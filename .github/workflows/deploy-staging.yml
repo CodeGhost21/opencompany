@@ -65,20 +65,14 @@ env:
   # The feature set the hosted tenant ships with. Changing it changes what
   # every tenant can do, so treat edits here as a product change, not a CI
   # tweak. Full belt: adds mcp/media/composio (the credential/real-money tool
-  # families, fail-closed until their config exists), imap/telegram (channels),
-  # medulla (hosted brain transport), tinycortex (local memory backend), and
-  # sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
+  # families, fail-closed until their config exists), imap (inbound mail),
+  # medulla (hosted brain transport), and sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
   # compiler the slim build image lacks, and it is redundant on a mongodb tenant.
   #
   # `tinymemory` is the hosted-memory contract: `OPENCOMPANY_MEMORY=remote` +
   # `OPENCOMPANY_MEMORY_DRIVER=supermemory|mem0|cognee` (plus `null`), inert
-  # until an operator sets those. `tinymemory-embedded` is deliberately NOT
-  # here for the same two reasons `sqlite` isn't: tinymemory-core links a
-  # bundled rusqlite (the C compiler the slim image lacks), and its `namespace`
-  # store on a mongodb tenant is refused by the ephemeral-/data guard anyway.
-  # Self-hosters wanting the embedded contract driver compile it via
-  # OPENCOMPANY_FEATURES (deploy/README.md).
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar,chargebee,paypal,tinymemory
+  # until an operator sets those.
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory
 
 jobs:
   deploy:
@@ -112,7 +106,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build and push image to ECR
         id: build

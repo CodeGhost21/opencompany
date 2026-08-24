@@ -356,9 +356,9 @@ type Finances {
 	"""
 	balanceUsd: Float!
 	"""
-	The monthly budget, USD.
+	The monthly budget, USD; `null` when no cap is set.
 	"""
-	budgetUsd: Float!
+	budgetUsd: Float
 	"""
 	Total spend this period, USD.
 	"""
@@ -598,6 +598,40 @@ type Message {
 	per emoji. Empty when nobody has.
 	"""
 	reactions: [MessageReaction!]!
+	"""
+	Who this message names, in reading order. Empty when it names nobody.
+	Same [`MessageView`] field the REST route reads, so the two surfaces
+	cannot disagree about who was mentioned.
+	"""
+	mentions: [MessageMention!]!
+}
+
+"""
+One mention on a history message. GraphQL mirror of the REST `mentions`
+array, so the two surfaces carry the same rows.
+"""
+type MessageMention {
+	"""
+	The literal span the author typed.
+	"""
+	text: String!
+	"""
+	Byte offset of `text` in the message body.
+	"""
+	offset: Int!
+	"""
+	Who was named, as a display label — never a raw user id.
+	"""
+	label: String!
+	"""
+	Whether the reading viewer is the one named (or was named by
+	`@everyone`).
+	"""
+	mine: Boolean!
+	"""
+	Whether this mention renders but pings nobody.
+	"""
+	quiet: Boolean!
 }
 
 """
@@ -1271,7 +1305,7 @@ type WorkspaceSearchHit {
 	"""
 	node: FsNode!
 	"""
-	Its logical path, e.g. `Standards/Engineering.md`.
+	Its logical path, e.g. `standards/Engineering.md`.
 	"""
 	path: String!
 	"""

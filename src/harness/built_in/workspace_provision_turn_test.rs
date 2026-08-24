@@ -227,6 +227,8 @@ fn company() -> CompanyId {
 
 fn record(overlays: Vec<OverlayAgent>) -> CompanyRecord {
     CompanyRecord {
+        overlay_retired_agents: Vec::new(),
+        overlay_agent_edits: Vec::new(),
         id: company(),
         manifest: manifest(),
         ledger: Vec::new(),
@@ -268,6 +270,7 @@ fn build_brain(
         // The agent workspaces hang off here. Nothing has created a single
         // directory under it — that is the precondition under test.
         workspace_root: dir.join("harness"),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.join("harness"),
         model_override: Some("stub-model".to_string()),
@@ -305,10 +308,8 @@ fn build_brain(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
+        tenant_search: None,
     };
     (
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record(overlays)),

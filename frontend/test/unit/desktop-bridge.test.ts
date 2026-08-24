@@ -7,7 +7,6 @@ import {
   connectionReady,
   embeddedHost,
   forgetConnection,
-  pairDevice,
   registerConnection,
   resetDesktopRegistrations,
 } from "@/api/transport/desktop";
@@ -118,34 +117,6 @@ describe("registering connections with the core", () => {
     const connect = calls.filter((c) => c.command === "oc_connect").at(-1);
     expect(connect?.args).not.toHaveProperty("deviceSession");
     expect(JSON.stringify(connect?.args)).not.toContain("device-abc");
-  });
-
-  it("asks the core to pair, and passes the code and label through", async () => {
-    // What this CAN assert from the console: the command shape. Whether a token
-    // comes back is decided in Rust by `PairedDevice`, which has no token
-    // field — a mock here proves nothing about that, and the earlier version of
-    // this test omitted `token` from its own fixture and then asserted the
-    // absence of it, which is a test checking itself. The real guarantee is the
-    // Rust-side `a_paired_device_carries_no_token`.
-    bridgeMock().invoke = (
-      command: string,
-      args: Record<string, unknown>,
-    ) => {
-      calls.push({ command, args });
-      return Promise.resolve({ company: "acme", deviceId: "dev-1", expiresAtMillis: 1 });
-    };
-
-    const device = await pairDevice("conn-1", "https://acme.test", "the-code", "Ada's Mac");
-    expect(device).toEqual({ company: "acme", deviceId: "dev-1", expiresAtMillis: 1 });
-    expect(calls.at(-1)).toMatchObject({
-      command: "oc_pair_device",
-      args: {
-        connectionId: "conn-1",
-        baseUrl: "https://acme.test",
-        code: "the-code",
-        label: "Ada's Mac",
-      },
-    });
   });
 
   it("does not disconnect before a registration still in flight has landed", async () => {
@@ -292,24 +263,6 @@ describe("the embedded host", () => {
       dataDir: "/tmp/oc",
       instanceId: "0f9d8c7b6a5e4f3d2c1b0a9988776655",
     });
-  });
-
-  it("carries the operator the console should offer at sign-in", async () => {
-    // A packaged install admits one standing local address and mails nothing,
-    // so a console that did not carry this showed a blank form on a host where
-    // every other address is answered with the same silent acknowledgement
-    // (#632). Optional on the wire — an older shell omits it and the form is
-    // blank as before — which is exactly why nothing else would catch a rename.
-    installBridge({
-      embedded: {
-        baseUrl: "http://127.0.0.1:52341",
-        dataDir: "/tmp/oc",
-        instanceId: "0f9d8c7b6a5e4f3d2c1b0a9988776655",
-        operatorEmail: "operator@opencompany.local",
-      },
-    });
-    const host = await embeddedHost();
-    expect(host?.operatorEmail).toBe("operator@opencompany.local");
   });
 
   it("is null when the core could not start one", async () => {

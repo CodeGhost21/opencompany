@@ -22,7 +22,33 @@ use opencompany_desktop_lib::proxy::{
 
 /// Boots a real host and registers it with a proxy.
 async fn host_and_proxy() -> (embedded::EmbeddedHost, ProxyRegistry, tempfile::TempDir) {
+    boot(None).await
+}
+
+/// The same, on a host that asks people to sign in.
+///
+/// The default embedded host runs `AuthMode::None` — a desktop install has one
+/// person and no accounts — so it answers an anonymous request rather than
+/// refusing it. That is correct for the product and useless as a fixture for
+/// the two cases below, which are *about* a refusal: what a failure body looks
+/// like coming back through the proxy, and whether the session header is
+/// actually sent.
+///
+/// Seeding `config.toml` is how a real operator turns a sign-in on here too —
+/// the setup wizard writes that key, and the shell falls back to `none` only
+/// when the file names nothing — so this asks for a supported configuration
+/// rather than reaching around the one under test.
+async fn signed_in_host_and_proxy() -> (embedded::EmbeddedHost, ProxyRegistry, tempfile::TempDir) {
+    boot(Some("auth_mode = \"email\"\n")).await
+}
+
+async fn boot(
+    config_toml: Option<&str>,
+) -> (embedded::EmbeddedHost, ProxyRegistry, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
+    if let Some(body) = config_toml {
+        std::fs::write(dir.path().join("config.toml"), body).expect("write config.toml");
+    }
     let host = embedded::start(dir.path().to_path_buf())
         .await
         .expect("the embedded host starts");
@@ -80,7 +106,7 @@ async fn a_refusal_carries_the_hosts_own_error_envelope() {
     // `ApiError`. If the proxy re-wrote or swallowed a failure body, every
     // desktop error message would degrade to a generic one — and it would do so
     // only for errors, which is exactly where it is least likely to be noticed.
-    let (host, proxy, _dir) = host_and_proxy().await;
+    let (host, proxy, _dir) = signed_in_host_and_proxy().await;
 
     let path = "/api/v1/company/tasks";
     let proxied = proxy
@@ -161,7 +187,7 @@ async fn the_session_header_is_attached_to_a_device_connection() {
     // (`SameSite=Lax` is never sent cross-site), so a paired device presents its
     // session as a header. This proves the proxy actually sends it — and that
     // the host reads it, by getting a *different* answer than the anonymous one.
-    let (host, proxy, _dir) = host_and_proxy().await;
+    let (host, proxy, _dir) = signed_in_host_and_proxy().await;
     proxy
         .upsert(
             "device".to_string(),

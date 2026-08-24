@@ -12,20 +12,20 @@ to render anything inline for exactly this reason (issue #667). Pages answers
 that refusal with real isolation rather than routing around it — see
 "The security model, in two halves" below.
 
-## Storage: `Pages/<slug>/` in the existing workspace tree
+## Storage: `pages/<slug>/` in the existing workspace tree
 
-No new port. A page lives at `Pages/<slug>/` in the company's
+No new port. A page lives at `pages/<slug>/` in the company's
 [`WorkspaceStore`](../../../src/ports/workspace.rs), the same store
-`Agents/<agent-id>/` and the rest of the shared note tree already use:
+`agents/<agent-id>/` and the rest of the shared note tree already use:
 
 ```text
-Pages/<slug>/
+pages/<slug>/
   page.toml          # title, description, icon, nav_visible — the manifest
-  Page.tsx            # the agent-authored source, a text node
-  Page.compiled.mjs   # server-compiled output, a binary node, mime application/javascript
+  page.tsx            # the agent-authored source, a text node
+  page.compiled.mjs   # server-compiled output, a binary node, mime application/javascript
 ```
 
-`Page.tsx` is an ordinary text node; `Page.compiled.mjs` is a binary node —
+`page.tsx` is an ordinary text node; `page.compiled.mjs` is a binary node —
 mime, size and sha256 computed by the store, same as any upload. Both ride
 the workspace's existing `[workspace] max_blob_mb` / `tree_quota_gb` quotas;
 no new limit exists for pages specifically.
@@ -33,8 +33,8 @@ no new limit exists for pages specifically.
 `slug` is restricted to `^[a-z0-9][a-z0-9-]*$` — narrower than an ordinary
 workspace path segment, because a slug is also a URL path segment
 (`GET …/pages/{slug}`) and has to survive that role without escaping or
-ambiguity. The layout constants (`Pages`, `page.toml`, `Page.tsx`,
-`Page.compiled.mjs`, the compiled mime) live in
+ambiguity. The layout constants (`Pages`, `page.toml`, `page.tsx`,
+`page.compiled.mjs`, the compiled mime) live in
 [`company::workspace_scaffold`](../../../src/company/workspace_scaffold.rs)
 rather than only in the harness tool module, because the HTTP routes that
 serve a page must exist — and 404 correctly — in a build compiled without the
@@ -46,7 +46,7 @@ serve a page must exist — and 404 correctly — in a build compiled without th
 tools, mirroring the shape of `harness::workspace_tools`:
 
 - `pages_list` — every page's slug and manifest.
-- `pages_read` — one page's manifest and `Page.tsx` source.
+- `pages_read` — one page's manifest and `page.tsx` source.
 - `pages_write` — create or update a page's manifest and/or source.
 - `pages_delete` — remove a page's whole bundle.
 
@@ -62,7 +62,7 @@ token-budget pressure.
 
 ## The compile contract
 
-`pages_write` compiles `Page.tsx` synchronously, whenever `source` is given,
+`pages_write` compiles `page.tsx` synchronously, whenever `source` is given,
 using [`swc_core`](https://github.com/swc-project/swc) — a pure-Rust
 TypeScript/JSX compiler, chosen specifically because the runtime image has no
 Node (`Dockerfile`'s builder stage; only the separate frontend Docker build
@@ -96,10 +96,10 @@ The pipeline, in [`pages_tools::compile_page`](../../../src/harness/pages_tools.
 
 A parse error, a rejected import, or a codegen failure returns the
 diagnostic as the tool's error result — the same ergonomics as a failing
-`cargo build` — and **writes nothing**: neither `Page.tsx` nor
-`Page.compiled.mjs` changes until a call compiles cleanly. `pages_write`
+`cargo build` — and **writes nothing**: neither `page.tsx` nor
+`page.compiled.mjs` changes until a call compiles cleanly. `pages_write`
 also carries a required `expected_updated_at` compare-and-swap token
-whenever it overwrites a page that already has a `Page.tsx`, the same
+whenever it overwrites a page that already has a `page.tsx`, the same
 read-before-write invariant `workspace_write` enforces.
 
 ## The HTTP routes
@@ -111,8 +111,8 @@ internal dashboard page, not a public site):
 | Route | Serves |
 | --- | --- |
 | `GET {scope}/pages` | Every page's manifest as JSON — `[{ "slug", "title", "description", "icon", "navVisible" }]` — for the console nav. |
-| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports `./{slug}/bundle.mjs` — a path relative to the shell's own URL at `…/pages/{slug}` — and mounts it with `ReactDOM.createRoot`. |
-| `GET {scope}/pages/{slug}/bundle.mjs` | The page's `Page.compiled.mjs`, streamed with `Content-Type: application/javascript` and `Content-Disposition: inline`. |
+| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports the SDK first — `@opencompany/site` is loaded unconditionally, so the relay listener below is present even for a page that does not import it itself — then `./{slug}/bundle.mjs` (a path relative to the shell's own URL at `…/pages/{slug}`) and mounts it with `ReactDOM.createRoot`. |
+| `GET {scope}/pages/{slug}/bundle.mjs` | The page's `page.compiled.mjs`, streamed with `Content-Type: application/javascript` and `Content-Disposition: inline`. |
 
 All three set:
 
@@ -138,7 +138,7 @@ upload** — anything a caller sent, of any claimed mime, with no verification
 that the bytes match the claim. Rendering that inline on the console's own
 origin would hand a malicious upload the operator's session cookie.
 
-`Page.compiled.mjs` is a different kind of bytes: it is not upload input, it
+`page.compiled.mjs` is a different kind of bytes: it is not upload input, it
 is the **validated output of the compile step** in the previous section — a
 source that already passed TSX parsing, the import allow-list, and a
 successful codegen. Serving it as `application/javascript` with `inline` is
@@ -173,8 +173,33 @@ exact iframe's `contentWindow`. That bridge forwards full GraphQL — queries
 authority the operator's own session has; the sandbox stops the page from
 touching cookies, the parent DOM, or making its own credentialed requests,
 but it does not limit what an authorized request can *do* once it crosses
-the bridge. The iframe embedding, the bridge, and the nav view that lists
-pages are frontend concerns and are not described further here.
+the bridge. The iframe embedding, the GraphQL bridge, and the nav view that
+lists pages are frontend concerns and are not described further here.
+
+**The gesture relay.** The one thing that travels the bridge the other way —
+parent to page — is a forwarded gesture. A toast in the console can cover a
+control inside the Pages view (issue #1303); a DOM event cannot cross the
+sandboxed-frame boundary, so when the toast is clicked the console posts the
+gesture's coordinates to the frame's document instead: `oc:relay-click` or
+`oc:relay-pointerdown`, with `x`/`y` shifted into frame-relative viewport
+coordinates, and the pointer's `pointerId`/`pointerType`/`button`/`buttons`
+fields on the pointerdown variant. Pointer capture cannot reach into another
+document, so a press is relayed whole: the console keeps posting the rest of
+the sequence — `oc:relay-pointermove`, `oc:relay-pointerup`,
+`oc:relay-pointercancel` — to the same frame until the press ends, and the
+SDK routes the continuations to the element that took the press so a drag or
+press-state control completes instead of getting stuck. The page SDK accepts
+a relay only from `window.parent` — a frame the page embeds itself surfaces
+as its own window, not the parent, so the source check is the whole trust
+boundary — and turns it back into a real click or `pointer` sequence on
+whatever `elementFromPoint(x, y)` finds in the frame's own document. The
+re-dispatched events are programmatic and therefore untrusted: like the
+console's own synthetic clicks, they carry no transient user activation, so
+a control that requires activation (a file input, `showPicker()`,
+`window.open()`) stays unreachable through an overlay — a browser will not
+transfer activation across the sandbox boundary (that is the clickjacking
+defense) — and the relay targets the ordinary click- and pointer-driven
+controls a toast-over-page gesture is actually for.
 
 
 **Normative: pages require a same-origin console.** The page shell and its

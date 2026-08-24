@@ -38,8 +38,8 @@ use crate::ports::types::{
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, channel_attributed_replies,
-    history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer,
+    channel_attributed_replies, history_for_desk,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
@@ -624,16 +624,46 @@ async fn company_events(
     // These are ephemeral and never journaled; the console switches on `type`
     // just like the durable projections. On a company with no active turn this
     // stream is simply quiet.
-    let live = crate::turn_stream::subscribe(&company).map(|frame| {
-        Ok::<Event, Infallible>(
-            Event::default().data(serde_json::to_string(&frame).unwrap_or_default()),
-        )
-    });
+    //
+    // A typing frame authored by this very connection is dropped here rather
+    // than by the console: the bus fans a ping out to every subscriber of the
+    // company, including its sender, so without this a composer would echo its
+    // own "You are typing…" line back at itself for the length of the ping's
+    // TTL. Presence is left alone — a console does not render its own dot from
+    // the live feed, so there is nothing to echo.
+    let self_id = scope.actor.as_ref().map(|a| a.id.clone());
+    let live = crate::turn_stream::subscribe(&company)
+        .filter_map(move |frame| {
+            let drop = is_own_typing_frame(&frame, self_id.as_deref());
+            std::future::ready(if drop { None } else { Some(frame) })
+        })
+        .map(|frame| {
+            Ok::<Event, Infallible>(
+                Event::default().data(serde_json::to_string(&frame).unwrap_or_default()),
+            )
+        });
     let stream = futures::stream::select(durable, live);
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
+    )
+}
+
+/// Whether a live frame is a typing ping authored by the very connection about
+/// to receive it.
+///
+/// The typing bus fans one ping out to every subscriber in the company,
+/// including its sender — there is no per-listener addressing beneath it — so
+/// without this check a console's own composer would echo its own "You are
+/// typing…" line back at itself for the length of the ping's TTL. Presence
+/// frames are left alone: a console never renders its own dot from the live
+/// feed, so there is nothing there to echo.
+fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&str>) -> bool {
+    matches!(
+        frame,
+        crate::turn_stream::LiveFrame::Typing(typing)
+            if self_id == Some(typing.user_id.as_str())
     )
 }
 
@@ -685,6 +715,8 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             steps,
             task_id,
             parent,
+            mentions,
+            ..
         } => {
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
@@ -706,6 +738,29 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // an ordinary chat reply so the legacy wire shape is unchanged.
             if let Some(task_id) = task_id {
                 o["taskId"] = json!(task_id);
+            }
+            // Mention spans, so a console watching live draws the same chips a
+            // reload would rather than rendering the reply flat and then
+            // re-rendering it on refresh.
+            //
+            // **Spans only — deliberately no targets.** A `Mention` carries an
+            // agent id or a *user* id, and this stream has no per-viewer
+            // projection to resolve either into a label; that is the same
+            // reason `ReactionToggled` is dropped here entirely (issue #364).
+            // A chip needs the range and whether it pings, and nothing else, so
+            // that is all this projects. `chat/history` remains the one surface
+            // that answers *who*, per viewer, with labels rather than ids.
+            if !mentions.is_empty() {
+                o["mentions"] = json!(
+                    mentions
+                        .iter()
+                        .map(|m| json!({
+                            "text": m.text,
+                            "offset": m.offset,
+                            "quiet": m.quiet,
+                        }))
+                        .collect::<Vec<_>>()
+                );
             }
             o
         }
@@ -1288,6 +1343,27 @@ struct ChatMessage {
     /// hands back a 202, which needs this turn record to exist first.
     #[serde(default)]
     detach: bool,
+    /// Who this message names, as the console's picker resolved them.
+    ///
+    /// Three states, and they are three different instructions:
+    ///
+    /// * **Absent** — the caller has no picker (`curl`, the API, a console
+    ///   predating this field). The host extracts mentions from the text
+    ///   itself, so `@engineer` still works from the command line.
+    /// * **Present and non-empty** — the caller resolved these against a roster
+    ///   it had loaded. Re-validated here against the live one and demoted, not
+    ///   trusted; a stale picker must not be able to address a turn to a
+    ///   teammate the company no longer has.
+    /// * **Present and empty** — the caller ran its picker and found nothing.
+    ///   Honoured as the answer it is: the host does not then guess on its
+    ///   behalf and chip an `@word` the author deliberately left unresolved.
+    ///
+    /// Additive in both directions, on exactly the terms `detach` documents
+    /// above: this struct has no `deny_unknown_fields`, so a newer console
+    /// against an older host degrades to host-side extraction, and an older
+    /// console against a newer host gets extraction too.
+    #[serde(default)]
+    mentions: Option<Vec<crate::ports::types::Mention>>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1756,6 +1832,13 @@ async fn accept_chat_turn(
         // that was being exercised on the very same message — see the field
         // docs on `CompanyEvent::OperatorMessage`.
         deliverable: message.deliverable,
+        // Resolved before the journal write, so the durable record and the
+        // routing decision that follows read the same list. The picker's answer
+        // when it sent one, extraction from the text when it did not — and
+        // either way re-validated against the live roster.
+        mentions: runtime
+            .resolve_mentions(&message.text, message.mentions.clone(), by)
+            .await,
     };
     let message_seq = runtime
         .events()
@@ -2081,11 +2164,34 @@ async fn journal_chat_replies(
     // made against a bubble the operator can still see names something every
     // other reader can resolve.
     for response in &mut report.responses {
+        // Scanned host-side from the reply text — the console's picker never
+        // touched this message. The author is passed so a teammate naming
+        // itself in its own answer does not chip itself.
+        let reply_mentions = runtime
+            .resolve_mentions(
+                &response.text,
+                None,
+                response
+                    .agent
+                    .as_deref()
+                    .map(|agent| Actor {
+                        kind: ActorKind::Agent,
+                        id: agent.to_string(),
+                    })
+                    .as_ref(),
+            )
+            .await;
         let journaled = runtime
             .events()
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    // Who this reply names. Rendered as chips and — unlike an
+                    // operator message's — never consulted by dispatch, which
+                    // is the mention-loop fuse.
+                    mentions: reply_mentions,
+                    // Zero, and stays zero while that edge does not exist.
+                    mention_depth: 0,
                     // The answer joins the thread its question was asked in,
                     // rather than opening one under the question (issue #364).
                     parent,
@@ -2275,6 +2381,43 @@ struct ChatHistoryMessageDto {
     /// per emoji. Omitted when nobody has, keeping the legacy shape.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     reactions: Vec<ChatReactionDto>,
+    /// Who this message names, in reading order. Omitted when it names nobody
+    /// — which is every message journaled before mentions existed — so the
+    /// legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<ChatMentionDto>,
+}
+
+/// One mention on a history message. Mirrors `Mention` in
+/// `frontend/src/lib/chat.ts`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatMentionDto {
+    /// The literal span the author typed, so the renderer highlights the text
+    /// as written rather than the target's current name.
+    text: String,
+    /// Byte offset of `text` in the message body.
+    offset: usize,
+    /// Who was named, as a display label — never a raw user id.
+    label: String,
+    /// Whether the reading viewer is the one named (or was named by
+    /// `@everyone`).
+    mine: bool,
+    /// Whether this mention renders but pings nobody.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    quiet: bool,
+}
+
+impl From<MentionView> for ChatMentionDto {
+    fn from(view: MentionView) -> Self {
+        Self {
+            text: view.text,
+            offset: view.offset,
+            label: view.label,
+            mine: view.mine,
+            quiet: view.quiet,
+        }
+    }
 }
 
 /// One person's reaction on a history message. Mirrors `Reaction` in
@@ -2316,6 +2459,11 @@ impl From<MessageView> for ChatHistoryMessageDto {
                 .reactions
                 .into_iter()
                 .map(ChatReactionDto::from)
+                .collect(),
+            mentions: view
+                .mentions
+                .into_iter()
+                .map(ChatMentionDto::from)
                 .collect(),
         }
     }
@@ -2673,10 +2821,6 @@ async fn list_approvals_single(
 struct ResolveApproval {
     /// `approve` or `deny`.
     verdict: Verdict,
-    /// An optional operator note (reserved; not yet surfaced to the brain).
-    #[allow(dead_code)]
-    #[serde(default)]
-    note: Option<String>,
     /// An optional payload edit; overlaid onto the parked effect on `approve`.
     #[serde(default)]
     amended_payload: Option<serde_json::Value>,
@@ -2734,8 +2878,6 @@ enum ResolveScope {
 /// request leaves the approval parked and journals no verdict. The contradictions
 /// are refused rather than resolved in the caller's favour:
 ///
-/// * **with a deny** — a scope describes what an approval grants, and a deny
-///   grants nothing. Honouring one would be inventing consent out of a refusal.
 /// * **with `amended_payload`** — an argument edit is by definition an
 ///   exact-call approval ("this, but with my correction"), and a standing grant
 ///   admits any arguments. The two say opposite things about the same request.
@@ -2759,10 +2901,7 @@ fn grant_scope(body: &ResolveApproval) -> Result<GrantScope, ApiError> {
             Ok(GrantScope::Once)
         }
         ResolveScope::Tool => {
-            if body.verdict == Verdict::Deny {
-                return Err(bad("a scope cannot accompany a deny verdict"));
-            }
-            if body.amended_payload.is_some() {
+            if body.verdict == Verdict::Approve && body.amended_payload.is_some() {
                 return Err(bad(
                     "amended_payload cannot accompany scope \"tool\": editing the arguments \
                      approves one exact call, while a standing grant admits any arguments",
@@ -2803,6 +2942,7 @@ struct StandingGrantDto {
     agent: String,
     /// The tool it admits.
     tool: String,
+    verdict: Verdict,
     /// Who granted it: a signed-in user, or the platform credential.
     granted_by: Actor,
     /// Epoch-millis it was granted.
@@ -2827,6 +2967,7 @@ impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
             id: g.id.to_string(),
             agent: g.agent,
             tool: g.tool,
+            verdict: g.verdict,
             granted_by: g.granted_by,
             at_millis: g.at_millis,
             expires_at_millis: g.expires_at_millis,
@@ -3125,6 +3266,8 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -3221,6 +3364,8 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest(),
                 ledger: Vec::new(),
@@ -3384,6 +3529,8 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: roster_manifest(),
                 ledger: Vec::new(),
@@ -3859,6 +4006,7 @@ mode = "full"
             let runtime = state.registry().get(&id).unwrap();
 
             let message = ChatMessage {
+                mentions: None,
                 text: ask.to_string(),
                 chat: None,
                 parent: None,
@@ -3911,6 +4059,8 @@ mode = "full"
         .unwrap();
 
         let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -3943,6 +4093,7 @@ mode = "full"
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: home.to_path_buf(),
             model_override: None,
@@ -3979,10 +4130,8 @@ mode = "full"
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -4046,6 +4195,8 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -4800,6 +4951,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -4815,6 +4968,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "main".to_string(),
@@ -4871,6 +5026,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "main".to_string(),
@@ -4967,6 +5124,8 @@ mode = "full"
                 .append(
                     runtime.id(),
                     CompanyEvent::AgentReply {
+                        mentions: Vec::new(),
+                        mention_depth: 0,
                         parent: None,
                         task_id,
                         chat_id: "main".to_string(),
@@ -5060,6 +5219,8 @@ mode = "full"
                     .append(
                         runtime.id(),
                         CompanyEvent::AgentReply {
+                            mentions: Vec::new(),
+                            mention_depth: 0,
                             parent: None,
                             task_id: None,
                             chat_id: "workflow-copilot:weekly_report".to_string(),
@@ -5109,6 +5270,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -7333,6 +7496,8 @@ mode = "full"
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "General".into(),
@@ -7368,6 +7533,8 @@ mode = "full"
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: Some(EventSeq::new(4)),
             task_id: None,
             chat_id: "General".into(),
@@ -7456,6 +7623,7 @@ mode = "full"
     fn projects_nothing_for_the_operators_own_message() {
         assert!(
             super::project_event(&stored(CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 text: "the operator's own words".into(),
                 by: None,
                 chat: Some("General".into()),
@@ -7543,6 +7711,8 @@ mode = "full"
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "General".into(),
@@ -7565,6 +7735,8 @@ mode = "full"
     #[test]
     fn projects_task_id_only_when_the_event_is_correlated() {
         let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: Some("t-1".into()),
             chat_id: "t-1".into(),
@@ -8214,6 +8386,7 @@ mode = "full"
         // still drops everything it dropped before.
         let dropped = [
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -8295,6 +8468,38 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// The composer's own typing pings must not echo back to it — the bus has
+    /// no per-listener addressing, so this filter is the only thing standing
+    /// between "you typed" and a fresh "Alice is typing…" line under your own
+    /// cursor.
+    #[test]
+    fn a_typing_frame_from_the_viewer_is_dropped_and_from_anybody_else_is_kept() {
+        let mine = crate::turn_stream::LiveFrame::Typing(crate::turn_stream::TypingFrame {
+            kind: "typing",
+            user_id: "u1".into(),
+            chat_id: "engineering".into(),
+            parent_id: None,
+            at_millis: 0,
+        });
+        assert!(super::is_own_typing_frame(&mine, Some("u1")));
+        assert!(!super::is_own_typing_frame(&mine, Some("u2")));
+        assert!(
+            !super::is_own_typing_frame(&mine, None),
+            "a machine credential with nobody behind it authors nothing to echo"
+        );
+
+        let presence = crate::turn_stream::LiveFrame::Presence(crate::turn_stream::PresenceFrame {
+            kind: "presence",
+            user_id: "u1".into(),
+            status: "online",
+            at_millis: 0,
+        });
+        assert!(
+            !super::is_own_typing_frame(&presence, Some("u1")),
+            "presence is left alone — only typing echoes"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Standing permissions (issue #374)
     // -----------------------------------------------------------------------
@@ -8306,6 +8511,10 @@ mode = "full"
     /// must be refused at the edge, so the fact that resolving a missing
     /// approval would otherwise be a harmless no-op never gets a chance to mask
     /// a body that should not have been accepted.
+    ///
+    /// A deny may now ride the tool scope (issue #1458 — a standing refusal),
+    /// so that pairing is asserted as *accepted* at the bottom rather than
+    /// listed among the refusals.
     #[tokio::test]
     async fn a_contradictory_or_unbounded_scope_is_refused() {
         let home_dir = home();
@@ -8313,10 +8522,6 @@ mode = "full"
 
         let day: u64 = 24 * 60 * 60 * 1000;
         for (label, body) in [
-            (
-                "a scope cannot ride a deny",
-                format!(r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#),
-            ),
             (
                 "an argument edit and a standing grant contradict",
                 format!(
@@ -8397,6 +8602,26 @@ mode = "full"
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A deny riding the tool scope is no longer a contradiction: it mints a
+        // standing refusal (issue #1458). Same edge validation as an approve —
+        // duration mandatory, bounded, and the missing approval resolves as a
+        // no-op — so it is accepted exactly where a matching approve would be.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/approvals/appr-missing")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     /// The default body — no `scope` key at all — is accepted exactly as before.
@@ -8471,6 +8696,7 @@ mode = "full"
                 agent: "ops".into(),
                 workflow: None,
                 tool: "workspace_write".into(),
+                verdict: Verdict::Approve,
                 granted_by: Actor {
                     kind: ActorKind::User,
                     id: "user-7".into(),

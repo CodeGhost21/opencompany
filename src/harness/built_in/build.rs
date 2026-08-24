@@ -42,7 +42,7 @@
 //!   **explicit** `workspace` / `workspace.write` grant — a bare `*` does not
 //!   confer them. `workspace_write` and `workspace_delete` are each guarded by
 //!   a required compare-and-swap revision token, and the lifecycle pair reaches
-//!   only `Agents/<agent id>/`. Unlike the file tools these are scoped by the
+//!   only `agents/<agent id>/`. Unlike the file tools these are scoped by the
 //!   store, not the filesystem: every call resolves through one company-scoped
 //!   `tree()` read, so no host path is ever built from agent input.
 //! * **Delegation authority is orchestrator-only; delegation itself is
@@ -215,8 +215,32 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// harness's existing callers and tests keep one name for "the persona", and so
 /// the composition rules (including the operator's inline `prompt`) are exercised
 /// by the default-build test suite rather than only where this module links.
-pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
-    crate::company::prompt::persona_prompt(company_name, agent)
+pub fn persona_prompt(
+    company_name: &str,
+    agent: &ManifestAgent,
+    instructions: Option<&str>,
+) -> String {
+    crate::company::prompt::persona_prompt(company_name, agent, instructions)
+}
+
+/// The `(files, shell, code)` flags [`toolbelt::sandbox_brief`] renders from,
+/// each true only when the namespace both (a) was wired from the agent's
+/// GRANT (`wants_files`/`shell_wired`/`wants_code`) and (b) is not denied by
+/// the per-turn capability tier in `capabilities`.
+///
+/// Pulled out of [`build_agent`] as a pure function so the capability-denial
+/// case — the brief must not describe `shell`/`code` on a turn where
+/// `filter_by_capabilities` is about to strip them — is unit-testable without
+/// standing up a full agent build.
+fn sandbox_brief_flags(
+    wants_files: bool,
+    shell_wired: bool,
+    wants_code: bool,
+    capabilities: &toolbelt::CapabilityFilter,
+) -> (bool, bool, bool) {
+    let shell = shell_wired && !toolbelt::namespace_denied(capabilities, "shell");
+    let code = wants_code && !toolbelt::namespace_denied(capabilities, "code");
+    (wants_files, shell, code)
 }
 
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
@@ -232,12 +256,20 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// reason `skill_deltas` is: this function is synchronous and runs on every
 /// roster rebuild, while the `WorkspaceStore` is async.
 ///
+/// `instructions` are this agent's **effective** persona text (issue #1530),
+/// resolved by the caller through
+/// [`CompanyRecord::effective_instructions`](crate::ports::types::CompanyRecord::effective_instructions)
+/// — an operator override when one is set, else the manifest `prompt`, else
+/// `None`. Passed in rather than read off `manifest_agent.prompt` so an overlay
+/// teammate (which has no manifest `prompt`) and a console-edited manifest agent
+/// are framed through the one injection point.
+///
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
 /// `query_company` / `spawn_task` / `delegate_to_desk` tools.
 // Each parameter is a distinct, load-bearing dependency of agent construction;
 // bundling them into a struct would only relocate the surface. (Pre-existing —
-// surfaced only under the full `openhuman,mcp,telegram` clippy combo, which CI
+// surfaced only under the full `openhuman,mcp` clippy combo, which CI
 // does not build; see the OpenCompany full-feature CI-gap note.)
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent(
@@ -249,6 +281,7 @@ pub fn build_agent(
     grants: &[String],
     skill_deltas: &[SkillState],
     routed_context: &[(String, String)],
+    instructions: Option<&str>,
     is_orchestrator: bool,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
@@ -289,10 +322,19 @@ pub fn build_agent(
     let mut tools: Vec<Box<dyn Tool>> = memory_tools(deps, company, &manifest_agent.id);
     #[cfg(feature = "mcp")]
     {
-        // These config-free tools read OpenHuman's live process registry, so
-        // installs and lifecycle changes are visible without rebuilding agents.
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool));
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool));
+        // These read the installed-server registry, so installs and lifecycle
+        // changes are visible without rebuilding agents. They take the config
+        // that selects the store now rather than reading a process global —
+        // hand them this company's own, the one REST writes through.
+        if let Some(mcp_home) = deps.mcp_home.clone() {
+            let config = std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
+            tools.push(Box::new(
+                oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
+            ));
+            tools.push(Box::new(
+                oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
+            ));
+        }
     }
 
     // Granted file tools, sandboxed to this agent's own workspace directory. An
@@ -357,6 +399,13 @@ pub fn build_agent(
     let wants_shell = grants_cover(grants, "shell");
     let wants_code = grants_cover(grants, "code");
     let wants_web = grants_cover(grants, "web");
+    // The GRANT says shell was asked for; this says it was actually wired.
+    // `shell_tools` withholds the whole namespace when the audit logger cannot
+    // be initialized (below), and the sandbox brief must describe the belt the
+    // agent holds rather than the one it requested — otherwise the one company
+    // whose audit sink is unwritable is also the one whose agents are told to
+    // run commands with a tool that is not there.
+    let mut shell_wired = false;
     if wants_shell || wants_code || wants_web {
         let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
         // `shell` and `code` are separate grant namespaces and are wired from
@@ -383,12 +432,9 @@ pub fn build_agent(
                 company,
                 &manifest_agent.id,
             ));
-            tools.extend(toolbelt::shell_tools(
-                exec_security.clone(),
-                runtime,
-                audit,
-                &workspace,
-            ));
+            let shell = toolbelt::shell_tools(exec_security.clone(), runtime, audit, &workspace);
+            shell_wired = !shell.is_empty();
+            tools.extend(shell);
         }
         if wants_code {
             tools.extend(toolbelt::code_tools(exec_security.clone(), &workspace));
@@ -578,11 +624,32 @@ pub fn build_agent(
     //
     // NOT feature-gated, unlike `media` and `composio`: it needs only the
     // always-compiled `openhuman_core` integrations client, and CI's gated lane
-    // builds `--features openhuman,tinycortex`. Hiding a real-money tool behind
+    // builds `--features openhuman,tinymemory`. Hiding a real-money tool behind
     // a feature no CI job compiles is how #288 / #281 / #297 each happened.
+    //
+    // A company that configured its **own** provider in the console
+    // (`deps.tenant_search`) gets that provider's family from OpenHuman's search
+    // domain INSTEAD of the managed tool — never as well as. The two would
+    // otherwise sit on one belt under one name, and the model would pick
+    // whichever the prompt happened to mention, which for a company that pasted
+    // a key means quietly spending the platform's money instead of its own. A
+    // BYO belt carries no daily cap and no usage sample either: the calls are
+    // billed by Brave or Exa to the company's own account, and metering a bill
+    // this host does not pay would be a number nobody can reconcile.
     if crate::company::grants_search_explicit(grants) {
-        match &deps.search {
-            Some(backend) => tools.extend(crate::harness::search::search_tools(
+        match (&deps.tenant_search, &deps.search) {
+            (Some(tenant), _) => {
+                let byo = crate::harness::search_byo::byo_search_tools(tenant);
+                tracing::debug!(
+                    company = %company,
+                    agent = %manifest_agent.id,
+                    provider = %tenant.provider(),
+                    tools = byo.len(),
+                    "[build] wiring the company's own search provider in place of managed search"
+                );
+                tools.extend(byo);
+            }
+            (None, Some(backend)) => tools.extend(crate::harness::search::search_tools(
                 backend,
                 crate::harness::search::SearchMetering {
                     company: company.clone(),
@@ -590,157 +657,17 @@ pub fn build_agent(
                     meter: deps.meter.clone(),
                 },
             )),
-            None => tracing::warn!(
+            (None, None) => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
-                "[build] agent explicitly grants `search` but no managed search backend is configured; web_search NOT wired (fail-closed)"
-            ),
-        }
-    }
-
-    // Bound repositories (issue #245, agent half) — `repo_checkout` / `repo_pr`
-    // over the company's own mirrored source. FOUR hard gates, and none of them
-    // is redundant:
-    //
-    //  1. an **EXPLICIT** `repo` grant (`grants_repo_explicit`) — the catch-all
-    //     `*` does NOT confer it, following `media` / `composio` / `search`.
-    //     Sharper here than for any of them: a checkout puts a third party's
-    //     source inside a sandbox the same agent may hold `shell` over, so a
-    //     wildcard set for file and shell tools must not carry it in.
-    //  2. a wired manager (`deps.repos`), which is a filesystem-home property —
-    //     a runtime assembled without one has no mirror cache at all.
-    //  3. at least one **binding**. A granted, wired, but unbound company has
-    //     nothing for either tool to resolve against, so every call would be a
-    //     refusal listing an empty set. Wiring nothing and warning is the
-    //     honest state, and it is what the console's "granted but nothing
-    //     bound" notice is telling the operator to fix.
-    //  4. a secret backend that does **not** keep the credential as plaintext on
-    //     this container's disk (issue #752). `RuntimeBuilder::build` refuses to
-    //     bring a repo-granted company up at all on `fs`/`sqlite`, so in a
-    //     normal boot this arm is unreachable — and it is here for the case that
-    //     is not a boot. A teammate added through the console lands in
-    //     `overlay_agents` on a **live** runtime; `HarnessPool::ensure` rebuilds
-    //     that agent's belt on the next turn without going back through
-    //     `build`, so the boot check never sees it. Without this arm, adding an
-    //     agent that names `repo` would hand it a checkout tool over a
-    //     credential sitting in a file the same agent can `cat`.
-    //
-    // NOT feature-gated, like `search` and unlike `media` / `composio`: the
-    // mirror and the git runner are always compiled, and with no forge client
-    // `repo_pr` degrades through `RepoManager::pull_request`'s honest
-    // `Unimplemented` answer rather than through a build that omits the tool.
-    // Hiding an agent-reachable surface behind a feature no CI job compiles is
-    // how #288 / #281 / #297 each happened.
-    if crate::company::grants_repo_explicit(grants) {
-        match (&deps.repos, deps.repo_bindings.is_empty()) {
-            // Gate 4 first: on a plaintext backend there is no shape of this
-            // that is safe to wire, so the binding count does not get a vote.
-            (Some(repos), _) if repos.secrets_are_plaintext_on_disk() => tracing::warn!(
-                company = %company,
-                agent = %manifest_agent.id,
-                "[build] agent explicitly grants `repo` but this host keeps secrets on its own \
-                 filesystem, where the credential is readable by the shell; repo tools NOT wired \
-                 (fail-closed, issue #752) — set OPENCOMPANY_STORAGE=mongodb or drop the `repo` \
-                 grant"
-            ),
-            (Some(repos), false) => {
-                tools.extend(crate::harness::repo::repo_tools(
-                    crate::harness::repo::RepoToolContext {
-                        repos: repos.clone(),
-                        bindings: deps.repo_bindings.clone().into(),
-                        workspace: workspace.clone(),
-                        ledger: deps.checkouts.clone(),
-                        agent: manifest_agent.id.clone(),
-                        approvals: deps.approval_requests.clone(),
-                    },
-                ));
-            }
-            (Some(_), true) => tracing::warn!(
-                company = %company,
-                agent = %manifest_agent.id,
-                "[build] agent explicitly grants `repo` but this company has bound no \
-                 repositories; repo tools NOT wired (fail-closed)"
-            ),
-            (None, _) => tracing::warn!(
-                company = %company,
-                agent = %manifest_agent.id,
-                "[build] agent explicitly grants `repo` but no repository cache is configured on \
-                 this host; repo tools NOT wired (fail-closed)"
-            ),
-        }
-    }
-
-    // Repository WRITE tier (issues #734, #735). A distinct, tighter grant than
-    // the read `repo` above: `grants_repo_write_explicit` matches ONLY the exact
-    // `repo.write`, so a bare `repo` (which every read-tier company writes) and
-    // the catch-all `*` confer nothing here — a company that asked for agents
-    // reading code does not silently get agents pushing it.
-    //
-    // FOUR gates, all fail-closed, and the fourth is the one #734 added: an
-    // explicit `repo.write` grant, a wired manager, at least one binding, AND a
-    // bound credential that can actually push (`can_push == Some(true)`; `None` —
-    // unprobed or pre-field — reads as cannot-push). Missing any one wires
-    // `repo_publish` NOT AT ALL and says which, rather than offering a publish
-    // that would fail at push time on a read-only credential.
-    //
-    // Like the read tier, NOT feature-gated: the mirror and git runner are always
-    // compiled, and `repo_publish`'s push waits on an operator approval the
-    // runtime performs, so there is no forge client to gate the tool behind.
-    if crate::company::grants_repo_write_explicit(grants) {
-        let push_capable = deps
-            .repo_bindings
-            .iter()
-            .any(|binding| binding.can_push == Some(true));
-        match (&deps.repos, deps.repo_bindings.is_empty(), push_capable) {
-            // Gate 4 (issue #752), first and unconditional as in the read tier
-            // above: on a plaintext backend the credential is readable by the
-            // agent shell, and `repo_publish` uses it host-side to push, so no
-            // shape of it is safe to wire — the write path is if anything more
-            // exposed than the read one, never less.
-            (Some(repos), _, _) if repos.secrets_are_plaintext_on_disk() => tracing::warn!(
-                company = %company,
-                agent = %manifest_agent.id,
-                "[build] agent explicitly grants `repo.write` but this host keeps secrets on its \
-                 own filesystem, where the credential is readable by the shell; repo_publish NOT \
-                 wired (fail-closed, issue #752) — set OPENCOMPANY_STORAGE=mongodb or drop the \
-                 `repo.write` grant"
-            ),
-            (Some(repos), false, true) => {
-                tools.push(crate::harness::repo::repo_publish_tool(
-                    crate::harness::repo::RepoToolContext {
-                        repos: repos.clone(),
-                        bindings: deps.repo_bindings.clone().into(),
-                        workspace: workspace.clone(),
-                        ledger: deps.checkouts.clone(),
-                        agent: manifest_agent.id.clone(),
-                        approvals: deps.approval_requests.clone(),
-                    },
-                ));
-            }
-            (None, _, _) => tracing::warn!(
-                company = %company,
-                agent = %manifest_agent.id,
-                "[build] agent explicitly grants `repo.write` but no repository cache is configured \
-                 on this host; repo_publish NOT wired (fail-closed)"
-            ),
-            (Some(_), true, _) => tracing::warn!(
-                company = %company,
-                agent = %manifest_agent.id,
-                "[build] agent explicitly grants `repo.write` but this company has bound no \
-                 repositories; repo_publish NOT wired (fail-closed)"
-            ),
-            (Some(_), false, false) => tracing::warn!(
-                company = %company,
-                agent = %manifest_agent.id,
-                "[build] agent explicitly grants `repo.write` but no bound repository has a \
-                 push-capable credential; repo_publish NOT wired (fail-closed)"
+                "[build] agent explicitly grants `search` but neither a company search provider nor a managed search backend is configured; web_search NOT wired (fail-closed)"
             ),
         }
     }
 
     // Company workspace (issues #237, #551) — live read (and optionally
     // create/write) tools over the shared note tree, so an agent can ground an
-    // answer in the company's own `Standards/` / `Playbooks/` instead of
+    // answer in the company's own `standards/` / `playbooks/` instead of
     // guessing, and can put what it produces somewhere the operator and its
     // teammates will actually find it. Two independent gates, deliberately
     // asymmetric:
@@ -773,7 +700,7 @@ pub fn build_agent(
     // (`policy::consequence`); and authorship, since every node records who
     // created it and who last wrote it (#326).
     //
-    // Rename and delete additionally reach only `Agents/<agent id>/`. Read that
+    // Rename and delete additionally reach only `agents/<agent id>/`. Read that
     // as a division of labour, not as a security boundary: the same grant
     // already confers unconfined overwrite, which is the broader power. See the
     // `workspace_tools::lifecycle` module docs.
@@ -805,7 +732,7 @@ pub fn build_agent(
         tools.extend(workspace_tools);
     }
 
-    // Agent-authored internal dashboard pages (`Pages/<slug>/` in the same
+    // Agent-authored internal dashboard pages (`pages/<slug>/` in the same
     // workspace store). Unlike workspace reads vs. writes above, there is no
     // two-tier gate here: per the design, `pages` rides the default `"*"`
     // grant whole, so a single `grants_cover` check on `pages` is enough —
@@ -842,8 +769,10 @@ pub fn build_agent(
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
-    // Includes the operator's inline `prompt`, appended to the generated framing.
-    let mut persona = persona_prompt(company_name, manifest_agent);
+    // Includes the effective persona instructions (issue #1530) — an operator
+    // override when one is set, else the manifest `prompt` — resolved by the
+    // caller and appended to the generated framing.
+    let mut persona = persona_prompt(company_name, manifest_agent, instructions);
 
     // The agent's checked-in briefing documents, placed here — before every
     // tool brief and before the routed workspace documents — because they are
@@ -871,6 +800,33 @@ pub fn build_agent(
         ));
     }
 
+    // The agent's own working directory, and the tools that reach it. Placed
+    // BEFORE the publish brief because that brief's first sentence ("the files
+    // you write live in your sandbox") presumes a sandbox the agent has by then
+    // been told about — and because publishing is gated on an artifact store,
+    // so a company without one used to get no mention of the sandbox at all
+    // while still holding every file tool.
+    //
+    // Each flag is the same one that wired the tools a few hundred lines up, so
+    // the brief cannot describe a namespace this agent was not granted. `shell`
+    // in particular was wired since Cell A and named in no brief anywhere: an
+    // agent asked to run something recorded a task about running it.
+    //
+    // `shell_wired`/`wants_code` only reflect the GRANT, but `deps.capabilities`
+    // (the per-turn capability tier resolved by `capability_budget::resolve_filter`
+    // — live at `HarnessPool::ensure`, not a hypothetical future cell) is applied
+    // to the tool vector later by `filter_by_capabilities`, below. Without this
+    // check the brief would describe `shell`/`code` on a turn where the capability
+    // tier denied them (a fail-closed metering error, or an exhausted budget),
+    // telling the agent to call a tool `filter_by_capabilities` already removed.
+    let (sandbox_files, sandbox_shell, sandbox_code) =
+        sandbox_brief_flags(wants_files, shell_wired, wants_code, &deps.capabilities);
+    persona.push_str(&toolbelt::sandbox_brief(
+        sandbox_files,
+        sandbox_shell,
+        sandbox_code,
+    ));
+
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not
     // have is how you get a turn spent calling something that does not exist.
@@ -890,10 +846,12 @@ pub fn build_agent(
         || !skill_deltas.is_empty()
         || !crate::globals::skills().is_empty()
     {
+        // Named through the same helper as the sandbox beside it, so the two
+        // siblings cannot end up under different spellings of one agent.
         let skill_ws = deps
             .workspace_root
-            .join(company.as_ref())
-            .join(&manifest_agent.id)
+            .join(sandbox_segment(company.as_ref()))
+            .join(sandbox_segment(&manifest_agent.id))
             .join("skill-catalog");
         // Best-effort, not fatal. This ran only for a company with a skills
         // source or an operator delta until the global baseline made it run for
@@ -1210,7 +1168,27 @@ pub(crate) fn grants_cover(grants: &[String], namespace: &str) -> bool {
 /// Naming only — this never touches the disk. Anything that needs the directory
 /// to *exist* goes through [`ensure_agent_workspace`].
 pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> PathBuf {
-    root.join(company.as_ref()).join(agent_id).join("workspace")
+    root.join(sandbox_segment(company.as_ref()))
+        .join(sandbox_segment(agent_id))
+        .join("workspace")
+}
+
+/// One directory name in the sandbox tree, under the workspace naming rule.
+///
+/// The sandbox is the other half of "the agent's workspace", and it carried the
+/// company id and the roster id verbatim — so a company browsing its own data
+/// directory found `agentic_law_firm/page_builder/` next to a note tree whose
+/// every name is lowercase and dashed. One rule for both
+/// ([`crate::company::workspace_names`]) is the point.
+///
+/// Two ids cannot collide into one sandbox by being normalized. Roster ids are
+/// snake_case (`company::manifest::is_snake_case`), so `-` never occurs in one
+/// and the mapping is injective over that alphabet. A company id is not
+/// validated that tightly, but it already shares a slug with its bundle
+/// directory (`store::paths`), so two ids that normalize alike were sharing
+/// their company data long before they shared a sandbox.
+fn sandbox_segment(raw: &str) -> String {
+    crate::company::workspace_names::kebab_name_or(raw, raw)
 }
 
 /// One agent's shell audit sink directory, resolved from the instance data root:
@@ -1272,8 +1250,56 @@ pub fn ensure_agent_workspace(
     agent_id: &str,
 ) -> std::io::Result<PathBuf> {
     let workspace = agent_workspace(root, company, agent_id);
+    adopt_legacy_sandbox(root, company, agent_id, &workspace);
     std::fs::create_dir_all(&workspace)?;
     Ok(workspace)
+}
+
+/// Move a pre-lowercase-dashed sandbox onto its canonical path, once.
+///
+/// The tree used to be named by the company and roster ids verbatim
+/// (`agentic_law_firm/page_builder/`), and an agent upgraded into the new
+/// naming would otherwise start in an empty directory with its half-finished
+/// work still on disk under the old name — present, unreachable, and reported
+/// by nothing.
+///
+/// This is a *rename*, unlike the workspace tree, where the equivalent
+/// migration is refused and offered as an operator action instead. The two are
+/// different things: this directory is the agent's private scratch, addressed
+/// only by [`agent_workspace`] within this process, with no ids, no links and
+/// no console pointing into it. Nothing outside can notice the move.
+///
+/// Best-effort and silent-on-conflict by construction: it acts only when the
+/// canonical path does not exist and the legacy one is a directory, so it
+/// cannot overwrite a live sandbox, and a failed rename simply leaves the
+/// agent with a fresh empty one rather than failing the turn.
+fn adopt_legacy_sandbox(root: &Path, company: &CompanyId, agent_id: &str, canonical: &Path) {
+    let legacy = root.join(company.as_ref()).join(agent_id).join("workspace");
+    if legacy == canonical || canonical.exists() || !legacy.is_dir() {
+        return;
+    }
+    let Some(parent) = canonical.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    match std::fs::rename(&legacy, canonical) {
+        Ok(()) => tracing::info!(
+            company = %company,
+            agent = %agent_id,
+            from = %legacy.display(),
+            to = %canonical.display(),
+            "[harness] moved the agent sandbox onto its lowercase-dashed path"
+        ),
+        Err(error) => tracing::warn!(
+            company = %company,
+            agent = %agent_id,
+            %error,
+            from = %legacy.display(),
+            "[harness] could not move the legacy agent sandbox; starting from an empty one"
+        ),
+    }
 }
 
 /// A [`SecurityPolicy`] that sandboxes an agent's file tools to `workspace` and
@@ -1347,6 +1373,72 @@ mod tests {
         assert_eq!(rows[0].label, "agent-memory/ceo/pin");
     }
 
+    /// The grant alone is not enough: a wired `shell`/`code` namespace the
+    /// capability tier denies must not be described in the sandbox brief,
+    /// because `filter_by_capabilities` is about to strip the matching tools
+    /// from the vector handed to the builder. This is the fix for the P1
+    /// codex found on PR #1670 — before it, `sandbox_brief_flags` did not
+    /// exist and the brief was built from the grant flags alone.
+    #[test]
+    fn sandbox_brief_flags_withhold_a_capability_denied_namespace() {
+        use std::collections::HashSet;
+
+        let deny_shell = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_shell),
+            (true, false, true),
+            "a denied `shell` must not be reported even though it was wired"
+        );
+
+        let deny_code = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["code"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_code),
+            (true, true, false),
+            "a denied `code` must not be reported even though it was granted"
+        );
+
+        let deny_both =
+            toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell", "code"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_both),
+            (true, false, false)
+        );
+    }
+
+    /// The identity filter changes nothing — the flags are exactly the wired
+    /// grant flags, files included (files are never a gateable namespace).
+    #[test]
+    fn sandbox_brief_flags_pass_through_under_allow_all() {
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &toolbelt::CapabilityFilter::AllowAll),
+            (true, true, true)
+        );
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &toolbelt::CapabilityFilter::AllowAll),
+            (false, false, false)
+        );
+    }
+
+    /// An ungranted/unwired namespace stays absent regardless of the capability
+    /// filter — denial can only ever narrow, never widen, what the grant wired.
+    #[test]
+    fn sandbox_brief_flags_never_add_a_namespace_the_grant_did_not_wire() {
+        use std::collections::HashSet;
+
+        let allow_all = toolbelt::CapabilityFilter::AllowAll;
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &allow_all),
+            (false, false, false)
+        );
+
+        // Denying a namespace that was never wired is a no-op on that flag.
+        let deny_shell = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &deny_shell),
+            (false, false, false)
+        );
+    }
+
     #[test]
     fn grants_cover_matches_namespace_glob_and_star() {
         assert!(grants_cover(&["docs.*".into()], "docs"));
@@ -1395,6 +1487,84 @@ mod tests {
         let again = ensure_agent_workspace(root.path(), &company, "ceo").expect("second ensure");
         assert_eq!(again, made);
         assert!(again.is_dir());
+    }
+
+    /// The sandbox is named under the workspace naming rule, so a snake_case
+    /// roster id and an underscored company id land on dashed directories —
+    /// the same convention the note tree beside them is kept in.
+    #[test]
+    fn the_sandbox_path_is_lowercase_and_dashed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let named = agent_workspace(
+            root.path(),
+            &CompanyId::new("Agentic_Law Firm"),
+            "page_builder",
+        );
+
+        assert_eq!(
+            named,
+            root.path()
+                .join("agentic-law-firm")
+                .join("page-builder")
+                .join("workspace")
+        );
+    }
+
+    /// An agent upgraded into the new naming keeps the work it had in flight.
+    ///
+    /// The sandbox is private scratch that nothing outside this process
+    /// addresses, so moving it is invisible — while leaving it behind would
+    /// strand a half-finished file on disk, present and unreachable, with
+    /// nothing reporting it.
+    #[test]
+    fn a_pre_rule_sandbox_is_moved_onto_the_canonical_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("draft.md"), "half-finished").expect("in-flight work");
+
+        let made = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(made, agent_workspace(root.path(), &company, "page_builder"));
+        assert_eq!(
+            std::fs::read_to_string(made.join("draft.md")).expect("the work came with it"),
+            "half-finished"
+        );
+        assert!(!legacy.exists(), "the legacy path is not left as a twin");
+    }
+
+    /// A sandbox that already exists at the canonical path is never overwritten
+    /// by a stale legacy one — the move is a one-time adoption, not a sync.
+    #[test]
+    fn a_live_sandbox_is_never_replaced_by_a_legacy_one() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let canonical =
+            ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+        std::fs::write(canonical.join("current.md"), "live").expect("live work");
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("stale.md"), "stale").expect("stale work");
+
+        let again = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(again, canonical);
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("current.md")).expect("still there"),
+            "live"
+        );
+        assert!(!canonical.join("stale.md").exists());
     }
 
     /// The bug, pinned. With the workspace absent, `validate_parent_path` walks
@@ -1586,7 +1756,7 @@ mod tests {
     #[test]
     fn persona_frames_role_company_and_description() {
         let agent = manifest_agent("Chief Executive", Some("Sets direction."));
-        let persona = persona_prompt("Acme", &agent);
+        let persona = persona_prompt("Acme", &agent, None);
         assert!(persona.contains("Chief Executive"), "{persona}");
         assert!(persona.contains("Acme"), "{persona}");
         assert!(persona.contains("first person"), "{persona}");
@@ -1595,7 +1765,7 @@ mod tests {
 
     #[test]
     fn persona_omits_absent_or_blank_description() {
-        let persona = persona_prompt("Acme", &manifest_agent("Engineer", Some("   ")));
+        let persona = persona_prompt("Acme", &manifest_agent("Engineer", Some("   ")), None);
         assert!(persona.contains("Engineer"));
         assert!(!persona.contains("   Engineer"));
         // No trailing description clause.
@@ -1662,6 +1832,14 @@ mod tests {
         ) -> crate::Result<bool> {
             Ok(false)
         }
+        async fn delete_label(
+            &self,
+            _: &CompanyId,
+            _: &crate::ports::types::ChunkAddr,
+            _: &str,
+        ) -> crate::Result<bool> {
+            Ok(false)
+        }
     }
 
     /// A no-op company store — `build_agent` only needs a handle; nothing here
@@ -1692,6 +1870,10 @@ mod tests {
         // root here would let a test pass while the audit sink sat inside the
         // workspace tree — the exact defect issue #775 fixed.
         let workspace_root = root.join("harness");
+        // Production sets this to `<home>/mcp` (see `runtime::builder`); mirror
+        // it so the pinned belt reflects a real company rather than the
+        // degraded no-MCP-home shape.
+        let mcp_home = Some(root.join("mcp"));
         let audit_root = root;
         HarnessDeps {
             ledgers: None,
@@ -1703,6 +1885,7 @@ mod tests {
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,
+            mcp_home,
             workspace_git_enabled: false,
             audit_root,
             model_override: None,
@@ -1743,13 +1926,11 @@ mod tests {
             // #238 tool is never built and the pinned belt below is the
             // pre-#238 belt exactly.
             search: None,
+            tenant_search: None,
             // Fail-closed default: with no workspace store wired, the #237
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 
@@ -1800,6 +1981,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             is_orchestrator,
         )
         .expect("agent builds");
@@ -1851,12 +2033,122 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
         let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
         names.sort();
         names
+    }
+
+    /// Build one agent under `grants` with BOTH a managed search backend and a
+    /// company's own `provider` connection wired, and return its live tool
+    /// names. The two together is the interesting case: it is what a company
+    /// that pasted a key into the console actually has, and what decides which
+    /// of the two surfaces the model is offered.
+    fn built_tool_names_with_byo_search(grants: &[&str], provider: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed-platform-token"),
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        deps.tenant_search = Some(crate::harness::search_byo::TenantSearch::for_test(
+            provider,
+            Some("tenant-key"),
+            Some("https://searx.example"),
+        ));
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            name: None,
+            description: None,
+            tier: None,
+            harness: None,
+            model: None,
+            tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// A company's own provider REPLACES the managed surface rather than
+    /// joining it, and still answers to the one name the skills know.
+    ///
+    /// Both halves matter. Two "search the web" tools on one belt would let the
+    /// model spend the platform's metered budget for a company that pasted its
+    /// own key — the exact bill-swap the BYO surface exists to prevent. And a
+    /// belt where the canonical name changed with the provider would break the
+    /// shipped research skills, which name `web_search` in their instructions.
+    #[test]
+    fn a_company_provider_replaces_the_managed_search_tool_under_the_same_name() {
+        let byo = built_tool_names_with_byo_search(&["search"], "brave");
+
+        assert!(
+            byo.contains(&"web_search".to_string()),
+            "the canonical name must survive the provider switch: {byo:?}"
+        );
+        assert!(
+            byo.contains(&"brave_news_search".to_string()),
+            "the provider's own extras must be wired too: {byo:?}"
+        );
+        // Exactly one tool answers to the canonical name.
+        assert_eq!(
+            byo.iter().filter(|name| *name == "web_search").count(),
+            1,
+            "two search tools under one name: {byo:?}"
+        );
+        // And the managed family's siblings are absent — nothing on this belt
+        // reaches the platform's metered backend.
+        assert!(
+            !byo.contains(&"exa_search".to_string()),
+            "a Brave company must not carry Exa tools: {byo:?}"
+        );
+    }
+
+    /// The BYO surface rides the SAME explicit grant as the metered one. A
+    /// company key does not turn `search` into a wildcard-conferred namespace:
+    /// the queries still leave the building, and which index reads them is a
+    /// decision the manifest makes by name.
+    #[test]
+    fn a_wildcard_grant_confers_no_search_tools_even_with_a_company_provider() {
+        let wildcard = built_tool_names_with_byo_search(&["*"], "exa");
+        assert!(
+            !wildcard.contains(&"web_search".to_string()),
+            "{wildcard:?}"
+        );
+        assert!(
+            !wildcard.contains(&"exa_get_contents".to_string()),
+            "{wildcard:?}"
+        );
     }
 
     // --- Company-workspace wiring gates (issue #237) -----------------------
@@ -1898,6 +2190,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -1943,6 +2236,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2084,301 +2378,6 @@ mod tests {
             !unrelated.contains(&"web_search".to_string()),
             "an unrelated grant must not confer web_search: {unrelated:?}"
         );
-    }
-
-    // --- Bound-repository wiring gates (issue #245, agent half) -------------
-
-    /// Build one agent under `grants` with a repository manager **and** one
-    /// binding wired, and return its live tool names. Mirrors
-    /// [`built_tool_names`], differing only in `deps.repos` /
-    /// `deps.repo_bindings` — so the difference between the two is exactly
-    /// "the operator bound something", which is two of the four gate states.
-    fn built_tool_names_with_repos(grants: &[&str], bindings: usize) -> Vec<String> {
-        built_tool_names_with_repos_cap(grants, bindings, false)
-    }
-
-    /// [`built_tool_names_with_repos`], with control over whether the bound
-    /// credentials read as push-capable (issue #735) — one of the two gates the
-    /// write tier adds beyond #245's three. `false` matches every read-tier
-    /// caller (`can_push: None`); the secret backend stays the safe Mongodb, so a
-    /// push-capability assertion never passes for the #752 reason instead.
-    fn built_tool_names_with_repos_cap(
-        grants: &[&str],
-        bindings: usize,
-        push_capable: bool,
-    ) -> Vec<String> {
-        built_tool_names_with_repos_on_cap(
-            grants,
-            bindings,
-            push_capable,
-            crate::store::StorageKind::Mongodb,
-        )
-    }
-
-    /// [`built_tool_names_with_repos`], with the secret backend spelled out —
-    /// the other added gate (issue #752). Mongodb is what the plain helper
-    /// passes, because a host that cannot hold a repository credential safely
-    /// cannot reach the other gates at all, and every assertion about them would
-    /// otherwise be passing for the #752 reason instead of its own.
-    fn built_tool_names_with_repos_on(
-        grants: &[&str],
-        bindings: usize,
-        storage_kind: crate::store::StorageKind,
-    ) -> Vec<String> {
-        built_tool_names_with_repos_on_cap(grants, bindings, false, storage_kind)
-    }
-
-    /// The full repository-wiring fixture: both the push-capability (#735) and
-    /// the secret-backend (#752) gates spelled out. The three wrappers above each
-    /// default the axis they do not vary.
-    fn built_tool_names_with_repos_on_cap(
-        grants: &[&str],
-        bindings: usize,
-        push_capable: bool,
-        storage_kind: crate::store::StorageKind,
-    ) -> Vec<String> {
-        use crate::runtime::repo_manager::types::RepoBinding;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut deps = pin_deps(dir.path().to_path_buf());
-        deps.repos = Some(std::sync::Arc::new(
-            crate::runtime::RepoManager::new(
-                CompanyId::new("acme"),
-                dir.path().join("repos"),
-                std::sync::Arc::new(crate::store::FsSecretStore::new(dir.path())),
-            )
-            .with_storage_kind(storage_kind),
-        ));
-        deps.repo_bindings = (0..bindings)
-            .map(|n| RepoBinding {
-                key: format!("acme-widgets-{n:012}"),
-                url: "https://github.com/acme/widgets".to_string(),
-                owner: "acme".to_string(),
-                repo: "widgets".to_string(),
-                branches: vec!["main".to_string()],
-                token_fingerprint: "0f1e2d3c4b5a".to_string(),
-                last_fetched_millis: None,
-                size_bytes: 0,
-                bound_at_millis: 1,
-                can_push: if push_capable { Some(true) } else { None },
-            })
-            .collect();
-        let manifest_agent = ManifestAgent {
-            global: false,
-            id: "desk".to_string(),
-            role: "Desk Lead".to_string(),
-            name: None,
-            description: None,
-            tier: None,
-            harness: None,
-            tools: Vec::new(),
-            // Issue #176: this repo-tools fixture predates `delegates_to` and is
-            // only compiled under the gated feature combo, so neither this
-            // branch's CI nor #245's could see the other's half.
-            delegates_to: Vec::new(),
-            context: None,
-            budget_usd_daily: None,
-            prompt: None,
-            prompt_files: Vec::new(),
-            prompt_files_resolved: Vec::new(),
-            classes: Vec::new(),
-            ledgers: None,
-            can_declare_ledgers: true,
-            model: None,
-        };
-        let policy = ApprovalPolicy::new(&Policy::default(), None);
-        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
-        let agent = build_agent(
-            &CompanyId::new("acme"),
-            "Acme",
-            &manifest_agent,
-            policy,
-            &deps,
-            &grants,
-            &[],
-            &[],
-            false,
-        )
-        .expect("agent builds");
-        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
-        names.sort();
-        names
-    }
-
-    /// The four gate states of the repository surface (issue #245), in one
-    /// table.
-    ///
-    /// The load-bearing row is the first, and it is load-bearing more sharply
-    /// here than for `media` / `composio` / `search`: a checkout puts a third
-    /// party's source inside a sandbox the same agent may hold `shell` over, so
-    /// it can never ride in on the wildcard a company set for its file tools.
-    ///
-    /// The last row is the one a reader is most likely to think redundant. A
-    /// granted, wired, but **unbound** company has nothing for either tool to
-    /// resolve against, so every call would be a refusal listing an empty set —
-    /// wiring nothing is the honest state, and it is what the console's
-    /// "granted but nothing bound" notice exists to tell the operator to fix.
-    #[test]
-    fn repo_tools_are_wired_only_by_explicit_grant_a_manager_and_a_binding() {
-        let pair = ["repo_checkout".to_string(), "repo_pr".to_string()];
-
-        // `*` + manager + binding → absent. The wildcard never confers this.
-        let wildcard = built_tool_names_with_repos(&["*"], 1);
-        for tool in &pair {
-            assert!(
-                !wildcard.contains(tool),
-                "a bare `*` must NOT confer the repository family: {wildcard:?}"
-            );
-        }
-
-        // explicit `repo` + manager + binding → both present.
-        let granted = built_tool_names_with_repos(&["repo"], 1);
-        for tool in &pair {
-            assert!(
-                granted.contains(tool),
-                "an explicit `repo` grant with a binding must wire {tool}: {granted:?}"
-            );
-        }
-        // The sub-grant form works the same way `media.*` / `composio.*` do.
-        let sub_granted = built_tool_names_with_repos(&["repo.checkout"], 1);
-        for tool in &pair {
-            assert!(sub_granted.contains(tool), "{sub_granted:?}");
-        }
-
-        // explicit `repo`, NO manager → absent, fail-closed.
-        let unwired = built_tool_names(&["repo"], false);
-        for tool in &pair {
-            assert!(
-                !unwired.contains(tool),
-                "a repo grant with no repository cache must wire nothing: {unwired:?}"
-            );
-        }
-
-        // explicit `repo` + manager, NO binding → absent, fail-closed.
-        let unbound = built_tool_names_with_repos(&["repo"], 0);
-        for tool in &pair {
-            assert!(
-                !unbound.contains(tool),
-                "a repo grant with nothing bound must wire nothing: {unbound:?}"
-            );
-        }
-        // …and the rest of the belt is untouched in every refused state, so the
-        // gate withholds a family rather than breaking the agent.
-        assert_eq!(
-            unbound,
-            built_tool_names(&["repo"], false),
-            "the unbound state must differ from the unwired state by nothing"
-        );
-
-        // Gate 4 (issue #752): explicit `repo` + manager + binding, on a host
-        // whose secrets are plaintext on its own disk → absent. This is the
-        // console-added-teammate path, which never goes back through the boot
-        // check. The binding exists, so nothing but the backend is refusing.
-        for kind in [
-            crate::store::StorageKind::Fs,
-            crate::store::StorageKind::Sqlite,
-        ] {
-            let plaintext = built_tool_names_with_repos_on(&["repo"], 1, kind);
-            for tool in &pair {
-                assert!(
-                    !plaintext.contains(tool),
-                    "a repo grant on {} must wire nothing: {plaintext:?}",
-                    kind.as_str()
-                );
-            }
-            // Again, a withheld family and not a broken agent.
-            assert_eq!(
-                plaintext,
-                built_tool_names(&["repo"], false),
-                "the {} state must differ from the unwired state by nothing",
-                kind.as_str()
-            );
-        }
-    }
-
-    /// Granting `repo` must not quietly hand over anything *else*: the bound
-    /// `["repo"]` belt is the ungranted belt plus exactly the two tools.
-    #[test]
-    fn the_repo_grant_adds_exactly_two_tools() {
-        let mut baseline = built_tool_names(&[], false);
-        let granted = built_tool_names_with_repos(&["repo"], 1);
-        baseline.push("repo_checkout".to_string());
-        baseline.push("repo_pr".to_string());
-        baseline.sort();
-        assert_eq!(granted, baseline, "the `repo` grant widened the belt");
-    }
-
-    /// The repository *write* tier (issue #734) wires NO tool of its own yet —
-    /// `repo_publish` lands in #735. Granting `repo.write` confers the read pair
-    /// (write implies read, since `repo.write` matches the read predicate's
-    /// `repo.` prefix) and nothing more, whatever the bound credential's push
-    /// capability. This pins "#734 wires nothing": if a later change wires a
-    /// write tool without the push-capability gate, the exact-set assertion here
-    /// breaks rather than shipping an ungated push surface. The bindings the
-    /// helper builds carry `can_push: None`, so the write tier fails closed
-    /// (warns) — and still adds no tool.
-    #[test]
-    fn repo_write_grant_wires_no_tool_beyond_the_read_pair() {
-        let mut baseline = built_tool_names(&[], false);
-        baseline.push("repo_checkout".to_string());
-        baseline.push("repo_pr".to_string());
-        baseline.sort();
-
-        let write_granted = built_tool_names_with_repos(&["repo.write"], 1);
-        assert_eq!(
-            write_granted, baseline,
-            "repo.write with a non-push-capable credential wires only the read pair"
-        );
-    }
-
-    /// The write tier's fourth gate (issue #735): `repo_publish` is wired only
-    /// with `repo.write` **and** a push-capable credential, and never by the read
-    /// `repo` grant. The non-push-capable half is
-    /// `repo_write_grant_wires_no_tool_beyond_the_read_pair` above.
-    #[test]
-    fn repo_write_with_a_push_capable_credential_wires_repo_publish() {
-        let publish = "repo_publish".to_string();
-
-        // repo.write + a push-capable credential → repo_publish joins the belt,
-        // and the read pair is still there (write implies read).
-        let pushable = built_tool_names_with_repos_cap(&["repo.write"], 1, true);
-        assert!(
-            pushable.contains(&publish),
-            "a push-capable `repo.write` must wire repo_publish: {pushable:?}"
-        );
-        assert!(
-            pushable.contains(&"repo_checkout".to_string())
-                && pushable.contains(&"repo_pr".to_string()),
-            "the read pair must still be wired: {pushable:?}"
-        );
-
-        // repo.write but a read-only credential → fail-closed, no publish.
-        let read_only = built_tool_names_with_repos_cap(&["repo.write"], 1, false);
-        assert!(
-            !read_only.contains(&publish),
-            "a read-only credential must not wire repo_publish: {read_only:?}"
-        );
-
-        // A bare `repo` never confers it, push-capable credential or not.
-        let bare = built_tool_names_with_repos_cap(&["repo"], 1, true);
-        assert!(
-            !bare.contains(&publish),
-            "bare `repo` (the read tier) must never wire repo_publish: {bare:?}"
-        );
-
-        // Gate 4 (issue #752): even a push-capable `repo.write` wires nothing on a
-        // plaintext secret backend — repo_publish uses the credential host-side, so
-        // it is refused exactly like the read tools are on such a host.
-        for kind in [
-            crate::store::StorageKind::Fs,
-            crate::store::StorageKind::Sqlite,
-        ] {
-            let plaintext = built_tool_names_with_repos_on_cap(&["repo.write"], 1, true, kind);
-            assert!(
-                !plaintext.contains(&publish),
-                "a push-capable `repo.write` on {} must not wire repo_publish: {plaintext:?}",
-                kind.as_str()
-            );
-        }
     }
 
     /// Granting `search` must not quietly hand over anything *else*: the
@@ -2547,7 +2546,7 @@ mod tests {
     /// **Feature-aware (issue #297).** The belt genuinely differs by feature
     /// set: `#[cfg(feature = "mcp")]` pushes two `mcp_registry_*` tools
     /// unconditionally in `build_agent`, so a flat literal was *wrong* under
-    /// `--features openhuman,mcp,telegram` — the combination a full local build
+    /// `--features openhuman,mcp` — the combination a full local build
     /// and the shipped tenant image both use, and which no CI lane ran. The pin
     /// was therefore failing unseen on `main`. Extending the array
     /// unconditionally would only move the failure onto plain
@@ -2587,9 +2586,11 @@ mod tests {
         // belt now — including a company with no skills source of its own.
         expected.extend(["describe_skill", "list_skills", "read_skill_resource"]);
         expected.sort();
-        // Mirrors the unconditional `#[cfg(feature = "mcp")]` push in
-        // `build_agent`. These two are intrinsic (unmapped by `namespace_of`),
-        // so no grant gates them — enabling the feature is the whole condition.
+        // Mirrors the `#[cfg(feature = "mcp")]` push in `build_agent`. These two
+        // are intrinsic (unmapped by `namespace_of`), so no grant gates them:
+        // the feature plus a configured `HarnessDeps::mcp_home` is the whole
+        // condition. The home is what selects the company's own registry store,
+        // and a tool built without it would read a different one.
         #[cfg(feature = "mcp")]
         {
             expected.push("mcp_registry_list_tools");
@@ -2645,6 +2646,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2913,6 +2915,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");

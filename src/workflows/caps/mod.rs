@@ -291,6 +291,7 @@ pub async fn build_capabilities(
             grants,
             &deps.capabilities,
             deps.search.as_ref(),
+            deps.tenant_search.as_ref(),
             search_metering,
             wiring,
         );
@@ -341,6 +342,14 @@ pub async fn build_capabilities(
         // hard-abort path is when the engine future is dropped: staged-but-undrained
         // writes die with the run, exactly as `ApprovalClaim` treats gated calls.
         let board_claim = Arc::new(deps.delegations.claim_board(run_id.to_string()));
+        // The publish tool is captured by the fingerprint-cached roster agent,
+        // so a workflow run cannot replace its queue handle. Scope only refused
+        // publishes: staged publishes remain unavailable to runs because they
+        // still have no destination to claim.
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run(run_id.to_string()),
+        );
 
         // `deps` moves in last — the borrows above (`deps.capabilities`,
         // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
@@ -358,6 +367,7 @@ pub async fn build_capabilities(
             blocks,
             approvals,
             board_claim,
+            publish_refusal_claim,
         ));
         (Arc::new(tools), Arc::new(http), state, Some(agent))
     };
@@ -529,6 +539,10 @@ pub struct HarnessAgentRunner {
     /// claim would let one node destroy a sibling's staged writes. See the
     /// acquisition site for the full reasoning.
     board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
+    /// The run's refusal bucket on the shared publish queue. The cached
+    /// `PublishArtifactTool` reads this task-local scope when it refuses a
+    /// publish, so sibling runs cannot drain each other's notices.
+    publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
 }
 
 /// Where an agent node leaves a notice for the operator (issue #638).
@@ -712,6 +726,7 @@ impl HarnessAgentRunner {
         blocks: RunBlocks,
         approvals: RunApprovals,
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
+        publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
     ) -> Self {
         Self {
             turn,
@@ -726,6 +741,7 @@ impl HarnessAgentRunner {
             blocks,
             approvals,
             board_claim,
+            publish_refusal_claim,
         }
     }
 
@@ -850,32 +866,14 @@ impl HarnessAgentRunner {
     /// three times should name it once, for the reason
     /// [`push_tool`] gives.
     ///
-    /// # Known limitation: the bucket is unscoped
+    /// # Scope
     ///
-    /// The queue handle is shared across every path in the company, and the
-    /// chat cycle's `clear()` at the top of each turn empties it. So a chat
-    /// cycle starting between a node's refusal and this drain can discard the
-    /// notice. That is the **safe** direction and the reason it is left as is:
-    /// the loss is a notice that does not appear, never one attributed to a run
-    /// that did not earn it — a claimed destination records no refusal at all
-    /// (pinned by `a_claimed_destination_records_no_refusal`), so nothing a chat
-    /// or task turn does can *add* to this bucket.
-    ///
-    /// A *different* workflow run can add to it, though: two overlapping runs
-    /// of the same company share this same bucket, and whichever run's
-    /// `drain_publish_refusals` executes first takes every refusal queued so
-    /// far, including one a sibling run just raised — a misattribution, not a
-    /// loss (tracked as issue #1243). Closing it properly is **not** as simple
-    /// as handing each run a private queue at `build_capabilities` time: the
-    /// `agent` node type dispatches through `HarnessPool::run_background` to a
-    /// roster agent built **once** by `HarnessPool::ensure` and cached behind
-    /// fingerprints, so the `PublishArtifactTool` a model's turn actually calls
-    /// captures its `pending_publishes` handle at that cache-build time, not at
-    /// per-run dispatch time — a fork made here never reaches it. The fix needs
-    /// the same *task-local* run scope issue #771 gave the delegation queue
-    /// (`ApprovalScope` / `DelegationScope` / `board_claim.scoped(..)` above),
-    /// read by `push_refusal` at call time rather than baked in at tool
-    /// construction, which is a wider change than this fix.
+    /// The queue handle is shared across every path in the company because the
+    /// cached roster tool captures it at construction time. A run therefore
+    /// claims a task-local refusal scope around its node turn and this drain;
+    /// `push_refusal` reads that scope at call time. Concurrent runs write to
+    /// and drain distinct buckets while chat and task turns retain the default
+    /// bucket and their existing behavior.
     fn drain_publish_refusals(&self) {
         let refusals = self.deps.pending_publishes.drain_refusals();
         let mut seen: Vec<String> = Vec::new();
@@ -1306,7 +1304,8 @@ impl AgentRunner for HarnessAgentRunner {
             self.drain_publish_refusals();
             (outcome, parked)
         });
-        let (outcome, parked) = self.board_claim.scoped(turn).await;
+        let turn = Box::pin(self.board_claim.scoped(turn));
+        let (outcome, parked) = self.publish_refusal_claim.scoped(turn).await;
         // Issue #849: a provider context-window refusal reaches the operator as
         // the run's error text, and the vendor's own wording ("Please start a
         // new chat") is unfollowable in a workflow — there is no chat and no
@@ -1797,6 +1796,8 @@ mod tests {
         let queue = deps.approval_requests.clone();
         let notices = RunNotices::default();
         let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1"));
         let runner = HarnessAgentRunner::new(
             single_turn(&deps),
             deps,
@@ -1810,6 +1811,7 @@ mod tests {
             RunBlocks::default(),
             RunApprovals::default(),
             board_claim,
+            publish_refusal_claim,
         );
 
         // Pushed inside the run's own scope, exactly as its turn would.

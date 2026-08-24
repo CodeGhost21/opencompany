@@ -26,19 +26,74 @@ is separate and still to come.
 
 `GET /api/v1/setup` returns everything the wizard needs to draw itself: each
 configurable field with **the layer that owns it**, the shipped template
-catalog, the sign-in modes this host accepts, and which optional surfaces are
-compiled into the build.
+catalog, the sign-in modes this host accepts, which optional surfaces are
+compiled into the build, and — in `mail` — what this host can do with a mailbox.
+
+`mail` is two booleans, `wired` and `echoes_code`, computed from the very
+predicates the login route branches on rather than re-read from the environment
+here. It answers a different question from `auth_modes`: that list says which
+modes are *legal*, and `email` stays on it whatever mail this host has, because
+hub OAuth and passwords sign people in without a transport. `mail` says which
+sign-in the wizard can honestly offer *today* — mailed on `wired`, handed back
+as a link on `echoes_code`, and neither on a routable host that has configured
+no transport.
+
+That last case is why it is reported at all. The console used to infer mail from
+whether the sign-in request echoed a code back, and a code is only ever echoed
+on a loopback bind — so a routable host with no transport finished setup by
+telling its operator to check an inbox that would stay empty forever. The echoed
+code still *sources* the link it hands over; it no longer decides whether one
+was sent. The sign-in step says the same thing before the choice is made, and
+`/auth/config` carries it to the login screen as `magicLink`, which is the only
+place a returning visitor could ever be told: `auth/request` answers `sent:
+true` on a host that delivered nothing exactly as on one that did.
 
 `POST /api/v1/setup` applies a completed wizard: writes `config.toml`, seeds the
 chosen template when the registry is empty, and stamps `setup_completed_at`.
 Validation happens before anything is written — a partial apply is worse than a
 refused one, because nothing tells the operator which half landed.
 
+The Business step renders that catalog as a dropdown. The selected preset is
+sent with the optional details to the roster pass, so matching is anchored to a
+real shipped company type instead of inferred from a free-text keyword alone.
+
 `GET /spec` additionally carries `setup_complete`. It is reported on that
 unauthenticated handshake because an instance nobody has configured has nobody
 who *can* sign in; gating the answer behind auth would make the wizard
 unreachable exactly when it is needed. The boolean is the whole disclosure — the
 configuration itself stays behind `/api/v1/setup`.
+
+## The order the wizard asks in
+
+Six steps: **model, business, sign-in, you, advanced, review**.
+
+Model is first because its failure is silent everywhere else — the design pass
+falls back to a curated team on a missing or bad credential, so an untested key
+produces a *plausible* company and the operator finds out several screens later,
+if at all. It is a gate, not a wall: skipping is a first-class answer.
+
+For a local OpenAI-compatible provider, setup accepts the address local model
+apps normally display (`localhost:6969`), normalizes it to
+`http://localhost:6969/v1`, reads `/models`, and probes a concrete model id.
+That provider, normalized endpoint, model mapping, and optional write-only key
+are then persisted on the company the wizard creates. The roster-design pass
+uses the same tested provider before the company exists; a green test is not a
+temporary connection that setup forgets at Finish.
+
+Sign-in comes before the address, and that is the point of it having a step. It
+used to be the first card inside Advanced — one screen *after* the wizard asked
+for an email address, under copy inviting the operator to press straight past
+the lot — so someone setting up on a laptop was asked for an address they need
+never have supplied, by a flow that already knew it might not want one. A
+question with a consequence does not sit behind "press on if none of it matters
+to you"; what stays in Advanced is settings that already work.
+
+**A skipped step gets no slot in the bar.** Choosing `none` removes the address
+step outright rather than making it optional, and the progress bar renumbers
+with it — a five-step flow that says "step 3 of 6" is counting a screen that
+will never arrive. The console holds its position as a step *id* rather than an
+index for the same reason: a list that changes length behind the operator would
+otherwise silently mean a different screen.
 
 ## Every field carries its layer
 
@@ -164,13 +219,14 @@ the wizard for a sign-in form would restore the dead end this flow removes.
 
 ## What it does not configure
 
-ACP is a **cargo feature** (`acp`), not a setting, and no `/acp` handler is
-mounted in this tree — only the session and permission model plus the reserved
-path (`src/server/routes.rs`). The flow therefore reports `acp_in_build` and
-`acp_transport_mounted` separately and offers no switch, which is the difference
-between telling an operator "not available" and sending a client at an endpoint
-that 404s. The same reporting-not-writing rule covers `mcp`, `openhuman` and
-`oauth`.
+ACP is a **cargo feature** (`acp`), not a setting. With the feature on, the
+host mounts the authenticated HTTP JSON-RPC transport at `/acp`
+(`src/server/acp/`); without it only the session and permission model plus the
+reserved path compile (`src/server/routes.rs`). The flow therefore reports
+`acp_in_build` and `acp_transport_mounted` separately and offers no switch,
+which is the difference between telling an operator "not available" and sending
+a client at an endpoint that 404s. The same reporting-not-writing rule covers
+`mcp`, `openhuman` and `oauth`.
 
 `data_dir` is excluded too: a running host has already opened and locked its
 data root, so writing a new one into the file that lives *inside* that root

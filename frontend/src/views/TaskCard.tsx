@@ -134,23 +134,23 @@ export function TaskItem({
 }) {
   return (
     <div
-      onClick={onOpen}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
       className={cn(
-        "cursor-grab rounded-lg border bg-card p-3 shadow-sm transition-shadow hover:shadow active:cursor-grabbing",
-        dragging && "opacity-50",
+        "cursor-grab rounded-lg border bg-card p-3 shadow-sm transition-[transform,box-shadow] hover:shadow active:cursor-grabbing",
+        // A card being carried needs to read as being in the operator's hand,
+        // not as unavailable. The small rise, rotation, and shadow make that
+        // state distinct from a disabled card without changing the gesture.
+        dragging && "-translate-y-1 rotate-1 shadow-xl",
       )}
     >
       <div className="flex items-start justify-between gap-2">
-        <p className="text-sm font-medium leading-snug">{task.title}</p>
+        <button
+          type="button"
+          onClick={onOpen}
+          className="-m-1 min-w-0 rounded-sm p-1 text-left text-sm font-medium leading-snug hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid="task-card-open"
+        >
+          {task.title}
+        </button>
         {/* Only when something is being asked. `low` is what a card takes when
             nobody chose a priority, so a badge for it is a pill on a third of a
             real board announcing the default — noise competing with the title
@@ -192,8 +192,8 @@ export function TaskItem({
         </div>
       )}
       {task.plan && <PlanBadgeRow plan={task.plan} />}
-      {SHOWS_OUTPUT_LINK.has(task.column) && <OutputLinkRow task={task} />}
-      {task.column === "paused" && (
+      {showsOutputLink(task) && <OutputLinkRow task={task} />}
+      {task.stage === "paused" && (
         <>
           {block && <BlockedRow block={block} now={now} onReview={onReview} />}
           <Button
@@ -302,6 +302,19 @@ function BlockedRow({
 const SHOWS_OUTPUT_LINK = new Set(["in_review", "done"]);
 
 /**
+ * Whether this card advertises its output.
+ *
+ * Reads the **stage** and falls back to the phase, because since issue #1512 a
+ * card waiting on a verdict is `column: "working", stage: "in_review"` while a
+ * finished one is `column: "done"` with no stage at all. Matching on `column`
+ * alone would put the link on every working card, including the three that
+ * have not produced anything to look at yet.
+ */
+function showsOutputLink(task: Task): boolean {
+  return SHOWS_OUTPUT_LINK.has(task.stage ?? task.column);
+}
+
+/**
  * What a planned card carries, in one line on the board (issue #337).
  *
  * Shown on **every** column a plan survives into rather than a chosen set, and
@@ -376,15 +389,14 @@ function LinkIcon({ kind }: { kind: TaskLink["kind"] }) {
  * `card` kind there, a link back to the card itself, and the card is already
  * that click. See the guard below.
  *
- * The anchor stops its own click from bubbling: the whole card is a button that
- * opens the detail screen, and without this a click on the link would both
- * follow the href and fire the card's `onOpen`, racing two navigations.
+ * It is independent of the title button that opens the task detail screen, so
+ * following an output never also opens the task itself.
  */
 function OutputLinkRow({ task }: { task: Task }) {
   const link = primaryLink(task);
   const extra = extraOutputCount(task);
   // A card that produced nothing links to itself, labelled "Open this task" —
-  // which is what the whole card already is (`role="button"`, `onOpen`). A
+  // which is what the title button already does (`onOpen`). A
   // second copy of the card's own action, given a divider and a row of its own,
   // is most of why two cards for the same kind of object came out different
   // heights and different shapes depending only on which column they sat in.
@@ -395,7 +407,6 @@ function OutputLinkRow({ task }: { task: Task }) {
       <a
         href={link.href}
         title={link.hint}
-        onClick={(e) => e.stopPropagation()}
         className="flex min-w-0 items-center gap-1.5 text-muted-foreground hover:text-foreground hover:underline"
       >
         <LinkIcon kind={link.kind} />
@@ -405,7 +416,6 @@ function OutputLinkRow({ task }: { task: Task }) {
         <a
           href={`#/tasks/${encodeURIComponent(task.id)}`}
           title="Open the task to see everything it produced."
-          onClick={(e) => e.stopPropagation()}
           className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
         >
           +{extra} more

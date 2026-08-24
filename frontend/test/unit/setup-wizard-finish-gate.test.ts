@@ -29,9 +29,7 @@ function status(over: Partial<SetupStatus> = {}): SetupStatus {
     complete: false,
     config_path: "/data/config.toml",
     fields: [],
-    templates: [
-      { id: "starter", name: "Starter", agent_count: 2, output: null },
-    ],
+    templates: [],
     auth_modes: ["email"],
     build: {
       acp_in_build: false,
@@ -42,6 +40,7 @@ function status(over: Partial<SetupStatus> = {}): SetupStatus {
     },
     companies: [],
     inference: { ready: false, provider: null, base_url: null },
+    mail: { wired: false, echoes_code: false },
     ...over,
   };
 }
@@ -129,10 +128,14 @@ async function skipModel() {
   await next(); // -> business
 }
 
-/** model -> business -> account -> advanced -> review. */
+/** model -> business -> sign-in -> account -> advanced -> review. */
 async function goToReview() {
   await skipModel();
   await fill("setup-field-industry", "E-commerce — homeware");
+  await next(); // -> sign-in
+  // Left as it stands: the host default is email sign-in, which is the case
+  // this file is about — an operator who will have to sign in and so needs an
+  // address on the next screen.
   await next(); // -> account
   // The address is required on any host that asks people to sign in — leaving
   // it blank holds the wizard here, which is its own assertion below.
@@ -162,6 +165,36 @@ const finishButton = () =>
   container.querySelector('[data-testid="setup-finish"]') as HTMLButtonElement | null;
 
 describe("finishing setup with no companies on the host", () => {
+  it("offers the shipped company templates as a dropdown", async () => {
+    await show(
+      clientWith(
+        status({
+          templates: [
+            { id: "agentic_software_company", name: "Agentic Software Company", agent_count: 5, output: "Software" },
+            { id: "agentic_law_firm", name: "Agentic Law Firm", agent_count: 4, output: "Legal work" },
+          ],
+        }),
+      ),
+    );
+    await skipModel();
+
+    const picker = container.querySelector(
+      '[data-testid="setup-field-template"]',
+    ) as HTMLSelectElement;
+    expect(picker).toBeTruthy();
+    expect(Array.from(picker.options).map((option) => option.textContent)).toContain(
+      "Agentic Software Company (5 teammates)",
+    );
+
+    await act(async () => {
+      picker.value = "agentic_software_company";
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(
+      (container.querySelector('[data-testid="setup-field-industry"]') as HTMLInputElement).value,
+    ).toBe("Agentic Software Company");
+  });
+
   /**
    * The design call fails in this environment (no host behind the client), so
    * Review renders its error rather than a roster — which is precisely the
@@ -205,7 +238,8 @@ describe("finishing setup with no companies on the host", () => {
     await show(clientWith(status()));
     await skipModel();
     await fill("setup-field-industry", "E-commerce — homeware");
-    await next(); // -> account
+    await next(); // -> sign-in
+    await next(); // -> account, because the mode above asks people to sign in
 
     // Pressing on with no address must not leave this step.
     await next();
@@ -277,6 +311,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
+    await fill("setup-field-key", "rejected-key");
     await act(async () => {
       (
         container.querySelector('[data-testid="setup-test-connection"]') as HTMLElement
@@ -306,6 +341,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
+    await fill("setup-field-key", "working-key");
     await act(async () => {
       (
         container.querySelector('[data-testid="setup-test-connection"]') as HTMLElement
@@ -320,6 +356,44 @@ describe("finishing setup with no companies on the host", () => {
     ).toContain("https://example.test/v1");
     await next();
     expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeTruthy();
+  });
+
+  it("requires the selected provider's credential before testing", async () => {
+    let requests = 0;
+    await show(
+      clientWith(status(), {
+        post: async () => {
+          requests += 1;
+          return { ok: true, baseUrl: "https://example.test/v1" };
+        },
+      }),
+    );
+
+    expect(button("Test connection").disabled).toBe(true);
+    await act(async () => {
+      button("Test connection").click();
+    });
+    expect(requests).toBe(0);
+
+    await fill("setup-field-key", "working-key");
+    expect(button("Test connection").disabled).toBe(false);
+    await act(async () => {
+      button("Test connection").click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requests).toBe(1);
+  });
+
+  it("requires an endpoint before testing Ollama", async () => {
+    await show(clientWith(status()));
+
+    await act(async () => {
+      (container.querySelector('[data-testid="setup-provider-ollama"]') as HTMLElement).click();
+    });
+    expect(button("Test connection").disabled).toBe(true);
+
+    await fill("setup-field-base-url", "http://127.0.0.1:11434/v1");
+    expect(button("Test connection").disabled).toBe(false);
   });
 
 
@@ -351,6 +425,7 @@ describe("finishing setup with no companies on the host", () => {
     ).toBeTruthy();
     // No empty input pretending to be the question.
     expect(container.querySelector('[data-testid="setup-field-key"]')).toBeNull();
+    expect(button("Test connection").disabled).toBe(false);
 
     // Someone who wants their own key can still get the field.
     await act(async () => {
@@ -359,6 +434,39 @@ describe("finishing setup with no companies on the host", () => {
       ).click();
     });
     expect(container.querySelector('[data-testid="setup-field-key"]')).toBeTruthy();
+  });
+
+  /**
+   * The "Use my own" escape hatch switches the gate too. Once the operator
+   * opts to supply their own key, an empty box must not test anything — a
+   * test with no key probes the host credential and would report a pass for a
+   * key they never provided.
+   */
+  it("requires a key once the operator opts to use their own", async () => {
+    await show(
+      clientWith({
+        ...status(),
+        inference: {
+          ready: true,
+          provider: "managed",
+          base_url: "https://api.tinyhumans.ai/openai/v1",
+        },
+      }),
+    );
+
+    // The host credential is testable as-is.
+    expect(button("Test connection").disabled).toBe(false);
+
+    await act(async () => {
+      (
+        container.querySelector('[data-testid="setup-key-override"]') as HTMLElement
+      ).click();
+    });
+    // Their own key, not yet provided, is nothing to test.
+    expect(button("Test connection").disabled).toBe(true);
+
+    await fill("setup-field-key", "own-key");
+    expect(button("Test connection").disabled).toBe(false);
   });
 
   /**

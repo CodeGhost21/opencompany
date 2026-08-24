@@ -93,6 +93,32 @@ export interface SetupStatus {
   companies: string[];
   /** What this host can already reach without the operator supplying anything. */
   inference: InferenceReady;
+  /** What this host can do with a mailbox. */
+  mail: MailReady;
+}
+
+/**
+ * What this host can do with a mailbox.
+ *
+ * Separate from `auth_modes`, which says which modes are *legal*: `email` stays
+ * on that list whatever mail the host has, because hub OAuth and passwords sign
+ * people in without a transport. This says which sign-in can honestly be
+ * offered today.
+ *
+ * Required rather than optional, deliberately. An optional field would let a
+ * host too old to report it fall through to whatever the UI treats `undefined`
+ * as and render confident copy about a mailbox nobody checked; required makes
+ * the compiler name every place that has to decide.
+ */
+export interface MailReady {
+  /** A transport and credentials are wired — a link is genuinely sent. */
+  wired: boolean;
+  /**
+   * A minted code comes back in the response instead of going to a mailbox:
+   * loopback bind, no public URL, no transport. The laptop case, where the
+   * honest hand-off is a link rather than an inbox.
+   */
+  echoes_code: boolean;
 }
 
 /**
@@ -150,6 +176,8 @@ export interface InferenceTestResult {
   ok: boolean;
   /** The endpoint actually reached — a tick from the wrong URL is not a pass. */
   baseUrl: string;
+  /** Concrete model discovered from the endpoint's OpenAI-compatible catalog. */
+  model?: string | null;
   /** Present only on failure, already summarised into one actionable line. */
   error?: string;
 }
@@ -211,6 +239,16 @@ export interface DesignedCompany {
    * nobody. Omitted only on a host that needs no sign-in at all.
    */
   adminEmail?: string | null;
+  /** The tested provider to persist onto the new company. */
+  inference?: SetupInferenceInput | null;
+}
+
+export interface SetupInferenceInput {
+  provider: string;
+  baseUrl?: string | null;
+  model?: string | null;
+  /** Write-only; stored in the company's secret store. */
+  key?: string | null;
 }
 
 export interface DesignedAgent {  name: string;
@@ -299,7 +337,11 @@ export function proposeSetupRoster(
     industry: string;
     teamHint: string;
     automate: string;
+    template?: string | null;
     inferenceKey?: string | null;
+    inferenceProvider?: string | null;
+    inferenceBaseUrl?: string | null;
+    inferenceModel?: string | null;
   },
 ): Promise<SetupRoster> {
   return client.post<SetupRoster>("/api/v1/setup/roster", body);

@@ -13,7 +13,14 @@
 
 import { EyeOff, FileText, Folder, Loader2, Lock, Search } from "lucide-react";
 
-import { formatBytes, highlightRuns, isBinary, originLabel, type SearchHit } from "@/api/workspace";
+import {
+  centerExcerpt,
+  formatBytes,
+  highlightRuns,
+  isBinary,
+  originLabel,
+  type SearchHit,
+} from "@/api/workspace";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -24,6 +31,7 @@ import {
   isSecretPath,
   SECRETS_LABEL,
   SECRETS_REASON,
+  titleOf,
 } from "@/lib/workspace";
 
 interface Props {
@@ -46,10 +54,21 @@ interface Props {
  */
 function Excerpt({ text, query }: { text: string; query: string }) {
   return (
-    <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground" data-testid="workspace-search-excerpt">
-      {highlightRuns(text, query).map((run, i) =>
+    <p
+      className="mt-0.5 line-clamp-2 text-xs text-muted-foreground"
+      data-testid="workspace-search-excerpt"
+    >
+      {/* Centred first (issue #1375). The host's window is generous and this
+          paragraph is two lines of a 250px column, so a match past the first
+          dozen words was clamped away — leaving two lines of arbitrary prose
+          with nothing marked in them, in the one element whose whole job is to
+          show *why* this note came back. */}
+      {highlightRuns(centerExcerpt(text, query), query).map((run, i) =>
         run.hit ? (
-          <mark key={i} className="rounded-sm bg-highlight px-0.5 text-foreground">
+          <mark
+            key={i}
+            className="rounded-sm bg-highlight px-0.5 text-foreground"
+          >
             {run.text}
           </mark>
         ) : (
@@ -60,12 +79,32 @@ function Excerpt({ text, query }: { text: string; query: string }) {
   );
 }
 
-export function SearchResults({ query, hits, total, loading, error, onOpen }: Props) {
+/**
+ * A hit's folder path, without the filename the row above already shows.
+ *
+ * Returns the workspace root's own label for a note filed at the top, so the
+ * line is never blank — "where is this?" has an answer for a root note too.
+ */
+function parentPath(path: string): string {
+  const cut = path.lastIndexOf("/");
+  return cut === -1 ? "Workspace root" : path.slice(0, cut);
+}
+
+export function SearchResults({
+  query,
+  hits,
+  total,
+  loading,
+  error,
+  onOpen,
+}: Props) {
   if (error) {
     return (
       <div className="px-2 py-2">
         <Alert variant="destructive">
-          <AlertDescription data-testid="workspace-search-error">{error}</AlertDescription>
+          <AlertDescription data-testid="workspace-search-error">
+            {error}
+          </AlertDescription>
         </Alert>
       </div>
     );
@@ -81,9 +120,12 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
 
   if (hits.length === 0) {
     return (
-      <p className="px-3 py-2 text-xs text-muted-foreground" data-testid="workspace-search-empty">
-        No notes mention “{query}”. Search matches whole words and parts of words, but not
-        misspellings — try a shorter or different term.
+      <p
+        className="px-3 py-2 text-xs text-muted-foreground"
+        data-testid="workspace-search-empty"
+      >
+        No notes mention “{query}”. Search matches whole words and parts of
+        words, but not misspellings — try a shorter or different term.
       </p>
     );
   }
@@ -151,7 +193,15 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                     <FileText className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <span className="truncate text-sm">
-                    {highlightRuns(hit.name, hit.matched === "name" ? query : "").map((run, i) =>
+                    {/* The same title the tree and the header show (issue
+                        #1382). Search rendered the raw `name`, so a hit read
+                        `Pagination.md` and clicking it renamed the thing on
+                        screen to `Pagination`. A query rarely spans the
+                        extension, so the highlight offsets are unaffected. */}
+                    {highlightRuns(
+                      hit.kind === "file" ? titleOf(hit) : hit.name,
+                      hit.matched === "name" ? query : "",
+                    ).map((run, i) =>
                       run.hit ? (
                         <mark
                           key={i}
@@ -178,26 +228,38 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                     beside the name where `Seeded` used to sit. "Written by a
                     ledger" and "Hidden from agents" are both wide, the pane is
                     256px, and on the name line either truncated the very thing
-                    the operator is scanning for — `DECISIONS.md` became
+                    the operator is scanning for — `decisions.md` became
                     `DECISIONS…`. Down here it costs no name width and lands
                     next to its own evidence, the `derived/` or `secrets/`
                     segment it explains. The scan-for-glyphs affordance lives in
                     the tree, which is the surface people browse. */}
                 <span className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-foreground">
-                  {/* `truncate` is doing two jobs, and the second one is easy
+                  {/* The *parent* path, ellipsised at the **start** (issue
+                      #1375). It used to render the full path with a tail
+                      `truncate`, which cuts the discriminating end
+                      (`Standards/Engineering/Backend/Rust/API…`) while
+                      repeating the filename already shown on the line above.
+                      Head-ellipsis via `direction: rtl` so the browser drops
+                      characters from the left at the real rendered width;
+                      `<bdi>` pins segment order so the RTL context cannot
+                      reorder the path itself.
+
+                      `truncate` stays, and is doing two jobs — the second easy
                       to mistake for missing. It carries `overflow: hidden`,
-                      which makes this flex item a scroll container — and a
-                      scroll container's automatic minimum size is 0, not its
-                      min-content width. So the path already shrinks and
-                      ellipsises rather than shouldering the badge out of a
-                      256px pane; a `min-w-0` beside it would be a no-op.
-                      Measured: with `truncate` the computed floor is `0px` and
-                      the badge overflows by 0; strip `truncate` and the floor
-                      is `auto` and it overflows. Keep them together. */}
-                  <span className="truncate">
-                    {hit.path}
-                    {isBinary(hit) && ` · ${hit.mime} · ${formatBytes(hit.size)}`}
-                  </span>
+                      which makes this flex item a scroll container, and a
+                      scroll container's automatic minimum size is 0 rather than
+                      its min-content width. So the path shrinks and ellipsises
+                      instead of shouldering the badge out of a 256px pane, and
+                      a `min-w-0` beside it would be a no-op. Measured: with
+                      `truncate` the computed floor is `0px` and the badge
+                      overflows by 0; strip it and the floor is `auto` and it
+                      overflows. */}
+                  <bdi className="truncate" dir="rtl" data-testid="workspace-search-path">
+                    {parentPath(hit.path)}
+                  </bdi>
+                  {isBinary(hit) && (
+                    <span className="shrink-0">{`${hit.mime} · ${formatBytes(hit.size)}`}</span>
+                  )}
                   {derived && (
                     <Badge
                       variant="outline"
@@ -230,6 +292,21 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
           );
         })}
       </ul>
+      {/* The head line says "20 of 50" and the list simply ends, so an operator
+          who scrolled to the bottom got no signal that 30 matches were withheld
+          — they met the last row and read it as the last match (issue #1457).
+          The route has no offset, so the remedy is a narrower query rather than
+          a next page, and this says which. */}
+      {hits.length < total && (
+        <p
+          className="border-t border-border/40 px-3 py-2 text-2xs text-muted-foreground"
+          data-testid="workspace-search-more"
+        >
+          {total - hits.length} more{" "}
+          {total - hits.length === 1 ? "match" : "matches"} not shown — narrow
+          your search to reach them.
+        </p>
+      )}
       {loading && (
         <p className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
           <Search className="size-3.5" /> Updating…

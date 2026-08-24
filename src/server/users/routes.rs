@@ -714,7 +714,7 @@ pub(crate) fn mail_transport_wired(state: &AppState) -> bool {
 /// that shape — there is no mailbox to flood and no remote caller to leak to —
 /// which is what makes skipping the resend throttle there safe. Any other host
 /// keeps the throttle.
-fn echoes_code_in_response(state: &AppState) -> bool {
+pub(crate) fn echoes_code_in_response(state: &AppState) -> bool {
     state.config().is_local_only() && !mail_transport_wired(state)
 }
 
@@ -1237,9 +1237,18 @@ async fn wallet_verify(
 struct AuthConfigResult {
     /// `email` | `wallet` | `none`.
     mode: &'static str,
+    /// What this company calls itself, so the sign-in screen can name what the
+    /// person is about to hand a credential to. The manifest's display name,
+    /// falling back to the company id; never absent, never empty.
+    name: String,
     /// Whether a password may be offered alongside the magic-link form. Only
     /// ever true in `email` mode.
     passwords: bool,
+    /// Whether a magic link asked for here can actually reach the person: a
+    /// wired transport, or a loopback host that hands the code back in the
+    /// response. False means the link form is a dead end and the console must
+    /// say so rather than draw it.
+    magic_link: bool,
 }
 
 /// `GET …/auth/config` — the sign-in mode this company uses.
@@ -1253,11 +1262,30 @@ struct AuthConfigResult {
 /// The console must branch on this rather than on which routes 404, so that a
 /// company with no sign-in renders "open the desktop app" instead of an email
 /// box that can never work.
-async fn auth_config(company: PublicCompany) -> Json<AuthConfigResult> {
+///
+/// It carries the company's display name for the same reason it carries the
+/// mode: the console has to draw the screen before it can authenticate, and a
+/// sign-in page that cannot name what it is a sign-in *to* asks for a credential
+/// without saying who is receiving it.
+async fn auth_config(
+    company: PublicCompany,
+    State(state): State<AppState>,
+) -> Json<AuthConfigResult> {
     let mode = company.runtime.auth_mode();
     Json(AuthConfigResult {
         mode: mode.as_str(),
+        // The one place a person can confirm *which* company they are signing
+        // in to. Every tenant is its own deployment on its own URL, so the host
+        // knows this for certain — and before this it told the console nothing,
+        // leaving the sidebar (after sign-in) as the first thing to name the
+        // company (issue #1334). Disclosing it discloses no membership: it is a
+        // property of the deployment, exactly like `mode`.
+        name: company.runtime.display_name().await,
         passwords: mode.uses_email(),
+        // The same two predicates `request_code` itself branches on, asked
+        // rather than restated: whether the console draws the form and whether
+        // the code goes anywhere must never be two separate opinions.
+        magic_link: mail_transport_wired(&state) || state.config().is_local_only(),
     })
 }
 

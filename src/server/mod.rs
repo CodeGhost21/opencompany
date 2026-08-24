@@ -38,8 +38,8 @@ pub mod chat_history;
 pub mod cors;
 mod error;
 pub mod feedback;
+pub mod feedback_board;
 pub mod graphql;
-pub mod hooks;
 pub mod hooks_chargebee;
 pub mod hub_identity;
 // Console MCP OAuth callback (issue #90): the unauthenticated browser-redirect
@@ -49,6 +49,9 @@ pub mod mcp_oauth;
 pub mod operator;
 pub mod ops;
 pub mod platform_auth;
+/// Who is here, and who is typing — ephemeral, leased, and never journaled.
+/// See [`presence`].
+pub mod presence;
 pub mod provision;
 mod routes;
 /// The first-run setup flow: one surface that configures an instance.

@@ -305,7 +305,7 @@ struct NamePath {
 }
 
 /// Loads the company's committed `[[mcp_server]]` entries from its record.
-async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, ApiError> {
+pub(super) async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, ApiError> {
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     Ok(record.map(|r| r.manifest.mcp_servers).unwrap_or_default())
 }
@@ -362,7 +362,7 @@ fn dto_from_decl(
 /// id, matching `bucket_usage`.
 pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<String>)> {
     let allow = &record.manifest.tools.allow;
-    let names = roster_display_names(&record.manifest.agents, &record.overlay_agents);
+    let names = roster_display_names(&record.effective_agents(), &record.overlay_agents);
     let roster_agent = |id: &str| RosterAgentDto {
         id: id.to_string(),
         name: names.get(id).cloned().unwrap_or_else(|| id.to_string()),
@@ -516,7 +516,7 @@ async fn add_server(
     let manifest = manifest_servers(runtime).await?;
     if manifest.iter().any(|m| m.name.trim() == name) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "`{name}` is declared in company.toml — update it to override, don't re-add it."
+            "`{name}` is declared in this company's bundle (`company.toml` or `mcp.json`) — update it to override, don't re-add it."
         ))));
     }
 
@@ -661,7 +661,7 @@ async fn delete_server(
     let manifest = manifest_servers(runtime).await?;
     if manifest.iter().any(|m| m.name.trim() == name) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "`{name}` is declared in company.toml — disable it instead of deleting."
+            "`{name}` is declared in this company's bundle (`company.toml` or `mcp.json`) — disable it instead of deleting."
         ))));
     }
     // Same guard, same reason, for an install-wide default (issue #527): the
@@ -792,7 +792,7 @@ async fn probe_and_persist(_runtime: &CompanyRuntime, _name: &str) -> Option<Mcp
 }
 
 /// Rejects an invalid server declaration as a `400`.
-fn reject_invalid(label: &str, server: &McpServer) -> Result<(), ApiError> {
+pub(super) fn reject_invalid(label: &str, server: &McpServer) -> Result<(), ApiError> {
     let problems = validate_one(label, server);
     if problems.is_empty() {
         Ok(())
@@ -1033,6 +1033,8 @@ role = "Chief Executive"
         )
         .expect("manifest parses");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),

@@ -11,6 +11,8 @@ import {
   type ComposioConnection,
 } from "@/api/composio";
 import { ApiError } from "@/api/types";
+import { classifyLoadFailure } from "@/lib/section-load";
+import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -61,6 +63,11 @@ interface Props {
  */
 export function AccountChoiceSection({ client, company, canManage, generation = 0 }: Props) {
   const [rows, setRows] = useState<ComposioConnection[] | null>(null);
+  // A non-404 read failure: the host could not answer which accounts exist, so
+  // this section must not read that as "nothing to choose between" (issue
+  // #1470). Distinct from `rows === []`, which is a host that answered with no
+  // multi-account provider.
+  const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   // Only the latest read may paint: switching company re-issues this call, and
   // a slow earlier response would otherwise show another company's accounts.
@@ -77,17 +84,25 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
       const list = await listComposioConnections(client, company);
       if (generation !== requestGeneration.current) return;
       setRows(list);
-    } catch {
-      // No Composio on this host, no credential, or the provider is
-      // unreachable. Not an error for this page — there is simply nothing to
-      // choose between, and the sections above already say why.
-      if (generation === requestGeneration.current) setRows([]);
+      setFailed(false);
+    } catch (err) {
+      if (generation !== requestGeneration.current) return;
+      // A 404 (or no credential) is genuinely "nothing to choose between", and
+      // the sections above say why. Any other failure means the host could not
+      // answer — don't render that as an empty choice (issue #1470).
+      if (classifyLoadFailure(err) === "error") {
+        setFailed(true);
+      } else {
+        setRows([]);
+        setFailed(false);
+      }
     }
   }, [client, company]);
 
   useEffect(() => {
     shownCompany.current = company;
     setRows(null);
+    setFailed(false);
     void refresh();
   }, [company, refresh, generation]);
 
@@ -133,15 +148,28 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
   // Only providers where the choice is real. `rows === null` is still loading;
   // an empty result and a single-account result render nothing at all.
   const multi = (rows ?? []).filter((row) => (row.accounts?.length ?? 0) > 1);
+  if (failed) {
+    return (
+      <section className="space-y-3" data-testid="account-choice">
+        <div className="flex items-center gap-2">
+          <Users className="size-4 text-muted-foreground" />
+          <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            Which account teammates act as
+          </h2>
+        </div>
+        <SectionUnreachable label="Couldn't read this company's connected accounts" />
+      </section>
+    );
+  }
   if (rows === null || multi.length === 0) return null;
 
   return (
     <section className="space-y-3" data-testid="account-choice">
       <div className="flex items-center gap-2">
         <Users className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Which account teammates act as
-        </h3>
+        </h2>
       </div>
       <p className="text-sm text-muted-foreground">
         {canManage

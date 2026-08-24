@@ -12,6 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { FeedbackForm } from "@/components/feedback-form";
+import { FeedbackBoard } from "@/views/feedback/FeedbackBoard";
 import { DiscordIcon } from "@/components/discord-icon";
 import { FEEDBACK_CATEGORIES, timeAgo } from "@/lib/language";
 import { DISCORD_INVITE_URL } from "@/lib/links";
@@ -32,14 +33,33 @@ interface Props {
   company: string | null;
 }
 
-/** A standalone feedback surface: report something, see past reports, get help. */
+/**
+ * The feedback surface: report something, see it against everyone else's asks,
+ * and follow what happens to it.
+ *
+ * Three layers, in the order an operator meets them:
+ *
+ * 1. **Flag something** — the local scrub-then-preview capture. Nothing leaves
+ *    the machine until the operator has seen the exact text that would.
+ * 2. **The shared board** — the hub's cross-product list of what has been
+ *    asked for, with votes, replies and a triage status
+ *    ([`FeedbackBoard`]). Absent on a host with no TinyHumans credential,
+ *    which has no board to show.
+ * 3. **Your reports** — this company's own captures, including the ones that
+ *    never left.
+ */
 export function FeedbackView({ client, company }: Props) {
   // Stays null until /spec answers, so the copy below never flickers between
   // the provisioned and unprovisioned wordings.
   const [provisioned, setProvisioned] = useState<boolean | null>(null);
   const [reports, setReports] = useState<FeedbackSummary[] | null>(null);
-  // Bumped on Done, which both clears the form and refetches the list.
+  // Bumped on Done, which clears the form, refetches the reports list, and
+  // re-anchors the board — a report that was just forwarded to the hub is a
+  // board row now, and it should not take a page reload to see it.
   const [round, setRound] = useState(0);
+  // Flipped off the first time the host says it has no board. Kept here rather
+  // than inside the board so the copy above can stop promising one.
+  const [hasBoard, setHasBoard] = useState(true);
 
   useEffect(() => {
     let live = true;
@@ -69,11 +89,12 @@ export function FeedbackView({ client, company }: Props) {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-2xl space-y-6 px-4 py-6">
+      <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
         <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Feedback</h2>
+          <h1 className="text-2xl font-semibold tracking-tight">Feedback</h1>
           <p className="text-sm text-muted-foreground">
-            Flag a wrong result, a missing capability, or anything that felt off.
+            Flag a wrong result, a missing capability, or anything that felt off
+            {hasBoard && " — then vote on what everyone else has asked for"}.
           </p>
         </div>
 
@@ -98,12 +119,21 @@ export function FeedbackView({ client, company }: Props) {
           </CardContent>
         </Card>
 
+        {hasBoard && (
+          <FeedbackBoard
+            client={client}
+            company={company}
+            refreshKey={round}
+            onAvailability={setHasBoard}
+          />
+        )}
+
         {reports !== null && reports.length > 0 && (
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Your reports</CardTitle>
               <CardDescription>
-                What you&apos;ve flagged from this company, newest first.
+                What this company has captured, newest first.
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
@@ -156,7 +186,11 @@ function ReportRow({ report }: { report: FeedbackSummary }) {
         <p className="text-xs text-muted-foreground">
           {timeAgo(report.at_millis, Date.now())}
           {report.work_item && ` · ${report.work_item}`}
-          {report.issue_status && ` · ${STATUS_LABELS[report.issue_status] ?? report.issue_status}`}
+          {` · ${
+            report.issue_status
+              ? (STATUS_LABELS[report.issue_status] ?? report.issue_status)
+              : "saved locally"
+          }`}
         </p>
       </div>
       {report.filed_issue_url && (

@@ -41,34 +41,18 @@ export interface EmbeddedInfo {
    * behaviour rather than to a connection keyed on `undefined`.
    */
   instanceId?: string;
-  /**
-   * The address this host will sign a person in as (#632).
-   *
-   * A desktop install has one standing admin and no mail transport, so nobody
-   * could guess what to type and every other address gets the same silent
-   * acknowledgement. Optional for the same reason as `instanceId`: an older
-   * shell does not send it, and a blank sign-in form is the honest degrade.
-   */
-  operatorEmail?: string;
 }
 
 /**
  * How a connection authenticates, in the shape `oc_connect` takes.
  *
- * Note what is absent: any device token. The core resolves a paired device's
- * session from the keychain by connection id, so the console has nothing to
- * pass and — more to the point — nothing to leak. Only the platform bearer
- * travels, because that one genuinely arrives in the URL.
+ * Only the platform bearer travels, because that one genuinely arrives in the
+ * URL. A session the desktop holds is the client's own business — it lives in
+ * the OS keychain and the console never sees it, which is also why there is no
+ * device token here to leak.
  */
 export interface DesktopCredential {
   platformToken?: string;
-}
-
-/** What pairing tells the console. Carries no secret. */
-export interface PairedDevice {
-  company: string;
-  deviceId: string;
-  expiresAtMillis: number;
 }
 
 /** Connections the core has been told about, by id. */
@@ -201,7 +185,6 @@ export interface LocalInstance {
    * on. The address is not: it is a fresh ephemeral port every launch.
    */
   instanceId?: string;
-  operatorEmail?: string;
   companies?: string[];
   /** Why it is not running. Usually another process holding its data root. */
   error?: string;
@@ -280,6 +263,13 @@ export async function forgetLocalInstance(id: string): Promise<void> {
   await desktop.invoke<void>("oc_forget_local_instance", { id });
 }
 
+/** Permanently deletes a desktop-created host and everything in its data root. */
+export async function deleteLocalInstance(id: string): Promise<void> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("deleting a local company needs the desktop application");
+  await desktop.invoke<void>("oc_delete_local_instance", { id });
+}
+
 /**
  * One tunnel this application is holding open. Mirrors `SshTunnelInfo` in Rust.
  */
@@ -345,42 +335,6 @@ export async function sshTunnels(): Promise<SshTunnel[] | null> {
     console.warn("[desktop] this shell has no ssh tunnels", error);
     return null;
   }
-}
-
-/**
- * Redeems a pairing code for this machine.
- *
- * The token never comes back. It exists for one HTTP response, and the core
- * keeps that response to itself: it writes the session to the OS keychain and
- * answers with only what a person needs to see. A console that received the
- * token — even to hand it straight back — would be a console an injected script
- * could read it from.
- */
-export async function pairDevice(
-  id: string,
-  baseUrl: string,
-  code: string,
-  label?: string,
-): Promise<PairedDevice> {
-  const desktop = tauriCore();
-  if (!desktop) throw new Error("pairing a device needs the desktop application");
-  return desktop.invoke<PairedDevice>("oc_pair_device", {
-    connectionId: id,
-    baseUrl,
-    code,
-    label: label ?? null,
-  });
-}
-
-/**
- * Forgets this machine's stored session for a connection.
- *
- * Local only: the session still exists on the host until someone revokes it
- * from the devices list there. Conflating the two would mean unpairing one
- * laptop cut off another.
- */
-export async function forgetDevice(id: string): Promise<void> {
-  await tauriCore()?.invoke("oc_forget_device", { connectionId: id });
 }
 
 /**

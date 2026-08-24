@@ -144,6 +144,11 @@ mod test {
                 ledger: Vec::new(),
                 lifecycle: "running".to_string(),
                 overlay_agents: Vec::new(),
+                // Added on `main` by #1530's override layer while this test was
+                // on `feat/external-acp`; empty is the right seed for a fixture
+                // that declares its roster in the manifest.
+                overlay_agent_edits: Vec::new(),
+                overlay_retired_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),

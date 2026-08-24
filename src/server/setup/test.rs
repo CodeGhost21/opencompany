@@ -16,6 +16,9 @@ use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
+use crate::server::ops::ConnectionsRuntime;
+use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
+use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::{AppConfig, AppState};
 
@@ -39,6 +42,23 @@ fn fresh_state(home: &std::path::Path) -> AppState {
     .with_home(home.to_path_buf())
 }
 
+/// A loopback host with a mail transport wired — the shape where a magic link
+/// is genuinely mailed rather than handed back in the response.
+fn state_with_mail(home: &std::path::Path) -> AppState {
+    let connections = ConnectionsRuntime::new()
+        .with_mail(Arc::new(RecordingMailSender::new()))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: "p".into(),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }));
+    fresh_state(home).with_connections(connections)
+}
+
 /// A routable host, where the anonymous gate must never open.
 fn routable_state(home: &std::path::Path) -> AppState {
     AppState::new(AppConfig {
@@ -54,6 +74,8 @@ async fn with_company(state: &AppState, home: &std::path::Path) -> CompanyId {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -98,6 +120,25 @@ async fn get_setup(state: AppState) -> (StatusCode, serde_json::Value) {
         .unwrap();
     let status = response.status();
     (status, body_json(response).await)
+}
+
+/// Reads the payload with an admin session, for the routable host — where the
+/// anonymous gate is (correctly) shut and there is no other way in.
+async fn get_setup_as_admin(state: AppState) -> serde_json::Value {
+    let cookie =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Admin)
+            .await;
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/setup")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    body_json(response).await
 }
 
 async fn post_setup(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
@@ -172,9 +213,9 @@ async fn the_payload_lists_the_shipped_templates() {
     );
 }
 
-/// ACP is a cargo feature whose transport is not mounted in this tree, so the
-/// flow reports build state rather than offering a switch. A flag that claimed
-/// otherwise would send a client to an endpoint that 404s.
+/// ACP is a cargo feature whose transport is mounted under that feature, so
+/// the flow reports build state rather than offering a switch. A flag that
+/// claimed otherwise would send a client to an endpoint that 404s.
 #[tokio::test]
 async fn the_payload_reports_acp_as_build_state_not_a_setting() {
     let home_dir = home();
@@ -182,8 +223,9 @@ async fn the_payload_reports_acp_as_build_state_not_a_setting() {
 
     assert_eq!(dto["build"]["acp_in_build"], cfg!(feature = "acp"));
     assert_eq!(
-        dto["build"]["acp_transport_mounted"], false,
-        "no /acp handler is mounted anywhere in this tree"
+        dto["build"]["acp_transport_mounted"],
+        cfg!(feature = "acp"),
+        "the flag must match whether the /acp handler is actually mounted"
     );
     assert!(
         !dto["fields"]
@@ -233,6 +275,78 @@ async fn none_is_offered_only_on_a_loopback_host() {
             .unwrap()
             .contains(&serde_json::json!("none")),
         "a routable host must not offer an unauthenticated console: {dto}"
+    );
+}
+
+/// A laptop with no SMTP is not a broken host — it is the one shape where the
+/// honest hand-off is a link the operator opens themselves. The wizard has to
+/// be able to tell that apart from a host where a magic link simply goes
+/// nowhere, and only the payload can say which it is on.
+#[tokio::test]
+async fn mail_on_a_loopback_host_with_no_transport_reports_the_code_echo() {
+    let home_dir = home();
+    let (_, dto) = get_setup(fresh_state(home_dir.path())).await;
+
+    assert_eq!(dto["mail"]["wired"], false, "nothing is configured: {dto}");
+    assert_eq!(
+        dto["mail"]["echoes_code"], true,
+        "a loopback host hands the code back in the response: {dto}"
+    );
+}
+
+/// The dead end. A routable host with no transport can neither mail a link nor
+/// echo one, so a wizard that offered the link form here would be offering a
+/// sign-in that arrives nowhere.
+#[tokio::test]
+async fn mail_on_a_routable_host_with_no_transport_reports_neither() {
+    let home_dir = home();
+    let state = routable_state(home_dir.path());
+    with_company(&state, home_dir.path()).await;
+    let dto = get_setup_as_admin(state).await;
+
+    assert_eq!(dto["mail"]["wired"], false, "{dto}");
+    assert_eq!(
+        dto["mail"]["echoes_code"], false,
+        "a routable host must not be described as echoing codes: {dto}"
+    );
+}
+
+/// With a transport wired the link is a real send, and the echo stops — the
+/// same either/or the login route itself branches on.
+#[tokio::test]
+async fn mail_with_a_transport_wired_reports_a_real_send() {
+    let home_dir = home();
+    let (_, dto) = get_setup(state_with_mail(home_dir.path())).await;
+
+    assert_eq!(dto["mail"]["wired"], true, "{dto}");
+    assert_eq!(
+        dto["mail"]["echoes_code"], false,
+        "a wired transport is delivered to, never echoed: {dto}"
+    );
+}
+
+/// `auth_modes` says which modes are *legal*, not which are convenient today.
+/// A host with no SMTP still runs `email` mode perfectly well over hub OAuth
+/// and passwords, so withholding the mode here would take away a working
+/// sign-in on the strength of a transport it does not need. `mail` is the field
+/// that says what the mailbox path can do; this one must stay a policy answer.
+#[tokio::test]
+async fn email_is_still_offered_on_a_host_that_cannot_mail() {
+    let home_dir = home();
+    let state = routable_state(home_dir.path());
+    with_company(&state, home_dir.path()).await;
+    let dto = get_setup_as_admin(state).await;
+
+    assert_eq!(
+        dto["mail"]["wired"], false,
+        "this host is the one that cannot mail: {dto}"
+    );
+    assert!(
+        dto["auth_modes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("email")),
+        "email mode does not depend on a transport: {dto}"
     );
 }
 
@@ -1080,6 +1194,72 @@ async fn an_apply_seeds_the_company_the_wizard_designed() {
         manifest.policy.mode,
         crate::company::PROVISIONED_POLICY_MODE
     );
+}
+
+#[tokio::test]
+async fn onboarding_persists_the_local_model_it_tested() {
+    let home = home();
+    let state = fresh_state(home.path());
+    let mut company = designed_company(None);
+    company["inference"] = serde_json::json!({
+        "provider": "ollama",
+        "baseUrl": "localhost:6969",
+        "model": "qwen3:8b"
+    });
+
+    let (status, body) = post_setup(state.clone(), serde_json::json!({ "company": company })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+    let manifest = seeded_manifest(home.path(), seeded).await;
+    assert_eq!(manifest.inference.provider.as_deref(), Some("ollama"));
+    assert_eq!(
+        manifest.inference.base_url.as_deref(),
+        Some("http://localhost:6969/v1")
+    );
+    for tier in crate::company::INFERENCE_TIERS {
+        assert_eq!(
+            manifest.inference.models.get(*tier).map(String::as_str),
+            Some("qwen3:8b")
+        );
+    }
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
+    let app = axum::Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "data": [{ "id": "qwen3:8b" }] }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "choices": [{ "message": { "content": "pong" } }]
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "ollama".to_string(),
+            base_url: Some(address.to_string()),
+            ..Default::default()
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.base_url, format!("http://{address}/v1"));
+    assert_eq!(result.model.as_deref(), Some("qwen3:8b"));
 }
 
 /// A designed company beats a template slug. An operator who answered three

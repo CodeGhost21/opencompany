@@ -266,6 +266,13 @@ nothing: finding out a key is wrong must not require having stored it. Provider
 errors are summarised to one actionable line rather than forwarded, since a
 failure body can echo request material into a browser on an unauthenticated host.
 
+Local endpoints get one onboarding-only convenience before that shared
+resolution: a bare `localhost:port` gains `http://` and `/v1`. Setup reads the
+OpenAI-compatible `/models` catalog and probes its concrete model rather than
+sending the abstract `agentic-v1` tier to a server that cannot resolve it. The
+successful provider, endpoint and tier mapping are persisted only when Finish
+creates the company; the probe itself remains write-free.
+
 The step is a **gate with an escape**. `GET /api/v1/setup` reports whether the
 host already holds a credential, so a hosted tenant — whose operator has no key
 and no way to get one — arrives with the step already answered and only needs to
@@ -295,13 +302,33 @@ screen states it. The fix is the sentence, not a wider grant.
 An `outreach` focus carrying `composio` was rejected: it would put credential
 reach behind a value a model chose from free text — what D7's enum prevents.
 
+## What is on the board on day one
+
+A company that boots with a correct roster, correct ledgers and an empty To-do
+column has agents with nothing to pick up and an operator with no idea where to
+start, so the first thing anybody does is invent the setup list — badly, and
+differently each time. So the board is seeded once, at first boot, from `globals/tasks.toml` (the setup
+every company has: the brief, the first goals, the standing decisions, the top
+risks, the connections) plus that bundle's own `companies/<name>/tasks.toml`
+(the setup its vertical is defined by, winning on a shared id). Each card names
+the ledger row or document it should produce, so an agent that picks one up
+hands back the thing rather than an essay about it.
+
+Every seeded card lands in **To-do**, unassigned, and none of them can dispatch:
+a seed file cannot name a column, and the seeder writes through the plain task
+store rather than the edge-firing path that turns `in_progress` into a run. A
+freshly provisioned company can boot with a full board and spend nothing.
+Seeding is first-boot only, so a card an operator deletes stays deleted. See
+[globals.md](globals.md) for the rules and the `disable = ["task:<id>"]` opt-out.
+
 ## What the host enforces, rather than asks for
 
-Four guarantees hold whatever a model returns — coverage checked against the
-host's own job list, a tool belt asked for rather than inherited, a copy of the
-reference team refused the name "designed", and a fallback that says which
-fallback it is. Each is a boundary rather than a line in a prompt, and each has
-a test that fails when it stops holding:
+Five guarantees hold whatever a model returns — coverage checked against the
+host's own job list, a tool belt asked for rather than inherited, standing
+instructions the host writes rather than the model, a copy of the reference team
+refused the name "designed", and a fallback that says which fallback it is. Each
+is a boundary rather than a line in a prompt, and each has a test that fails when
+it stops holding:
 [company-setup-guarantees.md](company-setup-guarantees.md).
 
 ## Nobody gets stuck

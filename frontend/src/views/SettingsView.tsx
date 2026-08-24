@@ -1,9 +1,19 @@
-import { useEffect, useState } from "react";
-import { Compass, Flag, Globe, Pause, Play, Power, Archive as ArchiveIcon } from "lucide-react";
+import { useState } from "react";
+import {
+  Compass,
+  Flag,
+  Globe,
+  Pause,
+  Play,
+  Power,
+  TriangleAlert,
+  Archive as ArchiveIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
-import { ApiError, type MemorySpec } from "@/api/types";
+import { ApiError } from "@/api/types";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,7 +34,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
 import { ExternalHarnesses } from "@/components/external-harnesses";
 import { PolicySettings } from "@/components/policy-settings";
@@ -34,6 +43,7 @@ import type { CompanyFeed } from "@/hooks/use-company";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { lifecycleAffordances } from "@/lib/lifecycle-controls";
 
 interface Props {
   client: OpenCompanyClient;
@@ -54,10 +64,10 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
         {/* This sub-page draws no visible title of its own — the sub-nav rail
             beside it already says "Settings" (issue #1221). */}
-        <h1 className="sr-only">General settings</h1>
-        {/* Pairing this machine. Renders nothing in a browser, where the
-            session cookie already works. */}
-        <DevicePairing />
+        <h1 className="text-2xl font-semibold tracking-tight lg:sr-only">General settings</h1>
+        {/* Device pairing was here. Sessions are the frontend client's own
+            business now — the desktop app holds its session the same way the
+            browser does — so there is no machine for this page to pair. */}
 
         {/* Every coding engine a teammate can be bound to, joined against
             whether it can actually run on this machine (issue #1245). Works in
@@ -108,8 +118,6 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
           </CardContent>
         </Card>
 
-        <MemoryEngineCard client={client} />
-
         {/* Lifecycle */}
         {scoped ? (
           <LifecycleControls client={client} company={scoped} feed={feed} />
@@ -124,8 +132,14 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
           </Card>
         )}
 
-        {/* Domain & email */}
-        <DomainSettings company={company} />
+        {/* Domain & email.
+
+            `key` is load-bearing, not cosmetic: this card holds a
+            typed-but-unsaved SMTP password in React state, and without a
+            remount a company switch would carry a credential typed for one
+            company into another company's Save. `SettingsSection` remounts
+            `BillingView`/`HostingView` for exactly this reason. */}
+        <DomainSettings key={company ?? "self"} client={client} company={company} />
 
         {/* Appearance.
 
@@ -213,9 +227,6 @@ function LifecycleControls({
    */
   const [pending, setPending] = useState<string | null>(null);
   const state = pending ?? feed.status.lifecycle;
-  const archived = state === "archived";
-  const running = state === "running";
-  const paused = state === "paused";
 
   async function run(action: LifecycleAction) {
     if (busy) return;
@@ -239,53 +250,95 @@ function LifecycleControls({
     }
   }
 
+  const platform = client.carriesPlatformBearer;
+  const { actions, explainPlatformOnly, explainPlatformSuspended, archived } =
+    lifecycleAffordances(state, platform);
+  const offers = (action: LifecycleAction) => actions.includes(action);
+
   return (
     <Card>
       <CardHeader>
+        {/* Four verbs, and the card used to name three of them. `Pause` and
+          `Suspend` in particular were indistinguishable to a reader — the
+          suspend dialog described what anyone would assume pause did. Only the
+          controls this console can actually reach are named here. */}
         <CardTitle className="text-base">Lifecycle</CardTitle>
-        <CardDescription>Pause, resume, or retire this company.</CardDescription>
+        <CardDescription>
+          Pause stops this company taking new work; resume starts it again.
+          {platform ? " Suspend and archive are the platform's own, heavier stops." : ""}
+        </CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-wrap gap-2">
-        {running && (
-          <Button variant="outline" disabled={busy} onClick={() => void run("pause")}>
-            <Pause className="size-4" /> Pause
-          </Button>
+      <CardContent className="space-y-4">
+        {/* Said before the buttons, in the register Billing and Hosting use for
+          the same problem: a control that cannot work here explains itself in
+          the page rather than failing after the click. */}
+        {explainPlatformOnly && (
+          <Alert data-testid="lifecycle-platform-only">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              Suspending and archiving a company are the hosting platform&rsquo;s to do, not this
+              console&rsquo;s. They need a platform credential, which a person signed in here never
+              holds — so the controls are left out rather than shown failing. Pause is the
+              reversible stop that is yours.
+            </AlertDescription>
+          </Alert>
         )}
-        {(paused || state === "suspended") && !archived && (
-          <Button variant="outline" disabled={busy} onClick={() => void run("resume")}>
-            <Play className="size-4" /> Resume
-          </Button>
+        {explainPlatformSuspended && (
+          <Alert data-testid="lifecycle-platform-suspended">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              The platform suspended this company. Only the platform can lift a suspension — an
+              admin here cannot resume it, so there is no Resume button to offer.
+            </AlertDescription>
+          </Alert>
         )}
-        {!archived && (
-          <ConfirmAction
-            trigger={
-              <Button variant="outline" disabled={busy}>
-                <Power className="size-4" /> Suspend
-              </Button>
-            }
-            title="Suspend this company?"
-            description="It will stop handling work until you resume it. In-flight tasks are paused, not lost."
-            confirmLabel="Suspend"
-            onConfirm={() => void run("suspend")}
-          />
-        )}
-        {!archived && (
-          <ConfirmAction
-            trigger={
-              <Button variant="destructive" disabled={busy}>
-                <ArchiveIcon className="size-4" /> Archive
-              </Button>
-            }
-            title="Archive this company?"
-            description="Archiving retires the company. This is meant to be permanent — you won't be able to operate it afterward."
-            confirmLabel="Archive"
-            destructive
-            onConfirm={() => void run("archive")}
-          />
-        )}
-        {archived && (
-          <p className="text-sm text-muted-foreground">This company is archived.</p>
-        )}
+        <div className="flex flex-wrap gap-2">
+          {offers("pause") && (
+            <Button variant="outline" disabled={busy} onClick={() => void run("pause")}>
+              <Pause className="size-4" /> Pause
+            </Button>
+          )}
+          {offers("resume") && (
+            <Button variant="outline" disabled={busy} onClick={() => void run("resume")}>
+              <Play className="size-4" /> Resume
+            </Button>
+          )}
+          {offers("suspend") && (
+            <ConfirmAction
+              trigger={
+                <Button variant="outline" disabled={busy}>
+                  <Power className="size-4" /> Suspend
+                </Button>
+              }
+              title="Suspend this company?"
+              // The old copy promised "until you resume it". The handler
+              // refuses exactly that: a suspension is a platform-forced pause,
+              // and neither an owner token nor the company's own admins may
+              // lift it. Saying so is the difference between a heavy stop and
+              // a trap.
+              description="It stops handling work, and only the platform can start it again — the company's own admins cannot. For a stop you can undo, use Pause."
+              confirmLabel="Suspend"
+              onConfirm={() => void run("suspend")}
+            />
+          )}
+          {offers("archive") && (
+            <ConfirmAction
+              trigger={
+                <Button variant="destructive" disabled={busy}>
+                  <ArchiveIcon className="size-4" /> Archive
+                </Button>
+              }
+              title="Archive this company?"
+              description="Archiving retires the company. This is meant to be permanent — you won't be able to operate it afterward."
+              confirmLabel="Archive"
+              destructive
+              onConfirm={() => void run("archive")}
+            />
+          )}
+          {archived && (
+            <p className="text-sm text-muted-foreground">This company is archived.</p>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -325,75 +378,6 @@ function ConfirmAction({
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-  );
-}
-
-/**
- * Read-only: which memory engine this instance is bound to, from `/spec`.
- *
- * Deliberately carries no setter. Engine selection is instance-wide and
- * belongs to the infra operator — the `OPENCOMPANY_MEMORY*` variables, read
- * once at boot — so a console admin can see the engine but never repoint a
- * deployment's storage from here. The switch runbook lives in
- * `docs/spec/runtime/memory-engine.md`. Renders nothing on the `store`
- * default and on a host predating the `/spec` memory field.
- */
-function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
-  const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
-  useEffect(() => {
-    let live = true;
-    setEngine(undefined);
-    client
-      .spec()
-      .then((spec) => {
-        if (live) setEngine(spec.memory);
-      })
-      .catch(() => {
-        /* best-effort: the settings page works without /spec */
-      });
-    return () => {
-      live = false;
-    };
-  }, [client]);
-
-  if (!engine || engine.backend === "store") return null;
-  const discarding = engine.backend === "null";
-  return (
-    <Card data-testid="settings-memory-engine">
-      <CardHeader>
-        <CardTitle className="text-base">Memory engine</CardTitle>
-        <CardDescription>
-          Set by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>, read
-          at boot). Instance-wide; read-only here by design.
-          {discarding &&
-            " This engine accepts and discards every write — nothing this company is told will be remembered."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-0 divide-y">
-        <InfoRow label="Engine">
-          <span className="font-mono text-xs">{engine.driver_id ?? engine.backend}</span>
-        </InfoRow>
-        <InfoRow label="Mode">
-          <span className="font-mono text-xs">{engine.backend}</span>
-        </InfoRow>
-        <InfoRow label="Capabilities">
-          <span className="text-sm">
-            {engine.capabilities.length > 0
-              ? engine.capabilities.join(", ")
-              : "not negotiated"}
-          </span>
-        </InfoRow>
-        <InfoRow label="Boot probe">
-          <span className="text-sm">
-            {engine.healthy === true
-              ? "reachable"
-              : engine.healthy === false
-                ? "unreachable — check the endpoint and credential"
-                : "not probed"}
-          </span>
-        </InfoRow>
-      </CardContent>
-    </Card>
   );
 }
 

@@ -48,6 +48,7 @@ import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
+import { TypingLine } from "./chat/TypingLine";
 import { MessageComposer } from "./chat/MessageComposer";
 import { MessageTimeline } from "./chat/MessageTimeline";
 import { ThreadPanel } from "./chat/ThreadPanel";
@@ -106,6 +107,29 @@ interface Props {
    * race the Conversation surface already brackets against.
    */
   onSendStart?: (threadId: string) => void;
+  /**
+   * Who is present right now, keyed by user id. Empty when the host has no
+   * presence route, or when nobody else is connected to this replica.
+   */
+  presence?: ReadonlyMap<string, { status: "online" | "away" | "offline" }>;
+  /**
+   * The company's people, for the members pane's People section.
+   *
+   * Separate from `members` (teammates) on purpose: desk membership is a
+   * teammate concept, and every signed-in person can already see every desk,
+   * so people are never "in" or "outside" a channel.
+   */
+  companyPeople?: Array<{ id: string; label: string }>;
+  /**
+   * Display names for the typing line, in a stable order — resolved on
+   * demand rather than a single precomputed array, because this view needs
+   * two independent lines: the main composer's (no `parentId`) and, when a
+   * thread is open, that thread's own (`parentId` set). A single `string[]`
+   * could only ever answer one of them.
+   */
+  resolveTypingNames?: (chatId: string, parentId?: string) => string[];
+  /** Called as a composer is typed in; the caller throttles. */
+  onTyping?: (chatId: string, parentId?: string) => void;
   onSendEnd?: (threadId: string) => void;
   /**
    * The host accepted the turn and answered `202` instead of the reply
@@ -202,6 +226,10 @@ export function ChatView({
   setTranscripts,
   hydration = HISTORY_UNTRACKED,
   onSendStart,
+  presence,
+  companyPeople,
+  resolveTypingNames,
+  onTyping,
   onSendEnd,
   onSendDetached,
   onSendFailed,
@@ -941,8 +969,10 @@ export function ChatView({
 
   /**
    * Drop a teammate from the roster through the host when it has a record of
-   * them; a manifest teammate can't be removed (409) and a starter-roster row
-   * has no host record at all, so both fall back to a local-only removal.
+   * them. A blueprint teammate is removable too — the host records a tombstone
+   * rather than rewriting `company.toml` — and the only refusal left is the
+   * company's last teammate (409). A starter-roster row has no host record at
+   * all, so it falls back to a local-only removal.
    */
   async function removeMember(member: TeamMember) {
     if (!fromHost) {
@@ -954,7 +984,12 @@ export function ChatView({
       setMembers((ms) => ms.filter((m) => m.id !== member.id));
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        toast.error("This teammate is defined in the company manifest and can't be removed here.");
+        // The only 409 this route still answers: a company must keep at
+        // least one teammate. The host's own message says which teammate and
+        // what to do about it, so it is shown rather than restated.
+        toast.error(
+          error.message || "You can't remove your company's last teammate.",
+        );
       } else {
         toast.error(error instanceof Error ? error.message : "Couldn't remove teammate.");
       }
@@ -971,18 +1006,25 @@ export function ChatView({
 
   return (
     <div className="flex min-h-0 flex-1">
+      {/* The channel rail and the chat pane share the viewport with the app
+          sidebar. That sidebar is on from `md` (≥768), so a rail that also came
+          in at `md` gave two rails plus content a ~290px pane from 768–1023px —
+          Send fell off the right edge with no scroll to reach it (issue #1383).
+          The rail now waits for `lg` (≥1024); from 768–1023 the pane runs
+          single-column and the "Show channels" toggle in the header (also
+          `lg:hidden`) swaps to the rail, mirroring the sub-`md` mobile flow. */}
       <ChannelRail
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
-        className={cn("md:flex", mobilePane === "rail" ? "flex" : "hidden")}
+        className={cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")}
       />
 
       <div
         className={cn(
           "min-w-0 flex-1 flex-col",
-          mobilePane === "chat" ? "flex" : "hidden md:flex",
+          mobilePane === "chat" ? "flex" : "hidden lg:flex",
         )}
       >
         <ChatHeader
@@ -1041,10 +1083,15 @@ export function ChatView({
                 </span>
               </p>
             )}
+            <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
               onSend={(text, intent) => void send(text, intent)}
+              // Every keystroke asks; the hook throttles to one ping per
+              // channel per few seconds and skips entirely while the event
+              // stream is down.
+              onTyping={() => onTyping?.(active.id)}
               // Channel *and* DM composers offer "just chatting" / "do it once" /
               // "build me the workflow" (issues #580, #845, #1152) — see
               // `offersDeliverableChoice`, which owns the rule and is unchanged:
@@ -1063,6 +1110,8 @@ export function ChatView({
               sending={sending}
               onSend={(text) => void send(text, undefined, parent.id)}
               onClose={() => setOpenThreadId(null)}
+              typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
+              onTyping={() => onTyping?.(active.id, parent.id)}
             />
           )}
 
@@ -1070,6 +1119,8 @@ export function ChatView({
             <MembersPane
               channelMembers={inChannel}
               others={outsideChannel}
+              people={companyPeople}
+              presence={presence}
               leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
               loading={loadingTeam}
               fromHost={fromHost}

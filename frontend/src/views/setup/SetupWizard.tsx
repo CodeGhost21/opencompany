@@ -42,6 +42,7 @@ import {
   type SetupStatus,
 } from "@/api/setup";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { OnboardingShell } from "@/components/onboarding-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,53 +57,63 @@ import {
   jobItems,
   type SetupDraft,
 } from "@/lib/company-setup";
+import { isDesktopRuntime } from "@/api/transport";
 import { cn } from "@/lib/utils";
 
-/** The steps, in order. `fields` names the config keys each one owns. */
 /**
- * The flow, question-first.
+ * The flow, in order. `fields` names the config keys each step owns.
  *
- * The order is the whole design. Three cheap questions about *them* come before
- * anything about the machine, because nobody abandons "what do you sell" and
- * plenty abandon `bind`. The two asks that cost something — an address and a
- * credential — arrive fourth and fifth, after enough investment that their
- * purpose is self-evident rather than a wall on screen one.
+ * The order is the whole design. Cheap questions about *them* come before the
+ * asks that cost something, because nobody abandons "what do you sell" and
+ * plenty abandon `bind` — and everything with a working default stays behind
+ * Advanced, since a knob that already works is not a decision worth a screen.
+ * Two steps are placed against that grain, each for a reason:
  *
- * Everything else that used to be a step is now behind Advanced: sign-in mode,
- * brain, host and tools all have defaults that work, and a knob with a working
- * default is not a decision worth a screen.
- */
-/**
- * The flow, in order.
- *
- * **Model comes first, and it did not used to.** It sat third, after the three
+ * **Model comes first, and it did not used to.** It sat third, after the
  * questions, on the reasoning that cheap interesting questions earn the right to
  * ask for a credential. That reasoning was sound about *motivation* and wrong
  * about *consequence*: the design pass is silent when a credential is missing or
  * bad — it falls back to a curated team — so a wrong key produced a plausible
  * company and an operator found out two screens later, if at all. The one step
- * whose failure invalidates every answer after it belongs before them.
+ * whose failure invalidates every answer after it belongs before them. It is a
+ * gate, not a wall: the step can be skipped outright, and skipping is what the
+ * curated fallback is for.
  *
- * It is a gate, not a wall: the step can be skipped outright, and skipping is
- * what the curated fallback is for.
+ * **Sign-in comes before the address it decides the need for.** It is the other
+ * step whose answer changes what follows: on `none` there is nobody to invite,
+ * so the address screen is not shown at all (see `visibleSteps`). This flow used
+ * to ask the address on step three and offer the choice on step four, buried in
+ * Advanced under copy inviting the operator to press straight past it — so
+ * someone on a laptop was asked for an address they need never have supplied,
+ * by a wizard that already knew it might not want one. It does not move any
+ * further forward than this: it is a question about the machine, and the
+ * questions about *them* are what earn the right to ask one of those.
  */
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
   { id: "power", label: "Model", fields: ["tinyhumans_api_key"] },
   { id: "business", label: "Business", fields: [] },
+  { id: "signin", label: "Sign-in", fields: ["auth_mode"] },
   { id: "account", label: "You", fields: [] },
   { id: "advanced", label: "Advanced", fields: [] },
   { id: "review", label: "Review", fields: [] },
 ];
 
 /**
- * Advanced, as its own stepped flow rather than a wall of fields.
+ * Advanced: the settings that already work, grouped by subject.
  *
- * These were four screens before the merge, and collapsing them into one
+ * These were separate screens before the merge, and collapsing them into one
  * scrolling accordion made "advanced settings" mean "everything we could not
- * place". They are four different subjects — who may sign in, what thinks, where
- * it runs, what it can reach — and each deserves the same one-subject-per-screen
- * treatment the main flow gets. The difference is that this is opt-in, and
- * leaving it never blocks anything.
+ * place". Each subject keeps a bounded card of its own instead — where it runs,
+ * what it can reach — so the reader can see where one ends. The difference from
+ * the main flow is that this is opt-in, and leaving it never blocks anything.
+ *
+ * Two groups now, not four, and the two that left were not demoted — they were
+ * promoted to steps. What thinks became step one, because a bad credential is
+ * silent everywhere else. Who may sign in became step three, because it is a
+ * *question*, not a knob with a working default, and this flow gives a screen of
+ * its own to every question. What remains here genuinely has a default that
+ * works, which is what earns something a place behind "press on if none of it
+ * matters to you".
  */
 const ADVANCED_GROUPS: readonly {
   id: string;
@@ -112,25 +123,11 @@ const ADVANCED_GROUPS: readonly {
   fields: readonly string[];
 }[] = [
   {
-    id: "signin",
-    label: "Sign-in",
-    title: "How people sign in",
-    hint: "This applies to every company this host serves.",
-    fields: ["auth_mode"],
-  },
-  {
     id: "host",
     label: "Host",
     title: "How this host runs",
     hint: "The address it serves on and how much room its workspace gets. Defaults are fine for a laptop.",
     fields: ["bind", "public_url", "workspace.max_blob_mb", "workspace.storage_quota_gb"],
-  },
-  {
-    id: "tools",
-    label: "Tools",
-    title: "Repository access",
-    hint: "Lets agents read your code and open pull requests. You can add this later.",
-    fields: ["github_token"],
   },
 ];
 
@@ -165,7 +162,18 @@ interface Props {
 export function SetupWizard({ client, onDone, onCancel }: Props) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [step, setStep] = useState(0);
+  /**
+   * Where the operator is, held as a step **id** rather than an index.
+   *
+   * The list of steps can lose one behind their back — choosing "no sign-in"
+   * removes the address screen — and an index silently means a *different
+   * screen* the moment it does. Today's order happens to make that unreachable:
+   * the only step that disappears sits after the only screen that can remove it,
+   * so the position is always before the gap. An id does not rest on that
+   * argument, which is the point — the next person to reorder these will not
+   * think to restate it.
+   */
+  const [stepId, setStepId] = useState<string>(STEPS[0].id);
   const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -173,6 +181,8 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
 
   /** The three answers. */
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
+  /** The shipped company template the operator explicitly chose. */
+  const [template, setTemplate] = useState("");
   /** The address that will be able to sign in. */
   const [email, setEmail] = useState("");
   /** Whether the operator has been shown a problem on the current step yet. */
@@ -198,7 +208,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
    * that traps them.
    */
   const [tested, setTested] = useState<
-    { kind: "untested" } | { kind: "testing" } | { kind: "ok"; baseUrl: string } | { kind: "failed"; error: string } | { kind: "skipped" }
+    | { kind: "untested" }
+    | { kind: "testing" }
+    | { kind: "ok"; baseUrl: string; model?: string | null }
+    | { kind: "failed"; error: string }
+    | { kind: "skipped" }
   >({ kind: "untested" });
   /**
    * The team, once the host has designed one — and `null` until then.
@@ -228,6 +242,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     | { kind: "arranging" }
     | { kind: "link"; url: string }
     | { kind: "mailed" }
+    | { kind: "unmailable" }
     | { kind: "open" }
     | null
   >(null);
@@ -242,6 +257,33 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         // re-running setup edits their configuration rather than a blank one.
         const seeded: Record<string, string> = {};
         for (const f of s.fields) if (f.value !== null) seeded[f.key] = f.value;
+        // Answer the sign-in question for a desktop install, because where this
+        // console is running has already answered it. The packaged app is a
+        // `none`-mode host — one machine, one person, no mailbox to send a link
+        // to — so asking would be asking an operator to re-derive a fact about
+        // their own computer, and then asking them for an address to go with the
+        // wrong answer. Seeding it removes the address step before they see it
+        // rather than taking it away after (see `visibleSteps`).
+        //
+        // A preselection, not a lock: the mode is still on screen and still
+        // changeable, which is what someone sharing their instance with a
+        // colleague needs. The host reads the choice back out of `config.toml`
+        // at the next launch, so it survives the quit.
+        //
+        // Both conditions are load-bearing. `auth_modes` is checked because this
+        // console can be pointed at a *remote* host through the switcher, and a
+        // routable host withholds `none` on purpose — it would be an
+        // unauthenticated admin console — so seeding it there would walk the
+        // operator into a choice the apply refuses. And only when the file names
+        // nothing: an operator re-running setup is editing their own
+        // configuration, not being told what it should have been.
+        if (
+          seeded.auth_mode === undefined &&
+          isDesktopRuntime() &&
+          s.auth_modes.includes("none")
+        ) {
+          seeded.auth_mode = "none";
+        }
         setValues(seeded);
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
@@ -264,7 +306,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   /**
    * Arrange the operator's way in, the moment the company exists.
    *
-   * Three outcomes, and each is said plainly rather than left to be discovered:
+   * Four outcomes, and each is said plainly rather than left to be discovered:
    *
    * - **No sign-in on this host** — nothing to arrange; the console is open.
    * - **A link we can hand over** — a loopback host with no mail transport
@@ -273,6 +315,15 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
    *   stay empty. This is the laptop case, and it was the broken one.
    * - **Mailed** — say which address, so they know where to look and that we
    *   used the one they typed.
+   * - **Unmailable** — a routable host with no transport. Nothing was sent and
+   *   nothing is coming, so say so rather than name an inbox.
+   *
+   * Which of the last two applies is the host's own answer (`status.mail`), not
+   * an inference from the echoed code. It used to be that inference, which is
+   * only sound on a loopback bind — echoing requires one — so a routable host
+   * with no transport ended setup by telling its operator to check a mailbox
+   * that would stay empty forever. The code still *sources* the link; it no
+   * longer decides which of these is true.
    *
    * Failure is not fatal: the sign-in form still works, and the button below
    * still opens the console.
@@ -300,14 +351,16 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     setHandoff({ kind: "arranging" });
     requestCode(client, company, address)
       .then((result) => {
-        setHandoff(
-          result.dev_code
-            ? {
-                kind: "link",
-                url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
-              }
-            : { kind: "mailed" },
-        );
+        if (result.dev_code) {
+          // The only branch holding the code, and so the only one that can hand
+          // over a link rather than describe one.
+          setHandoff({
+            kind: "link",
+            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
+          });
+        } else {
+          setHandoff(status.mail.wired ? { kind: "mailed" } : { kind: "unmailable" });
+        }
       })
       .catch(() => {
         // The sign-in form still works; the button below still opens it.
@@ -318,10 +371,36 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   // See `changedFields`: unchanged fields are omitted, env-owned ones are never
   // sent (the host refuses them and an apply is all-or-nothing), and a secret
   // goes only when the operator typed one.
-  const changed = useMemo(
-    () => (status ? changedFields(status, values) : {}),
+  const changed = useMemo(() => {
+    const fields = status ? changedFields(status, values) : {};
+    // BYOK/local credentials belong to the new company's write-only inference
+    // store. Writing the same bytes into the host-wide TinyHumans key would
+    // both duplicate the secret and falsely report a process restart.
+    if (provider !== "managed") delete fields.tinyhumans_api_key;
+    return fields;
+  }, [status, values, provider]);
+
+  /**
+   * The steps this host actually shows. `STEPS` stays the source of order.
+   *
+   * A host that asks nobody to sign in has nobody to invite, so the address step
+   * is absent rather than optional — and an absent step gets no slot in the
+   * progress bar either, or the bar counts a screen that will never arrive.
+   *
+   * `status` is null until the first read lands, and that counts as "show it":
+   * the mode it would be judged against has not been read yet, and a bar that
+   * changes length under someone already looking at it is worse than one that
+   * starts at its longest.
+   */
+  const visibleSteps = useMemo(
+    () => STEPS.filter((s) => s.id !== "account" || !status || requiresSignIn(status, values)),
     [status, values],
   );
+
+  // A position whose step is no longer shown falls back to the start. That is
+  // unreachable today for the reason given on `stepId`, and a defined screen
+  // beats a blank one if it ever stops being.
+  const step = Math.max(0, visibleSteps.findIndex((s) => s.id === stepId));
 
   const restartKeys = useMemo(() => {
     if (!status) return [];
@@ -347,7 +426,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         industry: draft.industry,
         teamHint: draft.teamHint,
         automate: draft.automate,
+        template: template || null,
         inferenceKey: values.tinyhumans_api_key || null,
+        inferenceProvider: tested.kind === "ok" ? provider : null,
+        inferenceBaseUrl: tested.kind === "ok" ? tested.baseUrl : null,
+        inferenceModel: tested.kind === "ok" ? tested.model : null,
       });
       // The host is contracted never to answer with an empty roster, so a
       // missing or empty one is a failure rather than a team of nobody — and
@@ -362,7 +445,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     } finally {
       setDesigning(false);
     }
-  }, [client, draft, values.tinyhumans_api_key]);
+  }, [client, draft, template, provider, tested, values.tinyhumans_api_key]);
 
   const submit = useCallback(async () => {
     if (!status) return;
@@ -385,6 +468,15 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
                 // As reviewed, not as proposed.
                 agents: roster.agents,
                 adminEmail: email.trim() || null,
+                inference:
+                  tested.kind === "ok" && provider !== "managed"
+                    ? {
+                        provider,
+                        baseUrl: tested.baseUrl,
+                        model: tested.model ?? null,
+                        key: values.tinyhumans_api_key?.trim() || null,
+                      }
+                    : null,
               }
             : null,
       });
@@ -395,32 +487,32 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [client, status, changed, roster, draft, email]);
+  }, [client, status, changed, roster, draft, email, provider, tested, values.tinyhumans_api_key]);
 
   if (loadError) {
     return (
-      <Shell>
+      <OnboardingShell>
         <Alert variant="destructive">
           <AlertTitle>Can&apos;t read this instance&apos;s setup</AlertTitle>
           <AlertDescription>{loadError}</AlertDescription>
         </Alert>
-      </Shell>
+      </OnboardingShell>
     );
   }
 
   if (!status) {
     return (
-      <Shell>
+      <OnboardingShell>
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Reading this instance…
         </div>
-      </Shell>
+      </OnboardingShell>
     );
   }
 
   if (applied) {
     return (
-      <Shell>
+      <OnboardingShell>
         <div className="space-y-4" data-testid="setup-done">
           <h1 className="text-xl font-semibold">You&apos;re set up</h1>
           <p className="text-sm text-muted-foreground">
@@ -479,6 +571,25 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             </Alert>
           )}
 
+          {handoff?.kind === "unmailable" && (
+            <Alert data-testid="setup-handoff-unmailable">
+              <AlertTriangle />
+              <AlertTitle>No sign-in link was sent</AlertTitle>
+              <AlertDescription>
+                <span className="block">
+                  This host has no mail transport, so a link to{" "}
+                  <strong className="text-foreground">{email.trim()}</strong> would have gone
+                  nowhere. There is nothing on its way and nothing to wait for.
+                </span>
+                <span className="mt-2 block">
+                  That address still administers this company. Sign in with one of the
+                  ecosystem buttons on the sign-in screen, or configure mail on this host and
+                  ask for a link then.
+                </span>
+              </AlertDescription>
+            </Alert>
+          )}
+
           {handoff?.kind === "link" && (
             <Alert data-testid="setup-handoff-link">
               <AlertTitle>You&apos;re ready to go in</AlertTitle>
@@ -501,18 +612,21 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             </Button>
           ) : (
             <Button onClick={onDone} data-testid="setup-open-console">
-              {applied.restart_required.length > 0
+              {/* "Anyway" wherever something is genuinely outstanding — a
+                  staged setting, or a sign-in we could not arrange. That word is
+                  the only thing saying this button does not finish the job. */}
+              {applied.restart_required.length > 0 || handoff?.kind === "unmailable"
                 ? "Open the console anyway"
                 : "Open the console"}
             </Button>
           )}
         </div>
-      </Shell>
+      </OnboardingShell>
     );
   }
 
-  const current = STEPS[step];
-  const last = step === STEPS.length - 1;
+  const current = visibleSteps[step];
+  const last = step === visibleSteps.length - 1;
   const needsCompany = status.companies.length === 0;
   // The one thing that must never be reachable: a configured instance with
   // nothing to sign in to and no way back into setup.
@@ -527,7 +641,15 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         ? "That connection did not work. Fix it, or continue without a model."
         : "Test the connection first, or continue without a model.";
     }
-    if (current.id === "business" && !draft.industry.trim()) {
+    if (current.id === "business" && needsCompany && status.templates.length > 0 && !template) {
+      return "Choose the kind of company you want to start with.";
+    }
+    if (
+      current.id === "business" &&
+      needsCompany &&
+      status.templates.length === 0 &&
+      !draft.industry.trim()
+    ) {
       return "Tell us a little about the company first.";
     }
     if (current.id === "account" && needsCompany) {
@@ -550,12 +672,13 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     setTouched(false);
     // Designing happens on the way into Review, so the wait sits between two
     // screens rather than in front of one.
-    if (STEPS[step + 1]?.id === "review" && !roster && !designing) void design();
-    setStep((n) => n + 1);
+    if (visibleSteps[step + 1]?.id === "review" && !roster && !designing) void design();
+    const next = visibleSteps[step + 1];
+    if (next) setStepId(next.id);
   };
 
   return (
-    <Shell
+    <OnboardingShell
       header={
         <div className="space-y-4">
           <div className="space-y-1">
@@ -575,13 +698,13 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               should be felt, and the one thing worth naming is where you are. */}
           <div className="space-y-2">
             <div className="flex gap-1" aria-hidden>
-              {STEPS.map((s, i) => (
+              {visibleSteps.map((s, i) => (
                 <button
                   key={s.id}
                   type="button"
                   tabIndex={-1}
                   disabled={i >= step}
-                  onClick={() => setStep(i)}
+                  onClick={() => setStepId(s.id)}
                   data-testid={`step-${s.id}`}
                   className={cn(
                     "h-1 flex-1 rounded-full transition-colors",
@@ -594,7 +717,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             </div>
             <p className="text-xs text-muted-foreground">
               <span className="text-foreground">{current.label}</span> · step {step + 1} of{" "}
-              {STEPS.length}
+              {visibleSteps.length}
             </p>
           </div>
         </div>
@@ -609,7 +732,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             <span />
           )}
           <div className="flex gap-2">
-            <Button variant="outline" disabled={step === 0} onClick={() => setStep((n) => n - 1)}>
+            <Button
+              variant="outline"
+              disabled={step === 0}
+              onClick={() => setStepId(visibleSteps[step - 1].id)}
+            >
               Back
             </Button>
             {last ? (
@@ -632,7 +759,29 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     >
       <div className="space-y-6" data-testid="setup-wizard">
         {current.id === "business" && (
-          <BusinessStep draft={draft} onChange={setDraft} onEnter={advance} />
+          <BusinessStep
+            draft={draft}
+            templates={status.templates}
+            template={template}
+            onTemplate={(id) => {
+              setTemplate(id);
+              const selected = status.templates.find((candidate) => candidate.id === id);
+              if (selected && !draft.industry.trim()) {
+                setDraft((current) => ({ ...current, industry: selected.name }));
+              }
+              setRoster(null);
+            }}
+            onChange={setDraft}
+            onEnter={advance}
+          />
+        )}
+
+        {current.id === "signin" && (
+          <SignInStep
+            status={status}
+            value={values.auth_mode ?? ""}
+            onChange={(v) => set("auth_mode", v)}
+          />
         )}
 
         {current.id === "account" && (
@@ -705,7 +854,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           </Alert>
         )}
       </div>
-    </Shell>
+    </OnboardingShell>
   );
 }
 
@@ -738,12 +887,23 @@ function SignInStep({
   const locked = field !== undefined && !field.editable;
 
   return (
-    <div className="space-y-3">
-      {/* No heading here: inside Advanced the group already carries one, and a
-          second would read as a new section rather than the same one. */}
-      {locked && <LayerLock />}
+    <div>
+      {/* Heading, one-sentence hint, then the control — the rhythm every other
+          question screen keeps. It had none of its own while it lived inside
+          Advanced, where the group header asked the question on its behalf. */}
+      <h2 className="text-base font-medium leading-snug" data-testid="setup-question">
+        How should people sign in?
+      </h2>
+      <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        This applies to every company this host serves.
+      </p>
+      {locked && (
+        <div className="mt-2.5">
+          <LayerLock />
+        </div>
+      )}
 
-      <div className="space-y-2">
+      <div className="mt-2.5 space-y-2">
         {status.auth_modes.map((mode) => {
           const copy = AUTH_MODE_COPY[mode] ?? { label: mode, hint: "" };
           const active = (value || field?.value) === mode;
@@ -769,8 +929,22 @@ function SignInStep({
         })}
       </div>
 
+      {/* What choosing email actually gets you on *this* host.
+          Not a reason to hide the mode or grey the card out: hub OAuth and a
+          password sign people in with no transport anywhere in sight, so "no
+          mail" means the magic link is undeliverable, not that email sign-in is
+          broken. Hiding it would refuse a mode the operator may wire mail up
+          for ten minutes from now. */}
+      {status.auth_modes.includes("email") && !status.mail.wired && (
+        <p className="mt-3 text-xs text-muted-foreground" data-testid="setup-mail-note">
+          {status.mail.echoes_code
+            ? "This host sends no mail and doesn't need to: it only listens on this machine, so a sign-in link is handed straight back to your browser instead of arriving in an inbox."
+            : "This host has no mail transport, so a sign-in link would arrive nowhere. The ecosystem buttons and a password still work — configure mail before inviting anyone who would need a link."}
+        </p>
+      )}
+
       {!status.auth_modes.includes("none") && (
-        <p className="text-xs text-muted-foreground">
+        <p className="mt-3 text-xs text-muted-foreground">
           &ldquo;No sign-in&rdquo; isn&apos;t offered because this host binds a routable address,
           where it would serve an unauthenticated admin console to anyone who can reach it.
         </p>
@@ -814,12 +988,12 @@ function FieldRow({
         onChange={(e) => onChange(e.target.value)}
       />
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <code className="font-mono text-2xs text-muted-foreground/70">{field.key}</code>
+        <code className="font-mono text-2xs text-muted-foreground">{field.key}</code>
         {/* Only where it is true *and* actionable: a locked field cannot be
             changed here at all, so telling its owner about a restart is noise
             about work they are not doing. */}
         {field.requires_restart && !locked && (
-          <span className="text-2xs text-muted-foreground/70">· needs a restart</span>
+          <span className="text-2xs text-muted-foreground">· needs a restart</span>
         )}
       </div>
       {locked && <div className="mt-1.5">{<LayerLock />}</div>}
@@ -844,41 +1018,6 @@ function LayerLock() {
         <code className="font-mono">config.toml</code>. Change it where the host is deployed.
       </span>
     </p>
-  );
-}
-
-/**
- * A card, centred — not an application shell.
- *
- * The previous version put edge-to-edge header and footer rules across the
- * viewport, which is the chrome of an app you live in. This is a task you pass
- * through once, and dressing it as an admin panel made a five-field flow look
- * like a broken settings page: rules running off both edges, a narrow column
- * marooned in the middle of them, and — because the content band was `flex-1` —
- * most of a thousand pixels of nothing between the last field and the buttons.
- *
- * One bounded card instead, centred on both axes, with its own header and its
- * own actions. It grows with its content and stops at 88vh, after which the
- * middle scrolls and the header and actions stay put. Nothing floats, nothing
- * stretches, and the eye has one object to land on.
- */
-function Shell({
-  header,
-  footer,
-  children,
-}: {
-  header?: React.ReactNode;
-  footer?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-4 sm:p-6">
-      <div className="flex max-h-[88vh] w-full max-w-[34rem] flex-col overflow-hidden rounded-2xl border bg-card shadow-xl">
-        {header && <div className="shrink-0 border-b px-6 py-5">{header}</div>}
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">{children}</div>
-        {footer && <div className="shrink-0 border-t px-6 py-4">{footer}</div>}
-      </div>
-    </div>
   );
 }
 
@@ -911,7 +1050,10 @@ function AccountStep({
       <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
         {required
           ? "This is how you sign back in, and the only address that can administer the company."
-          : "Optional on this host — you chose no sign-in, so anyone who can reach it is the owner."}
+          : // Not the no-sign-in case: that host does not render this step at
+            // all. What is left is a host that already serves a company, where
+            // the roster it has can already administer it.
+            "Optional on this host — it already serves a company, so this is only how you get back in."}
       </p>
       <Input
         id="setup-email"
@@ -969,8 +1111,20 @@ function PowerStep({
   // The house already holds one, and this operator may have no way to get their
   // own. The key box is then optional rather than the point of the screen.
   const onTheHouse = status.inference.ready && provider === status.inference.provider;
+  // "Use my own" flips the gate: the host credential is only testable while
+  // that is the operator's actual choice. Once they opt to supply their own
+  // key, an empty box must not test anything — a test with no key probes the
+  // host credential and would report a pass for a key they never provided.
+  const canTest =
+    (!spec.needsKey || (onTheHouse && !override) || value.trim().length > 0) &&
+    (!spec.needsUrl || baseUrl.trim().length > 0);
 
   const run = async () => {
+    // This also protects the Enter shortcut on the inputs. A disabled button
+    // alone would still leave that route to a request the provider cannot
+    // answer usefully.
+    if (!canTest) return;
+
     onTested({ kind: "testing" });
     try {
       const result = await testInference(client, {
@@ -980,7 +1134,7 @@ function PowerStep({
       });
       onTested(
         result.ok
-          ? { kind: "ok", baseUrl: result.baseUrl }
+          ? { kind: "ok", baseUrl: result.baseUrl, model: result.model }
           : { kind: "failed", error: result.error ?? "Could not reach the provider." },
       );
     } catch (err: unknown) {
@@ -1040,7 +1194,8 @@ function PowerStep({
             Endpoint
           </Label>
           <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
-            The base URL of the chat API, ending in <code>/v1</code>.
+            Paste the local address as shown, for example <code>localhost:6969</code>. We&apos;ll
+            add <code>http://</code> and <code>/v1</code> when needed.
           </p>
           <Input
             id="setup-base-url"
@@ -1137,7 +1292,7 @@ function PowerStep({
         <Button
           type="button"
           variant={tested.kind === "ok" ? "outline" : "default"}
-          disabled={tested.kind === "testing"}
+          disabled={tested.kind === "testing" || !canTest}
           onClick={() => void run()}
           data-testid="setup-test-connection"
         >
@@ -1159,7 +1314,8 @@ function PowerStep({
             watched us produce. */}
         {tested.kind === "ok" && (
           <p className="text-sm leading-snug text-status-done-text" data-testid="setup-test-ok">
-            Reached {tested.baseUrl} and got a reply.
+            Reached {tested.baseUrl}
+            {tested.model ? ` using ${tested.model}` : ""} and got a reply.
           </p>
         )}
         {tested.kind === "failed" && (
@@ -1200,7 +1356,7 @@ function PowerStep({
 type TestState =
   | { kind: "untested" }
   | { kind: "testing" }
-  | { kind: "ok"; baseUrl: string }
+  | { kind: "ok"; baseUrl: string; model?: string | null }
   | { kind: "failed"; error: string }
   | { kind: "skipped" };
 
@@ -1377,7 +1533,7 @@ function ReviewStep({
               </ul>
               <p className="mt-2 text-sm leading-snug text-muted-foreground">
                 You can still continue — add someone for it here, or later from
-                the team page.
+                the Company page.
               </p>
             </>
           )}
@@ -1455,8 +1611,8 @@ function ReviewStep({
  * and skippable by pressing on — which is what "advanced" should mean: present
  * and passed over, not hidden and hunted for.
  *
- * All four groups on one screen, for the same reason the three questions are:
- * they are short, related, and splitting them would be four more Next presses
+ * Both groups on one screen, for the same reason the business questions share
+ * one: they are short, related, and splitting them would be another Next press
  * for settings most people will never touch.
  */
 function AdvancedStep({
@@ -1482,35 +1638,23 @@ function AdvancedStep({
       </div>
 
       {ADVANCED_GROUPS.map((group) => (
-        // Each subject is its own bounded card. Four sections running together
-        // down one scroll is what made this read as a dump — nothing told you
-        // where "how people sign in" ended and "where the thinking runs" began.
+        // Each subject is its own bounded card. Sections running together down
+        // one scroll is what made this read as a dump — nothing told you where
+        // "how this host runs" ended and "what it can reach" began.
         <section key={group.id} className="rounded-xl border">
           <div className="border-b px-4 py-3">
             <h3 className="text-base font-medium leading-snug">{group.title}</h3>
             <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{group.hint}</p>
           </div>
           <div className="space-y-5 px-4 py-4">
-            {group.id === "signin" && (
-              <SignInStep
-                status={status}
-                value={values.auth_mode ?? ""}
-                onChange={(v) => set("auth_mode", v)}
+            {fieldsFor(status, group.fields).map((f) => (
+              <FieldRow
+                key={f.key}
+                field={f}
+                value={values[f.key] ?? ""}
+                onChange={(v) => set(f.key, v)}
               />
-            )}
-            {fieldsFor(status, group.fields)
-              // `auth_mode` is chosen with the three cards above. Rendering its
-              // raw input underneath offered the same setting twice, and the
-              // second one looked like the real control because it was a field.
-              .filter((f) => !(group.id === "signin" && f.key === "auth_mode"))
-              .map((f) => (
-                <FieldRow
-                  key={f.key}
-                  field={f}
-                  value={values[f.key] ?? ""}
-                  onChange={(v) => set(f.key, v)}
-                />
-              ))}
+            ))}
           </div>
         </section>
       ))}
@@ -1533,10 +1677,16 @@ function AdvancedStep({
  */
 function BusinessStep({
   draft,
+  templates,
+  template,
+  onTemplate,
   onChange,
   onEnter,
 }: {
   draft: SetupDraft;
+  templates: SetupStatus["templates"];
+  template: string;
+  onTemplate: (id: string) => void;
   onChange: (update: (d: SetupDraft) => SetupDraft) => void;
   onEnter: () => void;
 }) {
@@ -1549,24 +1699,57 @@ function BusinessStep({
             breathing room belongs *before the field*, not inside the sentence.
             A uniform `space-y` gave all three the same gap and the question
             read as three unrelated lines. */}
-        <Label htmlFor="setup-industry" className="text-base font-medium leading-snug">
+        <Label htmlFor="setup-template" className="text-base font-medium leading-snug">
           What kind of company are you setting up?
         </Label>
         <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
-          A sentence is plenty. What you sell, or what you do.
+          Pick one of the teams bundled with OpenCompany. You can tailor it below.
         </p>
-        <Input
-          id="setup-industry"
-          autoFocus
-          value={draft.industry}
-          placeholder="e.g. E-commerce — I sell homeware online"
-          data-testid="setup-field-industry"
-          className="mt-2.5"
-          onChange={(e) => onChange((d) => ({ ...d, industry: e.target.value }))}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onEnter();
-          }}
-        />
+        {templates.length > 0 ? (
+          <select
+            id="setup-template"
+            autoFocus
+            value={template}
+            data-testid="setup-field-template"
+            className="mt-2.5 h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+            onChange={(event) => onTemplate(event.target.value)}
+          >
+            <option value="" disabled>
+              Choose a company template…
+            </option>
+            {templates.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.name} ({option.agent_count} teammates)
+              </option>
+            ))}
+          </select>
+        ) : (
+          <Input
+            id="setup-industry"
+            autoFocus
+            value={draft.industry}
+            placeholder="e.g. E-commerce — I sell homeware online"
+            data-testid="setup-field-industry"
+            className="mt-2.5"
+            onChange={(e) => onChange((d) => ({ ...d, industry: e.target.value }))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onEnter();
+            }}
+          />
+        )}
+        {template && (
+          <Input
+            id="setup-industry"
+            value={draft.industry}
+            placeholder="Optional details about what makes yours different"
+            data-testid="setup-field-industry"
+            className="mt-2"
+            onChange={(e) => onChange((d) => ({ ...d, industry: e.target.value }))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onEnter();
+            }}
+          />
+        )}
       </div>
 
       <div>

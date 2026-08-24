@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS context_chunks (
     stored_ms  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (company_id, addr)
 );
+-- The context index: one row per (addr, label) claim, the shape the fs
+-- backend's JSONL index always had (issue #1300). `context_chunks` keeps one
+-- body row per address (its `label` column stays the first write's label so a
+-- downgraded binary keeps reading what it always read); this table is what
+-- `list` and the label-scoped delete read and mutate.
+CREATE TABLE IF NOT EXISTS context_chunk_labels (
+    company_id TEXT NOT NULL,
+    addr       TEXT NOT NULL,
+    label      TEXT NOT NULL,
+    stored_ms  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (company_id, addr, label)
+);
 CREATE TABLE IF NOT EXISTS secrets (
     company_id TEXT NOT NULL,
     key        TEXT NOT NULL,
@@ -167,6 +179,12 @@ CREATE TABLE IF NOT EXISTS runs (
     -- does, and `task_id = ?` never matches it — which is what a per-card
     -- filter wants.
     task_id    TEXT,
+    -- Issue #1573: the desk the attempt was dispatched to, mirrored out of
+    -- `run_json` so the console's per-teammate history is an indexed read
+    -- rather than a scan. Nullable only so the additive `ALTER` on an existing
+    -- database has something to write before the backfill runs; every row the
+    -- store itself writes carries one.
+    agent_id   TEXT,
     status     TEXT NOT NULL,
     attempt    INTEGER NOT NULL,
     created_ms INTEGER NOT NULL,
@@ -175,6 +193,7 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
 CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
+-- `runs_by_agent` is deliberately NOT here; see `heal_runs_agent_id`.
 CREATE TABLE IF NOT EXISTS run_steps (
     company_id TEXT NOT NULL,
     run_id     TEXT NOT NULL,
@@ -361,6 +380,40 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
         .map_err(sql_err)
 }
 
+/// Gives `runs` its `agent_id` mirror column, backfills it, and indexes it
+/// (issue #1573).
+///
+/// Three steps that have to happen in this order and cannot be expressed in
+/// [`MIGRATIONS`]:
+///
+/// 1. **The column.** `CREATE TABLE IF NOT EXISTS` silently skips a table that
+///    already exists, so an additive column only reaches an existing database
+///    through an `ALTER` — [`add_column_if_missing`].
+/// 2. **The backfill.** Every run ever written already carries its desk inside
+///    `run_json`; this copies it into the column so a per-teammate read answers
+///    with the *whole* history rather than only the attempts written since the
+///    upgrade. Without it the new filter would silently under-report, which is
+///    worse than not offering it — an empty history reads as "this teammate has
+///    never run", not as "this database has not been migrated".
+/// 3. **The index.** It cannot sit in [`MIGRATIONS`], because that batch is
+///    executed *before* the `ALTER` above and would fail on a column the old
+///    table does not have yet.
+///
+/// Idempotent, and cheap on every open after the first: the `ALTER` is skipped
+/// once the column exists, the `UPDATE` matches nothing once no row is `NULL`
+/// (and the index makes that a lookup rather than a scan), and re-creating an
+/// existing index is a no-op.
+fn heal_runs_agent_id(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "runs", "agent_id", "TEXT")?;
+    conn.execute(
+        "UPDATE runs SET agent_id = json_extract(run_json, '$.agentId') WHERE agent_id IS NULL",
+        [],
+    )
+    .map_err(sql_err)?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id)")
+        .map_err(sql_err)
+}
+
 /// Drops the `NOT NULL` constraint on `runs.task_id` (issue #983).
 ///
 /// A column constraint cannot be altered in place in SQLite, so this is the
@@ -399,18 +452,60 @@ fn relax_runs_task_id_nullability(conn: &Connection) -> Result<()> {
              company_id TEXT NOT NULL,
              id         TEXT NOT NULL,
              task_id    TEXT,
+             agent_id   TEXT,
              status     TEXT NOT NULL,
              attempt    INTEGER NOT NULL,
              created_ms INTEGER NOT NULL,
              run_json   TEXT NOT NULL,
              PRIMARY KEY (company_id, id)
          );
+         -- `agent_id` is read straight out of the blob rather than copied from
+         -- a column, because this rebuild also runs on a database that predates
+         -- the column entirely — selecting it there would fail on a name the
+         -- old table does not have.
          INSERT INTO runs_rebuilt
-             SELECT company_id, id, task_id, status, attempt, created_ms, run_json FROM runs;
+             SELECT company_id, id, task_id,
+                    json_extract(run_json, '$.agentId'),
+                    status, attempt, created_ms, run_json FROM runs;
          DROP TABLE runs;
          ALTER TABLE runs_rebuilt RENAME TO runs;
          CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
+         CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id);
          CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
+         COMMIT;",
+    )
+    .map_err(sql_err)
+}
+
+/// Heals `context_chunk_labels` against `context_chunks` at open (issue #1300).
+///
+/// Two idempotent steps, one transaction, covering every mixed-version
+/// history a database can have:
+///
+/// - **Backfill**: a body row whose (addr, label) has no index row — a
+///   database from before the labels table existed, or a row an older binary
+///   wrote since — gets one, carrying the body row's stamp. `INSERT OR
+///   IGNORE` on the full primary key makes re-running a no-op, and a
+///   label-scoped delete can never be undone by it: when the last label goes
+///   the body row goes in the same transaction, so there is nothing left to
+///   backfill from.
+/// - **Orphan sweep**: an index row whose body row is gone — an older
+///   binary's address-level delete removed only `context_chunks` — is
+///   dropped, so `list` never names a chunk `peek` cannot read.
+///
+/// Both run on every open rather than behind a version flag, matching the
+/// other heals in this file, which read the live schema instead of trusting a
+/// stamp. The cost is two anti-joins against a primary-key index, once per
+/// process, and neither writes anything on an already-healed database.
+fn sync_context_chunk_labels(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "BEGIN;
+         INSERT OR IGNORE INTO context_chunk_labels (company_id, addr, label, stored_ms)
+             SELECT company_id, addr, label, stored_ms FROM context_chunks;
+         DELETE FROM context_chunk_labels WHERE NOT EXISTS (
+             SELECT 1 FROM context_chunks c
+             WHERE c.company_id = context_chunk_labels.company_id
+               AND c.addr = context_chunk_labels.addr);
          COMMIT;",
     )
     .map_err(sql_err)
@@ -489,6 +584,14 @@ impl SqliteStore {
         // insert on a constraint the record no longer has. Idempotent: it reads
         // the live schema and does nothing once the constraint is gone.
         relax_runs_task_id_nullability(&conn)?;
+        // Issue #1573: the `agent_id` mirror column, its backfill and its index.
+        // After the rebuild above, which owns the table's shape on the one path
+        // that replaces it wholesale.
+        heal_runs_agent_id(&conn)?;
+        // Issue #1300: the context index moved into `context_chunk_labels`
+        // (one row per (addr, label) claim). Runs after the `stored_ms`
+        // column heal above, whose column it reads.
+        sync_context_chunk_labels(&conn)?;
         Ok(Self {
             conn: Arc::new(StdMutex::new(conn)),
             senders: Arc::new(StdMutex::new(HashMap::new())),
@@ -592,6 +695,8 @@ impl CompanyStore for SqliteStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_agent_edits: overlay.agent_edits,
+            overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
@@ -954,8 +1059,18 @@ impl MemoryStore for SqliteStore {
 impl ContextStore for SqliteStore {
     async fn put(&self, id: &CompanyId, chunk: ContextChunk) -> Result<ChunkAddr> {
         let addr = content_address(&chunk.body);
-        let conn = self.conn();
-        conn.execute(
+        // One clock read for both rows: a body row and the claim that lands
+        // with it describe the same write and must not disagree by a
+        // millisecond the caller can observe through `list`.
+        let stored_ms = now_millis() as i64;
+        let mut conn = self.conn();
+        // Body row first-write-wins per address; the labels index accumulates
+        // one row per (addr, label) — set semantics, so a byte-identical body
+        // stored under a second label keeps both claims, and a re-put of an
+        // identical (body, label) is a no-op (#1300). One transaction, so a
+        // body row can never land without its index row.
+        let tx = conn.transaction().map_err(sql_err)?;
+        tx.execute(
             "INSERT OR IGNORE INTO context_chunks (company_id, addr, label, body, len, stored_ms) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -964,19 +1079,31 @@ impl ContextStore for SqliteStore {
                 chunk.label,
                 chunk.body,
                 chunk.body.len() as i64,
-                now_millis() as i64
+                stored_ms
             ],
         )
         .map_err(sql_err)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO context_chunk_labels (company_id, addr, label, stored_ms) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id.as_ref(), addr, chunk.label, stored_ms],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(ChunkAddr::new(addr))
     }
 
     async fn list(&self, id: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>> {
         let conn = self.conn();
+        // The labels table is the index (#1300); the join carries each claim's
+        // body length from the one body row. `l.rowid` keeps insertion order,
+        // the same order the single-table `rowid` scan used to give.
         let mut stmt = conn
             .prepare(
-                "SELECT addr, label, len, stored_ms FROM context_chunks \
-                 WHERE company_id = ?1 ORDER BY rowid",
+                "SELECT l.addr, l.label, c.len, l.stored_ms \
+                 FROM context_chunk_labels l \
+                 JOIN context_chunks c ON c.company_id = l.company_id AND c.addr = l.addr \
+                 WHERE l.company_id = ?1 ORDER BY l.rowid",
             )
             .map_err(sql_err)?;
         let rows = stmt
@@ -1058,13 +1185,59 @@ impl ContextStore for SqliteStore {
     }
 
     async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
-        let conn = self.conn();
-        let removed = conn
+        let mut conn = self.conn();
+        // Address-level: the body row and every label claim go together, in
+        // one transaction so no half can survive the other.
+        let tx = conn.transaction().map_err(sql_err)?;
+        let removed_labels = tx
+            .execute(
+                "DELETE FROM context_chunk_labels WHERE company_id = ?1 AND addr = ?2",
+                params![id.as_ref(), addr.as_ref()],
+            )
+            .map_err(sql_err)?;
+        let removed = tx
             .execute(
                 "DELETE FROM context_chunks WHERE company_id = ?1 AND addr = ?2",
                 params![id.as_ref(), addr.as_ref()],
             )
             .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(removed > 0 || removed_labels > 0)
+    }
+
+    async fn delete_label(&self, id: &CompanyId, addr: &ChunkAddr, label: &str) -> Result<bool> {
+        let mut conn = self.conn();
+        // Label-scoped (#1300): remove exactly one (addr, label) claim, and
+        // reap the body row when — and only when — no claim remains. The
+        // check and both deletes are one transaction, so a concurrent put of
+        // identical content under another label either commits its claim
+        // before this transaction (and keeps the body) or after it.
+        let tx = conn.transaction().map_err(sql_err)?;
+        let removed = tx
+            .execute(
+                "DELETE FROM context_chunk_labels \
+                 WHERE company_id = ?1 AND addr = ?2 AND label = ?3",
+                params![id.as_ref(), addr.as_ref(), label],
+            )
+            .map_err(sql_err)?;
+        if removed > 0 {
+            let remaining: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM context_chunk_labels \
+                     WHERE company_id = ?1 AND addr = ?2",
+                    params![id.as_ref(), addr.as_ref()],
+                    |r| r.get(0),
+                )
+                .map_err(sql_err)?;
+            if remaining == 0 {
+                tx.execute(
+                    "DELETE FROM context_chunks WHERE company_id = ?1 AND addr = ?2",
+                    params![id.as_ref(), addr.as_ref()],
+                )
+                .map_err(sql_err)?;
+            }
+        }
+        tx.commit().map_err(sql_err)?;
         Ok(removed > 0)
     }
 
@@ -2289,12 +2462,14 @@ impl crate::ports::runs::RunStore for SqliteStore {
             step_count: 0,
         };
         tx.execute(
-            "INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO runs \
+             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
                 run.created_at_millis as i64,
@@ -2336,15 +2511,18 @@ impl crate::ports::runs::RunStore for SqliteStore {
         // `status` and `task_id` are mirrored out of the blob so the indexes
         // can answer a filtered list without deserializing every row.
         conn.execute(
-            "INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+            "INSERT INTO runs \
+             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(company_id, id) DO UPDATE SET task_id = excluded.task_id, \
+             agent_id = excluded.agent_id, \
              status = excluded.status, attempt = excluded.attempt, \
              created_ms = excluded.created_ms, run_json = excluded.run_json",
             params![
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
                 run.created_at_millis as i64,
@@ -2360,7 +2538,7 @@ impl crate::ports::runs::RunStore for SqliteStore {
         company: &CompanyId,
         filter: &crate::ports::runs::RunFilter,
     ) -> Result<Vec<crate::ports::runs::RunRecord>> {
-        // Every predicate is pushed into SQL (both columns are indexed) so a
+        // Every predicate is pushed into SQL (all three columns are indexed) so a
         // long-lived company does not deserialize its whole run history to
         // answer one card's Attempts list.
         let mut sql = String::from("SELECT run_json FROM runs WHERE company_id = ?1");
@@ -2368,6 +2546,10 @@ impl crate::ports::runs::RunStore for SqliteStore {
         if let Some(task_id) = &filter.task_id {
             args.push(task_id.clone());
             sql.push_str(&format!(" AND task_id = ?{}", args.len()));
+        }
+        if let Some(agent_id) = &filter.agent_id {
+            args.push(agent_id.clone());
+            sql.push_str(&format!(" AND agent_id = ?{}", args.len()));
         }
         if !filter.statuses.is_empty() {
             let placeholders: Vec<String> = filter
@@ -3656,6 +3838,14 @@ mod test {
         conformance::assert_inbox_store(store()).await;
     }
 
+    /// Issue #1505. The port holds this company's inference credential, its MCP
+    /// OAuth tokens and its SMTP password, and had no conformance case on any
+    /// backend until this one.
+    #[tokio::test]
+    async fn conformance_secret_store() {
+        conformance::assert_secret_store(store()).await;
+    }
+
     #[tokio::test]
     async fn conformance_task_store() {
         conformance::assert_task_store(store()).await;
@@ -3707,6 +3897,21 @@ mod test {
     #[tokio::test]
     async fn conformance_context_multibyte_bodies() {
         conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_identical_body_two_labels() {
+        conformance::assert_identical_body_two_labels(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_delete_label_scoped() {
+        conformance::assert_delete_label_scoped(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_delete_label_survives_a_concurrent_identical_put() {
+        conformance::assert_delete_label_survives_a_concurrent_identical_put(store()).await;
     }
 
     /// The migration path a fresh database never exercises.
@@ -3790,6 +3995,79 @@ mod test {
         .expect("adding an existing column is a no-op, not an error");
     }
 
+    /// Issue #1300's open-time heals on a mixed-version database: the
+    /// backfill gives a row an older binary wrote its label claim (so the
+    /// label-scoped delete can reach it), and the orphan sweep drops an index
+    /// row whose body row an older binary's address-level delete removed.
+    #[tokio::test]
+    async fn legacy_context_rows_gain_label_claims_and_orphans_are_swept_on_open() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE context_chunks (
+                 company_id TEXT NOT NULL,
+                 addr       TEXT NOT NULL,
+                 label      TEXT NOT NULL,
+                 body       TEXT NOT NULL,
+                 len        INTEGER NOT NULL,
+                 stored_ms  INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (company_id, addr)
+             );
+             CREATE TABLE context_chunk_labels (
+                 company_id TEXT NOT NULL,
+                 addr       TEXT NOT NULL,
+                 label      TEXT NOT NULL,
+                 stored_ms  INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (company_id, addr, label)
+             );
+             -- A row an older binary wrote after the labels table existed: the
+             -- body row is there, its claim is not.
+             INSERT INTO context_chunks (company_id, addr, label, body, len, stored_ms)
+             VALUES ('acme', 'old-binary-addr', 'agent/ceo', 'written by an old binary', 24, 7);
+             -- And the reverse: a claim whose body row an older binary's
+             -- address-level delete removed.
+             INSERT INTO context_chunk_labels (company_id, addr, label, stored_ms)
+             VALUES ('acme', 'reaped-addr', 'agent/ops', 9);",
+        )
+        .expect("seed a mixed-version database");
+
+        let store = SqliteStore::from_conn(conn).expect("migrations run");
+        let id = CompanyId::new("acme");
+
+        let metas = ContextStore::list(&store, &id, "")
+            .await
+            .expect("list after the heals");
+        assert_eq!(
+            metas.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
+            ["agent/ceo"],
+            "the old binary's row gains its claim; the orphaned claim is swept"
+        );
+        assert_eq!(
+            metas[0].stored_at_millis, 7,
+            "the backfilled claim carries the body row's stamp"
+        );
+
+        // The backfilled claim is label-deletable, and takes the body with it
+        // as the last claim.
+        let addr = ChunkAddr::new("old-binary-addr".to_string());
+        assert!(
+            store
+                .delete_label(&id, &addr, "agent/ceo")
+                .await
+                .expect("label-scoped delete on a backfilled claim")
+        );
+        assert!(
+            ContextStore::list(&store, &id, "")
+                .await
+                .unwrap()
+                .is_empty(),
+            "no claim may remain"
+        );
+        assert!(
+            store.peek(&id, &addr, None).await.is_err(),
+            "the body row went with its last claim"
+        );
+    }
+
     /// Issue #983: a database created while `runs.task_id` was `NOT NULL` must
     /// end up able to hold a card-less run.
     ///
@@ -3869,6 +4147,104 @@ mod test {
                 .len(),
             2,
             "a second pass duplicated or dropped rows"
+        );
+    }
+
+    /// Issue #1573: a database created before the `agent_id` mirror column must
+    /// end up able to answer "what has this desk run" over its **whole**
+    /// history, not just the attempts written since the upgrade.
+    ///
+    /// The column reaches an existing deployment through an additive `ALTER`,
+    /// which leaves every stored row `NULL` — and a `NULL` never matches
+    /// `agent_id = ?`. So the rows that would silently disappear from the new
+    /// filter are precisely the ones an operator opening a teammate for the
+    /// first time most wants to see. That is a wrong answer rather than a
+    /// missing feature: an empty history reads as "this teammate has never
+    /// run".
+    ///
+    /// Seeded with the **post-#983** shape on purpose, so this exercises the
+    /// plain `ALTER` + backfill path rather than riding along on the table
+    /// rebuild that `a_legacy_runs_table_learns_to_hold_a_card_less_run`
+    /// already covers.
+    #[tokio::test]
+    async fn a_legacy_runs_table_learns_which_desk_ran_each_attempt() {
+        use crate::ports::runs::{NewRun, RunFilter, RunStore};
+
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE runs (
+                 company_id TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 task_id    TEXT,
+                 status     TEXT NOT NULL,
+                 attempt    INTEGER NOT NULL,
+                 created_ms INTEGER NOT NULL,
+                 run_json   TEXT NOT NULL,
+                 PRIMARY KEY (company_id, id)
+             );
+             INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json)
+             VALUES ('acme', 'old-run', 'card-7', 'succeeded', 1, 1700000000000,
+                     '{\"id\":\"old-run\",\"company\":\"acme\",\"taskId\":\"card-7\",\
+                       \"agentId\":\"engineer\",\"attempt\":1,\"status\":\"succeeded\",\
+                       \"createdAtMillis\":1700000000000}');",
+        )
+        .expect("seed a pre-#1573 database");
+
+        let store = SqliteStore::from_conn(conn).expect("migrations run on a legacy database");
+        let id = CompanyId::new("acme");
+
+        // The desk was only ever inside the blob; the backfill is what makes it
+        // a predicate.
+        assert_eq!(
+            store
+                .list_runs(&id, &RunFilter::for_agent("engineer"))
+                .await
+                .expect("list by desk")
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["old-run"],
+            "an attempt written before the column existed is still this desk's"
+        );
+        assert!(
+            store
+                .list_runs(&id, &RunFilter::for_agent("ceo"))
+                .await
+                .expect("list by desk")
+                .is_empty(),
+            "and it is not somebody else's"
+        );
+
+        // A run written after the upgrade is filed by the same predicate.
+        store
+            .create_run(&id, NewRun::for_chat("turn-1", "general", "engineer"))
+            .await
+            .expect("mint a run on the migrated table");
+        let mut ids = store
+            .list_runs(&id, &RunFilter::for_agent("engineer"))
+            .await
+            .expect("list by desk")
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["old-run", "turn-1"]);
+
+        // The heal is idempotent — it runs on every open, and must not rewrite
+        // the run history each time. Re-running it leaves the same answer, and
+        // nothing is left `NULL` for it to touch.
+        heal_runs_agent_id(&store.conn()).expect("the heal is idempotent");
+        assert_eq!(
+            store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE agent_id IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .expect("count"),
+            0,
+            "the backfill left nothing behind for a later open to find"
         );
     }
 
@@ -4131,7 +4507,7 @@ mod test {
     ///
     /// This backend does not reject it, and hosted tenants run this backend — so
     /// the shape is reachable data rather than a thought experiment, and that is
-    /// what this asserts: sqlite stores `q/r.md` under `Agents/ghost/`, and the
+    /// what this asserts: sqlite stores `q/r.md` under `agents/ghost/`, and the
     /// sweep leaves `ghost` alone. It lives here because
     /// `cargo test --features sqlite --lib store::sqlite` is the only lane that
     /// runs it.
@@ -4226,6 +4602,7 @@ mod test {
         let id = CompanyId::new("acme");
         company
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: toml::from_str(
                     "[company]\nname=\"Acme\"\noutput=\"widgets\"\n[[agent]]\nid=\"ceo\"\nrole=\"Chief\"\n[policy]\nmode=\"supervised\"\n",
@@ -4239,6 +4616,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -4251,6 +4629,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "hi".into(),
                     by: None,
@@ -4304,6 +4683,7 @@ mod test {
         s.append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -4320,6 +4700,7 @@ mod test {
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -4407,6 +4788,7 @@ mod test {
             s.append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "persist".into(),
                     by: None,
@@ -4424,6 +4806,7 @@ mod test {
         assert_eq!(
             events[0].event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "persist".into(),
                 by: None,

@@ -1,7 +1,7 @@
 role = "Analyst"
 description = "Compute, model, and check numbers against the claims on record."
 # Gets the code index so the second program does not rebuild the first.
-context = ["GOAL.md", "BRIEF.md", "CLAIMS.md", "INDEX.md"]
+context = ["GOAL.md", "brief.md", "claims.md", "INDEX.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company
@@ -23,3 +23,9 @@ ledgers = [
     { name = "findings", access = "record" },
     { name = "sources", access = "read" },
 ]
+
+# The role's working rules, checked in beside this file and read at manifest
+# load. The `.toml` carries the wiring; `prompts/` carries how the role works.
+# A missing path here is a manifest error rather than a skipped entry — a role
+# whose prompt was written around a briefing it never received fails silently.
+prompt_files = ["prompts/analyst.md"]

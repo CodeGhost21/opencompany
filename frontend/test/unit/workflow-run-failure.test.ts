@@ -72,6 +72,7 @@ Object.defineProperties(globalThis.HTMLElement.prototype, {
 
 const { WorkflowsView } = await import("@/views/WorkflowsView");
 const { RunHistoryPanel } = await import("@/views/workflows/RunHistoryPanel");
+const { RunFailurePanel } = await import("@/views/workflows/RunFailurePanel");
 const { runFailureFrom } = await import("@/views/workflows/run-failure");
 const { formatDuration, runDuration } = await import("@/views/workflows/run-health");
 
@@ -253,7 +254,7 @@ describe("dispatching a run clears the previous run's detail", () => {
 });
 
 describe("the history row names the node the operator named", () => {
-  it("prints the node's display name on the failure line, not its raw id", async () => {
+  it("leads with the actionable failure at the node's display name and keeps raw details", async () => {
     // The engine's trail is keyed by node id, and this line printed it verbatim
     // while the run drawer's own timeline — and the canvas, and the overlay
     // banner — all said “Draft the digest”.
@@ -266,7 +267,8 @@ describe("the history row names the node the operator named", () => {
       runId: "r9",
       deliveries: [],
       pendingApprovals: [],
-      error: "the writer agent has no model",
+      error:
+        "harness error: capability error: agent: the writer agent has no model",
       nodes: [
         { nodeId: "start", status: "ok", elapsedMs: 1 },
         { nodeId: "n_3", status: "error", elapsedMs: 12_000 },
@@ -285,8 +287,15 @@ describe("the history row names the node the operator named", () => {
       );
     });
     const row = container.querySelector('[data-testid="workflow-run-row"]');
-    expect(row?.textContent).toContain("This run failed at “Draft the digest”");
-    expect(row?.textContent).not.toContain("failed at “n_3”");
+    expect(row?.textContent).toContain(
+      "This run failed at “Draft the digest”: the writer agent has no model",
+    );
+    expect(row?.textContent).not.toContain("This run failed at “n_3”");
+    const details = row?.querySelector("details");
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain(
+      "harness error: capability error: agent: the writer agent has no model",
+    );
     // …and says how long it took, which nothing on this surface did before.
     expect(
       container.querySelector('[data-testid="workflow-run-duration"]')?.textContent,
@@ -295,7 +304,13 @@ describe("the history row names the node the operator named", () => {
 });
 
 describe("what the failure panel is built from", () => {
-  const CTX = { startedAtMillis: 1_000, atMillis: 3_400, request: "", dryRun: false };
+  const CTX = {
+    startedAtMillis: 1_000,
+    atMillis: 3_400,
+    request: "",
+    dryRun: false,
+    sawRunStart: false,
+  };
 
   it("keeps the host's code only when the host's own envelope carried it", () => {
     const fromHost = runFailureFrom(new ApiError(409, "engine_failed", "no", true), CTX);
@@ -313,6 +328,75 @@ describe("what the failure panel is built from", () => {
     expect(runFailureFrom("kaboom", CTX).message).toBe("kaboom");
     expect(runFailureFrom(new Error(""), CTX).message).not.toBe("");
     expect(runFailureFrom(new ApiError(500, "x", "", true), CTX).message).toContain("500");
+  });
+});
+
+describe("failure panel follow-up controls", () => {
+  it("opens the durable row, its failed step, and the existing copilot path", async () => {
+    const openHistory = vi.fn();
+    const showStep = vi.fn();
+    const fixWithCopilot = vi.fn();
+    await act(async () => {
+      root.render(
+        createElement(RunFailurePanel, {
+          failure: {
+            message: "the writer agent has no model",
+            fromHost: true,
+            runId: "run-9",
+            sawRunStart: true,
+            startedAtMillis: 1_000,
+            atMillis: 3_400,
+            request: "",
+            dryRun: false,
+          },
+          onClose: () => {},
+          onOpenHistory: openHistory,
+          failedStepName: "Draft the digest",
+          onShowFailedStep: showStep,
+          onFixWithCopilot: fixWithCopilot,
+        }),
+      );
+    });
+
+    await act(async () => {
+      button("Open Run history").click();
+      button("Show “Draft the digest”").click();
+      button("Fix with copilot").click();
+    });
+
+    expect(openHistory).toHaveBeenCalledOnce();
+    expect(showStep).toHaveBeenCalledOnce();
+    expect(fixWithCopilot).toHaveBeenCalledOnce();
+  });
+});
+
+describe("failure panel error details", () => {
+  it("shows the actionable leaf while preserving the host diagnostic verbatim", async () => {
+    const raw =
+      "harness error: capability error: http_request: Blocked local/private host: 127.0.0.1";
+    await act(async () => {
+      root.render(
+        createElement(RunFailurePanel, {
+          failure: {
+            message: raw,
+            fromHost: true,
+            sawRunStart: false,
+            startedAtMillis: 1_000,
+            atMillis: 3_400,
+            request: "",
+            dryRun: false,
+          },
+          onClose: () => {},
+        }),
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="workflow-run-failure-message"]')?.textContent,
+    ).toBe("Blocked local/private host: 127.0.0.1");
+    const details = container.querySelector("details");
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain(raw);
   });
 });
 

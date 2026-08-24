@@ -100,6 +100,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::ports::generate_id;
 use crate::ports::types::{Actor, ApprovalId, EventSeq};
@@ -347,6 +348,9 @@ pub struct StandingGrant {
     pub workflow: Option<String>,
     /// The tool it admits, with any arguments.
     pub tool: String,
+    /// Whether this standing policy admits or refuses matching calls.
+    #[serde(default = "default_standing_verdict")]
+    pub verdict: crate::ports::types::Verdict,
     /// Who granted it. Journaled so "who opened this up" is answerable later.
     pub granted_by: Actor,
     /// The approval whose resolution minted it — the provenance the brain's
@@ -436,6 +440,10 @@ pub struct StandingGrant {
     pub scope: Option<String>,
 }
 
+fn default_standing_verdict() -> crate::ports::types::Verdict {
+    crate::ports::types::Verdict::Approve
+}
+
 impl StandingGrant {
     /// Who may spend this permission (issue #1098).
     ///
@@ -502,6 +510,25 @@ impl StandingGrant {
 #[derive(Clone, Default)]
 pub struct GrantSet {
     inner: Arc<Mutex<GrantState>>,
+    /// Serialises the mint-side opposite-polarity reconcile (issue #1458).
+    ///
+    /// A standing mint's `snapshot → journal revocations → insert` spans
+    /// awaited journal appends, so two concurrent resolutions of the same
+    /// (subject, tool, scope) with opposite verdicts — an approve and a deny
+    /// landing within a few milliseconds from separate console surfaces — can
+    /// both snapshot an empty opposite set and then both insert. The two
+    /// opposite policies then sit live together, and because denials match
+    /// first, the approve stays listed but never admits a call whatever the
+    /// operator's true order. Held as a `tokio` guard across the whole sequence
+    /// so the second mint sees the first's policy and supersedes it, exactly as
+    /// "newest standing decision wins" promises.
+    ///
+    /// A `tokio::sync::Mutex` rather than the `std` one that guards the state:
+    /// the guard has to survive the journal awaits inside the reconcile, which
+    /// a `std::sync::MutexGuard` (not `Send`) cannot. Cloning shares the lock
+    /// like it shares the state, so every holder of a cloned `GrantSet` agrees
+    /// on the ordering.
+    reconcile_lock: Arc<TokioMutex<()>>,
 }
 
 #[derive(Default)]
@@ -550,6 +577,19 @@ struct GrantState {
     /// sweeps every checkout, so there is nothing left for a rehydrated mark to
     /// protect.
     pending: HashMap<ApprovalId, String>,
+}
+
+/// Whether two recorded scopes overlap (issue #1458).
+///
+/// A wildcard — a scope the tool could not resolve at mint time, recorded
+/// `None` — overlaps every concrete scope, because a wildcard policy matches
+/// every call the tool can make. Two concrete scopes overlap only when they are
+/// identical. This is deliberately not [`StandingGrant::admits_scope`], whose
+/// third case refuses a scoped grant against an unresolvable live call: that is
+/// the right answer for matching (unknown is a send), but the reconcile is
+/// comparing two policies, not a policy and a call.
+fn scopes_overlap(a: Option<&str>, b: Option<&str>) -> bool {
+    a.is_none() || b.is_none() || a == b
 }
 
 impl GrantSet {
@@ -661,32 +701,54 @@ impl GrantSet {
             .remove(approval_id);
     }
 
-    /// Whether a live grant, a standing grant, **or a still-parked approval**
-    /// names `task` as its origin (issue #796).
+    /// Whether a live grant, an **approving** standing grant, **or a
+    /// still-parked approval** names `task` as its origin (issue #796).
     ///
     /// The harness asks this to decide whether a task's checkout held across an
     /// approval park is still awaiting a resume or has been orphaned by a denied
     /// or expired approval, so
     /// [`CheckoutLedger::sweep_orphans`](crate::harness::repo::CheckoutLedger::sweep_orphans)
     /// can reclaim the disk. Three states keep it live: a live grant names it (an
-    /// approved step waiting to be re-issued), a standing grant names it, or an
-    /// approval it parked is **still pending** — that last case mints no grant
-    /// yet, so without `pending` the checkout would be swept in the window
-    /// between the park and the operator's decision. A spent grant is already
-    /// removed from every map, so this reads `false` the moment the resume is
-    /// under way — which is safe because the resuming turn has reclaimed the tree
-    /// onto its turn-scoped list by then.
+    /// approved step waiting to be re-issued), an **approving** standing grant
+    /// names it, or an approval it parked is **still pending** — that last case
+    /// mints no grant yet, so without `pending` the checkout would be swept in
+    /// the window between the park and the operator's decision.
+    ///
+    /// A standing **denial** is deliberately not a live state (issue #1458). A
+    /// denied approval is never re-dispatched to reclaim its checkout — the
+    /// brain's `ApprovalResolved` arm runs only on `Approve` — so counting the
+    /// deny's `origin_task` would hold the tree for the denial's full duration,
+    /// up to a week, and repeated denials would accumulate disk that nothing
+    /// ever resumes. A spent grant is already removed from every map, so this
+    /// reads `false` the moment the resume is under way — which is safe because
+    /// the resuming turn has reclaimed the tree onto its turn-scoped list by
+    /// then.
     pub fn any_for_task(&self, task: &str) -> bool {
         let state = self.inner.lock().expect("grant set poisoned");
         let names_task = |t: &Option<String>| t.as_deref() == Some(task);
         state.live.values().any(|g| names_task(&g.origin_task))
-            || state.standing.values().any(|g| names_task(&g.origin_task))
+            || state.standing.values().any(|g| {
+                g.verdict == crate::ports::types::Verdict::Approve && names_task(&g.origin_task)
+            })
             || state.pending.values().any(|t| t == task)
     }
 
     // -----------------------------------------------------------------------
     // Standing grants (issue #374)
     // -----------------------------------------------------------------------
+
+    /// Holds the lock that serialises the standing-policy reconcile
+    /// (issue #1458) for the caller's whole mint sequence.
+    ///
+    /// The standing mint takes it across `snapshot → journal → insert` — the
+    /// read of [`opposite_polarity`](Self::opposite_polarity) through the write
+    /// of [`grant_standing`](Self::grant_standing) — so a concurrent
+    /// opposite-polarity resolution cannot interleave between them. The
+    /// returned guard is `Send` (a `tokio` guard, not a `std` one), so holding
+    /// it across the journal awaits inside the mint keeps the future `Send`.
+    pub async fn standing_reconcile(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.reconcile_lock.lock().await
+    }
 
     /// Arms a standing grant.
     pub fn grant_standing(&self, grant: StandingGrant) {
@@ -731,6 +793,24 @@ impl GrantSet {
         scope: Option<&str>,
         now_millis: u64,
     ) -> Option<StandingGrant> {
+        self.match_standing_with_verdict(
+            subject,
+            tool,
+            scope,
+            crate::ports::types::Verdict::Approve,
+            now_millis,
+        )
+    }
+
+    /// Matches a standing policy with the requested polarity.
+    pub fn match_standing_with_verdict(
+        &self,
+        subject: &GrantSubject,
+        tool: &str,
+        scope: Option<&str>,
+        verdict: crate::ports::types::Verdict,
+        now_millis: u64,
+    ) -> Option<StandingGrant> {
         let state = self.inner.lock().expect("grant set poisoned");
         state
             .standing
@@ -739,10 +819,59 @@ impl GrantSet {
                 &g.subject() == subject
                     && g.tool == tool
                     && g.admits_scope(scope)
+                    && g.verdict == verdict
                     && g.is_live_at(now_millis)
             })
             .max_by_key(|g| g.expires_at_millis)
             .cloned()
+    }
+
+    /// Returns every **live** standing policy of the opposite polarity whose
+    /// recorded scope overlaps `grant_scope` — the same subject and tool, and a
+    /// scope that either policy would shadow (issue #1458).
+    ///
+    /// This is the read half of the mint-side newest-decision-wins reconcile.
+    /// Callers persist the returned policies as revoked before removing them
+    /// with [`revoke_standing`], preserving the journal-before-live ordering
+    /// used when a standing policy is minted. `ApprovalPolicy` checks a standing
+    /// *denial* above a standing *grant*, so if both polarities were allowed to
+    /// sit live for the same (subject, tool, scope), an approval minted after an
+    /// older refusal would list as a permission and never admit a call — the
+    /// operator's later decision silently inert until the refusal expired or was
+    /// revoked.
+    ///
+    /// Scoped deliberately to policies whose scope would actually shadow the
+    /// new one, so a denial of one web host does not revoke a grant for another:
+    /// two policies that each govern their own slice of a tool coexist, exactly
+    /// as they do when minted in isolation. Overlap is symmetric: a wildcard
+    /// policy (an unresolvable scope, recorded `None`) shadows every other
+    /// policy for the same tool in either direction. A wildcard old policy is
+    /// superseded by any new scoped one, and a wildcard **new** policy
+    /// supersedes any older scoped one — the operator's newest decision is the
+    /// whole standing contract for the tool, rather than leaving the older
+    /// scoped policy listed-but-inert until the wildcard expires and resurrects
+    /// it.
+    pub fn opposite_polarity(
+        &self,
+        subject: &GrantSubject,
+        tool: &str,
+        grant_scope: Option<&str>,
+        verdict: crate::ports::types::Verdict,
+        now_millis: u64,
+    ) -> Vec<StandingGrant> {
+        let state = self.inner.lock().expect("grant set poisoned");
+        state
+            .standing
+            .values()
+            .filter(|g| {
+                g.verdict != verdict
+                    && &g.subject() == subject
+                    && g.tool == tool
+                    && scopes_overlap(grant_scope, g.scope.as_deref())
+                    && g.is_live_at(now_millis)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Revokes a standing grant, returning it when there was one.
@@ -1072,6 +1201,7 @@ mod test {
             agent: agent.to_string(),
             workflow: None,
             tool: tool.to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: operator(),
             approval_id: ApprovalId::new(format!("approval-{id}")),
             at_millis: 1_000,
@@ -1241,6 +1371,262 @@ mod test {
             set.match_standing(&GrantSubject::agent("ops"), "shell", None, 10_001)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_standing_deny_matches_only_its_subject_tool_and_deadline() {
+        let set = GrantSet::default();
+        let mut deny = standing("deny-1", "ops", "shell", 10_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        assert!(
+            set.match_standing_with_verdict(
+                &GrantSubject::agent("ops"),
+                "shell",
+                None,
+                crate::ports::types::Verdict::Deny,
+                2_000,
+            )
+            .is_some()
+        );
+        assert!(
+            set.match_standing_with_verdict(
+                &GrantSubject::agent("ops"),
+                "shell",
+                None,
+                crate::ports::types::Verdict::Deny,
+                10_000,
+            )
+            .is_none()
+        );
+        assert!(
+            set.match_standing_with_verdict(
+                &GrantSubject::agent("ops"),
+                "shell",
+                None,
+                crate::ports::types::Verdict::Approve,
+                2_000,
+            )
+            .is_none()
+        );
+    }
+
+    /// Issue #1458: a standing **denial** must not keep a task's checkout alive.
+    ///
+    /// A denied approval is never re-dispatched — the brain's `ApprovalResolved`
+    /// arm runs only on `Approve` — so nothing will ever reclaim the held tree,
+    /// and counting the deny's `origin_task` would retain it for the denial's
+    /// full duration. Only an approving grant names a task that may still resume.
+    #[test]
+    fn a_standing_deny_does_not_keep_a_task_checkout_alive() {
+        let set = GrantSet::default();
+        let mut deny = standing("deny-1", "ops", "shell", 10_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        deny.origin_task = Some("t-1".to_string());
+        set.grant_standing(deny);
+        assert!(
+            !set.any_for_task("t-1"),
+            "a deny is never resumed, so it must not hold the task's checkout"
+        );
+
+        // An approving standing grant for the same task is still a live reason.
+        let mut grant = standing("grant-1", "ops", "shell", 10_000);
+        grant.origin_task = Some("t-1".to_string());
+        set.grant_standing(grant);
+        assert!(
+            set.any_for_task("t-1"),
+            "an approving standing grant still keeps the checkout live"
+        );
+    }
+
+    /// Issue #1458, the reconcile: newest standing decision wins. An approval
+    /// minted after a live denial of the same scope takes the denial back, or
+    /// `ApprovalPolicy`'s deny-above-grant ordering would leave the operator's
+    /// later "yes" listed but never admitting a call.
+    #[test]
+    fn an_approval_mint_supersedes_a_live_denial_of_the_same_scope() {
+        let set = GrantSet::default();
+        let mut deny = scoped("deny-1", "ops", "web_fetch", "https://docs.rs", 10_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert_eq!(drained.len(), 1, "the shadowing denial is taken back");
+        assert_eq!(drained[0].id, GrantId::new("deny-1"));
+        assert!(
+            set.match_standing(
+                &GrantSubject::agent("ops"),
+                "web_fetch",
+                Some("https://docs.rs"),
+                2_000
+            )
+            .is_none(),
+            "only the new approval is left for this scope"
+        );
+    }
+
+    /// The mirror direction: a denial minted after a live approval of the same
+    /// scope takes the grant back, so the operator's newer refusal is the whole
+    /// of the standing contract.
+    #[test]
+    fn a_denial_mint_supersedes_a_live_approval_of_the_same_scope() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped(
+            "grant-1",
+            "ops",
+            "web_fetch",
+            "https://docs.rs",
+            10_000,
+        ));
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Deny,
+            2_000,
+        );
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, GrantId::new("grant-1"));
+        set.revoke_standing(&drained[0].id);
+        assert_eq!(set.standing().len(), 0);
+    }
+
+    /// Opposite polarities for *different* scopes coexist: a denial of one host
+    /// neither shadows nor takes back a grant for another, exactly as they would
+    /// if minted in isolation.
+    #[test]
+    fn a_denial_for_one_host_does_not_take_back_a_grant_for_another() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped(
+            "grant-1",
+            "ops",
+            "web_fetch",
+            "https://docs.rs",
+            10_000,
+        ));
+        let mut deny = scoped(
+            "deny-1",
+            "ops",
+            "web_fetch",
+            "https://other.example",
+            10_000,
+        );
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert!(
+            drained.is_empty(),
+            "a denial for other.example does not shadow a docs.rs approval"
+        );
+        assert_eq!(set.standing().len(), 2);
+    }
+
+    /// A wildcard old policy (a scope the tool could not resolve, recorded
+    /// `None`) shadows *every* new policy for the same tool, so it is
+    /// superseded too — the newer decision is the whole of the contract.
+    #[test]
+    fn a_wildcard_denial_is_superseded_by_any_new_policy_for_the_same_tool() {
+        let set = GrantSet::default();
+        let mut deny = standing("deny-1", "ops", "web_fetch", 10_000); // scope None
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert_eq!(drained.len(), 1);
+    }
+
+    /// The mirror of the wildcard-old case: a **new** wildcard policy (an
+    /// unresolvable scope, recorded `None`) shadows every scoped opposite policy
+    /// for the same tool, so the reconcile takes the older scoped one too.
+    /// Otherwise it would sit listed-but-inert while the wildcard refused every
+    /// call, and silently resurrect when the wildcard expired — the newest
+    /// standing decision should be the whole of the contract.
+    #[test]
+    fn a_new_wildcard_policy_supersedes_an_older_scoped_opposite() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped(
+            "approve-1",
+            "ops",
+            "web_fetch",
+            "https://docs.rs",
+            10_000,
+        ));
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            None, // a scope the tool could not resolve
+            crate::ports::types::Verdict::Deny,
+            2_000,
+        );
+        assert_eq!(
+            drained.len(),
+            1,
+            "the new wildcard refusal supersedes the older scoped approval"
+        );
+        assert_eq!(drained[0].id, GrantId::new("approve-1"));
+        assert_eq!(
+            set.standing().len(),
+            1,
+            "the reconcile is read-only; the caller persists the revocation before revoking"
+        );
+    }
+
+    #[test]
+    fn same_polarity_policies_are_never_reconciled() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped("g1", "ops", "web_fetch", "https://docs.rs", 10_000));
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert!(drained.is_empty());
+        assert_eq!(set.standing().len(), 1);
+    }
+
+    /// An expired opposite-polarity policy shadows nothing — the matcher
+    /// refuses it — so the reconcile leaves it for the sweep.
+    #[test]
+    fn an_expired_opposite_polarity_policy_is_left_for_the_sweep() {
+        let set = GrantSet::default();
+        let mut deny = scoped("deny-1", "ops", "web_fetch", "https://docs.rs", 5_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            6_000,
+        );
+        assert!(drained.is_empty());
+        assert_eq!(set.standing().len(), 1);
     }
 
     #[test]

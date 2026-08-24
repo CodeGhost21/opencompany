@@ -1,4 +1,4 @@
-//! Serves agent-authored internal dashboard pages (`Pages/<slug>/` in the
+//! Serves agent-authored internal dashboard pages (`pages/<slug>/` in the
 //! company workspace) to the operator console.
 //!
 //! ```text
@@ -25,7 +25,7 @@
 //! of `src/harness/` is); this module is always compiled, because the routes
 //! it serves must 404 rather than fall through to the console SPA shell even
 //! in a build without the harness. So it does not import from
-//! `harness::pages_tools` — it re-derives the same `Pages/<slug>/` layout from
+//! `harness::pages_tools` — it re-derives the same `pages/<slug>/` layout from
 //! the always-compiled constants in
 //! [`crate::company::workspace_scaffold`], the same way `harness::pages_tools`
 //! does.
@@ -131,16 +131,21 @@ fn valid_slug(slug: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Resolves every `Pages/<slug>/` bundle from one company-scoped tree read.
+/// Resolves every `pages/<slug>/` bundle from one company-scoped tree read.
 async fn all_pages(
     store: &dyn WorkspaceStore,
     company: &CompanyId,
 ) -> crate::Result<Vec<(String, PageBundle)>> {
     let nodes = store.tree(company).await?;
-    let Some(pages_root) = nodes
-        .iter()
-        .find(|n| n.parent_id.is_none() && n.kind == NodeKind::Folder && n.name == PAGES_ROOT)
-    else {
+    // Case-insensitive, matching `harness::pages_tools`: the root and the
+    // compiled node were `Pages/` and `Page.compiled.mjs` before the workspace's
+    // lowercase-dashed rule, and this route serves exactly what those tools
+    // wrote — including in a company created under the old spelling.
+    let Some(pages_root) = nodes.iter().find(|n| {
+        n.parent_id.is_none()
+            && n.kind == NodeKind::Folder
+            && n.name.eq_ignore_ascii_case(PAGES_ROOT)
+    }) else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
@@ -155,9 +160,9 @@ async fn all_pages(
             .iter()
             .filter(|n| n.parent_id.as_deref() == Some(folder.id.as_str()))
         {
-            if child.name == PAGE_MANIFEST_NAME {
+            if child.name.eq_ignore_ascii_case(PAGE_MANIFEST_NAME) {
                 bundle.manifest = Some(child.clone());
-            } else if child.name == PAGE_COMPILED_NAME {
+            } else if child.name.eq_ignore_ascii_case(PAGE_COMPILED_NAME) {
                 bundle.compiled = Some(child.clone());
             }
         }
@@ -223,8 +228,8 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
 /// The fixed HTML shell that mounts a page's compiled module (not agent
 /// content). Extracted from the route so the shell's load-bearing invariants
 /// — the React namespace import, the slug-relative bundle path, the absolute
-/// SDK CSS link, the import map — are unit-testable instead of living only in
-/// a route that needs a full workspace to exercise.
+/// SDK CSS link, the import map, the SDK load — are unit-testable instead of
+/// living only in a route that needs a full workspace to exercise.
 fn page_shell_html(slug: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -248,6 +253,7 @@ fn page_shell_html(slug: &str) -> String {
 <body>
 <div id="root"></div>
 <script type="module">
+  import "@opencompany/site";
   import * as React from "react";
   import * as ReactDOM from "react-dom/client";
   import Page from "./{slug}/bundle.mjs";
@@ -423,6 +429,21 @@ mod tests {
         assert!(
             html.contains("\"react/jsx-runtime\": \"/pages-sdk/react.mjs\""),
             "react/jsx-runtime must resolve to the SDK's React bundle"
+        );
+    }
+
+    #[test]
+    fn shell_loads_the_page_sdk_even_for_a_page_that_does_not_import_it() {
+        let html = page_shell_html("revenue");
+        // The toast click relay (`toast-click-through.ts`) forwards a click on
+        // a toast over this frame to the page SDK's own listener
+        // (`pages-sdk/client.ts`), so the SDK must be present in every frame —
+        // including a static page whose own bundle never imports it. Without
+        // the shell import, a relayed click into such a page would reach no
+        // listener and the control beneath the toast would stay blocked.
+        assert!(
+            html.contains("import \"@opencompany/site\";"),
+            "the shell must load the page SDK itself: {html}"
         );
     }
 }

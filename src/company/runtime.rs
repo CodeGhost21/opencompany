@@ -20,13 +20,17 @@ use tokio::task::JoinHandle;
 use crate::Result;
 use crate::app::config::AuthMode;
 use crate::error::OpenCompanyError;
+use crate::feedback::board::{
+    BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, VoteValue,
+};
 use crate::feedback::service::{FeedbackFiler, FeedbackResponse};
 use crate::feedback::store::FeedbackStore;
+use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Verdict,
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Mention, Verdict,
 };
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
@@ -265,18 +269,6 @@ pub struct CompanyRuntime {
     /// which is what makes a wedged cron fire and an agent-initiated run as
     /// stoppable from the console as a Run-button one.
     pub(crate) run_supervisor: crate::runtime::RunSupervisor,
-    /// Issue #245: the company's bound repositories and their host-side mirror
-    /// cache, when the runtime was built over a filesystem home.
-    ///
-    /// `None` is a real state, not an omission: the manager is rooted at
-    /// `companies/<slug>/repos/`, so a runtime assembled from injected ports
-    /// with no home (a test harness, an embedding) has no cache to manage and
-    /// the ops routes answer "not wired" rather than inventing a location.
-    ///
-    /// Compiled in every build. Nothing here is agent-facing — there is no
-    /// grant and no tool in this tier — so it needs no feature gate, and the
-    /// forge HTTP client it can optionally hold is the only part that does.
-    pub(crate) repos: Option<Arc<crate::runtime::RepoManager>>,
     /// Issue #243: the live single-use grants minted when an operator approves a
     /// tool call an agent was blocked from making.
     ///
@@ -407,6 +399,11 @@ fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> Comp
             .to_string(),
         steps: Vec::new(),
         task_id: None,
+        // A runtime notice addressed to whoever is reading it. It names no
+        // teammate and no person, so there is nothing to chip and nobody to
+        // ping.
+        mentions: Vec::new(),
+        mention_depth: 0,
     }
 }
 
@@ -466,7 +463,6 @@ impl CompanyRuntime {
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
-            repos: None,
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),
@@ -517,20 +513,6 @@ impl CompanyRuntime {
     /// caching it honest.
     pub fn auth_mode(&self) -> AuthMode {
         self.auth_mode
-    }
-
-    /// Issue #245: attach the repository manager after construction, wired by
-    /// the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the same
-    /// filesystem home the company's bundle hangs off.
-    pub fn set_repos(&mut self, repos: Arc<crate::runtime::RepoManager>) {
-        self.repos = Some(repos);
-    }
-
-    /// The company's bound repositories, if a mirror cache is wired. `None` on
-    /// a runtime built without a filesystem home, where the ops routes report
-    /// the surface as not wired.
-    pub fn repos(&self) -> Option<&Arc<crate::runtime::RepoManager>> {
-        self.repos.as_ref()
     }
 
     /// Issue #29: attach the workflow runner after construction. Wired by the
@@ -713,10 +695,18 @@ impl CompanyRuntime {
     ///   otherwise be covered — it is kept for the case where a turn's steerable
     ///   run outlives the cycle that started it.
     ///
-    /// Cheap by construction: a non-blocking `try_lock`, a map emptiness check,
-    /// and one `std::sync::Mutex` acquisition. The platform calls this once per
-    /// idle tenant per reconcile scan against a short timeout, so anything that
-    /// could block would turn a slow company into a stalled sweep.
+    /// Every arm fails closed: the two registries report **busy** on a poisoned
+    /// mutex rather than panicking, because a panic here reaches an axum handler
+    /// with no `CatchPanicLayer` and the manager's reading of a reset connection
+    /// is to park (issues #1133, #1239).
+    ///
+    /// Cheap by construction: a non-blocking `try_lock` and at most two
+    /// `std::sync::Mutex` acquisitions — one for the run supervisor's map (the
+    /// emptiness check *is* a lock) and one for the steer registry. `||`
+    /// short-circuits, so a company already holding its cycle lock takes
+    /// neither. The platform calls this once per idle tenant per reconcile scan
+    /// against a short timeout, so anything that could block would turn a slow
+    /// company into a stalled sweep.
     pub fn is_busy(&self) -> bool {
         self.serial.try_lock().is_err()
             || !self.run_supervisor.is_empty()
@@ -2003,6 +1993,22 @@ impl CompanyRuntime {
             // goes to the run or card the work belongs to, and a root belonging
             // to some other channel must not follow it there.
             let parent = self.resolvable_parent(conversation.parent, &chat_id).await;
+            // Scanned host-side from the reply text. The author is passed so a
+            // teammate naming itself in its own answer does not chip itself.
+            let reply_mentions = self
+                .resolve_mentions(
+                    &response.text,
+                    None,
+                    response
+                        .agent
+                        .as_deref()
+                        .map(|id| Actor {
+                            kind: ActorKind::Agent,
+                            id: id.to_string(),
+                        })
+                        .as_ref(),
+                )
+                .await;
             match self
                 .events
                 .append(
@@ -2020,6 +2026,10 @@ impl CompanyRuntime {
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
+                        mentions: reply_mentions,
+                        // Zero, and stays zero: no reply's mentions reach
+                        // dispatch, so no reply is ever a mention hop.
+                        mention_depth: 0,
                     },
                 )
                 .await
@@ -2546,6 +2556,17 @@ impl CompanyRuntime {
                 // cannot disagree.
                 broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
+                // Issue #1458: a standing **denial** is enforced only on the
+                // agent turn path (`standing_deny_applies`); the workflow gate
+                // does not honour `Deny`, and the resolve route's 400 refuses a
+                // workflow standing denial before the gate is touched. So the
+                // deny control is offered only where the runtime will actually
+                // enforce it — an agent subject — while the grant half above
+                // still covers a workflow, which can hold a standing permission.
+                broadly_deniable: matches!(
+                    crate::runtime::grants::subject_of(&p.effect),
+                    Some(crate::runtime::grants::GrantSubject::Agent(_))
+                ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
@@ -2583,13 +2604,64 @@ impl CompanyRuntime {
     /// previews the exact final issue body or files it (per consent). The
     /// scrubber fails closed, so a report that cannot be safely scrubbed is
     /// blocked rather than risked.
+    ///
+    /// `item_id` carries the previewed item on the confirm (Send-after-Preview)
+    /// path: the same item is finalized — never a second capture — so the report
+    /// appears once in the feedback family and the posted body is the exact
+    /// previewed bytes (see [`crate::feedback::service::finalize`]).
+    ///
+    /// A confirm closes two gaps a bare `finalize` call would leave open:
+    ///
+    /// * **Idempotent** — an item that already left this machine (its
+    ///   `issue_status` is recorded) returns the recorded result instead of
+    ///   filing or forwarding again, so a retried or double-submitted Send does
+    ///   not file a second issue or add a duplicate comment. A per-item lock
+    ///   held across the whole confirm serialises concurrent confirms of the
+    ///   same item, so the loser re-reads the winner's recorded result instead
+    ///   of both sending.
+    /// * **Preview-first** — an item captured by the feedback tool or the chat
+    ///   intent was never previewed and its words are hidden from the reports
+    ///   list, so confirming it by id would send a body nobody inspected.
+    ///   Confirms of such items are refused; the operator must preview first.
     pub async fn submit_feedback(
         &self,
         input: FeedbackInput,
         preview: bool,
+        item_id: Option<String>,
     ) -> Result<FeedbackResponse> {
-        let item = self.capture_feedback(input).await?;
         let manifest = self.store.load(&self.id).await?.map(|r| r.manifest);
+        // Held until the end of the call for a confirm, so the check below and
+        // the finalize that records the status are one critical section.
+        let mut _confirm_guard = None;
+        let item = match item_id {
+            Some(id) => {
+                // A nonexistent `item_id` is caller-supplied, so it must not
+                // mint an entry in the process-wide confirm-lock registry,
+                // which is never evicted. Validate existence before taking the
+                // lock; the feedback family is append-only, so an id that
+                // exists here still exists at the locked re-read below.
+                if self.feedback.get(&id).await?.is_none() {
+                    return Err(OpenCompanyError::NotFound(format!("feedback item {id}")));
+                }
+                _confirm_guard = Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
+                let item = self.feedback.get(&id).await?.expect(
+                    "feedback item exists: existence checked before taking the confirm lock",
+                );
+                if !preview {
+                    if item.issue_status.is_some() {
+                        return Ok(FeedbackResponse::recorded(&item));
+                    }
+                    if item.scrubbed_body.is_none() {
+                        return Ok(FeedbackResponse::blocked(
+                            &id,
+                            "this report was not previewed; preview it before sending".to_string(),
+                        ));
+                    }
+                }
+                item
+            }
+            None => self.capture_feedback(input).await?,
+        };
         crate::feedback::service::finalize(
             &self.feedback,
             self.secrets.as_ref(),
@@ -2616,6 +2688,133 @@ impl CompanyRuntime {
         let mut items = self.feedback.list().await?;
         items.sort_by_key(|item| std::cmp::Reverse(item.at_millis));
         Ok(items.iter().map(FeedbackSummary::from_item).collect())
+    }
+
+    /// The shared feedback board, one page at a time.
+    ///
+    /// The board is the hub's, not this runtime's: these four methods are a
+    /// proxy that lends the console the instance credential without ever
+    /// putting it in a browser. An instance provisioned with no credential has
+    /// no board — that is a `no_board` refusal, not an empty page, so the
+    /// console can hide the surface instead of rendering "nobody has asked for
+    /// anything yet" to every unprovisioned operator.
+    pub async fn feedback_board(&self, query: BoardQuery) -> Result<BoardPage> {
+        self.hub()?.list_board(query).await
+    }
+
+    /// One board item with its comments.
+    pub async fn feedback_board_item(&self, id: &str) -> Result<BoardDetail> {
+        self.hub()?.board_item(id).await
+    }
+
+    /// Casts (or retracts) this instance's vote on a board item.
+    pub async fn vote_feedback_board(&self, id: &str, value: VoteValue) -> Result<BoardItem> {
+        self.hub()?.vote_board_item(id, value).await
+    }
+
+    /// Comments on a board item as this instance's hub account.
+    pub async fn comment_feedback_board(&self, id: &str, body: &str) -> Result<BoardComment> {
+        self.hub()?.comment_board_item(id, body).await
+    }
+
+    /// The hub client, or the refusal an unprovisioned instance owes the caller.
+    fn hub(&self) -> Result<&dyn TinyHumansClient> {
+        self.filer
+            .tinyhumans
+            .as_deref()
+            .ok_or_else(|| crate::error::OpenCompanyError::TinyHumans {
+                code: "no_board".to_string(),
+                message: "this instance is not connected to a TinyHumans account".to_string(),
+            })
+    }
+
+    /// The company's display name — what the manifest calls it, falling back to
+    /// its id.
+    ///
+    /// Split out of [`Self::status`] for the one caller that needs the name
+    /// *before* anybody has signed in: `GET …/auth/config`, which draws the
+    /// sign-in heading. That route is public, so it must not be handed a status
+    /// snapshot — the pending-approval count alone is a fact about the company's
+    /// work, and the name is the only field on it a stranger may see.
+    ///
+    /// A store failure yields the id rather than an error: the name decorates a
+    /// screen whose real payload is the mode, and a heading is not worth
+    /// refusing to tell the console how this company signs people in.
+    pub async fn display_name(&self) -> String {
+        let named = self
+            .store
+            .load(&self.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.manifest.company.name);
+        match named {
+            Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+            _ => self.id.to_string(),
+        }
+    }
+
+    /// Resolve the mentions in one chat message body.
+    ///
+    /// The single seam both journal sites go through, so an operator message
+    /// and an agent reply cannot end up obeying different rules about who
+    /// `@ada` is. Loads the record and the user directory and hands them to
+    /// [`crate::runtime::mentions::resolve`], which does the rest without
+    /// touching IO.
+    ///
+    /// **Never fails a send.** A store that cannot answer means mentions cannot
+    /// be resolved, not that the message cannot be delivered — so a read error
+    /// yields an empty list and is logged. The message still lands; it simply
+    /// draws no chips and pings nobody, which is the same state every message
+    /// journaled before this feature existed is in.
+    pub async fn resolve_mentions(
+        &self,
+        text: &str,
+        supplied: Option<Vec<Mention>>,
+        sender: Option<&Actor>,
+    ) -> Vec<Mention> {
+        // Issue: on the operator-message path this runs BEFORE the journal
+        // append (`mention_responder` reads the resolved mentions off the
+        // journaled event, so the append cannot go first), which puts these
+        // two store reads in front of every chat POST's accept latency. Run
+        // together rather than sequentially — they read different stores and
+        // neither depends on the other's result — to keep that addition close
+        // to the cost of the slower read alone rather than the sum of both.
+        let (record, user_list) =
+            tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
+        let record = match record {
+            Ok(Some(record)) => record,
+            Ok(None) => return Vec::new(),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    error = %err,
+                    "[mentions] the company record could not be read; this message is \
+                     journaled with no mentions"
+                );
+                return Vec::new();
+            }
+        };
+        let mut users = user_list.unwrap_or_else(|err| {
+            tracing::warn!(
+                company = %self.id,
+                error = %err,
+                "[mentions] the user directory could not be read; only teammates and \
+                 desks are resolvable on this message"
+            );
+            Vec::new()
+        });
+        // Suspended users are retained only for attribution and are refused on
+        // every request — they must not be a live mention target here either.
+        users.retain(|u| u.status == crate::ports::users::UserStatus::Active);
+        // Sorted by the same stable key `GET .../chat/mentionables` uses before
+        // it mints slugs (`user_slugs`), so a collision between two same-named
+        // users gets the same `-2`/`-3` suffix here that the picker advertised —
+        // an unsorted `UserStore` order (most-recently-created first) could
+        // otherwise resolve `@sam-2` to a different person than the one the
+        // picker showed under that label.
+        users.sort_by(|a, b| a.id.cmp(&b.id));
+        crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
     }
 
     /// A status snapshot, loading the company record for name and lifecycle.
@@ -3030,6 +3229,8 @@ mod tests {
         use crate::server::chat_history::owns;
 
         let reply = |chat_id: String| CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id,
             agent_id: "copywriter".to_string(),
@@ -3167,6 +3368,33 @@ mod tests {
             assert!(runtime.is_busy(), "a registered steer run must report busy");
         }
         assert!(!runtime.is_busy(), "the steer guard must clear it on drop");
+    }
+
+    /// A poisoned run supervisor must make `is_busy` report **busy**.
+    ///
+    /// The predicate's advertised invariant is that it fails closed, and #1133
+    /// only delivered that for two of its three sources: `steer.any_inflight`
+    /// was made poison-tolerant, but the `run_supervisor` arm still reached a
+    /// `.expect` through `len`. `GET /healthz/busy` has no `CatchPanicLayer`, so
+    /// that panic reset the connection, the manager read it as "cannot tell",
+    /// and its default is to park — losing the work the endpoint exists to
+    /// protect (issue #1239).
+    ///
+    /// Outside any feature gate on purpose, matching
+    /// `is_busy_sees_every_source_of_work`: the run supervisor is wired on the
+    /// default build, and this must not be a test that only CI's `openhuman`
+    /// lane runs.
+    #[tokio::test]
+    async fn is_busy_fails_closed_on_a_poisoned_run_supervisor() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+        assert!(!runtime.is_busy(), "an idle runtime must not report busy");
+
+        runtime.run_supervisor().poison_for_test();
+
+        assert!(
+            runtime.is_busy(),
+            "a poisoned run supervisor must report busy rather than panic in the handler"
+        );
     }
 
     async fn runtime_and_record() -> (
@@ -3792,6 +4020,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "pay the invoice".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
@@ -3806,6 +4035,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),
@@ -3865,6 +4095,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "and another thing".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
@@ -3959,6 +4190,7 @@ mod tests {
                     .append(
                         &rt.id,
                         CompanyEvent::OperatorMessage {
+                            mentions: Vec::new(),
                             text: "ship it".into(),
                             by: None,
                             chat: chat.map(str::to_string),
@@ -3990,6 +4222,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),

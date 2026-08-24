@@ -13,7 +13,15 @@ import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type BoardComment,
+  type BoardDetail,
+  type BoardItem,
+  type BoardPage,
+  type BoardQuery,
+  type BoardVote,
   type ReadMarker,
+  type MentionablesResponse,
+  type PresenceListResponse,
   type ReadStateResponse,
   type ApiErrorBody,
   type WorkflowProblem,
@@ -138,6 +146,26 @@ export class OpenCompanyClient {
   /** Whether a specific company is being operated (vs single-company mode). */
   get isSingleCompany(): boolean {
     return this.defaultCompany === null;
+  }
+
+  /**
+   * Whether this client sends a **platform** bearer.
+   *
+   * Asked by the surfaces that offer `PlatformScope` routes — `suspend` and
+   * `archive` (issue #1401). Those resolve through `resolve_claims`, which
+   * cannot return a human, so a console authenticating as a person through the
+   * session cookie is refused by construction rather than by policy: there is
+   * no credential it could hold, and no setting an operator could change, that
+   * would let the call through. A control for one of them is only honest on a
+   * client that answers `true` here.
+   *
+   * True does not promise the call succeeds — the bearer still has to carry the
+   * `platform` scope, and a tenant token without it gets a `403`. That is a
+   * configuration mistake with a legible answer, which is a different thing
+   * from an unreachable button.
+   */
+  get carriesPlatformBearer(): boolean {
+    return Boolean(this.token);
   }
 
   /** The route prefix for `company`, for callers building their own paths. */
@@ -429,12 +457,12 @@ export class OpenCompanyClient {
      * `"workflow"` say what the card it opens produces, `"chat"` says it is not
      * a request for work and no card should be opened for it.
      *
-     * Everything except `"once"` reaches the wire; `"once"` and the default are
-     * sent as *nothing at all*. That is what keeps "Do it once" the default: an
-     * unmarked message posts the exact body shape it posted before any of these
-     * controls existed, so the host cannot tell one from a pre-#580 client —
-     * the same omitted-field compatibility rule the deliverable field follows
-     * everywhere (see `CreateTask.deliverable`).
+     * Everything except `"once"` reaches the wire; `"once"` and no selection
+     * are sent as *nothing at all*. That preserves the historical wire shape:
+     * an unmarked message posts exactly what it did before any of these controls
+     * existed, so the host can apply its normal triage without a browser-asserted
+     * override — the same omitted-field compatibility rule the deliverable field
+     * follows everywhere (see `CreateTask.deliverable`).
      *
      * One key, not two. `"chat"` rides `deliverable` rather than arriving as a
      * second `intent` field, so a body cannot claim "build me the workflow" and
@@ -603,6 +631,104 @@ export class OpenCompanyClient {
   }
 
   /**
+   * Everything an `@` can name. Presence uses only `people`, for the
+   * user-id → label map the live frames deliberately do not carry.
+   *
+   * A host that predates this route answers 404; callers treat that as an
+   * empty directory rather than throwing on load.
+   */
+  mentionables(company?: string | null): Promise<MentionablesResponse> {
+    return this.request<MentionablesResponse>(
+      "GET",
+      `${this.scope(company)}/chat/mentionables`,
+    );
+  }
+
+  /** Who is present on this replica right now. */
+  presence(company?: string | null): Promise<PresenceListResponse> {
+    return this.request<PresenceListResponse>("GET", `${this.scope(company)}/presence`);
+  }
+
+  /**
+   * A heartbeat, and what to appear as.
+   *
+   * The body deliberately carries **no user id**: the host takes the subject
+   * from the session, so no caller can move somebody else's dot. `consoleId`
+   * is not an identity either — it is this tab's opaque lease key, so closing
+   * one of several open tabs drops only that tab's lease rather than logging
+   * every tab for this person out (see `usePresence`'s `consoleId`).
+   */
+  announcePresence(
+    status: "online" | "away" | "offline",
+    company?: string | null,
+    consoleId?: string,
+  ): Promise<void> {
+    return this.request<void>("PUT", `${this.scope(company)}/presence`, {
+      status,
+      ...(consoleId ? { consoleId } : {}),
+    });
+  }
+
+  /**
+   * Clear this console's dot on the way out.
+   *
+   * Goes through `this.transport`, the same seam every other call on this
+   * class uses — **not** a direct `fetch`, which this used to be. A desktop
+   * console's webview cannot satisfy this route on its own even with the
+   * right headers: it is cross-origin with the host (so a direct request
+   * needs CORS the host does not grant it) and the device credential lives
+   * only in the Rust core's keychain, never in JS. `ProxyTransport` is what
+   * gets both right, and only routing through `this.transport` reaches it.
+   *
+   * The one thing this needs beyond an ordinary request — surviving the
+   * document going away, since this fires from `pagehide` — is
+   * `keepalive: true`, threaded through `TransportRequest` for exactly this
+   * call. `BrowserTransport` forwards it to `fetch`'s own `keepalive` option;
+   * `ProxyTransport` ignores it, because a Tauri `invoke` is core-process IPC
+   * with no equivalent teardown-survival problem. `sendBeacon` would be the
+   * usual browser-only tool here but cannot issue a `DELETE` or run through
+   * the desktop bridge at all.
+   *
+   * Carries the same session and bearer headers `request` would attach —
+   * `credentials: "include"` alone (still set unconditionally inside
+   * `BrowserTransport`) only carries a same-origin cookie, and a console
+   * authenticated cross-origin holds its session in
+   * `x-opencompany-session`/`authorization` instead.
+   *
+   * Best-effort by design, and allowed to fail silently: if it does not land,
+   * the host's lease expires the dot within a few minutes anyway. That is the
+   * whole reason presence is a lease — no disconnect path has to be correct.
+   */
+  disconnectPresenceBeacon(company?: string | null, consoleId?: string): void {
+    const query = consoleId ? `?consoleId=${encodeURIComponent(consoleId)}` : "";
+    void this.transport
+      .request({
+        method: "DELETE",
+        url: `${this.baseUrl}${this.scope(company)}/presence${query}`,
+        headers: this.authHeaders(),
+        keepalive: true,
+      })
+      .catch(() => {
+        // Best-effort by design; see this method's doc comment.
+      });
+  }
+
+  /**
+   * Say this console is typing. Fire-and-forget: an undelivered ping is not
+   * worth a retry, and the indicator expires on its own regardless.
+   */
+  typing(
+    chatId: string,
+    parentId?: string,
+    company?: string | null,
+  ): Promise<void> {
+    return this.request<void>("POST", `${this.scope(company)}/chat/typing`, {
+      chatId,
+      ...(parentId ? { parentId } : {}),
+    });
+  }
+
+  /**
    * Moves one channel's read floor forward.
    *
    * The host's write is monotonic, and it answers with where the marker
@@ -648,18 +774,16 @@ export class OpenCompanyClient {
   async resolveApproval(
     approvalId: string,
     verdict: Verdict,
-    note?: string,
+    _note?: string,
     company?: string | null,
     options: { detach?: boolean; scope?: GrantScope } = {},
   ): Promise<ChatResponse | ResolveReceipt> {
     const body: {
       verdict: Verdict;
-      note?: string;
       detach?: boolean;
       scope?: "once" | "tool";
       expires_in_millis?: number;
     } = { verdict };
-    if (note) body.note = note;
     if (options.detach) body.detach = true;
     // Issue #374. The `once` scope is sent as *nothing at all*, not as
     // `scope: "once"`: the omitted-field form is what an old host understands,
@@ -709,6 +833,51 @@ export class OpenCompanyClient {
   }
 
   /**
+   * One page of the shared feedback board.
+   *
+   * Rejects with a 404 `tinyhumans_no_board` on a host with no TinyHumans
+   * credential — there is no board to show, which is a different thing from an
+   * empty one, so the caller hides the surface instead of rendering "nobody has
+   * asked for anything yet".
+   */
+  feedbackBoard(query: BoardQuery = {}, company?: string | null): Promise<BoardPage> {
+    const search = new URLSearchParams();
+    if (query.sort) search.set("sort", query.sort);
+    if (query.kind) search.set("type", query.kind);
+    if (query.status) search.set("status", query.status);
+    if (query.page !== undefined) search.set("page", String(query.page));
+    if (query.limit !== undefined) search.set("limit", String(query.limit));
+    const suffix = search.toString() ? `?${search}` : "";
+    return this.request<BoardPage>("GET", `${this.scope(company)}/feedback/board${suffix}`);
+  }
+
+  /** One board item with its comments. */
+  feedbackBoardItem(id: string, company?: string | null): Promise<BoardDetail> {
+    return this.request<BoardDetail>(
+      "GET",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}`,
+    );
+  }
+
+  /** Casts (or, with `0`, retracts) this instance's vote. Returns the new row. */
+  voteFeedbackBoard(id: string, value: BoardVote, company?: string | null): Promise<BoardItem> {
+    return this.request<BoardItem>(
+      "POST",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}/vote`,
+      { value },
+    );
+  }
+
+  /** Comments on a board item. Returns the stored comment. */
+  commentFeedbackBoard(id: string, body: string, company?: string | null): Promise<BoardComment> {
+    return this.request<BoardComment>(
+      "POST",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}/comments`,
+      { body },
+    );
+  }
+
+  /**
    * The host's runtime spec. Unauthenticated and company-agnostic, so it sits
    * outside `scope()`; the console reads `cycles_available` from it to tell
    * whether this instance is provisioned with a TinyHumans credential.
@@ -732,7 +901,18 @@ export class OpenCompanyClient {
    * callers fall back to a local-only add.
    */
   addTeamMember(
-    input: { name: string; role: string; description?: string; budgetUsdDaily?: number },
+    input: {
+      name: string;
+      role: string;
+      description?: string;
+      budgetUsdDaily?: number;
+      /**
+       * Optional persona instructions to give the teammate at birth (issue
+       * #1530). Omitted keys are left off the wire, so a caller that does not
+       * collect instructions changes nothing.
+       */
+      instructions?: string;
+    },
     company?: string | null,
   ): Promise<TeamMemberDto> {
     return this.request<TeamMemberDto>("POST", `${this.scope(company)}/team`, input);
@@ -776,10 +956,12 @@ export class OpenCompanyClient {
    * null` clears the instructions and `description: undefined` leaves them,
    * which is why the two must not be collapsed on the way in.
    *
-   * The host refuses a manifest teammate with a 409 — its fields live in the
-   * version-controlled `company.toml`, and the console does not rewrite that.
-   * Ask `getAgent` first: its `editable` list is the host's own statement of
-   * which fields this call will accept.
+   * A manifest teammate is editable too: the host stores the change as an
+   * override on the company record and never rewrites `company.toml`, including
+   * persona instructions (issue #1530). `instructions: null` clears that
+   * override and restores the blueprint value. Ask `getAgent` first — its
+   * `editable` list is the host's own statement of which fields this call will
+   * accept, and `tools` is admin-only.
    */
   updateAgent(
     agentId: string,
@@ -834,7 +1016,11 @@ export class OpenCompanyClient {
     );
   }
 
-  /** Remove an operator-added teammate. 409s for a manifest teammate (can't be removed here). */
+  /**
+   * Remove a teammate. A blueprint teammate is removed by tombstone rather than
+   * by rewriting `company.toml`, so it works for both kinds; the only refusal is
+   * a `409` on the company's last teammate.
+   */
   removeTeamMember(agentId: string, company?: string | null): Promise<void> {
     return this.request<void>(
       "DELETE",

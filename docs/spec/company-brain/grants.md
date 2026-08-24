@@ -66,6 +66,27 @@ epoch-millis deadline, capped at 7 days server-side — a request past the cap i
 a **400, never a silent clamp**, because quietly shortening a duration would
 leave the operator believing a permission is live when it lapsed days earlier.
 
+The same standing-policy record also carries a **verdict**. Approving a card
+with a standing scope creates a standing approval; declining it with that scope
+creates a standing **denial**. A denial is an agent-only refusal for the same
+`(subject, tool, scope)` the card showed: matching calls are rejected until the
+policy expires or is revoked, rather than being parked again. Workflow gate
+cards cannot mint standing denials, because the workflow path does not enforce
+that verdict; the resolve route rejects that combination with a 400 and leaves
+the card parked for a one-time denial instead.
+
+Standing approvals and denials are mutually exclusive for a scope. When a new
+standing policy is minted, any live opposite-polarity policy whose subject and
+tool match and whose recorded scope overlaps the new scope is journaled as
+revoked before it is removed from the live set. Thus the newest operator
+decision wins, while policies for different hosts or other non-overlapping
+scopes coexist. Overlap is symmetric: a wildcard policy (scope `None`) shadows
+every policy for the same tool in either direction. A wildcard legacy policy
+is superseded by any newer scoped decision, and a wildcard **new** policy
+supersedes every older scoped one — the newest decision is the whole standing
+contract for that tool, rather than leaving the older scoped policy
+listed-but-inert until the wildcard expires and resurrects it.
+
 Expiry is enforced at **redemption**, under the same lock as the match, and also
 swept on the scheduler's maintenance tick. The sweep is housekeeping and an
 operator notice; it is never the enforcement, or "for one hour" would mean
@@ -167,6 +188,35 @@ The tier composes with the Composio read/send reclassification rather than
 depending on it: a Composio read is `Grantable` today while still carrying
 `Reach::Consequence`, and reclassifying its *reach* leaves its standing alone,
 so it runs unattended under `auto` either way.
+
+#### And on the effect gate (issue #1454)
+
+Everything above is the **tool** gate. The **effect** gate —
+`ManifestApprovalGate`, which decides the native effects the runtime performs
+itself — is a second dispatch on the same `[policy].mode` word, and #560 gave it
+no `auto` arm. `auto` fell into its fail-safe catch-all, so the tier every
+provisioned company boots on parked *every* native effect, behaving exactly like
+`readonly` and strictly stricter than the `supervised` tier below it on the
+ladder. Nothing caught it because a tier with no arm and a tier that decided to
+park return the same decision, and every gate test named a single mode.
+
+It has a named arm now, and that arm applies the
+[supervised checkpoint taxonomy](approvals.md#checkpoint-taxonomy) unchanged.
+That is not a placeholder. The split `auto` needs on the tool path is
+`Standing::Grantable` — the sandbox writes that stay inside the company — and
+the effect taxonomy has no equivalent: every group it parks leaves the company
+or spends money, which is the line `auto` advertises stopping at, and its one
+inside-the-company group (**Other**) is already allowed under `supervised`. So
+there is nothing left for `auto` to loosen there.
+
+The stricter reading — park `Spend`/`Send`/`Hire` unconditionally, withholding
+`supervised`'s cap relief and established-thread relief — was considered and
+rejected: it inverts the ladder a second time, parking a $1 spend and a reply on
+a running thread that the tier *below* waves through.
+
+Two properties are pinned by tests rather than by this prose: every word in
+`POLICY_MODES` reaches a named arm, and permissiveness is monotonic up the
+ladder for every branch of the taxonomy.
 
 `auto` is **not** the default. Issue #560 argues it should become one, but
 `default_policy_mode()` returning it would change behaviour for every existing

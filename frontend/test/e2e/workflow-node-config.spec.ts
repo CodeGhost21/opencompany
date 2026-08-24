@@ -69,7 +69,7 @@ test("authoring a tool_call node's config through the form round-trips to the ho
     await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
 
     // Name the workflow.
-    await dialog.getByLabel("Id", { exact: true }).fill(id);
+    await dialog.getByLabel("Workflow ID", { exact: true }).fill(id);
     await dialog.getByLabel("Name", { exact: true }).fill(name);
 
     // The starter trigger row is already `start`. Add a second node and make it

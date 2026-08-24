@@ -14,14 +14,17 @@ import {
 } from "@/api/types";
 import {
   ApprovalHeadline,
+  DeclineScopeControl,
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
   useAskerNames,
+  useApprovalThreadLinks,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
+import { useStableList } from "@/hooks/use-stable-list";
 import {
   approvedByRuntimeLine,
   approvedLine,
@@ -154,7 +157,21 @@ export function ApprovalsView({
     () => (focusTaskId === null ? approvals : approvalsForTask(approvals, focusTaskId)),
     [approvals, focusTaskId],
   );
+  /**
+   * The same rows, but in a pointer-stable order (#1414).
+   *
+   * A poll swaps `visible` wholesale every 5s, and mapping that straight to
+   * cards let the queue reflow under the operator's pointer — a card removed
+   * above the pointer slid the next card's Approve button under an in-flight
+   * click. `useStableList` holds the rendered order (and holds removals) for as
+   * long as the pointer is over the queue or focus is inside it, then
+   * reconciles to the latest poll the moment the operator moves away. Every
+   * branch below reads `rows` rather than `visible` so the count, the empty
+   * state and the list all agree on the one frozen view.
+   */
+  const { items: rows, containerProps: queueHold } = useStableList(visible);
   const askerNames = useAskerNames(client, company, approvals);
+  const threadLinks = useApprovalThreadLinks(client, company, rows);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
   /**
    * How many rows each turn's batch still has waiting (#842).
@@ -333,7 +350,7 @@ export function ApprovalsView({
           ) : (
             <UnreadableApprovals onRetry={() => void feed.refresh()} />
           )
-        ) : visible.length === 0 ? (
+        ) : rows.length === 0 ? (
           focusTaskId !== null ? (
             <ClearedForTask />
           ) : (
@@ -343,9 +360,9 @@ export function ApprovalsView({
           <>
             <div className="mb-4 flex items-baseline justify-between">
               <h2 className="text-sm font-medium text-muted-foreground">
-                {visible.length === 1
+                {rows.length === 1
                   ? "1 thing needs your approval"
-                  : `${visible.length} things need your approval`}
+                  : `${rows.length} things need your approval`}
               </h2>
             </div>
             {/* #971: nothing may vanish unannounced. Requests now age out on
@@ -357,13 +374,14 @@ export function ApprovalsView({
               Each one has a deadline. Anything still undecided by then is
               declined on its own, and the work behind it moves on.
             </p>
-            <div className="flex flex-col gap-3">
-              {visible.map((a) => (
+            <div className="flex flex-col gap-3" {...queueHold}>
+              {rows.map((a) => (
                 <ApprovalCard
                   key={a.id}
                   approval={a}
                   now={now}
                   askerNames={askerNames}
+                  thread={threadLinks.get(a.id)}
                   deciding={inFlight.get(a.id) ?? null}
                   batchIndex={batchPos.get(a.id)?.index ?? 1}
                   batchTotal={batchPos.get(a.id)?.total ?? 1}
@@ -515,7 +533,7 @@ function StandingPermissions({
     <section className="mt-8">
       <h2 className="mb-1 text-sm font-medium text-muted-foreground">Standing permissions</h2>
       <p className="mb-3 text-xs text-muted-foreground">
-        Tools you've let a teammate use without asking each time. Each one expires on its own;
+        Tools you've allowed or blocked without asking each time. Each one expires on its own;
         you can end it sooner.
       </p>
       <div className="flex flex-col gap-2">
@@ -531,7 +549,7 @@ function StandingPermissions({
                   <p className="text-xs text-muted-foreground">
                     {askerNames.get(g.agent) ?? g.agent} ·{" "}
                     {expired ? "expired" : `expires ${untilLabel(g.expires_at_millis, now)}`} ·
-                    granted {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
+                    {g.verdict === "deny" ? "declined" : "granted"} {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
                   </p>
                 </div>
                 <Button
@@ -546,7 +564,7 @@ function StandingPermissions({
                   }}
                 >
                   {busy ? <Loader2 className="size-4 animate-spin" /> : <X className="size-4" />}{" "}
-                  Revoke
+                  Remove
                 </Button>
               </CardContent>
             </Card>
@@ -585,13 +603,16 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
  *
  * **An old host degrades to the pre-#372 card by construction.** It omits
  * `payload` and `agent` from the wire, so the payload block and the "Asked by"
- * line simply do not render and what is left is the headline, the amount and
- * the relative time — exactly what shipped before.
+ * line simply do not render when the action is named. An unlabelled native
+ * action instead says that no further details were supplied (#1419), because
+ * leaving its generic headline alone would not distinguish one request from
+ * another.
  */
-function ApprovalCard({
+export function ApprovalCard({
   approval: a,
   now,
   askerNames,
+  thread,
   deciding,
   batchIndex,
   batchTotal,
@@ -600,6 +621,7 @@ function ApprovalCard({
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  thread?: import("@/components/approval-card").ApprovalThreadLink | null;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
   /**
@@ -620,49 +642,23 @@ function ApprovalCard({
   // card decided without touching the control behaves exactly as it did before
   // #374 — the scope is opt-in at every level, including this one.
   const [scope, setScope] = useState<GrantScope>({ kind: "once" });
+  const [declineScope, setDeclineScope] = useState<GrantScope>({ kind: "once" });
 
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
   return (
     <Card data-approval-id={a.id}>
       <CardContent className="flex flex-col gap-3 py-4">
-        <ApprovalHeadline
-          approval={a}
-          /* Disabled on THIS card's own state only — a decision in flight on
-             another card leaves these live. That is the whole of #373's
-             first cause. */
-          actions={
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={deciding !== null}
-                /* A decline never carries a scope — there is nothing to grant,
-                   and the host refuses the pairing anyway. */
-                onClick={() => onDecide("deny", { kind: "once" })}
-              >
-                {deciding === "deny" ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <X className="size-4" />
-                )}{" "}
-                Decline
-              </Button>
-              <Button
-                size="sm"
-                disabled={deciding !== null}
-                onClick={() => onDecide("approve", scope)}
-              >
-                {deciding === "approve" ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Check className="size-4" />
-                )}{" "}
-                Approve
-              </Button>
-            </>
-          }
-        />
+        {/* Issue #1406: the headline no longer carries the decide buttons.
+            Approve and Decline used to sit here, level with the title and above
+            everything an operator reads to decide — the payload, and the scope
+            control that changes what Approve even means. On a tall card the
+            scope control was ~200px below the button, or off-screen entirely,
+            so the commit affordance was reachable before the evidence was seen.
+            The buttons now live in a footer row below the scope control, so the
+            card reads what will happen → what it will do → who asked and by
+            when → decide, the order every working consent pattern uses. */}
+        <ApprovalHeadline approval={a} />
 
         {/* Issue #596: for a workflow pre-publish gate, show the VERBATIM content
             the run is about to publish — the draft awaiting sign-off — above the
@@ -679,11 +675,13 @@ function ApprovalCard({
           onChange={setScope}
           disabled={deciding !== null}
         />
+        <DeclineScopeControl approval={a} scope={declineScope} onChange={setDeclineScope} disabled={deciding !== null} />
 
         <ApprovalMeta
           approval={a}
           now={now}
           askerNames={askerNames}
+          thread={thread}
           /* Honest copy for a request that spans an agent turn (#373): an
              approve is not done when the button stops spinning, it is handed
              to the agent. A decline IS terminal, so it only has to record. */
@@ -701,6 +699,43 @@ function ApprovalCard({
                 : undefined
           }
         />
+
+        {/* The decide footer (#1406) — deliberately the LAST thing in the card,
+            after the scope control it depends on. Disabled on THIS card's own
+            state only; a decision in flight on another card leaves these live,
+            which is the whole of #373's first cause. */}
+        <div
+          data-testid="approval-decide"
+          className="flex flex-wrap justify-end gap-2 border-t border-border pt-3"
+        >
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={deciding !== null}
+            /* A decline never carries a scope — there is nothing to grant,
+               and the host refuses the pairing anyway. */
+            onClick={() => onDecide("deny", declineScope)}
+          >
+            {deciding === "deny" ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <X className="size-4" />
+            )}{" "}
+            Decline
+          </Button>
+          <Button
+            size="sm"
+            disabled={deciding !== null}
+            onClick={() => onDecide("approve", scope)}
+          >
+            {deciding === "approve" ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Check className="size-4" />
+            )}{" "}
+            Approve
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

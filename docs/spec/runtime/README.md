@@ -29,6 +29,9 @@ Supporting docs:
   - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
     data root: the embedded runtime's root, the agent sandboxes, choosing the
     root, and migrating a legacy doubled install
+  - [workspace-names.md](workspace-names.md) — the one naming rule for
+    everything the runtime puts in a workspace (lowercase, dashed), where it is
+    applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
@@ -110,10 +113,6 @@ Supporting docs:
   it
 - [config.md](config.md) — configuration and the one-key story
 - [setup.md](setup.md) — the first-run setup flow that writes it
-- [repos.md](repos.md) — bound repositories: the host-side mirror cache, how a
-  credential reaches git without entering argv, the environment or any file, the
-  alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
-  of same-user confinement
 - [../security/agent-isolation.md](../security/agent-isolation.md) — the threat
   model behind that limit: what confines an agent today, what does not, and what
   a prompt-injected agent with `shell` can still do after every planned control
@@ -124,6 +123,10 @@ Supporting docs:
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
 - [hub-console.md](hub-console.md) — one console deployment operating many hosts
   on other origins: the carried session, CORS, and what it costs
+- [finance-console.md](finance-console.md) — the Finance section: Invoicing
+  (Chargebee) and Wallet (PayPal) as sub-pages, the host read plane that makes
+  provider data reachable from the console at all, and how an operator tests a
+  connection without billing a real customer
 - [connectors.md](connectors.md) — where the runtime runs: the four connectors
   (this computer, TinyHumans Cloud, a remote gateway, over SSH), why the choice
   is per host rather than per application, and what each one costs
@@ -182,7 +185,7 @@ port returns the crate `Result<T>`.
 | *(default)* | kernel, fs store, hosted brain client, operator API |
 | `tiny` | TinyAgents embedding (existing flag; used by stub brain and local workers) |
 | `sqlite` | SQLite store implementations |
-| `tinycortex` | TinyCortex `MemoryStore`/`ContextStore` adapters |
+| `tinymemory` | Hosted/null memory engine seam (`MemoryProvider` contract) |
 | `tinyplace` | tiny.place economy adapter and A2A routes |
 | `sidecar` | Node sidecar brain for self-hosters |
 

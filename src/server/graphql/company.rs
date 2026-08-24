@@ -28,7 +28,7 @@ use super::{
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyId;
 use crate::ports::types::TurnStep;
-use crate::server::chat_history::{self, MessageView, ReactionView, Viewer};
+use crate::server::chat_history::{self, MentionView, MessageView, ReactionView, Viewer};
 
 /// The aggregation-root handle over one company. See the module docs.
 pub struct CompanyGql {
@@ -306,14 +306,16 @@ impl CompanyGql {
                 budget_set_at_millis: attribution.map(|entry| entry.at_millis as f64),
             }
         };
-        let mut out: Vec<TeamMemberGql> = record
-            .manifest
-            .agents
+        // Resolved through the record for the same reason the caps are: a
+        // manifest teammate an operator edited from the console reads back as
+        // what it now is, here and in the REST `list_team`, identically.
+        let effective = record.effective_agents();
+        let mut out: Vec<TeamMemberGql> = effective
             .iter()
             .map(|agent| {
                 row(
                     &agent.id,
-                    None,
+                    agent.name.clone(),
                     agent.role.clone(),
                     agent.description.clone(),
                 )
@@ -554,6 +556,52 @@ pub struct MessageGql {
     /// Who reacted to this message with what (issue #364), one row per person
     /// per emoji. Empty when nobody has.
     pub reactions: Vec<MessageReactionGql>,
+    /// Who this message names, in reading order. Empty when it names nobody.
+    /// Same [`MessageView`] field the REST route reads, so the two surfaces
+    /// cannot disagree about who was mentioned.
+    pub mentions: Vec<MessageMentionGql>,
+}
+
+/// One mention on a history message. GraphQL mirror of the REST `mentions`
+/// array, so the two surfaces carry the same rows.
+#[derive(SimpleObject)]
+#[graphql(name = "MessageMention")]
+pub struct MessageMentionGql {
+    /// The literal span the author typed.
+    pub text: String,
+    /// Byte offset of `text` in the message body.
+    pub offset: u32,
+    /// Who was named, as a display label — never a raw user id.
+    pub label: String,
+    /// Whether the reading viewer is the one named (or was named by
+    /// `@everyone`).
+    pub mine: bool,
+    /// Whether this mention renders but pings nobody.
+    pub quiet: bool,
+}
+
+impl From<MentionView> for MessageMentionGql {
+    fn from(view: MentionView) -> Self {
+        MessageMentionGql {
+            text: view.text,
+            // Saturating rather than `as`: GraphQL has no 64-bit integer, and a
+            // silent wrap would put a chip at the wrong place in the text. An
+            // offset this large cannot occur in a chat message, so the clamp is
+            // unreachable — it is here so that if it ever is reached, the chip
+            // lands at the end rather than at a wrapped-around position.
+            //
+            // `i32::MAX`, not `u32::MAX`: the GraphQL spec defines `Int` as a
+            // signed 32-bit integer, so a `u32` value above `i32::MAX` is
+            // already out of range for the scalar this field is declared as
+            // and can fail serialization on the way out — the clamp exists
+            // for exactly this unreachable-in-practice case, so it needs to
+            // clamp to a value the wire type can actually carry.
+            offset: i32::try_from(view.offset).unwrap_or(i32::MAX) as u32,
+            label: view.label,
+            mine: view.mine,
+            quiet: view.quiet,
+        }
+    }
 }
 
 /// One person's reaction on a history message (issue #364). GraphQL mirror of
@@ -629,6 +677,11 @@ impl From<MessageView> for MessageGql {
                 .reactions
                 .into_iter()
                 .map(MessageReactionGql::from)
+                .collect(),
+            mentions: view
+                .mentions
+                .into_iter()
+                .map(MessageMentionGql::from)
                 .collect(),
         }
     }

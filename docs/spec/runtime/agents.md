@@ -81,8 +81,8 @@ Write for the reader, not the client.
 """
 prompt_files = ["prompts/house-style.md"]   # checked-in, bundle-relative
 context = [                                 # live workspace documents
-    "Brand/Brand voice.md",                 #   read only (the bare-string shorthand)
-    { path = "Agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
+    "brand/brand-voice.md",                 #   read only (the bare-string shorthand)
+    { path = "agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
 ]
 classes = ["evidence"]                      # routing exclusions — see below
 
@@ -116,7 +116,7 @@ agent's `workspace_write`/`workspace_create` scope.
 before this existed: `workspace_write`/`workspace_create` reach anywhere in the
 company's tree, as they always could. Declaring **at least one** write entry
 confines this agent's `workspace_write`/`workspace_create` to exactly the paths
-it declared, plus its own `Agents/<id>/` home, which stays writable regardless
+it declared, plus its own `agents/<id>/` home, which stays writable regardless
 — a role narrowed to a real access list must not also lose the ability to
 produce and revise its own work. See `src/harness/workspace_tools.rs` for the
 enforcement and why the pre-existing unconfined default is otherwise
@@ -156,12 +156,46 @@ An agent's system prompt is assembled in this order, and the order is a decision
 1. the generated **persona** — who this teammate is, at which company;
 2. its inline **`prompt`**;
 3. its **`prompt_files`** bodies;
-4. tool briefs (workspace, publishing, skills catalogue);
+4. tool briefs (workspace, ledgers, sandbox, publishing, skills catalogue);
 5. its routed **`context`** documents.
 
 Static material first, volatile last. The prompt prefix is what a provider cache
 reuses across turns, so a workspace note the operator edits between two turns
 must not invalidate the briefing behind it.
+
+### The sandbox brief
+
+Step 4 includes a **sandbox** brief (`harness::toolbelt::sandbox_brief`) naming
+the agent's own working directory and the tools that reach it: `file_read` /
+`file_write` / `edit` / `list` / `glob` / `grep` under the `files`/`docs` grant,
+`shell` and `read_workspace_state` under `shell`, and `apply_patch` /
+`git_operations` / `csv_export` under `code`. Each clause is emitted only under
+the grant that wired its tools, and an agent holding none of the three gets no
+section.
+
+It is not cosmetic. A granted tool the prompt never names is, in practice, a
+tool the agent does not use: asked to *write* something, an agent that had never
+been told it holds `file_write` recorded a task about writing it instead, and
+`shell` — wired since the exec cell — was named in no brief at all. The brief
+also states the path confinement the belt already enforces for the file/code
+tools (`exec_security` sets `workspace_only`, so an absolute path or a `../`
+escape is refused), because an agent that does not know it spends turns
+rediscovering it one refusal at a time. The shell clause is deliberately not
+framed that way: `action_dir` only sets the command's working directory, and a
+same-uid command can read anywhere the server can
+([agent-isolation.md](../security/agent-isolation.md)), so the brief describes
+the directory as where shell commands *start*, never as a jail.
+
+The `shell` clause tracks what was **wired**, not what was granted:
+`toolbelt::shell_tools` withholds the whole namespace when the per-agent audit
+logger cannot initialize, and the brief follows it rather than the grant.
+
+The `shell`/`code` clauses also track the per-turn capability tier
+(`capability_budget::resolve_filter`, live at `HarnessPool::ensure`): a fail-closed
+metering error or an exhausted budget makes `filter_by_capabilities` drop the
+matching tools from the vector `build_agent` hands to the builder, and
+`sandbox_brief_flags` withholds the matching clause for the same turn — so the
+brief never instructs an agent to call a tool the filter has already removed.
 
 Step 5 is resolved by the async caller before the (synchronous) agent build and
 fingerprinted over document **bodies**, so editing a routed note reaches the next
@@ -205,6 +239,40 @@ A `prompt_files` path may not escape `agents/`. The check is on path components,
 before touching the filesystem, rather than by canonicalizing: canonical
 comparison resolves symlinks, and whether a bundle is valid must not depend on
 how the checkout was laid out on the reading machine.
+
+### Seeing the assembled prompt
+
+A brief is the most editable thing in a bundle and used to be the least
+inspectable: reading one as the agent receives it meant running the company and
+reading a provider trace. `opencompany prompt` renders the same composition from
+a manifest alone.
+
+```sh
+./scripts/dump-prompt.sh --company companies/agentic_product_team
+./scripts/dump-prompt.sh --company <dir> --agent bug_triager       # one teammate
+./scripts/dump-prompt.sh --company <dir> --agent bug_triager --raw # bytes only
+./scripts/dump-prompt.sh --company <dir> --out /tmp/prompts        # a file each
+./scripts/dump-prompt.sh --company <dir> --json                    # machine-readable
+```
+
+The report names every section, where its bytes came from (a manifest field, a
+bundle file, a brief function), and the agent's effective grants — a missing
+brief is almost always a missing grant. `--raw` prints the concatenation exactly
+as the harness performs it, which is what makes it diffable against a real
+trace.
+
+**What it cannot render, it names.** Routed `context` bodies need a live
+workspace store, the skill catalogue needs a materialized bundle directory, the
+MCP brief needs a configured registry, and the vendored runtime's safety
+preamble and grounding suffix need a live `PromptContext`. Each appears under
+*Not rendered here* with the reason, so a section missing from the dump is
+visibly missing rather than invisibly absent.
+
+The wrapper exists for the feature flag: the harness owns the tool briefs and
+compiles only under `--features openhuman`, so calling the subcommand from a
+default build produces a shorter prompt that would otherwise look complete.
+Composition itself (`src/company/prompt_dump.rs`) is always compiled — a
+debugging surface that only exists in a feature build is one nobody runs.
 
 ### Budgets
 
@@ -338,6 +406,7 @@ rename can switch off is not a control.
 | --- | --- |
 | Bundle loading, `prompt_files` resolution | `src/company/agent_file.rs` |
 | Prompt composition and clamping | `src/company/prompt.rs` |
+| Rendering a composed prompt back out (`opencompany prompt`) | `src/company/prompt_dump.rs` |
 | Routing table and exclusions | `src/company/context_routing.rs` |
 | Roster type and constants | `src/company/types.rs` |
 | Manifest wiring and validation | `src/company/manifest.rs` |

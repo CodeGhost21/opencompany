@@ -114,6 +114,43 @@ fn get_i64(doc: &Document, key: &str) -> Result<i64> {
         .map_err(|e| mongo_err(format!("missing field {key}: {e}")))
 }
 
+/// Every label claiming a context document (issue #1300): the `labels` set,
+/// plus the legacy scalar `label` field — documents written before the set
+/// existed carry only the scalar, and new writes keep it as the first label so
+/// a downgraded binary still reads what it always read. Deduped, scalar first.
+/// Wraps an array-valued aggregation expression in a `$reduce` that drops
+/// duplicates while **preserving order** — `$setUnion` dedupes but reorders,
+/// and the context-chunk label list is read in order (the first claim is the
+/// one the legacy scalar `label` names).
+fn dedupe_preserving_order(input: Document) -> Document {
+    doc! {"$reduce": {
+        "input": input,
+        "initialValue": [],
+        "in": {"$cond": [
+            {"$in": ["$$this", "$$value"]},
+            "$$value",
+            {"$concatArrays": ["$$value", ["$$this"]]},
+        ]},
+    }}
+}
+
+fn doc_labels(doc: &Document) -> Vec<String> {
+    let mut labels = Vec::new();
+    if let Ok(scalar) = doc.get_str("label") {
+        labels.push(scalar.to_string());
+    }
+    if let Ok(set) = doc.get_array("labels") {
+        for value in set {
+            if let Some(label) = value.as_str()
+                && !labels.iter().any(|have| have == label)
+            {
+                labels.push(label.to_string());
+            }
+        }
+    }
+    labels
+}
+
 /// A unique index restricted to the documents that carry `present` at all
 /// (issue #697).
 ///
@@ -215,6 +252,11 @@ const JOURNAL: &str = "journal";
 /// imported — the gate that makes the import happen exactly once.
 const JOURNAL_IMPORTS: &str = "journal_imports";
 
+/// How many legacy run rows [`MongoStore::backfill_run_agent_ids`] migrates in
+/// one pass. Bounds the memory a first boot's migration holds and gives the
+/// server's own run writes room to interleave between passes.
+const BACKFILL_BATCH_SIZE: usize = 200;
+
 /// A single MongoDB database implementing all five storage ports.
 #[derive(Clone)]
 pub struct MongoStore {
@@ -236,6 +278,31 @@ impl MongoStore {
             senders: Arc::new(StdMutex::new(HashMap::new())),
         };
         store.ensure_indexes().await?;
+        // Issue #1573: give run documents written before the `agent_id` mirror
+        // existed one, so a per-teammate history is the whole history. Spawned
+        // rather than awaited: on a first boot the migration can touch every
+        // legacy run one row at a time, and storage initialization must not sit
+        // in front of `/healthz` (AGENTS.md:170). The sqlite backend heals
+        // synchronously because its migration is a single UPDATE; Mongo's desk
+        // lives inside a JSON string, so there is no equivalent and the cost is
+        // a bounded background churn. Best-effort for the same reason the
+        // orphan-blob sweep is — a store that will not boot is worse than one
+        // whose oldest run rows are not yet filterable by desk.
+        let backfill_store = store.clone();
+        tokio::spawn(async move {
+            match backfill_store.backfill_run_agent_ids().await {
+                Ok(0) => {}
+                Ok(filled) => tracing::info!(
+                    filled,
+                    "backfilled the agent id on run rows written before the column existed"
+                ),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "could not backfill run agent ids; a per-teammate run history will \
+                     under-report until the next boot"
+                ),
+            }
+        });
         // Reclaim workspace payloads whose node document never landed (issue
         // #553). Best-effort by design: the cost of skipping it is disk that is
         // already unreachable, and the cost of failing boot over it would be a
@@ -254,6 +321,75 @@ impl MongoStore {
         Ok(store)
     }
 
+    /// Copies `agentId` out of `run_json` into the indexed `agent_id` field for
+    /// every run document that predates it (issue #1573), returning how many
+    /// were filled.
+    ///
+    /// The MongoDB half of sqlite's `heal_runs_agent_id`, and it exists for the
+    /// same reason: a per-teammate run list that silently omitted every attempt
+    /// written before the upgrade would read as "this teammate has never run",
+    /// which is a wrong answer rather than a missing feature. Mongo cannot do
+    /// this server-side — the desk lives inside a **string** of JSON, not a
+    /// sub-document — so the rows are read back and rewritten one by one.
+    ///
+    /// The `$exists: false` probe finds rows written before the mirror column
+    /// existed and matches nothing once the backfill has run — but a first
+    /// boot can still hold a whole legacy collection's worth of work, so the
+    /// migration is batched. Each pass resumes from the previous batch's last
+    /// `_id`, so it never re-reads rows it has already migrated; each pass
+    /// collects at most [`BACKFILL_BATCH_SIZE`] rows, keeps them in memory
+    /// only long enough to fill them, then moves on. Bounded memory, and the
+    /// server's own run writes interleave between passes. Best-effort at the
+    /// call site for the same reason the orphan blob sweep is — a company
+    /// that will not start is worse than one whose oldest run rows are not
+    /// yet filterable by desk.
+    async fn backfill_run_agent_ids(&self) -> Result<usize> {
+        let runs = self.collection("runs");
+        let mut filled = 0usize;
+        // Resume where the last pass stopped. The probe has no leading
+        // `company_id`, so no compound index can serve it — restarting the
+        // scan per batch would re-examine every already-migrated row to reach
+        // the next legacy one. `_id` is the one index every document has, and
+        // the cursor advances in `_id` order, so the `$gt` bound is both cheap
+        // and lossless: everything at or before the watermark has been filled.
+        let mut after: Option<mongodb::bson::Bson> = None;
+        loop {
+            let mut filter = doc! {"agent_id": {"$exists": false}};
+            if let Some(id) = after.clone() {
+                filter.insert("_id", doc! {"$gt": id});
+            }
+            let mut cursor = runs
+                .find(filter)
+                .sort(doc! {"_id": 1})
+                .limit(BACKFILL_BATCH_SIZE as i64)
+                .await
+                .map_err(mongo_err)?;
+            let mut batch: Vec<(String, String, String)> = Vec::new();
+            while let Some(document) = cursor.try_next().await.map_err(mongo_err)? {
+                let record: crate::ports::runs::RunRecord =
+                    serde_json::from_str(&get_str(&document, "run_json")?)?;
+                batch.push((
+                    get_str(&document, "company_id")?,
+                    get_str(&document, "run_id")?,
+                    record.agent_id,
+                ));
+                after = document.get("_id").cloned();
+            }
+            if batch.is_empty() {
+                return Ok(filled);
+            }
+            for (company_id, run_id, agent_id) in &batch {
+                runs.update_one(
+                    doc! {"company_id": company_id.as_str(), "run_id": run_id.as_str()},
+                    doc! {"$set": {"agent_id": agent_id.as_str()}},
+                )
+                .await
+                .map_err(mongo_err)?;
+            }
+            filled += batch.len();
+        }
+    }
+
     /// Idempotent index creation — the MongoDB equivalent of the sqlite
     /// backend's `CREATE TABLE IF NOT EXISTS` migrations.
     async fn ensure_indexes(&self) -> Result<()> {
@@ -267,7 +403,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 35] = [
+        let plans: [(&str, IndexModel); 36] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -341,6 +477,10 @@ impl MongoStore {
             ("runs", unique(doc! {"company_id": 1, "run_id": 1})),
             // A card has many attempts, and many attempts share a status.
             ("runs", nonunique(doc! {"company_id": 1, "task_id": 1})),
+            // Issue #1573: and many attempts share a desk — the console's
+            // per-teammate run history. See `backfill_run_agent_ids` for why
+            // the field is on every document by the time this index matters.
+            ("runs", nonunique(doc! {"company_id": 1, "agent_id": 1})),
             ("runs", nonunique(doc! {"company_id": 1, "status": 1})),
             (
                 "run_steps",
@@ -609,6 +749,8 @@ impl CompanyStore for MongoStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_agent_edits: overlay.agent_edits,
+            overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
@@ -942,17 +1084,37 @@ impl ContextStore for MongoStore {
         let addr = content_address(&chunk.body);
         // Insertion order stands in for the sqlite backend's rowid ordering.
         let ord = self.next_seq(id, "context_ord").await?;
+        // Body + metadata land once and never move (first-write-wins per
+        // address); every put folds its label into the `labels` set — one
+        // claim per (addr, label), #1300 — so a byte-identical body stored
+        // under a second label keeps both claims.
+        //
+        // A pipeline rather than `$setOnInsert` + `$addToSet`, for the scalar
+        // `label`: `$setOnInsert` is skipped on a document that already
+        // exists, so a document that has somehow lost its scalar would gain a
+        // claim while staying scalar-less — and a pre-#1300 `list` reads that
+        // field with a hard error on absence, so a rollback would meet a
+        // document it cannot read. `$ifNull` restores it from this write
+        // instead, and keeps the existing one untouched when there is one.
+        let claims = dedupe_preserving_order(doc! {"$concatArrays": [
+            {"$ifNull": ["$labels", []]},
+            [chunk.label.as_str()],
+        ]});
         let result = self
             .collection("context_chunks")
             .update_one(
                 doc! {"company_id": id.as_ref(), "addr": &addr},
-                doc! {"$setOnInsert": {
-                    "label": &chunk.label,
-                    "body": &chunk.body,
-                    "len": chunk.body.len() as i64,
-                    "ord": ord as i64,
-                    "stored_ms": now_millis() as i64,
-                }},
+                vec![doc! {"$set": {
+                    "labels": claims,
+                    // `$ifNull` IS the first-write-wins rule: on an upsert
+                    // insert every field is missing and takes this write's
+                    // value; on an existing document each keeps what it has.
+                    "label": {"$ifNull": ["$label", chunk.label.as_str()]},
+                    "body": {"$ifNull": ["$body", chunk.body.as_str()]},
+                    "len": {"$ifNull": ["$len", chunk.body.len() as i64]},
+                    "ord": {"$ifNull": ["$ord", ord as i64]},
+                    "stored_ms": {"$ifNull": ["$stored_ms", now_millis() as i64]},
+                }}],
             )
             .with_options(UpdateOptions::builder().upsert(true).build())
             .await;
@@ -971,29 +1133,99 @@ impl ContextStore for MongoStore {
             .map_err(mongo_err)?;
         let mut out = Vec::new();
         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            let label = get_str(&doc, "label")?;
-            if label.starts_with(prefix) {
-                out.push(ChunkMeta {
-                    addr: ChunkAddr::new(get_str(&doc, "addr")?),
-                    label,
-                    len: get_i64(&doc, "len")? as usize,
-                    // Absent on documents written before the field existed;
-                    // those read as an unknown (`0`) store time rather than
-                    // failing the whole list.
-                    stored_at_millis: doc.get_i64("stored_ms").unwrap_or(0).max(0) as u64,
-                });
+            let addr = get_str(&doc, "addr")?;
+            let len = get_i64(&doc, "len")? as usize;
+            // Absent on documents written before the field existed; those
+            // read as an unknown (`0`) store time rather than failing the
+            // whole list. One document carries every label claiming its
+            // address, so the stamp is the address's first write — per-label
+            // stamps are an fs/sqlite refinement this backend does not keep.
+            let stored_at_millis = doc.get_i64("stored_ms").unwrap_or(0).max(0) as u64;
+            for label in doc_labels(&doc) {
+                if label.starts_with(prefix) {
+                    out.push(ChunkMeta {
+                        addr: ChunkAddr::new(addr.clone()),
+                        label,
+                        len,
+                        stored_at_millis,
+                    });
+                }
             }
         }
         Ok(out)
     }
 
     async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        // Address-level: the one document carries the body and every label
+        // claim, so they go together.
         let result = self
             .collection("context_chunks")
             .delete_one(doc! {"company_id": id.as_ref(), "addr": addr.as_ref()})
             .await
             .map_err(mongo_err)?;
         Ok(result.deleted_count > 0)
+    }
+
+    async fn delete_label(&self, id: &CompanyId, addr: &ChunkAddr, label: &str) -> Result<bool> {
+        let chunks = self.collection("context_chunks");
+        // Every label claiming this document, as an expression over both
+        // shapes a claim lives in: the legacy scalar `label` first, then the
+        // `labels` set.
+        let claim_union = doc! {"$concatArrays": [
+            {"$cond": [{"$ifNull": ["$label", false]}, ["$label"], []]},
+            {"$ifNull": ["$labels", []]},
+        ]};
+
+        // Label-scoped (#1300), as ONE atomic document operation per outcome
+        // — never a read followed by a write, and never an intermediate state
+        // a concurrent reader or writer can observe.
+        //
+        // First outcome: this label is the ONLY claim, so the whole document
+        // goes. `$setEquals` ignores order and duplicates, and the condition
+        // is evaluated by the server as part of the delete, so a concurrent
+        // put that adds a second claim first simply makes this match nothing
+        // — the check-then-delete race the callers' old snapshot guards
+        // carried, closed by construction rather than by a snapshot.
+        let reaped = chunks
+            .delete_one(doc! {
+                "company_id": id.as_ref(),
+                "addr": addr.as_ref(),
+                "$expr": {"$setEquals": [claim_union.clone(), [label]]},
+            })
+            .await
+            .map_err(mongo_err)?;
+        if reaped.deleted_count > 0 {
+            return Ok(true);
+        }
+
+        // Second outcome: other claims remain, so only this one is removed.
+        // The scalar is re-pointed at a survivor in the SAME update, and this
+        // branch can only run while a survivor exists — so the document is
+        // never left without a scalar `label`, which a pre-#1300 `list` reads
+        // with a hard error on absence. Deduped by `$reduce` rather than
+        // `$setUnion`, which would not preserve read order.
+        let survivors = dedupe_preserving_order(doc! {"$filter": {
+            "input": claim_union,
+            "cond": {"$ne": ["$$this", label]},
+        }});
+        let removed = chunks
+            .update_one(
+                doc! {
+                    "company_id": id.as_ref(),
+                    "addr": addr.as_ref(),
+                    // Only a document this label actually claims, so a match
+                    // IS the answer to "did the pairing exist" — and so the
+                    // pipeline can never touch a document it has no claim on.
+                    "$or": [{"label": label}, {"labels": label}],
+                },
+                vec![doc! {"$set": {
+                    "labels": survivors.clone(),
+                    "label": {"$first": survivors},
+                }}],
+            )
+            .await
+            .map_err(mongo_err)?;
+        Ok(removed.matched_count > 0)
     }
 
     async fn peek(
@@ -2179,6 +2411,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
                 "task_id": run.task_id.as_deref(),
+                "agent_id": run.agent_id.as_str(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
                 "created_ms": run.created_at_millis as i64,
@@ -2215,6 +2448,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
                     "task_id": run.task_id.as_deref(),
+                    "agent_id": run.agent_id.as_str(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
                     "created_ms": run.created_at_millis as i64,
@@ -2235,6 +2469,9 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut query = doc! {"company_id": company.as_ref()};
         if let Some(task_id) = &filter.task_id {
             query.insert("task_id", task_id.as_str());
+        }
+        if let Some(agent_id) = &filter.agent_id {
+            query.insert("agent_id", agent_id.as_str());
         }
         if !filter.statuses.is_empty() {
             let statuses: Vec<&str> = filter.statuses.iter().map(|s| s.as_str()).collect();
@@ -3941,7 +4178,7 @@ mod test {
     /// `rename_move` has to `$unset` `folder_path_key`, and a missing unset is
     /// invisible until somebody needs the vacated path again. The moved
     /// document would keep guarding the path it left, so the next publish that
-    /// wanted `Agents/cmo/task-42/` would be refused by an index entry
+    /// wanted `agents/cmo/task-42/` would be refused by an index entry
     /// describing a folder that is no longer there — the permanent outage this
     /// primitive exists to prevent, reintroduced by the fix itself.
     ///
@@ -4208,6 +4445,135 @@ mod test {
         drop_db(&store).await;
     }
 
+    /// Issue #1573: the backfill copies `agentId` out of `run_json` for rows
+    /// written before the mirror column existed, and does so in bounded batches
+    /// that re-probe between passes rather than holding the whole collection.
+    ///
+    /// Seeded directly into the `runs` collection with no `agent_id` field —
+    /// the exact shape a row predating the upgrade has — because it is not
+    /// reachable through the port: `create_run`/`put_run` always write the
+    /// mirror. The store is built as a bare struct, not through `connect`, so
+    /// no background backfill task shares the database with this one's
+    /// assertions.
+    #[tokio::test]
+    async fn backfill_fills_legacy_run_rows_in_bounded_batches() {
+        let uri = match std::env::var("OPENCOMPANY_TEST_MONGODB_URI") {
+            Ok(uri) => uri,
+            Err(_) => {
+                assert!(
+                    !required(),
+                    "OPENCOMPANY_TEST_MONGODB_REQUIRED is set but \
+                     OPENCOMPANY_TEST_MONGODB_URI is not"
+                );
+                eprintln!("skipping: OPENCOMPANY_TEST_MONGODB_URI is not set");
+                return;
+            }
+        };
+        let client = Client::with_uri_str(&uri).await.unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        let db_name = format!(
+            "oc_test_{}_{}_{}",
+            std::process::id(),
+            nonce,
+            DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let store = MongoStore {
+            db: client.database(&db_name),
+            senders: Arc::new(StdMutex::new(HashMap::new())),
+        };
+
+        let company = CompanyId::new("legacy-co");
+        let runs = store.collection("runs");
+        // More than one batch, so the re-probe loop is exercised — the rows past
+        // the first `BACKFILL_BATCH_SIZE` must be picked up by a later pass.
+        for i in 0..BACKFILL_BATCH_SIZE + 3 {
+            let agent = if i % 2 == 0 { "engineer" } else { "designer" };
+            let record = crate::ports::runs::RunRecord {
+                id: format!("legacy-{i}"),
+                company: company.clone(),
+                task_id: None,
+                agent_id: agent.to_string(),
+                chat_id: None,
+                attempt: 1,
+                status: crate::ports::runs::RunStatus::Succeeded,
+                trigger_event_seq: None,
+                created_at_millis: 1_700_000_000_000,
+                started_at_millis: None,
+                finished_at_millis: None,
+                error: None,
+                usage: Default::default(),
+                step_count: 1,
+            };
+            runs.insert_one(doc! {
+                "company_id": company.as_ref(),
+                "run_id": &record.id,
+                "run_json": serde_json::to_string(&record).unwrap(),
+            })
+            .await
+            .unwrap();
+        }
+        // A row that already carries the mirror (written through the port after
+        // the upgrade) must be neither touched nor counted.
+        let fresh = crate::ports::runs::RunRecord {
+            id: "fresh".to_string(),
+            company: company.clone(),
+            task_id: None,
+            agent_id: "engineer".to_string(),
+            chat_id: None,
+            attempt: 1,
+            status: crate::ports::runs::RunStatus::Pending,
+            trigger_event_seq: None,
+            created_at_millis: 1_700_000_000_000,
+            started_at_millis: None,
+            finished_at_millis: None,
+            error: None,
+            usage: Default::default(),
+            step_count: 0,
+        };
+        runs.insert_one(doc! {
+            "company_id": company.as_ref(),
+            "run_id": &fresh.id,
+            "agent_id": "engineer",
+            "status": "pending",
+            "attempt": 1i64,
+            "created_ms": 1_700_000_000_000i64,
+            "run_json": serde_json::to_string(&fresh).unwrap(),
+        })
+        .await
+        .unwrap();
+
+        let filled = store.backfill_run_agent_ids().await.unwrap();
+        assert_eq!(
+            filled,
+            BACKFILL_BATCH_SIZE + 3,
+            "every legacy row is filled; the fresh row is not counted"
+        );
+
+        // The mirror landed on disk, not just in the return value — one row from
+        // each batch's worth of desks.
+        let migrated = runs
+            .find_one(doc! {"run_id": "legacy-0"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(get_str(&migrated, "agent_id").unwrap(), "engineer");
+        let later = runs
+            .find_one(doc! {"run_id": "legacy-1"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(get_str(&later, "agent_id").unwrap(), "designer");
+
+        // A second pass has nothing left to do — the `$exists: false` probe is
+        // exhausted.
+        assert_eq!(store.backfill_run_agent_ids().await.unwrap(), 0);
+
+        drop_db(&store).await;
+    }
+
     async fn drop_db(store: &MongoStore) {
         let _ = store.db.drop().await;
     }
@@ -4434,6 +4800,7 @@ mod test {
 
         for id in [&owned, &orphan] {
             let record = CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -4444,6 +4811,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -4509,6 +4877,7 @@ mod test {
 
         for (id, tenant) in [(&id_a, "tenant-a"), (&id_b, "tenant-b")] {
             let record = CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -4519,6 +4888,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -4631,6 +5001,17 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// Issue #1505. The port holds this tenant's inference credential, its MCP
+    /// OAuth tokens and its SMTP password, and had no conformance case on any
+    /// backend until this one — on the backend a hosted tenant actually runs,
+    /// where the company scope in the query IS the tenant boundary.
+    #[tokio::test]
+    async fn conformance_secret_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_secret_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
     #[tokio::test]
     async fn conformance_task_store() {
         let Some(s) = store().await else { return };
@@ -4666,6 +5047,176 @@ mod test {
     async fn conformance_context_multibyte_bodies() {
         let Some(s) = store().await else { return };
         conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_identical_body_two_labels() {
+        let Some(s) = store().await else { return };
+        conformance::assert_identical_body_two_labels(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_delete_label_scoped() {
+        let Some(s) = store().await else { return };
+        conformance::assert_delete_label_scoped(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_delete_label_survives_a_concurrent_identical_put() {
+        let Some(s) = store().await else { return };
+        conformance::assert_delete_label_survives_a_concurrent_identical_put(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The legacy scalar-`label` document shape (written before the `labels`
+    /// set existed) keeps working through every read and through the
+    /// label-scoped delete — `doc_labels` unions the two shapes, and the
+    /// `$unset` leg of `delete_label` is what removes a scalar claim.
+    #[tokio::test]
+    async fn legacy_scalar_label_documents_list_and_label_delete() {
+        let Some(s) = store().await else { return };
+        let id = CompanyId::new("acme");
+        let body = "written before the labels set";
+        // Seed the pre-#1300 shape directly: scalar label, no labels array —
+        // at the body's real content address, so a later put folds into it.
+        s.collection("context_chunks")
+            .insert_one(doc! {
+                "company_id": id.as_ref(),
+                "addr": content_address(body),
+                "label": "agent/ceo",
+                "body": body,
+                "len": body.len() as i64,
+                "ord": 1_i64,
+                "stored_ms": 7_i64,
+            })
+            .await
+            .expect("seed a legacy document");
+
+        let metas = ContextStore::list(s.as_ref(), &id, "").await.expect("list");
+        assert_eq!(
+            metas.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
+            ["agent/ceo"],
+            "the scalar label is a claim"
+        );
+
+        // A second label on the same body folds into the set beside it.
+        let addr = s
+            .put(
+                &id,
+                ContextChunk {
+                    label: "agent/ops".to_string(),
+                    body: body.to_string(),
+                },
+            )
+            .await
+            .expect("put an identical body under a new label");
+        let mut labels: Vec<String> = ContextStore::list(s.as_ref(), &id, "")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.addr == addr)
+            .map(|m| m.label)
+            .collect();
+        labels.sort();
+        assert_eq!(labels, ["agent/ceo", "agent/ops"]);
+
+        // Deleting the scalar claim leaves the set claim and the body.
+        assert!(
+            s.delete_label(&id, &addr, "agent/ceo")
+                .await
+                .expect("delete the scalar claim")
+        );
+        let after: Vec<String> = ContextStore::list(s.as_ref(), &id, "")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.addr == addr)
+            .map(|m| m.label)
+            .collect();
+        assert_eq!(after, ["agent/ops"]);
+        s.peek(&id, &addr, None).await.expect("the body survives");
+
+        // The rollback contract, read from the raw document: while any claim
+        // remains the scalar `label` is present AND names a live claim. A
+        // pre-#1300 binary reads that field with a hard error on absence, so
+        // a document left without one would fail its whole `list`.
+        let raw = s
+            .collection("context_chunks")
+            .find_one(doc! {"company_id": id.as_ref(), "addr": addr.as_ref()})
+            .await
+            .unwrap()
+            .expect("the document survives");
+        assert_eq!(
+            raw.get_str("label").ok(),
+            Some("agent/ops"),
+            "the scalar must re-point at a surviving claim: {raw:?}"
+        );
+
+        // And the last claim takes the document with it.
+        assert!(s.delete_label(&id, &addr, "agent/ops").await.unwrap());
+        assert!(s.peek(&id, &addr, None).await.is_err());
+        drop_db(&s).await;
+    }
+
+    /// A document carrying claims but no scalar `label` heals on the next
+    /// `put`, rather than gaining a claim and staying unreadable to a
+    /// pre-#1300 `list` (which reads that field with a hard error on
+    /// absence). `$setOnInsert` could not do this — it is skipped entirely on
+    /// a document that already exists — which is why `put` is a pipeline.
+    ///
+    /// Seeded directly rather than raced for: `delete_label` no longer leaves
+    /// this state (it either deletes the document atomically or re-points the
+    /// scalar in the same update), so the only honest way to test the healing
+    /// is to construct the state a rollback or an older build could leave.
+    #[tokio::test]
+    async fn a_put_restores_a_missing_scalar_label_and_keeps_first_write_wins() {
+        let Some(s) = store().await else { return };
+        let id = CompanyId::new("acme");
+        let body = "a document that lost its scalar label";
+        s.collection("context_chunks")
+            .insert_one(doc! {
+                "company_id": id.as_ref(),
+                "addr": content_address(body),
+                "body": body,
+                "len": body.len() as i64,
+                "ord": 1_i64,
+                "stored_ms": 7_i64,
+                "labels": [],
+            })
+            .await
+            .expect("seed a scalar-less document");
+
+        let addr = s
+            .put(
+                &id,
+                ContextChunk {
+                    label: "agent/ops".to_string(),
+                    body: body.to_string(),
+                },
+            )
+            .await
+            .expect("put onto the scalar-less document");
+
+        let raw = s
+            .collection("context_chunks")
+            .find_one(doc! {"company_id": id.as_ref(), "addr": addr.as_ref()})
+            .await
+            .unwrap()
+            .expect("the document is still there");
+        assert_eq!(
+            raw.get_str("label").ok(),
+            Some("agent/ops"),
+            "the write restores the scalar it found missing: {raw:?}"
+        );
+        assert_eq!(doc_labels(&raw), ["agent/ops"], "and claims it once");
+        assert_eq!(
+            raw.get_i64("stored_ms").ok(),
+            Some(7),
+            "first-write-wins still holds for the fields that were present"
+        );
         drop_db(&s).await;
     }
 

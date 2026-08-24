@@ -114,15 +114,16 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .route("/tiny", get(tiny))
         .merge(crate::server::operator::router())
         .merge(crate::server::ops::router())
-        .merge(crate::server::hooks::router())
         .merge(crate::server::hooks_chargebee::router())
         .merge(crate::server::provision::router())
         .merge(crate::server::setup::router())
         .merge(crate::server::feedback::router())
+        .merge(crate::server::feedback_board::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
-        .merge(crate::server::users::devices::router())
         .merge(crate::server::graphql::router());
+    #[cfg(feature = "acp")]
+    let router = router.merge(crate::server::acp::router());
     // tiny.place A2A inbound + discovery routes, only when the feature is on.
     #[cfg(feature = "tinyplace")]
     let router = router.merge(crate::server::a2a::router());
@@ -688,8 +689,9 @@ mod tests {
     /// iterates nothing and returns `false` without consulting any runtime, so
     /// this cannot fail for an aggregation bug. The direction that matters —
     /// that the endpoint can report `true` — is covered by
-    /// `is_busy_sees_a_cycle_holding_the_serial_lock` in `company::runtime`,
-    /// which exercises the real signal against a real runtime.
+    /// `is_busy_sees_every_source_of_work` in `company::runtime`, which
+    /// exercises the real signal against a real runtime, and by
+    /// `is_busy_fails_closed_on_a_poisoned_run_supervisor` alongside it.
     #[tokio::test]
     async fn busy_is_false_when_nothing_is_running() {
         let app = router(AppState::new(AppConfig::default()));
@@ -830,7 +832,7 @@ mod tests {
         assert_eq!(spec_body(restarted).await["instance_id"], id);
 
         let caps = body["capabilities"].as_array().expect("capabilities");
-        for expected in ["rest", "graphql", "sse", "devices"] {
+        for expected in ["rest", "graphql", "sse"] {
             assert!(caps.iter().any(|c| c == expected), "missing {expected}");
         }
         assert_eq!(body["storage"], "fs");
@@ -875,92 +877,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spec_reports_the_default_memory_engine() {
+    async fn spec_does_not_disclose_memory_engine_details() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
         let body = spec_body(state).await;
-        // No overlay: the base storage backend serves memory, so there is no
-        // separate engine to name.
-        assert_eq!(body["memory"]["backend"], "store");
-        assert!(body["memory"]["driver_id"].is_null());
-        assert_eq!(body["memory"]["capabilities"], serde_json::json!([]));
-    }
-
-    #[cfg(feature = "tinymemory")]
-    #[tokio::test]
-    async fn spec_names_the_bound_memory_engine_but_never_its_endpoint_or_key() {
-        // The acceptance criterion from issue #914: `driver_id` is safe to
-        // surface, the URL and the credential are not — and `/spec` is
-        // unauthenticated, so this is the route where that matters most.
-        const KEY: &str = "sk-memory-super-secret-value";
-        const ENDPOINT: &str = "https://memory.internal.example";
-
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
-            memory_backend: crate::store::MemoryBackend::Remote,
-            memory_driver: Some("supermemory".to_string()),
-            memory_url: Some(ENDPOINT.to_string()),
-            memory_api_key: Some(KEY.to_string()),
-            ..Default::default()
-        })
-        .expect("a fully configured remote engine binds")
-        .expect("remote yields an overlay");
-
-        let state = AppState::new(AppConfig::default())
-            .with_home(dir.path().to_path_buf())
-            .with_memory_overlay(overlay);
-
-        let body = spec_body(state).await;
-        assert_eq!(body["memory"]["backend"], "remote");
-        assert_eq!(body["memory"]["driver_id"], "supermemory");
-        // Unprobed here (the probe is `serve`'s boot step, not `bind`'s), and
-        // the field is skipped when absent so old clients see the old shape.
+        // `/spec` is the unauthenticated manager handshake. Memory-provider
+        // identity, capability and reachability details belong to the
+        // operator-authenticated engine route instead.
         assert!(
-            body["memory"]["healthy"].is_null(),
-            "an unprobed engine must not report health"
-        );
-        // The mandatory three a hosted adapter advertises, so an operator can
-        // see the tree/graph families it does not have.
-        let caps = body["memory"]["capabilities"].to_string();
-        assert!(caps.contains("core"), "{caps}");
-        assert!(caps.contains("recall"), "{caps}");
-        assert!(caps.contains("portability"), "{caps}");
-
-        let rendered = body.to_string();
-        assert!(!rendered.contains(KEY), "/spec leaked the memory key");
-        assert!(
-            !rendered.contains("memory.internal.example"),
-            "/spec leaked the memory endpoint: {rendered}"
-        );
-    }
-
-    /// The other half of the health contract on the wire: once the boot probe
-    /// has run, `/spec` serves its answer. The `null` driver's `health()` is
-    /// `Ready` by contract, so this covers the probed-`true` serialization
-    /// deterministically; the unprobed case is asserted `null` above, and the
-    /// mapping of degraded/down/timeout onto the bit is pinned in
-    /// `store::select`.
-    #[cfg(feature = "tinymemory")]
-    #[tokio::test]
-    async fn spec_serves_the_boot_probes_health_answer() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
-            memory_backend: crate::store::MemoryBackend::Null,
-            ..Default::default()
-        })
-        .expect("null binds")
-        .expect("null yields an overlay");
-        overlay
-            .refresh_health(std::time::Duration::from_secs(5))
-            .await;
-
-        let state = AppState::new(AppConfig::default())
-            .with_home(dir.path().to_path_buf())
-            .with_memory_overlay(overlay);
-        let body = spec_body(state).await;
-        assert_eq!(
-            body["memory"]["healthy"], true,
-            "probed health must reach /spec"
+            body.get("memory").is_none(),
+            "memory leaked through /spec: {body}"
         );
     }
 }

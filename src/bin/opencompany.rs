@@ -59,6 +59,39 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Print the system prompt each of a company's agents would be built with.
+    ///
+    /// A brief (`agents/prompts/*.md`, an inline `prompt`, a routed `context`
+    /// entry) is the most editable thing in a bundle and used to be the least
+    /// inspectable: seeing it meant running the company and reading a provider
+    /// trace. This renders the same composition from the manifest alone, names
+    /// every section's origin, and says plainly which sections need a live
+    /// runtime instead of guessing at them.
+    ///
+    /// Build with `--features openhuman` to include the harness's own tool
+    /// briefs (workspace, ledgers, deliverables, delegation); the default build
+    /// renders the persona and the checked-in briefs and reports the rest as
+    /// deferred. `scripts/dump-prompt.sh` is the wrapper that gets the feature
+    /// flag right.
+    Prompt {
+        /// Company bundle directory, or a manifest file.
+        #[arg(long = "company", value_name = "DIR", default_value = ".")]
+        company: PathBuf,
+        /// Only this agent id. Repeat for several.
+        #[arg(long = "agent", value_name = "ID")]
+        agents: Vec<String>,
+        /// Print the prompt body verbatim, with no report around it — the bytes
+        /// to diff against a provider trace. Requires exactly one agent.
+        #[arg(long)]
+        raw: bool,
+        /// Print the report as JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+        /// Write one `<agent-id>.prompt.md` per agent into this directory
+        /// instead of printing.
+        #[arg(long = "out", value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
     /// Report the effective runtime configuration, which layer set each value,
     /// and what is missing per optional capability.
     Doctor {
@@ -180,10 +213,6 @@ enum MemoryCmd {
         /// Target credential (hosted engines only).
         #[arg(long)]
         to_api_key: Option<String>,
-        /// Target data root (`namespace` only). Defaults to the env data dir —
-        /// refused when that resolves to the source's own store.
-        #[arg(long)]
-        to_data_dir: Option<PathBuf>,
         /// Records per page.
         #[arg(long, default_value_t = 500)]
         page_size: usize,
@@ -207,7 +236,6 @@ impl std::fmt::Debug for MemoryCmd {
                 to,
                 to_url,
                 to_api_key,
-                to_data_dir,
                 page_size,
                 dry_run,
                 resume_cursor,
@@ -216,7 +244,6 @@ impl std::fmt::Debug for MemoryCmd {
                 .field("to", to)
                 .field("to_url", &to_url.as_ref().map(|_| "<set>"))
                 .field("to_api_key", &to_api_key.as_ref().map(|_| "<set>"))
-                .field("to_data_dir", to_data_dir)
                 .field("page_size", page_size)
                 .field("dry_run", dry_run)
                 .field("resume_cursor", &resume_cursor.is_some())
@@ -245,6 +272,78 @@ impl From<ModeArg> for LaunchMode {
 /// file inside it (`companies/<name>/company.toml`); the file form is normalized
 /// to its parent so workspace seeding and the skill/workflow read resolvers look
 /// under the company directory rather than under `company.toml/…`.
+/// `opencompany prompt`: render each agent's composed system prompt.
+///
+/// Selection is by id and is **fail-loud** — a `--agent` naming nobody is an
+/// error listing the roster, not an empty report. A typo'd id that printed
+/// nothing would read exactly like an agent whose prompt is empty, which is the
+/// one thing this command exists to distinguish.
+fn run_prompt(
+    company: &std::path::Path,
+    agents: &[String],
+    raw: bool,
+    json: bool,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
+    let manifest = CompanyManifest::from_path(company)?;
+    let all = opencompany::company::prompt_dump::dump(&manifest);
+
+    let selected: Vec<_> = if agents.is_empty() {
+        all
+    } else {
+        for wanted in agents {
+            if !all.iter().any(|agent| &agent.agent_id == wanted) {
+                let roster: Vec<&str> = all.iter().map(|a| a.agent_id.as_str()).collect();
+                return Err(opencompany::error::OpenCompanyError::Config(format!(
+                    "no agent `{wanted}` in {} — the roster is {roster:?}",
+                    company.display()
+                )));
+            }
+        }
+        all.into_iter()
+            .filter(|agent| agents.contains(&agent.agent_id))
+            .collect()
+    };
+
+    if raw {
+        // One agent, because raw output has no framing to say whose prompt is
+        // whose: concatenating two would produce a document that looks like one
+        // agent's prompt and is not.
+        let [agent] = &selected[..] else {
+            return Err(opencompany::error::OpenCompanyError::Config(format!(
+                "`--raw` prints one prompt with no framing around it, so it needs exactly one \
+                 `--agent` (got {})",
+                selected.len()
+            )));
+        };
+        print!("{}", agent.body());
+        return Ok(());
+    }
+
+    if let Some(dir) = out {
+        std::fs::create_dir_all(dir)?;
+        for agent in &selected {
+            let path = dir.join(format!("{}.prompt.md", agent.agent_id));
+            std::fs::write(&path, agent.to_markdown())?;
+            println!("wrote {}", path.display());
+        }
+        return Ok(());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&selected)?);
+        return Ok(());
+    }
+
+    for (index, agent) in selected.iter().enumerate() {
+        if index > 0 {
+            println!("---\n");
+        }
+        print!("{}", agent.to_markdown());
+    }
+    Ok(())
+}
+
 fn company_source_dir(path: &std::path::Path) -> std::path::PathBuf {
     if path.is_file() {
         path.parent()
@@ -411,6 +510,11 @@ fn company_builder(
     // `[users].mode` to answer, which is the normal case.
     .with_auth_mode_override(state.auth_mode_override())
     .with_skills_registry(state.shared_skill_registry()?)
+    // The setup cards a real operator should find waiting on a real board. Turned
+    // on here rather than inferred from the seed directory, so a test or a
+    // fixture that builds a company gets the empty board it is asserting about —
+    // see `RuntimeBuilder::with_task_seeding`. First boot only.
+    .with_task_seeding(true)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
         builder = builder.with_seed_dir(source_dir);
@@ -419,7 +523,7 @@ fn company_builder(
         builder = builder.with_stores(stores);
     }
     if let Some(overlay) = state.memory_overlay() {
-        builder = builder.with_memory_overlay(overlay);
+        builder = builder.with_memory_overlay(&overlay);
     }
     #[cfg(feature = "smtp")]
     if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
@@ -549,6 +653,16 @@ fn spawn_maintenance_ticker(
     MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
 }
 
+/// Starts the process-wide presence sweep (issue: "Bound client-supplied
+/// console leases"). See [`opencompany::server::presence::PresenceSweeper`]
+/// for why this is a separate task from the maintenance ticker above rather
+/// than folded into it: presence is host-global, not scoped to a registered
+/// company.
+fn spawn_presence_sweeper(state: &AppState, shutdown: &Arc<Notify>) -> tokio::task::JoinHandle<()> {
+    opencompany::server::presence::PresenceSweeper::new(state.presence_handle())
+        .spawn(shutdown.clone())
+}
+
 /// Starts a company's IMAP mailbox poller as a background task, if the
 /// platform injected mailbox credentials for this tenant.
 ///
@@ -610,46 +724,6 @@ fn spawn_mailbox_poller(
     }
 }
 
-/// Starts a company's Telegram `getUpdates` long-polling listener as a
-/// background task, whenever this host has an outbound Telegram transport wired
-/// (the `telegram` feature).
-///
-/// Issue #203: this is what makes inbound Telegram work on a local or
-/// self-hosted instance, where Telegram's servers can never reach an inbound
-/// `/hooks/...` URL. It is started unconditionally rather than only when a bot
-/// token is already stored — the poller idles cheaply until one appears, so an
-/// operator who pastes a token in the console is receiving DMs on the next tick
-/// with no restart. On a publicly reachable host that opted into the webhook
-/// fast-path, the poller sees the registration and stands by.
-fn spawn_telegram_poller(
-    state: &AppState,
-    id: &str,
-    shutdown: &Arc<Notify>,
-    handles: &mut Vec<tokio::task::JoinHandle<()>>,
-) {
-    let Some(api) = state.connections().telegram.clone() else {
-        return;
-    };
-    let Some(runtime) = state.registry().get(&CompanyId::new(id)) else {
-        return;
-    };
-    let poll_secs = std::env::var("OPENCOMPANY_TELEGRAM_POLL_SECONDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(opencompany::runtime::telegram_poller::DEFAULT_POLL_SECONDS);
-    let webhook_capable = state.config().public_webhook_base_url().is_some();
-    let poller = opencompany::runtime::telegram_poller::TelegramPoller::new(
-        runtime,
-        api,
-        poll_secs,
-        webhook_capable,
-    )
-    // See `spawn_scheduler`: follow the registry so a rebuild reaches inbound
-    // Telegram instead of stranding it on the replaced runtime.
-    .following(state.registry().clone());
-    handles.push(poller.spawn(shutdown.clone()));
-}
-
 /// Attaches an OpenHuman JSON-RPC transport when the `openhuman-rpc` feature is
 /// enabled and `OPENCOMPANY_OPENHUMAN_URL` is set (the attach path).
 ///
@@ -677,62 +751,13 @@ fn attach_openhuman(builder: RuntimeBuilder) -> RuntimeBuilder {
 
 /// Attaches the embedded OpenHuman harness under the `openhuman` feature.
 ///
-/// The harness pool is **always** attached, so cognition routes through a live
-/// company agent whenever *any* inference source is configured — the managed
-/// env default (`TINYHUMANS_API_KEY` / `OPENCOMPANY_INFERENCE_*`), a manifest
-/// `[inference]` section, or a runtime console override (issue #56 — BYOK).
-/// Attaching the pool unconditionally is what unblocks a BYOK-only tenant that
-/// has no platform credential: the builder still constructs the harness brain
-/// from its manifest/runtime config. Without any source, the runtime keeps its
-/// hosted/echo brain.
-///
-/// Without the feature this is the identity function, so the default build is
-/// unaffected.
-#[cfg(not(feature = "openhuman"))]
+/// One line, because the sequence itself lives in the library
+/// ([`opencompany::app::attach_harness`]) — the desktop shell builds companies
+/// through `desktop::register` rather than through this binary, and a second
+/// copy of the wiring here is exactly how that path came to build companies
+/// with no harness at all.
 fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
-    builder
-}
-
-#[cfg(feature = "openhuman")]
-fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
-    use opencompany::app::config::ProcessEnv;
-    use opencompany::harness::HarnessPool;
-    use opencompany::harness::provider::{
-        PlatformCredentialStatus, harness_inference_from_env, media_backend_from_env,
-        search_backend_from_env,
-    };
-
-    // Issue #879: every managed surface below fails closed and says nothing at
-    // boot, so a tenant provisioned without its platform token comes up looking
-    // healthy and only reveals the gap when an agent is built or a workflow node
-    // 500s. Say it once, here, where an operator reading the pod's first lines
-    // will see it.
-    if let Some(warning) = PlatformCredentialStatus::resolve(&ProcessEnv).boot_warning() {
-        tracing::warn!("[boot] {warning}");
-    }
-
-    let builder = builder.with_harness(Arc::new(HarnessPool::new()));
-    // Issue #109: the MANAGED media-generation backend, resolved from the
-    // environment only (never a tenant secret). Absent ⇒ media tools stay unwired
-    // even for a company that grants `media` (fail-closed).
-    let builder = match media_backend_from_env(&ProcessEnv) {
-        Some(media_backend) => builder.with_media_backend(media_backend),
-        None => builder,
-    };
-    // Issue #238: the MANAGED web-search backend, on the same platform identity
-    // as managed inference and resolved from the environment only. Absent ⇒
-    // `web_search` stays unwired even for a company that grants `search`.
-    let builder = match search_backend_from_env(&ProcessEnv) {
-        Some(search_backend) => builder.with_search_backend(search_backend),
-        None => builder,
-    };
-    // The managed env default is an *optional*, lowest-precedence source; a
-    // BYOK-only tenant supplies none and still gets a harness brain from its
-    // manifest/runtime config.
-    match harness_inference_from_env(&ProcessEnv) {
-        Some((config, model_override)) => builder.with_harness_inference(config, model_override),
-        None => builder,
-    }
+    opencompany::app::attach_harness(builder)
 }
 
 /// Routes feedback to the TinyHumans hub when this instance is provisioned with
@@ -842,12 +867,6 @@ fn connections_runtime() -> Result<opencompany::server::ops::ConnectionsRuntime>
     {
         connections =
             connections.with_mail(Arc::new(opencompany::server::ops::smtp::LettreMailSender));
-    }
-    #[cfg(feature = "telegram")]
-    {
-        connections = connections.with_telegram(Arc::new(
-            opencompany::company::telegram::HttpTelegramApi::new(),
-        ));
     }
     if let Some(mail) = opencompany::server::ops::mailer::MailConfig::from_env()? {
         connections = connections.with_mail_credentials(mail.credentials);
@@ -1175,18 +1194,17 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
 /// what a boot would bind — you migrate *before* flipping the environment, so
 /// the environment still names the source. Only provider-backed engines can
 /// migrate (the seam is what `export_page`/`import_records` live on); the
-/// `store` default and the EngineCortex overlay are refused by name.
+/// `store` default is refused by name.
 #[cfg(feature = "tinymemory")]
 async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     use opencompany::store::StorageSettings;
-    use opencompany::store::memory::driver::{MemoryMode, open_driver};
+    use opencompany::store::memory::driver::open_driver;
     use opencompany::store::memory::migrate::migrate;
 
     let MemoryCmd::Migrate {
         to,
         to_url,
         to_api_key,
-        to_data_dir,
         page_size,
         dry_run,
         resume_cursor,
@@ -1207,27 +1225,12 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     // (`store::memory::migrate::resolve_migrate_configs`), where the feature
     // lanes execute the guards' tests; the bin drives the loop and reports.
     let (from_config, to_config) = opencompany::store::memory::migrate::resolve_migrate_configs(
-        &settings,
-        &to,
-        to_url,
-        to_api_key,
-        to_data_dir,
+        &settings, &to, to_url, to_api_key,
     )?;
 
-    // The same exclusive root lock serve holds, whenever an embedded store is
-    // on either side: a migration reading a SQLite store a live host is
-    // writing walks a shifting export cursor (skipped or repeated records).
-    // Hosted-to-hosted has no local store to lock; the pause-first
-    // precondition printed below still applies to the remote writer.
-    let _home_lock = if matches!(from_config.mode, MemoryMode::Embedded)
-        || matches!(to_config.mode, MemoryMode::Embedded)
-    {
-        Some(opencompany::store::lock::acquire(&resolve_home_migrated(
-            None,
-        )?)?)
-    } else {
-        None
-    };
+    // Hosted providers have no local memory store to lock. The pause-first
+    // precondition printed below still applies to remote writers.
+    let _home_lock: Option<()> = None;
 
     let (from, _) = open_driver(&from_config)?.ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(
@@ -1706,6 +1709,12 @@ async fn async_main() -> Result<()> {
             let setup_complete = config_file
                 .as_ref()
                 .is_some_and(|c| c.setup_completed_at.is_some());
+            // Read off the file before it is consumed for `bind` below: the
+            // memory engine is resolved further down, after the state exists.
+            let memory_section = config_file
+                .as_ref()
+                .map(|c| c.memory.clone())
+                .unwrap_or_default();
             let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
                 bind,
                 &ProcessEnv,
@@ -1749,7 +1758,12 @@ async fn async_main() -> Result<()> {
             // mongodb are opened once here and injected into every company's
             // builder. A selected-but-unavailable backend aborts boot rather
             // than silently falling back to fs.
-            let storage_settings = opencompany::store::StorageSettings::from_env()?;
+            // The environment first, then the instance's own `config.toml`
+            // `[memory]` section under it — the engine an operator chose from
+            // the console. A deployment that injects `OPENCOMPANY_MEMORY` keeps
+            // ownership and the file layer is inert; see `MemorySection`.
+            let storage_settings = opencompany::store::StorageSettings::from_env()?
+                .with_memory_config(&memory_section)?;
             if let Some(handles) =
                 opencompany::store::open_storage(&storage_settings, &home).await?
             {
@@ -1936,7 +1950,6 @@ async fn async_main() -> Result<()> {
                     );
                 }
                 spawn_mailbox_poller(&state, &id, &shutdown, &mut scheduler_handles);
-                spawn_telegram_poller(&state, &id, &shutdown, &mut scheduler_handles);
             }
             if companies.is_empty() {
                 // Nothing was named on the command line, so adopt whatever this
@@ -1959,7 +1972,6 @@ async fn async_main() -> Result<()> {
                         scheduler_handles.push(handle);
                     }
                     spawn_mailbox_poller(&state, slug, &shutdown, &mut scheduler_handles);
-                    spawn_telegram_poller(&state, slug, &shutdown, &mut scheduler_handles);
                     println!(
                         "adopted company `{slug}` ({}) from {}",
                         manifest.company.name,
@@ -1981,6 +1993,7 @@ async fn async_main() -> Result<()> {
             // and fire claims are retired, and it covers a company registered
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
+            scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
 
             // Stop the schedulers on a termination signal so background cycle
             // work halts with the process (lifecycle shutdown).
@@ -2022,6 +2035,13 @@ async fn async_main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Some(Command::Prompt {
+            company,
+            agents,
+            raw,
+            json,
+            out,
+        }) => run_prompt(&company, &agents, raw, json, out.as_deref()),
         Some(Command::Doctor { company, json }) => {
             let env = ProcessEnv;
             // Locate config.toml under the resolved data dir (env override or
