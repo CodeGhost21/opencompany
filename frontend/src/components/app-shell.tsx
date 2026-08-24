@@ -2058,7 +2058,7 @@ export function AppShell({
           wrapper that clips and cannot scroll. On the task board that clipped
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
-      <SidebarInset className="min-h-0 min-w-0">
+      <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the
