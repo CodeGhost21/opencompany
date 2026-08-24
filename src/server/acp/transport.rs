@@ -393,10 +393,10 @@ mod test {
     use serde_json::json;
 
     use crate::company::CompanyManifest;
+    use crate::ports::EventSeq;
     use crate::ports::types::{CompressedTrace, CycleRequest, CycleResult, TokenUsage};
     use crate::ports::users::{UserRecord, UserRole, UserStatus};
     use crate::ports::{Brain, CompanyStore, CycleHost};
-    use crate::ports::EventSeq;
     use crate::server::graphql::auth::UserPrincipal;
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, ports::types::CompanyRecord};
