@@ -715,11 +715,14 @@ function Identity({
   agent,
   action,
   onPickAvatar,
+  avatarBusy,
 }: {
   agent: AgentDetailDto;
   action?: ReactNode;
   /** Opens the icon picker. Absent leaves the tile inert — a read-only header. */
   onPickAvatar?: () => void;
+  /** An icon save is in flight — the tile must not start another one. */
+  avatarBusy?: boolean;
 }) {
   const display = agent.name?.trim() || agent.role;
   const seed = agent.id || display;
