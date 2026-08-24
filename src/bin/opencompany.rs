@@ -979,7 +979,7 @@ async fn export_to_dir(
     include_secrets: bool,
     dest: &std::path::Path,
 ) -> Result<()> {
-    use opencompany::store::export::{ExportOpts, export_bundle};
+    use opencompany::store::export::{ExportOpts, export_bundle_with_scopes};
     use opencompany::store::paths::Bundle;
 
     // The same exclusive root lock `serve` holds: a bundle read while the host
