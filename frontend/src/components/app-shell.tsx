@@ -546,6 +546,13 @@ export function AppShell({
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
   const [transcripts, setTranscripts] = useState<Transcripts>({});
+  // The latest transcripts, readable from the stable `refreshMentions`
+  // callback without rebuilding it on every channel that lands a line (the
+  // same reason `mentionFeedRef` and `chatChannelByThreadRef` exist).
+  const transcriptsRef = useRef(transcripts);
+  useEffect(() => {
+    transcriptsRef.current = transcripts;
+  }, [transcripts]);
   // How far each channel's history rehydration has got. Kept beside
   // `transcripts` rather than inside it because an empty transcript is a
   // legitimate final answer, and the timeline has to tell that apart from not
