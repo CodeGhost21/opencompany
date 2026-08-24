@@ -1887,6 +1887,8 @@ export interface MentionablePersonDto {
   id: string;
   /** How this person is named to colleagues; never their login identity. */
   label: string;
+  /** The collaboration-facing face chosen by this person, when any. */
+  avatar?: string;
   /** A short typable alias, disambiguated company-wide. Not a handle. */
   slug: string;
 }
