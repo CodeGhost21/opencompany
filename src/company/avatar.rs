@@ -245,9 +245,7 @@ fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
     let mut cost: u64 = 0;
     let mut saw_descriptor = false;
     loop {
-        let Some(&kind) = bytes.get(i) else {
-            return None;
-        };
+        let &kind = bytes.get(i)?;
         i += 1;
         match kind {
             // Trailer — the stream is over, and we walked every frame in it.
