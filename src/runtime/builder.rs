@@ -215,7 +215,14 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     // tenant credentials, third-party source, or operator-owned workspace
     // guidance. Keep narrowing consistent with the wiring predicates so an
     // agent cannot ask for one of them through a catch-all company grant.
-    if literal == "workspace.write" {
+    //
+    // Workspace writes are explicit-only in both spellings
+    // [`grants_workspace_write_explicit`](crate::company::grants_workspace_write_explicit)
+    // accepts: the bare `workspace` grant as well as `workspace.write`. A bare
+    // `workspace` *request* must be gated the same way, or an agent asking for
+    // it under a `["*"]` allow-list would hold the exact token the wiring
+    // predicate accepts and gain write tools the company withheld.
+    if literal == "workspace" || literal == "workspace.write" {
         return crate::company::grants_workspace_write_explicit(allow);
     }
 
