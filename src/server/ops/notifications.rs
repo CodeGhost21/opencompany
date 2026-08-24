@@ -425,13 +425,13 @@ mod tests {
 
         let (_, feed) = call(&state, "GET", None, true).await;
         assert_eq!(feed["unread"], 0);
+        // The feed filters read rows out entirely (`list` keeps only unread
+        // mentions), so the only assertion that can fail is that nothing
+        // remains — `.all(readAt is set)` would be vacuously true over an
+        // empty list and prove nothing.
         assert!(
-            feed["notifications"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|r| r.get("readAt").is_some()),
-            "every row carries this person's read stamp"
+            feed["notifications"].as_array().unwrap().is_empty(),
+            "a mark-all-read leaves no unread mention in the feed"
         );
     }
 
