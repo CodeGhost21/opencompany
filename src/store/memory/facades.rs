@@ -760,6 +760,20 @@ impl ProviderMemoryStore {
         self.archive.list(company).await
     }
 
+    /// Restores traces directly into the archive tier.
+    pub(super) async fn restore_archived_traces(
+        &self,
+        company: &CompanyId,
+        traces: &[CompressedTrace],
+    ) -> Result<()> {
+        for trace in traces {
+            self.archive
+                .put(company, &trace.cycle_id, trace, "trace")
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Bounds the archive tier to the newest `n` archived traces.
     ///
     /// Eviction moves traces OUT of the live window rather than destroying
