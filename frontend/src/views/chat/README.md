@@ -58,6 +58,7 @@ backend, and there is no per-channel routing on the host.
 |---|---|
 | Unread counts | Derived here from when this tab last looked at a channel — the host keeps no read receipts, so two consoles will disagree. The badge's tooltip says so. |
 | A console-only teammate's other half | A starter-roster teammate is not on the company, so nothing answers their DM. The transcript is still saved; a notice above the composer says which half is missing. |
+| Channel rail density | The desktop channel rail can collapse to an icon strip, preserving channel reachability while giving the transcript back its width. This is stored per browser connection and company; it is not a company-wide shell setting and does not change the full rail below `lg` (issue #1340). |
 
 Reactions are deliberately **not** on the SSE feed: the frame would have to
 carry the reacting person, and that stream has no per-viewer projection to turn
@@ -190,6 +191,24 @@ it looks that id up against the roster (`members.find`) the same way
 `ChatView` already does elsewhere, and simply leaves the mascot unresolved —
 falling back to the name seed, never a wrong face — when the id names a desk
 rather than a teammate.
+
+## A face is a way in
+
+Clicking a teammate's face — in the gutter of a message, in the member pane, or
+in a DM's header — opens `AgentProfileSheet`
+(`@/components/agent-profile-sheet`): a right-hand panel with that agent's
+persona, tier, desks and **resolved** tool grants, and two links out to their
+own page (`#/team/<id>`, and `#/team/<id>?edit` for the page with its edit form
+already open). The panel is mounted once by `AgentProfileProvider` in
+`app-shell.tsx`, so no chat surface threads a client, a company scope or an open
+flag of its own.
+
+Only a voice that resolves to a roster teammate is clickable. `Sender.agentId`
+is set exactly where `senderOf` **matched** the roster, never from the channel
+slug that seeded the face — that slug is a desk id for a cross-posted line, and
+a desk has no profile to open. `AgentAvatarButton` renders the bare avatar
+rather than a dead button wherever there is no id behind it (a desk, the
+company, you), which is also what it does outside the provider.
 
 ## One name per teammate
 

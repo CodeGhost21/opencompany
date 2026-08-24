@@ -205,13 +205,6 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // `pages_read` never reach an approval card.
   pages_write: "Publish a dashboard page",
   pages_delete: "Delete a dashboard page",
-  // Issue #245's pair. Both park per call, so each reaches an operator on the
-  // approval card and again in the Standing permissions list — and both names
-  // read like reads, which is exactly when a label has to say what is actually
-  // happening. "One of the company's repositories" is load-bearing: it tells
-  // the operator the reach is what they bound, not the whole of GitHub.
-  repo_checkout: "Check out one of the company's repositories",
-  repo_pr: "Fetch a pull request from one of the company's repositories",
   memory_store: "Save something to its memory",
   memory_forget: "Discard one of its own saved memories",
   memory_recall: "Look something up in its memory",
@@ -538,7 +531,8 @@ export function toolAction(kind: string): string {
  */
 export function grantHeadline(g: StandingGrant): string {
   const action = toolAction(g.tool);
-  return g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  const target = g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  return g.verdict === "deny" ? `Don't allow ${target}` : target;
 }
 
 /**
@@ -740,6 +734,86 @@ const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
   http_request: ["url", "method"],
   git_operations: ["operation"],
 };
+
+/**
+ * Payload keys, past the lead, that change what approving the call does.
+ *
+ * `PAYLOAD_KEY_ORDER` promotes the argument an operator is consenting to, and
+ * for most tools the first alone is the whole decision — the shell command, the
+ * glob pattern, the fetch URL. `http_request` carries two consequential keys
+ * past the lead: its method is the difference between a read and a delete on
+ * the same URL, and its body is what a write *sends* — two POSTs to the same
+ * address are only the same decision if the payload is the same, so a row that
+ * shows only the URL cannot tell them apart. This is that list, and
+ * {@link payloadLeadLabel} appends these values ahead of the first line.
+ */
+const PAYLOAD_LEAD_EXTRA: Readonly<Record<string, string[]>> = {
+  http_request: ["method", "body"],
+};
+
+/** A promoted extra's longest render in the compact lead; past it, a preview. */
+const EXTRA_PREVIEW_MAX = 60;
+
+function preview(value: string): string {
+  return value.length > EXTRA_PREVIEW_MAX
+    ? `${value.slice(0, EXTRA_PREVIEW_MAX)}…`
+    : value;
+}
+
+/**
+ * The payload's lead line, with any consequential later keys in front — the
+ * per-item label for a batch row.
+ *
+ * `null` when the host sent no payload (an old host) or withheld it, so callers
+ * fall back to the action's own words rather than rendering blank. Unlisted
+ * arguments still follow the lead, exactly as in {@link payloadLines}: this
+ * promotes, it never hides.
+ *
+ * A promoted extra is previewed, not printed whole: `http_request`'s body can
+ * be a large document, and the row's job is to distinguish two requests, not
+ * to carry the file. The detailed view still shows the full payload.
+ */
+export function payloadLeadLabel(a: ApprovalSummary): string | null {
+  const lines = payloadLines(a);
+  const first = lines[0];
+  if (first == null) return null;
+  const extras = PAYLOAD_LEAD_EXTRA[a.kind] ?? [];
+  if (extras.length === 0) return first.value;
+  // The extra keys are past the lead by definition, so a line whose label IS
+  // the lead's label is the lead itself and must not be repeated before it.
+  const extraValues = lines
+    .filter((line) => line.label !== first.label && extras.includes(line.label))
+    .map((line) => preview(line.value));
+  return extraValues.length > 0 ? `${extraValues.join(" ")} ${first.value}` : first.value;
+}
+
+/**
+ * Whether {@link payloadLeadLabel} had to cut a promoted extra to fit the
+ * compact lead.
+ *
+ * The compact row's job is to distinguish two requests, not to carry the file,
+ * so a long body is previewed — but a preview is not something an operator may
+ * authorize. `true` means the lead shows **less than the complete value**, so a
+ * caller with a one-click Approve must not offer it on that label: the operator
+ * has to see the full payload (the detailed view) before deciding.
+ *
+ * Mirrors {@link preview}'s bound exactly — same code-unit measure, same
+ * `EXTRA_PREVIEW_MAX` — so "would this label be cut?" can never drift from "was
+ * this label cut?".
+ */
+export function payloadLeadTruncated(a: ApprovalSummary): boolean {
+  const lines = payloadLines(a);
+  const first = lines[0];
+  if (first == null) return false;
+  const extras = PAYLOAD_LEAD_EXTRA[a.kind] ?? [];
+  if (extras.length === 0) return false;
+  return lines.some(
+    (line) =>
+      line.label !== first.label &&
+      extras.includes(line.label) &&
+      line.value.length > EXTRA_PREVIEW_MAX,
+  );
+}
 
 function renderValue(value: unknown): string {
   if (typeof value === "string") return value;

@@ -314,6 +314,7 @@ fn brain_with(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
@@ -351,9 +352,6 @@ fn brain_with(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
         tenant_search: None,
     };

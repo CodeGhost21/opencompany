@@ -444,6 +444,13 @@ pub struct AppState {
     /// the process. Lazy because it is a disk read that only `/spec` needs, and
     /// `AppState::new` is deliberately IO-free.
     instance_id: Arc<OnceLock<String>>,
+    /// Who is currently present, per company.
+    ///
+    /// Host-global and in-memory, like the live turn bus it publishes
+    /// alongside — presence is a lease, not a record, so it has no port and no
+    /// backend. See [`crate::server::presence`] for the TTL contract and for
+    /// why a second replica knowing nothing about this one is acceptable.
+    presence: Arc<crate::server::presence::PresenceRegistry>,
     /// Which storage backend is serving the durable ports. Reported by `/spec`
     /// as a kind only — never a path or a connection string.
     storage_kind: crate::store::StorageKind,
@@ -509,6 +516,10 @@ pub struct AppState {
     /// [`rebuilder`](Self::rebuilder) above is: the desktop supplies it, this
     /// crate only defines the seam.
     acp_agents: Option<Arc<dyn crate::ports::acp::AcpAgentFactory>>,
+    /// Live inbound ACP sessions. Kept on the host, rather than on a company,
+    /// because one ACP connection may open sessions for several companies.
+    #[cfg(feature = "acp")]
+    acp_sessions: Arc<crate::server::acp::SessionRegistry>,
     /// The boot-only builder inputs recorded per company at registration, so a
     /// rebuild configures the successor exactly as boot configured its
     /// predecessor. See [`BootInputs`](crate::runtime::BootInputs) for why
@@ -544,6 +555,7 @@ impl AppState {
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
+            presence: Arc::new(crate::server::presence::PresenceRegistry::new()),
             storage_kind: crate::store::StorageKind::default(),
             // Fails "not set up", so a host that never calls `with_setup_complete`
             // — every test fixture — presents the wizard rather than silently
@@ -559,6 +571,8 @@ impl AppState {
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rebuilder: None,
             acp_agents: None,
+            #[cfg(feature = "acp")]
+            acp_sessions: Arc::new(crate::server::acp::SessionRegistry::new()),
             boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -578,6 +592,12 @@ impl AppState {
     /// This host's local-transport ACP agent factory, when one is wired.
     pub fn acp_agents(&self) -> Option<Arc<dyn crate::ports::acp::AcpAgentFactory>> {
         self.acp_agents.clone()
+    }
+
+    /// Sessions opened through the host's ACP HTTP transport.
+    #[cfg(feature = "acp")]
+    pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
+        Arc::clone(&self.acp_sessions)
     }
 
     /// This host's in-place runtime rebuilder, when one is wired.
@@ -961,6 +981,18 @@ impl AppState {
         &self.registry
     }
 
+    /// Who is currently present, per company.
+    pub fn presence(&self) -> &crate::server::presence::PresenceRegistry {
+        &self.presence
+    }
+
+    /// A cloned handle to the same host-global registry [`Self::presence`]
+    /// borrows from, for a background task (the periodic sweep) that must
+    /// outlive any single request's borrow of `self`.
+    pub fn presence_handle(&self) -> std::sync::Arc<crate::server::presence::PresenceRegistry> {
+        self.presence.clone()
+    }
+
     /// The prebuilt GraphQL read-plane schema.
     pub fn schema(&self) -> &crate::server::graphql::OcSchema {
         &self.schema
@@ -1076,7 +1108,7 @@ impl AppState {
     /// capability rather than a version number. Growing the list must never
     /// break a client that has not heard of the new entry.
     fn capabilities(&self) -> Vec<&'static str> {
-        let mut out = vec!["rest", "graphql", "sse", "approvals", "devices"];
+        let mut out = vec!["rest", "graphql", "sse", "approvals"];
         if self.hub_identity.is_some() {
             out.push("hub-identity");
         }

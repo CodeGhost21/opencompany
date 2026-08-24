@@ -356,9 +356,9 @@ type Finances {
 	"""
 	balanceUsd: Float!
 	"""
-	The monthly budget, USD.
+	The monthly budget, USD; `null` when no cap is set.
 	"""
-	budgetUsd: Float!
+	budgetUsd: Float
 	"""
 	Total spend this period, USD.
 	"""
