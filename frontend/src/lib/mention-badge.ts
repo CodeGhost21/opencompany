@@ -100,7 +100,7 @@ export function mentionsToClear(
    * channel — which is exactly right, because the count arm never badged it
    * in the first place.
    */
-  mainChannelId: string | undefined,
+  mainChannelId?: string,
   visibleThreadIds: ReadonlySet<string> = new Set([channelId]),
   renderedChannelIds: ReadonlySet<string> = new Set(),
   /**
