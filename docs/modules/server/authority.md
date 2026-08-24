@@ -52,8 +52,9 @@ Faces are on the members' side of that line, deliberately
 (`docs/spec/runtime/avatars.md`). `POST …/avatars` and the `avatar` field on
 `PATCH …/team/{agentId}` are open to any member: picking a colleague's icon
 decides nothing about what the company reaches the world as, and a company whose
-only admin is away should not be stuck with eleven hashed blobs. `tools` stays
-the one admin-gated field on that route. A **person's** own face goes the other
+only admin is away should not be stuck with eleven hashed blobs. `tools` (a
+grant), `model` (a cost/scope choice) and `harness` (a routing binding) stay the
+admin-gated fields on that route. A **person's** own face goes the other
 way for the mirror-image reason — `PATCH …/auth/me` has no `user_id` in its
 path, so not even an admin can set somebody else's.
 
