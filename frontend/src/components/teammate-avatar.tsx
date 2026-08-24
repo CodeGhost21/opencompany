@@ -163,15 +163,24 @@ function useAvatarSrc(ref: string): string | null {
   const { client, company } = useConsole();
   const immediate = staticAvatarSrc(ref);
 
-  // The URL is stored beside the reference it was fetched for, and only trusted
-  // while it still matches. A mounted tile whose `ref` changes must not keep
-  // showing the previous face while the new one is in flight — the render that
-  // carries the new prop would otherwise still answer with the old state, and
-  // the previous person's face would flash before the effect replaced it.
+  // The URL is stored beside the reference it was fetched for and the scope
+  // it was fetched under. A mounted tile whose scope (`client` or `company`)
+  // changes while `ref` stays the same — a `blob:` node id that is valid in
+  // the previous company — must not keep returning the previous company's
+  // object URL; the render that carries the new scope would otherwise answer
+  // with the old company's face.
   // A mascot resolves synchronously, so `immediate` is always the current face
   // and the stateful path only ever holds an uploaded one.
-  const [fetched, setFetched] = useState<{ ref: string; src: string | null } | null>(null);
-  const src = fetched?.ref === ref ? fetched.src : immediate;
+  const [fetched, setFetched] = useState<{
+    client: typeof client;
+    company: typeof company;
+    ref: string;
+    src: string | null;
+  } | null>(null);
+  const src =
+    fetched?.ref === ref && fetched?.client === client && fetched?.company === company
+      ? fetched.src
+      : immediate;
 
   // Revoking a face's object URL does not unpaint a tile that already decoded
   // it, so a delete from the workspace cannot redraw a mounted tile on its own.
