@@ -138,6 +138,19 @@ pub const MAX_AVATAR_DIMENSION: u32 = 4096;
 /// 64 MiB, the worst case any surface ever decodes for one face.
 pub const MAX_AVATAR_PIXELS: u64 = 4096 * 4096;
 
+/// The largest decoded area an animated avatar may repaint in one full cycle.
+///
+/// [`MAX_AVATAR_PIXELS`] bounds a single still; an animation multiplies the
+/// cost of viewing by its frame count, so the thing that matters is the *sum*
+/// of every frame's decoded pixels. Eight full-screen `4096²` frames would be
+/// a pathological avatar, so the ceiling sits at eight of them — while a
+/// genuinely moving face (a few hundred frames at 128×128) stays two orders of
+/// magnitude below it. This is what turns "a valid 4096×4096 animation with
+/// hundreds of full-canvas frames under the 4 MiB byte ceiling" into a `400`,
+/// so every operator who views the roster is never asked to repeatedly decode
+/// billions of pixels.
+pub const MAX_AVATAR_ANIMATED_PIXELS: u64 = 8 * MAX_AVATAR_PIXELS;
+
 /// The media type these bytes actually are, read from their signature.
 ///
 /// **Not** the type the upload declared. A declared type is a claim by whoever
