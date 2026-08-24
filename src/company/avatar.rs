@@ -1101,8 +1101,8 @@ mod test {
             v.extend_from_slice(&fh.to_be_bytes());
             v.extend_from_slice(&0u32.to_be_bytes()); // x offset
             v.extend_from_slice(&0u32.to_be_bytes()); // y offset
-            v.extend_from_slice(&[0, 0]); // delay_num, delay_den
-            v.extend_from_slice(&[0, 0]); // dispose, blend
+            v.extend_from_slice(&[0, 0, 0, 0]); // delay_num, delay_den
+            v.extend_from_slice(&[0, 0]); // dispose_op, blend_op
             v.extend_from_slice(&[0, 0, 0, 0]); // CRC
         }
         // An IDAT so the file reads as a complete PNG; the walker never reaches it.
