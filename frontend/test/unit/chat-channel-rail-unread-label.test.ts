@@ -154,4 +154,49 @@ describe("section folds survive a rail collapse/expand (P2 review)", () => {
 
     expect(sectionToggle()?.getAttribute("aria-expanded")).toBe("false");
   });
+
+  it("shares one fold set across the desktop and sub-lg rail instances", () => {
+    // `ChatView` renders two `ChannelRail`s (sub-`lg` and desktop) and hands
+    // both the same controlled disclosure state so crossing the breakpoint
+    // keeps the operator's folds (codex P2 review). This harness mirrors that
+    // wiring; folding on one rail must fold the same section on the other.
+    const SharedRails = () => {
+      const [folds, setFolds] = useState<Record<string, boolean>>({});
+      const toggle = (id: string) =>
+        setFolds((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
+      return (
+        <>
+          <ChannelRail
+            sections={SECTIONS}
+            activeId={null}
+            unread={{}}
+            onSelect={() => {}}
+            openSections={folds}
+            onToggleSection={toggle}
+          />
+          <ChannelRail
+            sections={SECTIONS}
+            activeId={null}
+            unread={{}}
+            onSelect={() => {}}
+            openSections={folds}
+            onToggleSection={toggle}
+          />
+        </>
+      );
+    };
+
+    act(() => root.render(createElement(SharedRails)));
+    const toggles = () =>
+      [...container.querySelectorAll<HTMLButtonElement>("section button[aria-expanded]")];
+    expect(toggles()).toHaveLength(2);
+    expect(toggles()[0].getAttribute("aria-expanded")).toBe("true");
+    expect(toggles()[1].getAttribute("aria-expanded")).toBe("true");
+
+    act(() => {
+      toggles()[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(toggles()[0].getAttribute("aria-expanded")).toBe("false");
+    expect(toggles()[1].getAttribute("aria-expanded")).toBe("false");
+  });
 });
