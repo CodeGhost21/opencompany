@@ -2,6 +2,20 @@ import type { NotificationDto } from "@/api/types";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 
 /**
+ * Mirrors the host's `is_general_chat` (`src/server/chat_history.rs`, issue
+ * #65): the console addresses its default thread as `"main"`, an unaddressed
+ * chat route stores the default desk `"General"`, and older events carry `""`.
+ * All four spellings are one desk, and a notification context that names it has
+ * to badge the *rendered* main channel — the rail is built from real desk ids,
+ * none of which is `"General"`.
+ */
+function isGeneralChat(context: string | null | undefined): boolean {
+  if (context === undefined || context === null) return false;
+  const folded = context.toLowerCase();
+  return context === "" || folded === MAIN_THREAD_ID || folded === "general";
+}
+
+/**
  * The mention badge: how many unread mentions of **you** sit in each channel.
  *
  * # Why this is not the unread count
@@ -39,8 +53,11 @@ export function mentionCountsByChannel(
     if (n.kind !== "mention") continue;
     // A row with no channel cannot be placed on the rail. Counted nowhere
     // rather than counted somewhere arbitrary.
-    if (!n.context) continue;
-    const channelId = n.context === MAIN_THREAD_ID ? mainChannelId : n.context;
+    if (n.context === undefined || n.context === null) continue;
+    // Every spelling of the General desk is the console's default thread, so
+    // it badges the first rendered desk channel; anything else is a channel id
+    // verbatim.
+    const channelId = isGeneralChat(n.context) ? mainChannelId : n.context;
     out[channelId] = (out[channelId] ?? 0) + 1;
   }
   return out;
@@ -60,14 +77,19 @@ export function mentionsToClear(
   visibleThreadIds: ReadonlySet<string> = new Set([channelId]),
 ): string[] {
   return notifications
-    .filter(
-      (n) =>
-        n.readAt === undefined &&
-        n.kind === "mention" &&
-        n.context !== undefined &&
-        ((n.context === channelId &&
-          (channelId !== mainChannelId || visibleThreadIds.has(channelId))) ||
-          (channelId === mainChannelId && n.context === MAIN_THREAD_ID)),
-    )
+    .filter((n) => {
+      if (n.readAt !== undefined || n.kind !== "mention" || n.context === undefined) {
+        return false;
+      }
+      if (n.context === channelId) {
+        // Clear only once the main channel's history is actually on screen —
+        // a mention is durable, and clearing it before the named message has
+        // loaded would lose the summons for good.
+        return channelId !== mainChannelId || visibleThreadIds.has(channelId);
+      }
+      // A general-chat spelling names the main channel: opening it clears
+      // those mentions too.
+      return channelId === mainChannelId && isGeneralChat(n.context);
+    })
     .map((n) => n.id);
 }
