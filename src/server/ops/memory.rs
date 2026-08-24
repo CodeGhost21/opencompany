@@ -93,10 +93,10 @@ const MAX_CONTEXT_ENTRIES: usize = 500;
 
 /// Upper bound on archived traces materialised by `GET /memory/archives`.
 ///
-/// The keep-recent eviction path already bounds the archive tier itself to
-/// [`TRACE_RETENTION_LIMIT`] (see `prune_archive`), but an older-than policy
-/// archives every evicted trace without pruning, so the route caps what it
-/// returns rather than depending on the eviction policy. Mirrors
+/// The facade's `evict` bounds the archive tier itself on every eviction path
+/// (keep-recent to its `n`, older-than to [`TRACE_RETENTION_LIMIT`]; see
+/// `prune_archive`), so the route's cap is defense-in-depth for archive rows
+/// written before that bound applied, not the primary bound. Mirrors
 /// `recent_traces`' newest-window semantics: same total order, tail of the cap.
 const MAX_ARCHIVED_TRACES: usize = TRACE_RETENTION_LIMIT;
 
