@@ -193,15 +193,28 @@ export function resolveAvatarSrc(
   if (!pending) {
     pending = client
       .getBlob(`${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(node)}`)
-      .then((blob) => URL.createObjectURL(blob))
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        // Evicted while the fetch was in flight — the key came and went, so
+        // nothing will read this URL from the cache again. Revoke it rather
+        // than let it leak.
+        if (!blobUrls.has(key)) {
+          URL.revokeObjectURL(url);
+          return null;
+        }
+        blobUrlValues.set(key, url);
+        return url;
+      })
       .catch(() => {
         // Not cached as a failure: a face that 404s because the workspace was
         // mid-write should be retried on the next mount, not remembered as
         // missing for the life of the tab.
         blobUrls.delete(key);
+        blobUrlValues.delete(key);
         return null;
       });
     blobUrls.set(key, pending);
+    if (blobUrls.size > MAX_BLOB_URLS) evictOldestBlobUrl();
   }
   return pending;
 }
