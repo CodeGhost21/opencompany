@@ -244,7 +244,10 @@ impl AgentRunGql {
 ///
 /// The scrubbed skeleton is the primary answer, so a failure to read it must
 /// reach the client rather than masquerade as "no steps".
-async fn load(runtime: &Arc<CompanyRuntime>, record: RunRecord) -> async_graphql::Result<AgentRunGql> {
+async fn load(
+    runtime: &Arc<CompanyRuntime>,
+    record: RunRecord,
+) -> async_graphql::Result<AgentRunGql> {
     let steps = runtime
         .runs()
         .list_run_steps(runtime.id(), &record.id)
