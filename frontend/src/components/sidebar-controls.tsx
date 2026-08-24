@@ -108,12 +108,17 @@ export function SidebarControls({
 
   return (
     <SidebarMenu>
-      {/* Company state. Not a control — `cursor-default` and inert, so it does
-          not read as something to press. */}
+      {/* Company state. Not a control — rendered as a status row (`div`, not a
+          `button`), so it stays out of the tab order and announces as status
+          text rather than as a navigation button that does nothing (this row
+          has no handler and never will). On the collapsed rail the label text
+          is visually clipped but still in the tree, so the state stays named.
+          The tooltip is hover-only and kept for the rail. */}
       <SidebarMenuItem>
         <SidebarMenuButton
           tooltip={label}
           className={cn("cursor-default font-medium hover:bg-transparent", TONE_TEXT[tone])}
+          render={<div />}
         >
           <span className="flex size-4 items-center justify-center">
             <span
