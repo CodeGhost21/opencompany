@@ -830,6 +830,13 @@ impl CompanyAgent {
                 }
                 events.push(event);
             }
+            // A turn that *ends* mid-thought has no closing `TextDelta` or tool
+            // call, so the reasoning tail below the interim flush threshold
+            // would otherwise sit in the trace unpersisted — exactly the
+            // failed/interrupted turns worth diagnosing. Flush on drain.
+            if let Some(sink) = &run_sink {
+                sink.flush().await;
+            }
             events
         });
 
