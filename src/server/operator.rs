@@ -2081,8 +2081,15 @@ async fn mention_context(
     match crate::runtime::assignee::resolve(&record, desk) {
         crate::runtime::assignee::AssigneeResolution::Agent(agent) => format!("dm:{agent}"),
         crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. } => desk_id,
-        // Unassigned, empty, unknown, or ambiguous: nothing canonical to badge,
-        // so the string as written is the honest context.
+        // Unassigned, empty, unknown, or ambiguous: nothing canonical to badge.
+        // A general-chat spelling — `"General"` (the default for an unaddressed
+        // message), `"main"`, or `""` — still names the General desk, the
+        // console's default thread, so it has to file under the console's
+        // canonical main-thread id, which the rail aliases onto its first
+        // rendered desk channel ([`is_general_chat`], issue #65). Anything else
+        // is honestly the string as written: it may badge nowhere, but it is
+        // not a lie.
+        _ if is_general_chat(Some(desk)) => MAIN_THREAD_ID.to_string(),
         _ => desk.to_string(),
     }
 }
