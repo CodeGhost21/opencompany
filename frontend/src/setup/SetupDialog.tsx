@@ -795,8 +795,10 @@ function InferenceNotice({
    * and its restart control render only under management authority, and the
    * host refuses the writes for a member — so an operator who cannot land them
    * is told to ask an admin instead of being handed a link that can only 403.
+   * `null` while the role read is outstanding: the action is withheld, because
+   * an unread role must not be guessed either way.
    */
-  canManage: boolean;
+  canManage: boolean | null;
   onLeave: () => void;
 }) {
   const restart = inference === "restart";
@@ -812,7 +814,7 @@ function InferenceNotice({
         {restart
           ? "This company needs a restart"
           : noModel
-            ? "This deployment can't run a model"
+            ? "This deployment can't design your team with a model"
             : unavailable
               ? "This host can't reach a model right now"
               : "We couldn't check this host's model"}
@@ -821,11 +823,13 @@ function InferenceNotice({
         {restart
           ? "A model is set up for this company, but the running brain predates it — teammates keep echoing until the company is restarted. "
           : noModel
-            ? "Your answers will create a standard team for your industry — no model on this host could tailor one. "
+            ? "Your answers will create a standard team for your industry — this deployment can't use a model to design one. "
             : unavailable
               ? "Your answers will create a standard team for your industry rather than tailor one to them. "
               : "Your answers may create a standard team rather than a tailored one. "}
-        {offered && canManage ? (
+        {canManage === null ? (
+          "Carry on with the standard team."
+        ) : offered && canManage ? (
           <>
             <a
               href="#/settings/connections"
