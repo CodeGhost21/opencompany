@@ -267,18 +267,33 @@ export function SetupController({
   const leave = useCallback(() => {
     markSetupResuming(scope);
     setOpen(false);
+    setRedesigning(false);
   }, [scope]);
 
   const done = useCallback(() => {
     // Clear the skip so it cannot outlive what it was suppressing: an operator
     // who skipped, later ran setup, then removed every agent should be offered
-    // setup again rather than left on an empty team page.
+    // setup again rather than left on an empty company page.
     clearSetupSkipped(scope);
     setOpen(false);
     // The team exists now, so the tour has something to walk through.
     setUnstaffed(false);
+    setRedesigning(false);
     onCompleted?.();
   }, [scope, onCompleted]);
+
+  /**
+   * The completion screen's "Add a model in Settings" action.
+   *
+   * Distinct from [`done`] even though both close the dialog: this one leaves
+   * the fallback team in place and records a redesign debt, so when the
+   * operator returns from wiring a model the dialog reopens in redesign mode
+   * and that team is replaced rather than a second one stacked on it.
+   */
+  const redesign = useCallback(() => {
+    markSetupRedesign(scope);
+    setOpen(false);
+  }, [scope]);
 
   if (!checked && !force) return null;
   if (!open) return null;
