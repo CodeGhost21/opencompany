@@ -382,6 +382,18 @@ fn prompt_text(params: &Value) -> Result<String, String> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use crate::company::CompanyManifest;
+    use crate::ports::types::{
+        CompressedTrace, CycleRequest, CycleResult, TokenUsage,
+    };
+    use crate::ports::users::{UserRecord, UserRole, UserStatus};
+    use crate::ports::{Brain, CompanyStore, CycleHost};
+    use crate::server::graphql::auth::UserPrincipal;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, CompanyRecord};
 
     #[test]
     fn target_requires_an_explicit_company() {
