@@ -1523,6 +1523,27 @@ export function AppShell({
     });
   }, []);
   /**
+   * A chat POST that resolved for a company the operator has since left
+   * (issue #1000).
+   *
+   * The turn and its reply are durably journaled in the OLD company's
+   * history, so nothing about them belongs in the active scope. But the
+   * send bracket `onSendStart` armed for the thread must still be released:
+   * if the echo suppression were left up, `agent_reply` frames for the
+   * thread would be captured into `pendingPostThreadsRef` and never
+   * rendered. So release the held frames — discarding them, because history
+   * re-reads them back when the operator returns — and lift the
+   * suppression. Pointedly NOT `onSendDetached`: that renders the held
+   * frames and arms an `openTurns` row, folding the old company's reply
+   * into the active company's state, which is exactly the cross-company
+   * leak the company guard exists to stop. Not `onSendEnd` either: it may
+   * clear a live step timeline or the `activeTurnThreadRef` fallback that a
+   * *current* company's own in-flight POST is using.
+   */
+  const onSendStale = useCallback((threadId: string) => {
+    pendingPostThreadsRef.current.detached(threadId);
+  }, []);
+  /**
    * The host accepted the turn and handed back its id instead of its answer
    * (issue #983).
    *
