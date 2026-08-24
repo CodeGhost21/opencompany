@@ -351,6 +351,13 @@ export function ChatView({
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
+  // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
+  // transcript share the viewport (`hidden lg:flex`), so it is visible even
+  // while `mobilePane` says "rail"; below that the pane toggle is the whole
+  // story. Mention clearing is gated on this so a mention cannot be marked
+  // read while only the rail is showing (codex P1 review).
+  const isDesktop = useIsDesktop();
+  const chatPaneVisible = mobilePane === "chat" || isDesktop;
   const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
   // Section disclosure is shared by the desktop and sub-`lg` rail instances
   // (codex P2 review): each instance would otherwise keep its own fold state,
