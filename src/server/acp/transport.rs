@@ -460,4 +460,171 @@ mod test {
     fn an_empty_prompt_is_refused() {
         assert!(prompt_text(&json!({ "prompt": [] })).is_err());
     }
+
+    /// A brain that answers a cycle with nothing, so the ACP `prompt` turn
+    /// completes without an inference credential. The notification this suite
+    /// asserts on is filed before the turn runs, so the empty answer is fine.
+    struct SilentBrain;
+
+    #[async_trait]
+    impl Brain for SilentBrain {
+        async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> crate::Result<CycleResult> {
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(req.cycle_id, "silent test brain")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    async fn seed_user(state: &AppState, company: &CompanyId, id: &str, display: &str) -> String {
+        let runtime = state.registry().get(company).expect("company");
+        let now = crate::ports::now_millis();
+        runtime
+            .users()
+            .upsert_user(
+                company,
+                &UserRecord {
+                    id: id.to_string(),
+                    email: format!("{id}@example.test"),
+                    display_name: Some(display.to_string()),
+                    role: UserRole::Member,
+                    status: UserStatus::Active,
+                    password_hash: None,
+                    must_change_password: false,
+                    created_at_millis: now,
+                    last_seen_at_millis: None,
+                    updated_at_millis: now,
+                },
+            )
+            .await
+            .expect("seed_user: upsert");
+        id.to_string()
+    }
+
+    /// A host whose registry runtime answers cycles with [`SilentBrain`], on
+    /// the `acp,runner,tinymemory` lane — the one that executes `server::acp`.
+    async fn acp_state(home: &std::path::Path) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = []
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_brain(std::sync::Arc::new(SilentBrain))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        state
+    }
+
+    /// An `@alice-smith` ACP prompt must badge alice exactly as a console
+    /// message would: the ACP surface is just another operator ingress, and the
+    /// durable notification is what lets an offline person see the mention at
+    /// all.
+    #[tokio::test]
+    async fn a_prompt_mention_files_the_durable_notification() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-mention-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).expect("company");
+
+        // Two people: the operator driving the prompt, and the person it names.
+        let admin = seed_user(&state, &company, "u-admin", "Admin Person").await;
+        let alice = seed_user(&state, &company, "u-alice", "Alice Smith").await;
+        let auth = GqlAuth::User(UserPrincipal {
+            company: company.clone(),
+            user_id: admin,
+            email: "admin@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+        });
+
+        state.acp_sessions().insert(
+            "conn-1",
+            crate::server::acp::AcpSession {
+                id: "s-1".to_string(),
+                company: company.clone(),
+                chat: "engineering".to_string(),
+                agent_id: None,
+            },
+        );
+
+        let result = prompt(
+            &state,
+            &auth,
+            &json!({
+                "sessionId": "s-1",
+                "prompt": [
+                    { "type": "text", "text": "@alice-smith please review the invoice" },
+                ],
+                "_meta": { "opencompany/connectionId": "conn-1" },
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "prompt failed: {result:?}");
+
+        // The durable half of the mention: the person named gets a row they can
+        // badge, placed in the channel the prompt ran in.
+        let rows = runtime
+            .notifications()
+            .list(&company, &alice)
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 1, "an @alice prompt must badge alice");
+        assert_eq!(rows[0].notification.kind, "mention");
+        assert_eq!(rows[0].notification.context.as_deref(), Some("engineering"));
+        // And the author is not badged for their own prompt.
+        let admin_rows = runtime
+            .notifications()
+            .list(&company, "u-admin")
+            .await
+            .expect("list");
+        assert!(admin_rows.is_empty(), "{admin_rows:?}");
+    }
 }
