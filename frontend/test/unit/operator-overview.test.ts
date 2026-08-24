@@ -188,8 +188,8 @@ describe("the operator overview landing page (#1321)", () => {
     // ticket must make the *latest* read win even when the initial answer
     // lands last — otherwise the fresher lists get overwritten by stale ones.
     window.localStorage.setItem("oc.overview.last-visit:test-host::acme", "1700000000000");
-    const tickFailed = run({ id: "tick-failed", finishedAtMillis: 1_700_000_000_100 });
-    const initialFailed = run({ id: "initial-failed", finishedAtMillis: 1_700_000_000_100 });
+    const tickFailed = run({ id: "tick-failed", taskId: "tick-failed", finishedAtMillis: 1_700_000_000_100 });
+    const initialFailed = run({ id: "initial-failed", taskId: "initial-failed", finishedAtMillis: 1_700_000_000_100 });
     const stoppedResolvers: Array<(runs: RunSummary[]) => void> = [];
     const failedResolvers: Array<(runs: RunSummary[]) => void> = [];
     const host: OpenCompanyClient = {
