@@ -33,10 +33,16 @@ function run(over: Partial<RunSummary> = {}): RunSummary {
   };
 }
 
-function client(runs: Promise<RunSummary[]>): OpenCompanyClient {
+function client(
+  runs: Promise<RunSummary[]>,
+  desks?: Promise<DeskDto[]>,
+): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/company/acme",
     get: () => runs,
+    // The desks read is best-effort and may be absent entirely — a mock that
+    // does not implement `listDesks` exercises the degraded DM default.
+    ...(desks ? { listDesks: () => desks } : {}),
   } as unknown as OpenCompanyClient;
 }
 
