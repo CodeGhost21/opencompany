@@ -63,7 +63,12 @@ type Phase =
 type Fallback = RosterFallback | "unspecified" | null;
 
 /** What the host said about the model before we ask the questions it shapes. */
-type InferenceReadiness = "checking" | "ready" | "unavailable" | "unknown";
+type InferenceReadiness =
+  | "checking"
+  | "ready"
+  | "unavailable"
+  | "restart"
+  | "unknown";
 
 /**
  * How long to wait for the readiness answer before carrying on without it.
