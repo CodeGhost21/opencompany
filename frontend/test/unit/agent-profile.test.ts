@@ -22,7 +22,7 @@ function agent(over: Partial<AgentDetailDto> = {}): AgentDetailDto {
     source: "overlay",
     editable: ["name", "role", "description"],
     isOrchestrator: false,
-    tools: { requested: [], companyAllow: ["workspace.*"], effective: ["workspace.*"] },
+    tools: { requested: [], companyAllow: ["workspace.*"], deskAllow: [], deskCeilingActive: false, effective: ["workspace.*"] },
     desks: [],
     inboxEnabled: false,
     ...over,
@@ -100,6 +100,8 @@ describe("what the panel says a teammate is", () => {
         tools: {
           requested: ["workspace.*", "finance.*"],
           companyAllow: ["workspace.*"],
+          deskAllow: [],
+          deskCeilingActive: false,
           effective: ["workspace.*"],
         },
       }),

@@ -173,16 +173,16 @@ describe("composer intent selection (issue #984)", () => {
     }
 
     await send("ordinary message");
-    // The trailing `undefined` is the attachments arg (issue #1682): the
-    // composer now widens `onSend` to `(text, intent?, attachments?)`, and a
-    // message with no attachment passes it as absent.
-    expect(sent).toHaveBeenLastCalledWith("ordinary message", undefined, undefined);
+    // The trailing `undefined`s are the attachments (issue #1682) and mentions
+    // args: the composer widens `onSend` to `(text, intent?, attachments?,
+    // mentions?)`, and a message with neither passes them as absent.
+    expect(sent).toHaveBeenLastCalledWith("ordinary message", undefined, undefined, undefined);
 
     await act(async () => {
       (container.querySelector('[data-testid="composer-deliverable-workflow"]') as HTMLButtonElement).click();
     });
     await send("make it reusable");
-    expect(sent).toHaveBeenLastCalledWith("make it reusable", "workflow", undefined);
+    expect(sent).toHaveBeenLastCalledWith("make it reusable", "workflow", undefined, undefined);
 
     for (const intent of ["chat", "once", "workflow"]) {
       expect(

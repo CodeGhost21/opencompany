@@ -101,6 +101,10 @@ pub struct RuntimeHandover {
     /// that is in fact ready to continue.
     pub(crate) blocked_nodes: BlockedNodeQueue,
     pub(crate) serial: Arc<TokioMutex<()>>,
+    /// The per-agent lock slots. Inherited across the swap for the same reason
+    /// as `serial`: a fresh map would let an agent mid-turn start a second turn
+    /// beside itself.
+    pub(crate) per_agent: Arc<TokioMutex<std::collections::HashMap<String, Arc<TokioMutex<()>>>>>,
     pub(crate) task_writes: Arc<TokioMutex<()>>,
     #[cfg(feature = "openhuman")]
     pub(crate) harness: Option<Arc<crate::harness::HarnessPool>>,
@@ -139,6 +143,7 @@ impl CompanyRuntime {
             workflow_gates: self.workflow_gates.clone(),
             blocked_nodes: self.blocked_nodes.clone(),
             serial: self.serial.clone(),
+            per_agent: self.per_agent.clone(),
             task_writes: self.task_writes.clone(),
             #[cfg(feature = "openhuman")]
             harness: self.harness.clone(),

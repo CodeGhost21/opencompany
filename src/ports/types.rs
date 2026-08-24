@@ -1631,6 +1631,21 @@ pub enum CompanyEvent {
         /// byte-for-byte as it did before.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         diagnostics: Vec<String>,
+        /// The attempt this node's agent ran as, when it opened one.
+        ///
+        /// A **structural id and nothing more**, which is why it is allowed on
+        /// an event whose whole stance is "ids, never payloads": it is no more
+        /// revealing than the `node_id` beside it, and it is what lets a console
+        /// go from a node on the canvas to that node's step trace without a
+        /// second round trip to find which attempt belonged to it.
+        ///
+        /// Absent for a non-agent node, for a host that records no attempts, and
+        /// on every line written before this field existed. Same `default` +
+        /// `skip_serializing_if` shape as `diagnostics` above, for the same
+        /// reason: the journal is replayed at boot, so a field without a default
+        /// would turn every pre-existing line into silent history loss.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_run_id: Option<String>,
     },
     /// One `output` node's report actually left the process (issue #529) — the
     /// durable record of a dispatch that the run's own
@@ -2603,6 +2618,11 @@ pub struct OutboundMessage {
     /// and says so rather than offering an action that cannot persist.
     #[serde(default, rename = "messageId", skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// Who this reply names, projected for the requesting viewer by the chat
+    /// handler. Stored replies carry structured mentions in `AgentReply`; this
+    /// field keeps the synchronous POST response identical to history and SSE.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<Mention>,
 }
 
 /// One visible step in an agent turn's processing timeline, surfaced in the
@@ -2742,6 +2762,20 @@ pub enum TurnStepKind {
     Note,
 }
 
+impl TurnStepKind {
+    /// The stable `snake_case` wire name, matching the serde rename above.
+    ///
+    /// GraphQL serializes the kind as a string; lowercasing the Rust `Debug`
+    /// name instead would yield `toolcall`, which no consumer understands.
+    pub fn wire_word(self) -> &'static str {
+        match self {
+            TurnStepKind::ToolCall => "tool_call",
+            TurnStepKind::Thinking => "thinking",
+            TurnStepKind::Note => "note",
+        }
+    }
+}
+
 /// How a [`TurnStep`] ended. Serialized in `snake_case` (`ok` / `error` /
 /// `running` / `awaiting_approval`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2820,6 +2854,24 @@ pub enum TurnStepFailure {
     /// Genuinely unclassified. The honest residue, and the *only* case that may
     /// read as "something went wrong": every state above used to land here.
     Failed,
+}
+
+impl TurnStepFailure {
+    /// The `snake_case` word this failure serializes as.
+    #[must_use]
+    pub fn wire_word(self) -> &'static str {
+        match self {
+            Self::Declined => "declined",
+            Self::BlockedByPolicy => "blocked_by_policy",
+            Self::Unauthorized => "unauthorized",
+            Self::MissingPermission => "missing_permission",
+            Self::MissingApp => "missing_app",
+            Self::NotFound => "not_found",
+            Self::Timeout => "timeout",
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4755,6 +4807,7 @@ mod test {
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         let json = serde_json::to_string(&no_steps).unwrap();
         assert_eq!(json, r#"{"channel":"operator","text":"hi"}"#);
@@ -4778,6 +4831,7 @@ mod test {
                 ..TurnStep::default()
             }],
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(round_trip(&with_steps), with_steps);
     }
@@ -4797,6 +4851,7 @@ mod test {
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&no_card).unwrap(),
@@ -4816,6 +4871,7 @@ mod test {
             text: "opened one".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(round_trip(&with_card), with_card);
         assert!(
@@ -7158,6 +7214,7 @@ mod test {
                 status,
                 elapsed_ms: 1234,
                 diagnostics: Vec::new(),
+                agent_run_id: None,
             };
             assert_eq!(round_trip(&event), event);
         }
@@ -7244,6 +7301,7 @@ mod test {
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 7,
             diagnostics: Vec::new(),
+            agent_run_id: None,
         })
         .expect("serialize");
         assert_eq!(

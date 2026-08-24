@@ -648,6 +648,7 @@ pub(crate) fn channel_message_from_effect(effect: &Effect) -> Option<OutboundMes
         text,
         steps: Vec::new(),
         reply_to: None,
+        mentions: Vec::new(),
     })
 }
 

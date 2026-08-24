@@ -318,6 +318,13 @@ struct RunDetail {
 struct RunsQuery {
     /// Only attempts at this card. Absent = every card.
     task: Option<String>,
+    /// Only attempts spawned by this workflow run's `agent` nodes. Absent =
+    /// every attempt, workflow-spawned or not.
+    ///
+    /// The join a run inspector needs: a workflow node's turn has neither a card
+    /// nor a conversation, so before this there was no selector that could
+    /// reach it.
+    workflow_run: Option<String>,
     /// Only attempts dispatched to this desk/teammate. Absent = every desk.
     ///
     /// Not validated against the roster on purpose: a teammate can be removed
@@ -357,6 +364,7 @@ impl RunsQuery {
         }
         Ok(RunFilter {
             task_id: self.task,
+            workflow_run_id: self.workflow_run,
             agent_id: self.agent,
             statuses,
             limit: Some(match self.limit {
@@ -958,6 +966,7 @@ mod tests {
     fn the_limit_clamps_and_zero_means_default() {
         let filter = |limit: Option<usize>| {
             RunsQuery {
+                workflow_run: None,
                 task: None,
                 agent: None,
                 status: None,
@@ -984,6 +993,7 @@ mod tests {
     fn the_agent_selector_becomes_a_store_predicate() {
         let filter = RunsQuery {
             task: Some("card-7".into()),
+            workflow_run: None,
             agent: Some("engineer".into()),
             status: None,
             limit: None,
@@ -1000,6 +1010,7 @@ mod tests {
         assert_eq!(
             RunsQuery {
                 task: None,
+                workflow_run: None,
                 agent: None,
                 status: None,
                 limit: None,

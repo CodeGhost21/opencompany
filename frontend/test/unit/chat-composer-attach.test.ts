@@ -114,7 +114,9 @@ describe("composer paperclip (issue #1682)", () => {
       (container.querySelector('[aria-label="Send"]') as HTMLButtonElement).click();
     });
 
-    expect(sent).toHaveBeenLastCalledWith("here is the diagram", undefined, [reference]);
+    // The trailing `undefined` is the mentions arg — no mention directory is
+    // loaded here, so the composer passes it absent.
+    expect(sent).toHaveBeenLastCalledWith("here is the diagram", undefined, [reference], undefined);
     // The chip is gone after send — a stale attachment must not ride the next
     // message.
     expect(container.textContent).not.toContain("diagram.png");

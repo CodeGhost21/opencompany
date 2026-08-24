@@ -1,4 +1,9 @@
-import type { AttachmentDto, ChatHistoryMessageDto, TurnStep } from "@/api/types";
+import type {
+  AttachmentDto,
+  ChatHistoryMessageDto,
+  ChatMentionDto,
+  TurnStep,
+} from "@/api/types";
 
 /**
  * The company's main line, by thread id.
@@ -19,6 +24,9 @@ export interface Reaction {
   /** Whether the reader is the one who reacted. */
   mine: boolean;
 }
+
+/** One mention on one line, exactly as resolved by the host. */
+export type Mention = ChatMentionDto;
 
 /** One line in the conversation with the company. */
 export interface ChatMessage {
@@ -70,6 +78,15 @@ export interface ChatMessage {
    * Absent on a line with no attachment.
    */
   attachments?: AttachmentDto[];
+  /**
+   * Who this line names (`@engineer`, `@Jane Doe`, `@everyone`), as the host
+   * resolved them — spans plus a label, never a target id.
+   *
+   * Carried rather than re-parsed from `text`, so a chip is drawn only where
+   * somebody was actually notified. Absent when the line names nobody, and on
+   * a host that predates the field.
+   */
+  mentions?: Mention[];
 }
 
 /**
@@ -205,6 +222,8 @@ export function makeMessage(
     taskId?: string;
     messageId?: string;
     attachments?: AttachmentDto[];
+    /** Mention spans the host resolved against this message, for chip rendering. */
+    mentions?: Mention[];
   } = {},
 ): ChatMessage {
   return {
@@ -219,6 +238,7 @@ export function makeMessage(
     // Issue #1682: an empty list is dropped to `undefined` so a line with no
     // attachment stays exactly the shape it was before the field existed.
     attachments: opts.attachments?.length ? opts.attachments : undefined,
+    mentions: opts.mentions?.length ? opts.mentions : undefined,
   };
 }
 
@@ -324,6 +344,9 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // Reactions come through whoever the host said reacted; nothing is
       // inferred here, `mine` included.
       reactions: entry.reactions?.length ? entry.reactions : undefined,
+      // Same rule as reactions: the host says who was mentioned, and nothing
+      // here infers one from the text.
+      mentions: entry.mentions?.length ? entry.mentions : undefined,
       // A sent message never carries a channel; only attribute one when the
       // line came from someone/something else, mirroring `ChatPane.send`.
       channel: from === "company" ? entry.channel : undefined,

@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   // AppWindow,  // re-add with the Pages nav entry below
   FolderClosed,
   LayoutDashboard,
@@ -49,7 +50,11 @@ import {
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
-import { arrivedViaSetupHandoff, clearSetupHandoff } from "@/setup/state";
+import {
+  arrivedViaSetupHandoff,
+  clearSetupHandoff,
+  setupHandoffHasScope,
+} from "@/setup/state";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -65,6 +70,7 @@ import { useHashView } from "@/hooks/use-hash-view";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -83,6 +89,7 @@ import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
+import { drainReReadQueue } from "@/lib/re-read-queue";
 import { OperatorOverview } from "@/views/OperatorOverview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
@@ -104,13 +111,20 @@ import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
+import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { SettingsSection } from "@/views/SettingsSection";
-import { isSettingsPage } from "@/views/settings-pages";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
   import("@/views/WorkflowsView").then((m) => ({ default: m.WorkflowsView })),
+);
+// Lazy for the reason the canvas is: it pulls recharts, and an operator who
+// never opens the Observatory should not pay for it.
+const ObservatoryView = lazy(() =>
+  import("@/views/observatory/ObservatoryView").then((m) => ({
+    default: m.ObservatoryView,
+  })),
 );
 // Pulls in the markdown renderer — load on demand.
 const WorkspaceView = lazy(() =>
@@ -229,6 +243,9 @@ const NAV: NavItem[] = [
   // `server::ops::finance`. See docs/spec/runtime/finance-console.md.
   { view: "finances", label: "Finance", icon: Wallet },
   { view: "workflows", label: "Workflows", icon: Workflow },
+  // What the agents actually did, run by run — the read-only companion to
+  // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
+  { view: "observatory", label: "Observatory", icon: Activity },
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
   // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
   // "something an agent built" surfaces, as opposed to the fixed views above.
@@ -275,47 +292,6 @@ const MAIN_CONTENT_ID = "main-content";
  * outright, and this only governs the no-segment case.
  */
 const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
-
-/**
- * `#/tasks` with no card named the board page, which is retired (issue #1140).
- * `#/memory` is the Brain browser's legacy address after it moved under
- * Settings (issue #1416).
- *
- * Each retired route lands at its current home, so a bookmark, a habit, or a
- * link written before the move still reaches the intended surface rather than
- * a 404. `#/tasks/<malformed>` names no card, so it goes to the board; a real
- * `#/tasks/<id>` returns `null` from here and resolves untouched.
- *
- * Module scope, because `useHashView` holds this in a `useCallback` dependency
- * list: an inline arrow would be a new identity on every render and would
- * re-resolve the route on each one.
- */
-const REWRITE_RETIRED = (
-  head: string,
-  sub: string | null,
-): [View, string | null] | null => {
-  if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
-  if (head === "memory") return ["settings", "brain"];
-  // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
-  // Team and Workspace. Do not render General under an address that names no
-  // page: a bookmark or shared link must say where it actually lands.
-  if (head === "settings" && sub !== null && !isSettingsPage(sub)) return ["settings", "general"];
-  // Bare `#/team` is the Company page now (issue #1141). It rendered the
-  // teammate card grid from a route with no nav entry, so nobody arrived at it;
-  // the grid is Company's Cards half, and leaving `#/team` answering as well
-  // would leave two live addresses drawing one grid with no relationship
-  // between them. A named teammate is untouched — `#/team/<agentId>` is the
-  // detail sub-page (issue #264), it is what the org chart's rows and the chat
-  // pane's chips link to, and it is deliberately a page so it can be linked.
-  if (head === "team" && !sub) return ["company", null];
-  // `#/connections` predates the split into OAuth / MCP / Inference; the
-  // accounts it named are the OAuth page.
-  if (head === "connections") return ["settings", "oauth"];
-  if (head === "oauth") return ["settings", "oauth"];
-  if (head === "mcp") return ["settings", "mcp"];
-  if (head === "people") return ["settings", "people"];
-  return null;
-};
 
 const LEGACY_CONNECT_QUERY_KEYS = ["connected", "connect_error", "provider"] as const;
 
@@ -514,6 +490,15 @@ export function AppShell({
   const [setupOpen, setSetupOpen] = useState(true);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
+  // `#/setup` is an intentional, manual recovery path. It is a route rather
+  // than a nav page: setup remains a dialog over the ordinary console, but the
+  // address works for staffed companies and after someone has skipped. Entering
+  // it forces the dialog open; leaving it (Back, or an edit) hands the dialog
+  // back to `SetupController`'s `routeOpen` edge, which closes what the route
+  // opened.
+  useEffect(() => {
+    if (view === "setup") setSetupForced(true);
+  }, [view]);
   /**
    * Did this mount start on a view the operator named?
    *
@@ -542,7 +527,14 @@ export function AppShell({
   // completion gets, and so a reload cannot re-apply it.
   const setupScope = { connection: scope.connection, company };
   useEffect(() => {
-    if (!arrivedViaSetupHandoff(setupScope)) return;
+    // SetupWizard and the magic-link flow use the unscoped marker because the
+    // connection/company may not survive their full-page hand-off. Accept that
+    // form only when the marker really carries no scope: a marker scoped to a
+    // different connection/company must not suppress setup on this one, nor be
+    // cleared before the company it names has consumed it.
+    const scoped = arrivedViaSetupHandoff(setupScope);
+    const unscoped = !setupHandoffHasScope() && arrivedViaSetupHandoff();
+    if (!scoped && !unscoped) return;
     setSetupCompleted(true);
     clearSetupHandoff();
   }, [scope.connection, company]);
@@ -613,6 +605,14 @@ export function AppShell({
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
+  /**
+   * Bumped by the events that actually signal a workflow node's agent is
+   * working — `workflow_run_started`, `workflow_node_started` and
+   * `workflow_node_finished`. Node turns stream no live turn frames
+   * (`run_background` publishes nothing), so this tick is fed from the node
+   * boundaries rather than from `onTurnEvent`; see `onWorkflowRunEvent`.
+   */
+  const [backgroundTurnTick, setBackgroundTurnTick] = useState(0);
   // Issue #384: bumped on every `workflow_created` / `workflow_updated` /
   // `workflow_deleted`, and since issue #276 on `workflow_enabled_changed` too,
   // so the Workflows view re-reads its picker while the tab stays open — a graph
@@ -837,6 +837,11 @@ export function AppShell({
     // channels that no longer exist, and start the unread floor again so the
     // incoming company's rehydrated history isn't counted as news.
     setChatChannelByThread({});
+    // Drop the deferred re-read queue with the channel map it was keyed against
+    // (issue #1701). A thread parked under the old company must not replay when
+    // the new company's map lands — channel ids like `general` collide across
+    // companies, so a stale id would fold the wrong thread's history in.
+    pendingReReadRef.current.clear();
     // Another company's channels are another namespace here too, and a status
     // carried over would let the incoming company's channels claim to be
     // settled before anything has asked about them.
@@ -1032,6 +1037,25 @@ export function AppShell({
    * that effect. {@link reReadSettledThread} is that case; see its doc.
    */
   const mountedRef = useRef(true);
+  // Thread ids whose turn settled before `chatChannelByThread` knew their
+  // channel, parked for replay once it does (issue #1701). A ref, not state:
+  // it must survive renders without itself provoking one, and the drain that
+  // reads it is triggered by the channel map landing, not by this set changing.
+  const pendingReReadRef = useRef<Set<string>>(new Set());
+  // Mirrors `chatChannelByThread` so `reReadSettledThread`'s `.then()` always
+  // reads the map's current value instead of the one closed over when the
+  // request started (issue #1701 follow-up). `reReadSettledThread` is
+  // recreated whenever `chatChannelByThread` changes — if a `getChatHistory`
+  // response lands *after* the map-populating render but its callback closure
+  // predates that render (the request started while the map was still
+  // empty), reading state directly would see the stale empty map even though
+  // the drain effect below already ran with the fresh one — parking the
+  // thread with nothing left to trigger its replay. Reading this ref instead
+  // means the response always sees whatever the map holds *now*.
+  const chatChannelByThreadRef = useRef(chatChannelByThread);
+  useEffect(() => {
+    chatChannelByThreadRef.current = chatChannelByThread;
+  }, [chatChannelByThread]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1110,8 +1134,16 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = chatChannelByThread[threadId];
-          if (!channelId) return;
+          const channelId = chatChannelByThreadRef.current[threadId];
+          // The thread settled before the desks/roster effect populated its
+          // channel id — on a cold load, or the moment after a company switch
+          // (issue #1701). The `threads` fold above still ran; park the id so
+          // the drain effect replays the transcript fold once the map lands,
+          // rather than dropping it and leaving the Chat panel stale.
+          if (!channelId) {
+            pendingReReadRef.current.add(threadId);
+            return;
+          }
           setTranscripts((t) => {
             const known = new Set((t[channelId] ?? []).map((m) => m.id));
             const fresh = hydrated.filter((m) => !known.has(m.id));
@@ -1124,8 +1156,21 @@ export function AppShell({
           /* offline — the next hydration pass still rebuilds it */
         });
     },
-    [client, company, chatChannelByThread],
+    // Deliberately excludes `chatChannelByThread`: the callback reads the map
+    // through `chatChannelByThreadRef` (always current) instead, so its
+    // identity no longer churns on every map update — see the ref's doc above.
+    [client, company],
   );
+
+  // Replay any thread parked by the branch above once its channel becomes
+  // known (issue #1701). Fires when the desks/roster effect populates
+  // `chatChannelByThread` — the exact edge that a cold-load or post-switch
+  // settle was waiting on. Deliberately keyed on the channel map and the
+  // callback only: `transcripts`/`threads` are written by the replay itself,
+  // so depending on them would loop.
+  useEffect(() => {
+    drainReReadQueue(pendingReReadRef.current, chatChannelByThread, reReadSettledThread);
+  }, [chatChannelByThread, reReadSettledThread]);
 
   /**
    * Watch each open turn to its end, and rebuild the transcript from the
@@ -1367,6 +1412,7 @@ export function AppShell({
               makeMessage("company", event.text, {
                 channel: event.agentId,
                 taskId: event.taskId,
+                mentions: event.mentions,
                 // Issue #483 — see `liveReplyIdentity`.
                 ...liveReplyIdentity(event),
               }),
@@ -1411,6 +1457,7 @@ export function AppShell({
             makeMessage("company", event.text, {
               channel: event.agentId,
               taskId: event.taskId,
+              mentions: event.mentions,
               // Issue #483: same identity as the thread store above. This is
               // the store `hydrateChannel` writes into, so this is where the
               // duplicate was visible.
@@ -1755,7 +1802,14 @@ export function AppShell({
     // when a frame carries no chatId (older host / background turn).
     const threadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
-    if (!threadId) return; // a background/task turn — not part of a chat.
+    if (!threadId) {
+      // No chat bubble to fold the frame into. Background turns (workflow
+      // nodes, dispatched cards) stream nothing at all — `run_background` runs
+      // with `LiveStream::Off` — so a chat-less frame here is a host emitting a
+      // shape this console does not render, and the Observatory's live re-read
+      // is instead driven by the workflow node events in `onWorkflowRunEvent`.
+      return;
+    }
     setLiveStepsByThread((prev) => {
       const rows = prev[threadId] ? [...prev[threadId]] : [];
       if (event.type === "tool_call") {
@@ -1972,6 +2026,18 @@ export function AppShell({
       // would be N round trips per run for a list that has not changed yet.
       setWorkflowRunEvents((prev) => [...prev, event].slice(-WORKFLOW_EVENT_WINDOW));
       if (event.type === "workflow_run_finished") setWorkflowRunTick((n) => n + 1);
+      // The Observatory's live refresh is a separate tick fed by node
+      // boundaries, not the run-history tick above: a node starting or settling
+      // is exactly when a watching operator's attempt trace changes, and the
+      // Workflows history must not pay a refetch per node. A node's turn
+      // streams no frames of its own, so the boundary events are the signal.
+      if (
+        event.type === "workflow_run_started" ||
+        event.type === "workflow_node_started" ||
+        event.type === "workflow_node_finished"
+      ) {
+        setBackgroundTurnTick((n) => n + 1);
+      }
     }, []),
     // Issue #384. The picker is refreshed from the host rather than patched
     // from the frame: the frame carries no graph body by design, and a console
@@ -2113,7 +2179,7 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
-          {view === "overview" && (
+          {(view === "overview" || view === "setup") && (
             <OperatorOverview
               client={client}
               company={company}
@@ -2383,7 +2449,29 @@ export function AppShell({
               onDecideStart={(approvalId) => ownApprovalDecisionsRef.current.add(approvalId)}
             />
           )}
-          {view === "workflows" && (
+          {view === "observatory" && (
+          <Suspense
+            fallback={
+              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
+                Loading observatory…
+              </div>
+            }
+          >
+            <ObservatoryView
+              client={client}
+              company={company}
+              // `#/observatory/<workflowRunId>` — the run to inspect, or null
+              // for the index. Unvalidated here for the reason every other
+              // sub-page is: only the view knows which run ids exist.
+              runId={sub}
+              // One tick for both signals a re-read should follow: a workflow
+              // run moved, or a workflow node started or settled (a node's turn
+              // streams no frames of its own, so the boundary is the signal).
+              eventTick={workflowRunTick + backgroundTurnTick}
+            />
+          </Suspense>
+        )}
+        {view === "workflows" && (
             <Suspense
               fallback={
                 <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -2466,6 +2554,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
+          {view === "not-found" && <UnknownRouteView address={sub} />}
         </ContentSurface>
         </AgentProfileProvider>
 
@@ -2498,6 +2587,7 @@ export function AppShell({
         client={client}
         company={company}
         force={setupForced}
+        routeOpen={view === "setup"}
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
@@ -2508,6 +2598,7 @@ export function AppShell({
           setSetupCompleted(true);
           setView("company");
         }}
+        onRouteDismiss={() => setView("overview")}
       />
 
       <TourController
