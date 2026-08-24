@@ -347,7 +347,8 @@ fn dto_from_decl(
 /// question about a different namespace ("who can read this?"), and a second
 /// roster walk beside this one is exactly how the two consoles would come to
 /// disagree with each other and with the harness. The roster is exactly what the harness builds in
-/// `build_roster`: the manifest agents (each with its own `tools` narrowed by
+/// `build_roster` — the **effective** roster, not the blueprint's: the manifest
+/// agents with every operator edit applied (each with its own `tools` narrowed by
 /// the company `allow`), plus the promoted overlay teammates — each narrowed by
 /// **its own** `tools` line the same way (issue #661), which for the common
 /// empty line is still the full company `allow`, the standard grant
