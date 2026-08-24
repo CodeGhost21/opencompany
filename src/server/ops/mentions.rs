@@ -28,6 +28,7 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use crate::server::error::Rejection;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
@@ -115,9 +116,9 @@ struct MentionablesDto {
     everyone: MentionableEveryoneDto,
 }
 
-async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDto>, Response> {
+async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDto>, Rejection> {
     if company.actor.is_none() {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     }
 
     let record = company
