@@ -270,7 +270,7 @@ describe("a host that cannot be reached at all", () => {
         ]);
       }
       if (path.endsWith("/workflows/flow-1")) {
-        return flowReadGate.then(() => ({}));
+        return flowReadGate.then(() => ({ nodes: [], edges: [] }));
       }
       return Promise.resolve(suffix ? HEALTHY_GET[suffix] : []);
     });
