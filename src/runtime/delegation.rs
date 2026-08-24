@@ -1144,7 +1144,7 @@ impl<'a> DelegationRunner<'a> {
             // to anyway is not a harmless nudge: it is an instruction the
             // model has no tool to follow, for a name it now believes should
             // be receiving work it never will.
-            with_mentions = if self.responder_can_delegate(responder) {
+            with_mentions = if self.responder_can_reach_mentioned(responder) {
                 format!(
                     "{message}
 
