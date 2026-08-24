@@ -31,6 +31,8 @@ interface Props {
    * folds (codex P2 review). Falls back to instance-local state. */
   openSections?: Record<string, boolean>;
   onToggleSection?: (id: string) => void;
+  directMessages?: Channel[];
+  onStartDirectMessage?: (id: string) => void;
   className?: string;
 }
 
