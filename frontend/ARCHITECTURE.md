@@ -266,10 +266,14 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   revenue, byCategory, transactions). **Caveat:** the inference-cost component
   of spend is `0` until openhuman#4940 (as with Usage).
 
-### Connections — `src/views/ConnectionsView.tsx`, `src/lib/provider-grid.ts`
+### OAuth — `src/views/OAuthView.tsx`, `src/lib/provider-grid.ts`
 - **One** provider grid with connect/disconnect and connected-account state,
-  plus the credential sections above it (MCP, inference, company key, Composio
-  token, channels).
+  plus the credential sections above it (the company key and the Composio
+  token).
+- **One question per page.** This was "Connections" and carried five unrelated
+  ones; MCP (`#/settings/mcp`) and inference (`#/settings/inference`) are their
+  own pages now, and the channels and repositories sections left with those
+  subsystems.
 - **Source:** ✅ real (feature `oauth`) — `Company.connections` (GraphQL) reads
   manifest intent (`[[connection]]`) + legacy native OAuth status. `POST
   …/connections/{provider}/start` and `GET /api/v1/oauth/callback` are dated
@@ -304,20 +308,25 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   remembered copy is only a second answer that can disagree with the
   authoritative one, and the SMTP password was in it. `src/lib/domain.ts` is now
   a domain pre-flight plus a one-shot purge of what older builds already wrote.
-### Devices (Settings) — `src/views/DevicesView.tsx`, `src/api/devices.ts`
-- The machines paired to the signed-in user: mint a pairing code, list paired
-  devices, revoke one.
-- **Source:** ✅ real — `GET/POST …/devices` and `DELETE …/devices/{id}`. The
-  routes shipped with device pairing and had no caller in the console for a
-  release, while the desktop's prompt pointed people here (issue #1476).
-- **Never `…/devices/claim`.** Redemption happens on the machine being enrolled,
-  through the Tauri bridge, so the session token goes host → OS keychain without
-  passing through a webview. A console that called it would hold the credential
-  the design says it cannot.
-- The sub-page table lives in `src/views/settings-pages.ts` rather than in
-  `SettingsSection.tsx`, so prose that sends someone to a sub-page (the desktop
-  pairing prompt) can name one without importing the section back through
-  itself — and cannot name one that does not exist.
+### MCP Servers (Settings) — `src/views/McpServersView.tsx`
+- Two tabs over one configuration: **Connections**, a row per server with its
+  status and its controls as icons (`src/views/mcp/McpIconButton.tsx` —
+  credential, connect, re-check, tools, enable/disable, remove), and
+  **mcp.json** (`src/views/mcp/McpJsonEditor.tsx`), the declared set as one
+  editable document.
+- **Source:** ✅ real — `…/mcp/servers` per row, `…/mcp/config` for the file.
+  Both write the same store, so the two tabs cannot describe different
+  configurations; a save re-mounts the rows so the list re-reads.
+- Credentials stay write-only in both: the document reports `authConfigured` and
+  never a token, and an entry with no `headers` leaves the stored credential
+  alone rather than clearing it.
+
+### Settings sub-pages — `src/views/settings-pages.ts`
+- The table lives in its own module rather than in `SettingsSection.tsx`, so
+  prose that sends someone to a sub-page can name one without importing the
+  section back through itself — and cannot name one that does not exist.
+- **Devices is gone.** The pairing page and its `…/devices` routes left with
+  device pairing itself: the frontend client holds its own session.
 
 ### Domain & Email (Settings) — `src/components/domain-settings.tsx`, `src/lib/domain.ts`
 - Custom domain with generated DNS records (verification TXT, CNAME, DKIM, SPF)

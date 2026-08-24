@@ -473,6 +473,17 @@ export interface Sender {
    * issue #1185.
    */
   avatar?: string;
+  /**
+   * The roster agent id behind this voice, when there is one — what a click on
+   * the face opens the profile panel on (issue #1653).
+   *
+   * Set only on a voice that actually **matched** the roster, never on the
+   * channel slug that seeded the face. A desk-originated cross-post carries a
+   * desk id in that slot (see `api/types.ts` on `thread`), and opening a
+   * teammate profile on a desk id would ask the host for an agent that does not
+   * exist.
+   */
+  agentId?: string;
 }
 
 /** Channel names the host uses for its own voice rather than a named agent. */
@@ -506,6 +517,7 @@ export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]
       kind: "agent",
       tone: named,
       avatar: agent?.avatar,
+      agentId: agent?.id,
     };
   }
 
@@ -518,6 +530,9 @@ export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]
     kind: channel.kind === "dm" || channel.tone ? "agent" : "company",
     tone: channel.tone,
     avatar: channel.member?.avatar,
+    // A DM's other end is a roster teammate; a desk channel's voice is the desk
+    // itself, which has no profile of its own to open.
+    agentId: channel.member?.id,
   };
 }
 

@@ -113,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
         workspace_root: dir.path().join("harness"),
+        mcp_home: Some(dir.path().join("mcp")),
         workspace_git_enabled: false,
         // Issue #775: the shell audit sink hangs off the data root as
         // `companies/<slug>/audit/<agent>/`, deliberately a sibling of the
@@ -155,9 +156,6 @@ async fn main() -> anyhow::Result<()> {
         search: None,
         tenant_search: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: Default::default(),
     };
 
     let pool = HarnessPool::new();
