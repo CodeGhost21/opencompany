@@ -255,6 +255,21 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event_seq: Option<EventSeq>,
     /// Epoch-millis the row was minted.
+    /// The workflow run whose node spawned this attempt, when one did.
+    ///
+    /// Absent for a card dispatch and a chat turn, which is *true* rather than
+    /// merely tolerated — those attempts belong to no workflow. Additive in the
+    /// same shape `task_id`/`chat_id` took, so a row written before this field
+    /// existed loads with `None` and re-serializes byte-identically. There is no
+    /// backfill to write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    /// The graph node within that run.
+    ///
+    /// Falls back to the agent ref on a graph compiled before nodes carried a
+    /// first-class id — the same honest fallback the blocked-node rows use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub created_at_millis: u64,
     /// Epoch-millis the cycle actually began. `None` while `Pending`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,6 +351,19 @@ pub struct NewRun {
     /// have nothing to filter on. `None` for a dispatch, which is already
     /// reachable through its card.
     pub chat_id: Option<String>,
+    /// The workflow run whose node spawned this attempt, when one did.
+    ///
+    /// Absent for a card dispatch and a chat turn, which is *true* rather than
+    /// merely tolerated — those attempts belong to no workflow. Additive in the
+    /// same shape `task_id`/`chat_id` took, so a row written before this field
+    /// existed loads with `None` and re-serializes byte-identically. There is no
+    /// backfill to write.
+    pub workflow_run_id: Option<String>,
+    /// The graph node within that run.
+    ///
+    /// Falls back to the agent ref on a graph compiled before nodes carried a
+    /// first-class id — the same honest fallback the blocked-node rows use.
+    pub node_id: Option<String>,
 }
 
 impl NewRun {
@@ -350,6 +378,8 @@ impl NewRun {
             task_id: Some(task_id.into()),
             agent_id: agent_id.into(),
             chat_id: None,
+            workflow_run_id: None,
+            node_id: None,
         }
     }
 
@@ -364,6 +394,30 @@ impl NewRun {
             task_id: None,
             agent_id: agent_id.into(),
             chat_id: Some(chat_id.into()),
+            workflow_run_id: None,
+            node_id: None,
+        }
+    }
+
+    /// A run spawned by an `agent` node of a workflow run.
+    ///
+    /// Attempts no card and belongs to no conversation: a workflow node's turn
+    /// has neither, which is exactly why nothing could find these attempts
+    /// before — `RunStore` was joinable only by `task_id`/`chat_id`, so the run
+    /// a node spawned was addressable by nothing at all.
+    pub fn for_workflow_node(
+        id: impl Into<String>,
+        workflow_run_id: impl Into<String>,
+        node_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            task_id: None,
+            agent_id: agent_id.into(),
+            chat_id: None,
+            workflow_run_id: Some(workflow_run_id.into()),
+            node_id: Some(node_id.into()),
         }
     }
 }
@@ -409,6 +463,22 @@ impl RunOutcome {
 pub struct RunFilter {
     /// Only attempts at this card.
     pub task_id: Option<String>,
+    /// Only attempts spawned by this workflow run's nodes.
+    ///
+    /// The join the console needs: given a workflow run, which agent attempts
+    /// did it produce. Before this there was no handle on them at all — a
+    /// workflow node's turn has neither a card nor a conversation.
+    pub workflow_run_id: Option<String>,
+    /// Only attempts dispatched to this desk/teammate.
+    ///
+    /// The selector behind the console's per-teammate run history (issue
+    /// #1573). Deliberately a *store* predicate rather than something a reader
+    /// applies after the fact: a desk's attempts are a thin slice of a
+    /// long-lived company's history, and filtering a fetched page in the
+    /// console would make `limit` mean "the newest N runs in the company, of
+    /// which some happen to be this desk's" — which reads as "this teammate has
+    /// done nothing" for any desk that has been quiet lately.
+    pub agent_id: Option<String>,
     /// Only these statuses. Empty means "any status".
     pub statuses: Vec<RunStatus>,
     /// At most this many rows, applied *after* ordering. `None` is unbounded.
@@ -420,6 +490,14 @@ impl RunFilter {
     pub fn for_task(task_id: impl Into<String>) -> Self {
         Self {
             task_id: Some(task_id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Narrows to one desk's attempts, whichever card (or none) they were at.
+    pub fn for_agent(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: Some(agent_id.into()),
             ..Self::default()
         }
     }
@@ -445,7 +523,7 @@ impl RunFilter {
         self
     }
 
-    /// Whether `run` passes the `task_id`/`statuses` predicates. The `limit` is
+    /// Whether `run` passes the `task_id`/`agent_id`/`statuses` predicates. The `limit` is
     /// **not** applied here — it is an ordering-dependent cap, so backends that
     /// filter in memory apply it after [`sort_newest_first`].
     pub fn matches(&self, run: &RunRecord) -> bool {
@@ -454,10 +532,29 @@ impl RunFilter {
         {
             return false;
         }
+        if let Some(workflow_run_id) = &self.workflow_run_id
+            && run.workflow_run_id.as_deref() != Some(workflow_run_id.as_str())
+        {
+            return false;
+        }
+        if let Some(agent_id) = &self.agent_id
+            && run.agent_id != *agent_id
+        {
+            return false;
+        }
         if !self.statuses.is_empty() && !self.statuses.contains(&run.status) {
             return false;
         }
         true
+    }
+
+    /// Narrows to the attempts one workflow run's nodes spawned.
+    #[must_use]
+    pub fn for_workflow_run(workflow_run_id: impl Into<String>) -> Self {
+        Self {
+            workflow_run_id: Some(workflow_run_id.into()),
+            ..Self::default()
+        }
     }
 }
 
@@ -542,6 +639,28 @@ pub trait RunStore: Send + Sync {
     async fn list_run_steps(&self, company: &CompanyId, run_id: &str)
     -> Result<Vec<RunStepRecord>>;
 
+    /// Reads every run's steps in one call, keyed by run id.
+    ///
+    /// The Observatory index reads the traces of up to `limit` runs at once.
+    /// The provided implementation loops the per-run read, which is the right
+    /// shape for backends where one read is one indexed query (sqlite, MongoDB).
+    /// The filesystem backend overrides this: its per-run read scans and
+    /// deserializes the whole company-wide JSONL before filtering one run, so a
+    /// loop over N runs would rescan the company's unbounded step history N
+    /// times — quadratic in company history on the view operators poll. One
+    /// scan, indexed once, keeps the index cost linear.
+    async fn list_run_steps_for_runs(
+        &self,
+        company: &CompanyId,
+        run_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<RunStepRecord>>> {
+        let mut out = std::collections::HashMap::with_capacity(run_ids.len());
+        for id in run_ids {
+            out.insert(id.clone(), self.list_run_steps(company, id).await?);
+        }
+        Ok(out)
+    }
+
     // -- transitions (provided; legality enforced here) ----------------------
 
     /// `Pending` → `Running`, stamping the driving event's seq and the start
@@ -558,6 +677,24 @@ pub trait RunStore: Send + Sync {
         run.trigger_event_seq = Some(trigger_event_seq);
         // A resumed run keeps the moment it first started: `started_at_millis`
         // is when the attempt began, not when its latest leg did.
+        run.started_at_millis.get_or_insert_with(now_millis);
+        self.put_run(company, &run).await?;
+        Ok(run)
+    }
+
+    /// `Pending` → `Running` for an attempt that **no journal event drove**.
+    ///
+    /// A workflow `agent` node is the case this exists for: it is activated by
+    /// the engine walking a graph, not by a `TaskDispatched` the journal
+    /// recorded, so there is no seq to stamp. `trigger_event_seq` is already
+    /// `Option`, so leaving it `None` is the record's own way of saying "nothing
+    /// in the journal drove this" — passing a made-up seq (or `0`) would point
+    /// every workflow attempt at an unrelated event and quietly corrupt any
+    /// reader that follows it.
+    async fn begin_run_untriggered(&self, company: &CompanyId, id: &str) -> Result<RunRecord> {
+        let mut run = require_run(self, company, id).await?;
+        check_transition(&run, RunStatus::Running)?;
+        run.status = RunStatus::Running;
         run.started_at_millis.get_or_insert_with(now_millis);
         self.put_run(company, &run).await?;
         Ok(run)
@@ -895,6 +1032,8 @@ mod test {
             error: None,
             usage: TokenUsage::default(),
             step_count: 0,
+            workflow_run_id: None,
+            node_id: None,
         }
     }
 

@@ -14,7 +14,18 @@ use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
+use crate::test_support::EnvVarGuard;
 use crate::{AppConfig, AppState};
+
+/// Every environment key the engine surface reads, so a guarded test restores
+/// all of them however it fails.
+const MEMORY_ENV: [&str; 5] = [
+    "OPENCOMPANY_MEMORY",
+    "OPENCOMPANY_MEMORY_DRIVER",
+    "OPENCOMPANY_MEMORY_URL",
+    "OPENCOMPANY_MEMORY_API_KEY",
+    "OPENCOMPANY_DATA_DIR",
+];
 
 /// A rebuilder that rebuilds a company over its live handover, so the apply
 /// path's live swap is exercised rather than reported as needing a restart.
@@ -155,6 +166,51 @@ fn catalog_matches_driver_registry() {
     );
 }
 
+/// The hosted engines are available in a **default** build, not only in one
+/// somebody remembered to pass `--features tinymemory` to.
+///
+/// This is a regression pin with a support case behind it: the memory-engine
+/// catalog is a console surface in every build, and without `tinymemory` four
+/// of its tiles ("Supermemory", "Mem0", "Cognee", "No memory") render disabled
+/// with "this build was compiled without the `tinymemory` feature" — an
+/// instruction to go and find a differently compiled binary. For the desktop
+/// app and for anyone running the shipped container that is not an instruction
+/// they can follow, so the feature ships in the default set (see `Cargo.toml`)
+/// and this asserts it from a lane that passes no features at all.
+///
+/// Deliberately NOT quantified over the whole catalog: the in-pod engines
+/// (`embedded`, `namespace`) do cost a bundled SQLite build and stay opt-in.
+/// The desktop keeps those off too — it offers no in-pod memory surface — and
+/// enables the hosted drivers itself via `tinymemory` in `src-tauri/Cargo.toml`.
+#[test]
+fn the_hosted_memory_engines_ship_in_the_default_build() {
+    let hosted = ["supermemory", "mem0", "cognee", "null"];
+    let entries: Vec<_> = catalog()
+        .into_iter()
+        .filter(|option| hosted.contains(&option.id))
+        .collect();
+    // Assert that the catalog still offers every required ID, so a regression
+    // that drops one of them fails here rather than passing silently because
+    // the entry never reached the disabled list.
+    let offered: Vec<_> = entries.iter().map(|option| option.id).collect();
+    assert_eq!(offered, hosted);
+    let disabled: Vec<String> = entries
+        .into_iter()
+        .filter(|option| !option.available)
+        .map(|option| {
+            format!(
+                "{}: {}",
+                option.id,
+                option.unavailable_reason.unwrap_or_default()
+            )
+        })
+        .collect();
+    assert!(
+        disabled.is_empty(),
+        "a default build must offer the hosted memory engines: {disabled:?}"
+    );
+}
+
 /// Whether this build can bind an engine is answered separately from whether
 /// the operator filled the form in — so a build without the feature refuses
 /// with the reason that actually blocks it.
@@ -273,6 +329,64 @@ async fn the_default_host_reports_the_built_in_store_as_editable() {
 fn an_env_owned_engine_is_detected_from_an_injected_source() {
     let env = crate::app::config::MapEnv::new([("OPENCOMPANY_MEMORY", "store")]);
     assert!(crate::store::StorageSettings::memory_is_env_owned_by(&env));
+}
+
+/// A health answer is useful only if it is current. The engine route is
+/// operator-authenticated and re-probes its overlay for each read, while the
+/// unauthenticated `/spec` handshake carries no memory block at all.
+#[cfg(feature = "tinymemory")]
+#[tokio::test]
+async fn read_reprobes_the_live_memory_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
+        memory_backend: MemoryBackend::Null,
+        ..Default::default()
+    })
+    .expect("null binds")
+    .expect("null yields an overlay");
+    assert_eq!(
+        overlay.descriptor.healthy, None,
+        "the overlay starts unprobed"
+    );
+
+    let state = state_at(dir.path()).await.with_memory_overlay(overlay);
+    let (status, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["active"], "null");
+    assert_eq!(body["healthy"], true, "GET must return its fresh probe");
+}
+
+/// The refusal this surface exists for: a deployment that injects
+/// `OPENCOMPANY_MEMORY` owns the engine, so the console renders read-only and
+/// a write is refused rather than accepted-and-dropped.
+#[tokio::test]
+async fn an_env_owned_engine_is_read_only_and_refuses_a_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvVarGuard::capture(&MEMORY_ENV);
+    guard.set("OPENCOMPANY_MEMORY", "store");
+    let state = state_at(dir.path()).await;
+
+    let (status, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["layer"], "env");
+    assert_eq!(body["editable"], false);
+
+    let (status, body) = call(
+        &state,
+        "PUT",
+        "/api/v1/company/memory/engine",
+        Some(json!({ "engine": "store" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("OPENCOMPANY_MEMORY"),
+        "the refusal must name the variable that outranks the file: {body}"
+    );
 }
 
 /// An apply writes the file, and the read that follows reports the new

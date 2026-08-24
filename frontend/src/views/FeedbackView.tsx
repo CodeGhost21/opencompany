@@ -91,7 +91,7 @@ export function FeedbackView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
         <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Feedback</h2>
+          <h1 className="text-2xl font-semibold tracking-tight">Feedback</h1>
           <p className="text-sm text-muted-foreground">
             Flag a wrong result, a missing capability, or anything that felt off
             {hasBoard && " — then vote on what everyone else has asked for"}.
@@ -133,7 +133,7 @@ export function FeedbackView({ client, company }: Props) {
             <CardHeader>
               <CardTitle className="text-base">Your reports</CardTitle>
               <CardDescription>
-                What you&apos;ve flagged from this company, newest first.
+                What this company has captured, newest first.
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
@@ -186,7 +186,11 @@ function ReportRow({ report }: { report: FeedbackSummary }) {
         <p className="text-xs text-muted-foreground">
           {timeAgo(report.at_millis, Date.now())}
           {report.work_item && ` · ${report.work_item}`}
-          {report.issue_status && ` · ${STATUS_LABELS[report.issue_status] ?? report.issue_status}`}
+          {` · ${
+            report.issue_status
+              ? (STATUS_LABELS[report.issue_status] ?? report.issue_status)
+              : "saved locally"
+          }`}
         </p>
       </div>
       {report.filed_issue_url && (

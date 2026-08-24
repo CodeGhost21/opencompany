@@ -270,7 +270,7 @@ async function mockApi(page: Page) {
         source: "manifest",
         editable: [],
         isOrchestrator: false,
-        tools: { requested: [], companyAllow: [], effective: [] },
+        tools: { requested: [], companyAllow: [], deskAllow: [], deskCeilingActive: false, effective: [] },
         desks: [],
         inboxEnabled: false,
       });
@@ -296,6 +296,11 @@ async function mockApi(page: Page) {
         body: "",
       });
     }
+    if (path.endsWith("/memory"))
+      // `GET /memory` answers with `{ items, totalContext, contextTruncated }`
+      // — the Overview's constellation reads the rows from `items`, and a bare
+      // array would leave it `undefined` and crash the graph render.
+      return json({ items: [], totalContext: 0, contextTruncated: false });
     if (path.endsWith("/me"))
       return json({ id: "op", email: "op@example.com", role: "admin" });
     return json([]);
@@ -473,7 +478,9 @@ test("#311 membership can be edited from the chart and survives a reload", async
 
   // Turing sits on no desk, so the chart accounts for him beside the tree
   // rather than dropping him.
-  const unplaced = page.getByRole("heading", { name: "Not on a desk" });
+  await expect(page.getByRole("heading", { name: "Desks", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "People outside desks", level: 2 })).toBeAttached();
+  const unplaced = page.getByRole("heading", { name: "Not on a desk", level: 3 });
   await expect(unplaced).toBeVisible();
   await expect(
     unplaced.locator("xpath=following-sibling::ul[1]"),

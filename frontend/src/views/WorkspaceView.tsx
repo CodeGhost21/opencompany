@@ -2084,10 +2084,20 @@ interface TreeProps {
  * {@link childrenOf} sorts everywhere else (issue #973). The pre-#686 ULID ids
  * all sort before every readable slug under the plain id ordering, which is
  * not an order an operator can read anything into.
+ *
+ * Most-recently-modified still comes first here (issue #1687) — `Tree` routes
+ * a roster root through this comparator instead of {@link childrenOf}'s, so
+ * without its own `updatedAt` check the two visible roots that need id
+ * resolution the most would be the two the MRU fix never reached, and stayed
+ * alphabetical underneath it.
  */
 function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
   return [...items].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+    if (a.updatedAt != null && b.updatedAt != null) {
+      const updatedAt = b.updatedAt - a.updatedAt;
+      if (updatedAt !== 0) return updatedAt;
+    }
     // Only a roster folder's name is an id worth resolving. A direct file
     // under `agents/` is unusual but not impossible, and its raw name could
     // coincidentally collide with a roster id — that must not reorder it by
@@ -2251,7 +2261,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
       <div
         ref={rowRef}
         className={cn(
-          "group flex items-center gap-1 rounded-md px-1.5 py-1 text-sm",
+          "group flex items-center gap-1 rounded-md px-1.5 py-0 text-sm md:py-1",
           active ? "bg-accent font-medium" : "hover:bg-accent/50",
           // Muted whether or not it is the open note: neither what writes the
           // file (#1377) nor who can read it (#1465) changes when you select
@@ -2262,7 +2272,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
       >
         <button
           onClick={() => (isFolder ? onToggle(node.id) : onOpen(node.id))}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+          className="flex min-h-6 min-w-0 flex-1 items-center gap-1.5 text-left md:min-h-0"
         >
           {isFolder ? (
             <>

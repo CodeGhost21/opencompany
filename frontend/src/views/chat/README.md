@@ -8,7 +8,9 @@ the desks the two shared without ever being connected.
 ## Routing
 
 `#/chat/<channelId>` — the channel id is the hash's second segment, so a
-channel is linkable and survives a refresh.
+channel is linkable and survives a refresh. The rail shows only direct messages
+with at least one line, newest first; **New message** opens the full roster to
+start an otherwise absent DM.
 
 - A desk's channel id is the host's desk id, which is also its chat thread id.
 - A DM is `dm:<teammate-id>` — e.g. `#/chat/dm:designer` for a host roster
@@ -50,7 +52,7 @@ backend, and there is no per-channel routing on the host.
 | Threads | A reply posts its `parent` — the parent message's own id — and comes back under it. Both halves of the exchange hang off the row the thread opened from. |
 | Reactions | One durable row per person per emoji, so a chip says who reacted and whether one of them was you. `POST {scope}/chat/messages/{seq}/reactions` with an explicit `on`, which makes a retry idempotent. |
 | Message ids | A sent message comes back with the id it was journaled under (`messageId`), which is what a thread reply or a reaction names. Until the id lands the row's reply/react actions are disabled and say why. |
-| Message intent | The composer's three positions — "Just chatting" / "Do it once" / "Build me the workflow" — travel as `deliverable` on the message and are journaled with it. Only a non-default value is sent, so an unmarked line is byte-identical on the wire to a pre-#580 one. `chat` withholds the card the host would otherwise open by construction; it does **not** take the orchestrator's own `spawn_task` away, so it means "not automatically carded", not "never carded". |
+| Message intent | The composer's three positions — "Just chatting" / "Do it once" / "Build me the workflow" — travel as `deliverable` on the message and are journaled with it. None starts selected: an unmarked line leaves no operator override, so the host's triage decides whether to open a card. `chat` withholds the card the host would otherwise open by construction; it does **not** take the orchestrator's own `spawn_task` away, so it means "not automatically carded", not "never carded". |
 
 **Still console-local:**
 
@@ -58,6 +60,7 @@ backend, and there is no per-channel routing on the host.
 |---|---|
 | Unread counts | Derived here from when this tab last looked at a channel — the host keeps no read receipts, so two consoles will disagree. The badge's tooltip says so. |
 | A console-only teammate's other half | A starter-roster teammate is not on the company, so nothing answers their DM. The transcript is still saved; a notice above the composer says which half is missing. |
+| Channel rail density | The desktop channel rail can collapse to an icon strip, preserving channel reachability while giving the transcript back its width. This is stored per browser connection and company; it is not a company-wide shell setting and does not change the full rail below `lg` (issue #1340). |
 
 Reactions are deliberately **not** on the SSE feed: the frame would have to
 carry the reacting person, and that stream has no per-viewer projection to turn
@@ -190,6 +193,24 @@ it looks that id up against the roster (`members.find`) the same way
 `ChatView` already does elsewhere, and simply leaves the mascot unresolved —
 falling back to the name seed, never a wrong face — when the id names a desk
 rather than a teammate.
+
+## A face is a way in
+
+Clicking a teammate's face — in the gutter of a message, in the member pane, or
+in a DM's header — opens `AgentProfileSheet`
+(`@/components/agent-profile-sheet`): a right-hand panel with that agent's
+persona, tier, desks and **resolved** tool grants, and two links out to their
+own page (`#/team/<id>`, and `#/team/<id>?edit` for the page with its edit form
+already open). The panel is mounted once by `AgentProfileProvider` in
+`app-shell.tsx`, so no chat surface threads a client, a company scope or an open
+flag of its own.
+
+Only a voice that resolves to a roster teammate is clickable. `Sender.agentId`
+is set exactly where `senderOf` **matched** the roster, never from the channel
+slug that seeded the face — that slug is a desk id for a cross-posted line, and
+a desk has no profile to open. `AgentAvatarButton` renders the bare avatar
+rather than a dead button wherever there is no id behind it (a desk, the
+company, you), which is also what it does outside the provider.
 
 ## One name per teammate
 

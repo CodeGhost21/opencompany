@@ -313,6 +313,31 @@ fn harness_sections(
         body: crate::harness::ledger_tools::ledger_brief(&registry),
     });
 
+    // Mirrors `build_agent`'s ordering — the sandbox is described before the
+    // deliverable brief that presumes it. Each of the three namespaces is read
+    // off the same predicates the builder gates its tool vectors on, so a dump
+    // cannot claim a clause the real prompt withholds. `shell` here is the
+    // GRANT, where the builder additionally requires the audit logger to have
+    // initialized; a manifest cannot know that, so the origin line says so
+    // rather than letting the dump imply a guarantee it does not have.
+    let sandbox_files = crate::company::grants_files_or_docs(grants);
+    let sandbox_shell = crate::harness::build::grants_cover(grants, "shell");
+    let sandbox_code = crate::harness::build::grants_cover(grants, "code");
+    let sandbox =
+        crate::harness::toolbelt::sandbox_brief(sandbox_files, sandbox_shell, sandbox_code);
+    if sandbox.is_empty() {
+        deferred.push(Deferred {
+            title: "Your sandbox".to_string(),
+            reason: "this agent's grants cover none of `files`/`docs`, `shell` or `code`, so it is offered no tool that reaches its working directory".to_string(),
+        });
+    } else {
+        sections.push(Section {
+            title: "Your sandbox".to_string(),
+            origin: "`harness::toolbelt::sandbox_brief` — one clause per granted namespace; the `shell` clause additionally needs the per-agent audit logger to initialize at build time".to_string(),
+            body: sandbox,
+        });
+    }
+
     if crate::company::grants_files_or_docs(grants) {
         sections.push(Section {
             title: "Deliverables".to_string(),
@@ -406,6 +431,67 @@ mod tests {
         let dumped = dump(&manifest);
         assert!(dumped[0].orchestrator);
         assert!(!dumped[1].orchestrator);
+    }
+
+    /// The sandbox section is the one this surface most needs to get right: an
+    /// agent that is never told it holds `file_write` records a task about
+    /// writing instead of writing, and an operator reading a dump that omits
+    /// the section has no way to see why. A default belt (`[tools].allow`
+    /// defaults to `*`) must therefore produce it, naming all three clauses.
+    ///
+    /// `harness_sections` — the only place that ever adds or defers a "Your
+    /// sandbox" section — is itself `#[cfg(feature = "openhuman")]`; a
+    /// default build folds it into the single "Tool briefs (...)" deferred
+    /// line instead (see the `#[cfg(not(feature = "openhuman"))]` branch
+    /// above). This test needs the same feature gate its subject does.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_default_belt_is_told_about_its_sandbox_and_its_shell() {
+        let manifest = manifest(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"pm\"\nrole = \"Product Manager\"\n",
+        );
+        let dumped = dump(&manifest);
+        let section = dumped[0]
+            .sections
+            .iter()
+            .find(|s| s.title == "Your sandbox")
+            .expect("a `*` belt covers files, shell and code");
+        for tool in ["file_write", "shell", "apply_patch"] {
+            assert!(section.body.contains(tool), "{}", section.body);
+        }
+    }
+
+    /// The inverse, and the reason the section is gated at all: a belt that
+    /// reaches none of the three namespaces must report the absence rather than
+    /// describe tools this agent cannot call.
+    ///
+    /// Same feature gate as above — without `openhuman`, this manifest's
+    /// absence gets folded into the generic "Tool briefs (...)" deferred
+    /// line rather than a "Your sandbox" one.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_belt_with_no_sandbox_namespace_defers_the_section() {
+        let manifest = manifest(
+            "[company]\nname = \"Acme\"\n\n[tools]\nallow = [\"workspace\"]\n\n[[agent]]\nid = \"pm\"\nrole = \"Product Manager\"\ntools = [\"workspace\"]\n",
+        );
+        let dumped = dump(&manifest);
+        assert!(
+            !dumped[0].sections.iter().any(|s| s.title == "Your sandbox"),
+            "{:?}",
+            dumped[0]
+                .sections
+                .iter()
+                .map(|s| &s.title)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            dumped[0]
+                .deferred
+                .iter()
+                .any(|entry| entry.title == "Your sandbox"),
+            "{:?}",
+            dumped[0].deferred
+        );
     }
 
     /// An agent with no `prompt_files` has no brief, and that is reported as a

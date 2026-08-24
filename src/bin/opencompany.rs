@@ -213,10 +213,6 @@ enum MemoryCmd {
         /// Target credential (hosted engines only).
         #[arg(long)]
         to_api_key: Option<String>,
-        /// Target data root (`namespace` only). Defaults to the env data dir —
-        /// refused when that resolves to the source's own store.
-        #[arg(long)]
-        to_data_dir: Option<PathBuf>,
         /// Records per page.
         #[arg(long, default_value_t = 500)]
         page_size: usize,
@@ -240,7 +236,6 @@ impl std::fmt::Debug for MemoryCmd {
                 to,
                 to_url,
                 to_api_key,
-                to_data_dir,
                 page_size,
                 dry_run,
                 resume_cursor,
@@ -249,7 +244,6 @@ impl std::fmt::Debug for MemoryCmd {
                 .field("to", to)
                 .field("to_url", &to_url.as_ref().map(|_| "<set>"))
                 .field("to_api_key", &to_api_key.as_ref().map(|_| "<set>"))
-                .field("to_data_dir", to_data_dir)
                 .field("page_size", page_size)
                 .field("dry_run", dry_run)
                 .field("resume_cursor", &resume_cursor.is_some())
@@ -516,6 +510,11 @@ fn company_builder(
     // `[users].mode` to answer, which is the normal case.
     .with_auth_mode_override(state.auth_mode_override())
     .with_skills_registry(state.shared_skill_registry()?)
+    // The setup cards a real operator should find waiting on a real board. Turned
+    // on here rather than inferred from the seed directory, so a test or a
+    // fixture that builds a company gets the empty board it is asserting about —
+    // see `RuntimeBuilder::with_task_seeding`. First boot only.
+    .with_task_seeding(true)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
         builder = builder.with_seed_dir(source_dir);
@@ -654,6 +653,16 @@ fn spawn_maintenance_ticker(
     MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
 }
 
+/// Starts the process-wide presence sweep (issue: "Bound client-supplied
+/// console leases"). See [`opencompany::server::presence::PresenceSweeper`]
+/// for why this is a separate task from the maintenance ticker above rather
+/// than folded into it: presence is host-global, not scoped to a registered
+/// company.
+fn spawn_presence_sweeper(state: &AppState, shutdown: &Arc<Notify>) -> tokio::task::JoinHandle<()> {
+    opencompany::server::presence::PresenceSweeper::new(state.presence_handle())
+        .spawn(shutdown.clone())
+}
+
 /// Starts a company's IMAP mailbox poller as a background task, if the
 /// platform injected mailbox credentials for this tenant.
 ///
@@ -713,46 +722,6 @@ fn spawn_mailbox_poller(
     {
         let _ = (state, id, shutdown, handles, cfg);
     }
-}
-
-/// Starts a company's Telegram `getUpdates` long-polling listener as a
-/// background task, whenever this host has an outbound Telegram transport wired
-/// (the `telegram` feature).
-///
-/// Issue #203: this is what makes inbound Telegram work on a local or
-/// self-hosted instance, where Telegram's servers can never reach an inbound
-/// `/hooks/...` URL. It is started unconditionally rather than only when a bot
-/// token is already stored — the poller idles cheaply until one appears, so an
-/// operator who pastes a token in the console is receiving DMs on the next tick
-/// with no restart. On a publicly reachable host that opted into the webhook
-/// fast-path, the poller sees the registration and stands by.
-fn spawn_telegram_poller(
-    state: &AppState,
-    id: &str,
-    shutdown: &Arc<Notify>,
-    handles: &mut Vec<tokio::task::JoinHandle<()>>,
-) {
-    let Some(api) = state.connections().telegram.clone() else {
-        return;
-    };
-    let Some(runtime) = state.registry().get(&CompanyId::new(id)) else {
-        return;
-    };
-    let poll_secs = std::env::var("OPENCOMPANY_TELEGRAM_POLL_SECONDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(opencompany::runtime::telegram_poller::DEFAULT_POLL_SECONDS);
-    let webhook_capable = state.config().public_webhook_base_url().is_some();
-    let poller = opencompany::runtime::telegram_poller::TelegramPoller::new(
-        runtime,
-        api,
-        poll_secs,
-        webhook_capable,
-    )
-    // See `spawn_scheduler`: follow the registry so a rebuild reaches inbound
-    // Telegram instead of stranding it on the replaced runtime.
-    .following(state.registry().clone());
-    handles.push(poller.spawn(shutdown.clone()));
 }
 
 /// Attaches an OpenHuman JSON-RPC transport when the `openhuman-rpc` feature is
@@ -898,12 +867,6 @@ fn connections_runtime() -> Result<opencompany::server::ops::ConnectionsRuntime>
     {
         connections =
             connections.with_mail(Arc::new(opencompany::server::ops::smtp::LettreMailSender));
-    }
-    #[cfg(feature = "telegram")]
-    {
-        connections = connections.with_telegram(Arc::new(
-            opencompany::company::telegram::HttpTelegramApi::new(),
-        ));
     }
     if let Some(mail) = opencompany::server::ops::mailer::MailConfig::from_env()? {
         connections = connections.with_mail_credentials(mail.credentials);
@@ -1239,18 +1202,17 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
 /// what a boot would bind — you migrate *before* flipping the environment, so
 /// the environment still names the source. Only provider-backed engines can
 /// migrate (the seam is what `export_page`/`import_records` live on); the
-/// `store` default and the EngineCortex overlay are refused by name.
+/// `store` default is refused by name.
 #[cfg(feature = "tinymemory")]
 async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     use opencompany::store::StorageSettings;
-    use opencompany::store::memory::driver::{MemoryMode, open_driver};
+    use opencompany::store::memory::driver::open_driver;
     use opencompany::store::memory::migrate::migrate;
 
     let MemoryCmd::Migrate {
         to,
         to_url,
         to_api_key,
-        to_data_dir,
         page_size,
         dry_run,
         resume_cursor,
@@ -1271,27 +1233,12 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     // (`store::memory::migrate::resolve_migrate_configs`), where the feature
     // lanes execute the guards' tests; the bin drives the loop and reports.
     let (from_config, to_config) = opencompany::store::memory::migrate::resolve_migrate_configs(
-        &settings,
-        &to,
-        to_url,
-        to_api_key,
-        to_data_dir,
+        &settings, &to, to_url, to_api_key,
     )?;
 
-    // The same exclusive root lock serve holds, whenever an embedded store is
-    // on either side: a migration reading a SQLite store a live host is
-    // writing walks a shifting export cursor (skipped or repeated records).
-    // Hosted-to-hosted has no local store to lock; the pause-first
-    // precondition printed below still applies to the remote writer.
-    let _home_lock = if matches!(from_config.mode, MemoryMode::Embedded)
-        || matches!(to_config.mode, MemoryMode::Embedded)
-    {
-        Some(opencompany::store::lock::acquire(&resolve_home_migrated(
-            None,
-        )?)?)
-    } else {
-        None
-    };
+    // Hosted providers have no local memory store to lock. The pause-first
+    // precondition printed below still applies to remote writers.
+    let _home_lock: Option<()> = None;
 
     let (from, _) = open_driver(&from_config)?.ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(
@@ -2011,7 +1958,6 @@ async fn async_main() -> Result<()> {
                     );
                 }
                 spawn_mailbox_poller(&state, &id, &shutdown, &mut scheduler_handles);
-                spawn_telegram_poller(&state, &id, &shutdown, &mut scheduler_handles);
             }
             if companies.is_empty() {
                 // Nothing was named on the command line, so adopt whatever this
@@ -2034,7 +1980,6 @@ async fn async_main() -> Result<()> {
                         scheduler_handles.push(handle);
                     }
                     spawn_mailbox_poller(&state, slug, &shutdown, &mut scheduler_handles);
-                    spawn_telegram_poller(&state, slug, &shutdown, &mut scheduler_handles);
                     println!(
                         "adopted company `{slug}` ({}) from {}",
                         manifest.company.name,
@@ -2056,6 +2001,7 @@ async fn async_main() -> Result<()> {
             // and fire claims are retired, and it covers a company registered
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
+            scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
 
             // Stop the schedulers on a termination signal so background cycle
             // work halts with the process (lifecycle shutdown).

@@ -255,7 +255,11 @@ export async function dispatch(page: Page, title: string) {
  */
 export async function openCard(page: Page, title: string): Promise<string> {
   await openBoard(page);
-  await card(page, title).click();
+  // The card's open action lives on the title button (issue #1391), not the
+  // whole card: the draggable wrapper is a drag surface only, and the centre of
+  // a card with a note and an assignee falls below the button, so a click there
+  // opens nothing and the URL assertion below would time out.
+  await card(page, title).getByTestId("task-card-open").click();
   await expect(page).toHaveURL(/#\/tasks\/[^/]+$/, { timeout: 30_000 });
   const id = page.url().split("#/tasks/")[1];
   await expect(page.getByText(title).first()).toBeVisible({ timeout: 30_000 });

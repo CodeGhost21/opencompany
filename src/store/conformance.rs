@@ -181,6 +181,10 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             role: "Head of Support".to_string(),
             description: Some("Answers customer mail and escalates refunds.".to_string()),
             tools: vec!["docs.*".to_string(), "web".to_string()],
+            // Both set, so a backend that drops either fails here — the same
+            // reason `tools` is non-empty on this one and empty on the next.
+            model: Some("claude-sonnet-4".to_string()),
+            harness: Some("claude".to_string()),
         },
         OverlayAgent {
             id: "pax_ivory".to_string(),
@@ -188,6 +192,11 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             role: "Analyst".to_string(),
             description: None,
             tools: Vec::new(),
+            // The absent half of the pair: `None` must rehydrate as `None`,
+            // never as an empty string pinning the teammate to a nameless
+            // harness.
+            model: None,
+            harness: None,
         },
     ]
 }
@@ -233,6 +242,11 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         description: Some(String::new()),
         tools: Some(vec!["docs.*".to_string()]),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
+        // Set rather than defaulted: this fixture exists to prove a store
+        // round-trips the whole override, so every field it gains needs a real
+        // value here or the new ones are covered by nothing.
+        model: Some("claude-opus-4-5".to_string()),
+        harness: Some("laptop".to_string()),
     }]
 }
 
@@ -318,6 +332,7 @@ pub async fn assert_isolation_by_company(
         .append(
             &alpha,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "a".into(),
                 by: None,
@@ -552,6 +567,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e0".into(),
                 by: None,
@@ -565,6 +581,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e1".into(),
                 by: None,
@@ -584,6 +601,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e2".into(),
                 by: None,
@@ -619,6 +637,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
             .append(
                 &alpha,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: format!("a{expected}"),
                     by: None,
@@ -636,6 +655,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
         .append(
             &beta,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "b0".into(),
                 by: None,
@@ -680,6 +700,7 @@ pub async fn assert_event_subscription_surfaces_gap(events: Arc<dyn EventLog>) {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: format!("event {seq}"),
                     by: None,
@@ -714,6 +735,7 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
                 .append(
                     &id,
                     CompanyEvent::OperatorMessage {
+                        mentions: Vec::new(),
                         parent: None,
                         text: text.to_string(),
                         by: None,
@@ -985,6 +1007,7 @@ pub async fn assert_export_totality(
     let mut appended = Vec::new();
     for i in 0..4 {
         let ev = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: format!("event {i}"),
             by: None,
@@ -2457,21 +2480,6 @@ pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutput
 /// `mcp/<name>/auth`, `harness/<id>/…`). **Every value is an obviously fake
 /// placeholder**; nothing here resembles a live credential.
 ///
-/// # One property this does NOT yet assert, and why
-///
-/// **Two distinct keys must stay distinct.** They do not on the filesystem
-/// backend: `Bundle::secret` slugs the key through
-/// [`slug`](crate::store::paths), which folds every character outside
-/// `[A-Za-z0-9._-]` to `_` and is therefore not injective, so `mcp/acme
-/// prod/auth` and `mcp/acme_prod/auth` are one file. SQLite and MongoDB keep
-/// them apart. Two MCP servers whose names differ only by such a character
-/// consequently share one credential on fs — issue #1510, found while writing
-/// this function.
-///
-/// The case is left out rather than added-and-failing because the fix is an
-/// on-disk filename change with a migration to think about, not a test fix.
-/// It is named here so the gap is countable instead of silent, which is the
-/// same complaint #1505 was filed about one level up.
 pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
@@ -2547,7 +2555,123 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "writing unrelated keys disturbed an existing secret"
     );
 
-    // 4. Overwrite replaces. A backend that appended, or that served a cached or
+    // 4. Keys remain distinct even when a filesystem-safe filename needs to
+    // encode them differently. MCP server names are trimmed but otherwise
+    // accepted verbatim, so these are two valid server credential keys.
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme prod/auth",
+            SecretValue("token-for-space-name".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme_prod/auth",
+            SecretValue("token-for-underscore-name".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/acme prod/auth").await.as_deref(),
+        Some("token-for-space-name"),
+        "a distinct key with a space was overwritten by its underscore variant"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/acme_prod/auth").await.as_deref(),
+        Some("token-for-underscore-name"),
+        "a distinct key with an underscore was overwritten by its space variant"
+    );
+
+    // Letter case is the same hazard one level down: on case-insensitive
+    // volumes (macOS, Windows) `mcp/Acme/auth` and `mcp/acme/auth` are one
+    // path, and a backend that let them share a file would overwrite one
+    // server's credential with another's. `validate_servers` treats them as
+    // two valid names.
+    secrets
+        .set(
+            &alpha,
+            "mcp/Acme/auth",
+            SecretValue("token-for-upper-case".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme/auth",
+            SecretValue("token-for-lower-case".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/Acme/auth").await.as_deref(),
+        Some("token-for-upper-case"),
+        "a distinct key that differs only in case was overwritten by its lower-case variant"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/acme/auth").await.as_deref(),
+        Some("token-for-lower-case"),
+        "a distinct key that differs only in case was overwritten by its upper-case variant"
+    );
+
+    // Windows strips trailing periods from a path component, so `foo` and
+    // `foo.` are one directory entry there — the filesystem backend has to
+    // encode the trailing dot, and every backend has to keep the two keys
+    // apart regardless.
+    secrets
+        .set(&alpha, "foo", SecretValue("token-for-plain".to_string()))
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "foo.",
+            SecretValue("token-for-trailing-dot".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("token-for-plain"),
+        "a distinct key ending in a period was overwritten by its plain variant"
+    );
+    assert_eq!(
+        read(&alpha, "foo.").await.as_deref(),
+        Some("token-for-trailing-dot"),
+        "a distinct key ending in a period lost its own value"
+    );
+
+    // A key that is itself shaped like a legacy filename must not alias another
+    // key. On the filesystem backend the canonical namespace and the legacy
+    // slug fallback have to stay disjoint, so `key-foo` must not read the value
+    // written for `foo`, and writing `key-foo` must not touch `foo`.
+    secrets
+        .set(&alpha, "foo", SecretValue("value-for-foo".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "key-foo").await,
+        None,
+        "reading a key-shaped legacy slug reached another key's value"
+    );
+    secrets
+        .set(
+            &alpha,
+            "key-foo",
+            SecretValue("value-for-key-foo".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("value-for-foo"),
+        "writing a key-shaped legacy slug deleted another key"
+    );
+
+    // 5. Overwrite replaces. A backend that appended, or that served a cached or
     //    stale row, would hand a rotated credential's *predecessor* to the next
     //    outbound call — which fails as an authentication error days later, far
     //    from the rotation that caused it.
@@ -2565,7 +2689,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "an overwritten secret still reads as its previous value"
     );
 
-    // 5. Clearing writes an empty value, and an empty value is NOT absence. This
+    // 6. Clearing writes an empty value, and an empty value is NOT absence. This
     //    distinction is load-bearing: `clear_auth`/`clear_key` clear a credential
     //    by writing `""`, and a backend that collapsed that into "unset" would
     //    fall back to whatever the manifest or the environment supplies — so the
@@ -2580,7 +2704,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "a cleared secret decayed into an unset one, so the revocation did not take"
     );
 
-    // 6. ISOLATION — the property with security consequences. `beta` has written
+    // 7. ISOLATION — the property with security consequences. `beta` has written
     //    nothing, and must not observe `alpha`'s credentials under any key.
     for key in [
         "inference/key",
@@ -2595,7 +2719,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         );
     }
 
-    // 7. And the isolation holds in both directions once `beta` writes the SAME
+    // 8. And the isolation holds in both directions once `beta` writes the SAME
     //    key: neither company sees the other's value. A backend that keyed only
     //    on `key` (dropping the company scope) passes step 6 and fails here,
     //    because until `beta` writes there is nothing for the missing scope to
@@ -2620,7 +2744,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
          is not part of the key"
     );
 
-    // 8. A key that exists only for `beta` is still absent for `alpha`, which is
+    // 9. A key that exists only for `beta` is still absent for `alpha`, which is
     //    the mirror of step 6 and catches a scope applied on write but not read.
     secrets
         .set(
@@ -2717,8 +2841,8 @@ pub async fn assert_fact_store(facts: Arc<dyn FactStore>) {
 /// backend keeps one claim per (addr, label) since #1300 (see
 /// [`assert_identical_body_two_labels`]), but a *new* label on an existing
 /// body stamps per-label on fs/sqlite and keeps the address's first-write
-/// stamp on the single-record backends (mongodb, the provider facade, the
-/// tinycortex engine). Readers of the stamp take the max across chunks for
+/// stamp on the single-record backends (mongodb, the provider facade).
+/// Readers of the stamp take the max across chunks for
 /// that reason.
 pub async fn assert_context_chunk_stamps(context: Arc<dyn ContextStore>) {
     let alpha = CompanyId::new("alpha");
@@ -5295,6 +5419,98 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
             .unwrap()
             .is_empty()
     );
+
+    // -- the per-desk filter (issue #1573) -----------------------------------
+    //
+    // In a company of its own so it disturbs none of the counts above, which
+    // are asserted exactly.
+    //
+    // Three things have to hold, and only the first is obvious. A desk's
+    // history spans **cards and card-less chat turns** alike, because both are
+    // recorded attempts at work by that desk — a filter that saw only
+    // dispatches would hide every conversation an operator had with the
+    // teammate. It composes with the other predicates rather than replacing
+    // them. And it stops at the company boundary like every other read here.
+    let gamma = CompanyId::new("gamma");
+    runs.create_run(&gamma, NewRun::for_task("g1", "card", "engineer"))
+        .await
+        .unwrap();
+    runs.create_run(&gamma, NewRun::for_chat("g2", "general", "engineer"))
+        .await
+        .unwrap();
+    runs.create_run(&gamma, NewRun::for_task("g3", "card", "ceo"))
+        .await
+        .unwrap();
+    runs.create_run(&alpha, NewRun::for_task("g4", "card", "engineer"))
+        .await
+        .unwrap();
+
+    let mut engineer = runs
+        .list_runs(&gamma, &RunFilter::for_agent("engineer"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect::<Vec<_>>();
+    // Sorted rather than compared in list order: all three rows are minted in
+    // the same millisecond, so `sort_newest_first` breaks the tie on `attempt`
+    // and `id`, and pinning that here would assert the tiebreak rather than the
+    // filter. The ordering itself is already pinned above.
+    engineer.sort();
+    assert_eq!(
+        engineer,
+        ["g1", "g2"],
+        "one desk's attempts, cards and card-less chat turns alike, and nobody \
+         else's — not the other desk in this company, not the same desk in another"
+    );
+
+    assert_eq!(
+        runs.list_runs(&gamma, &RunFilter::for_agent("ceo"))
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        ["g3"]
+    );
+
+    // Composes with `task_id`: the desk's attempts *at one card*.
+    assert_eq!(
+        runs.list_runs(
+            &gamma,
+            &RunFilter {
+                agent_id: Some("engineer".into()),
+                ..RunFilter::for_task("card")
+            }
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect::<Vec<_>>(),
+        ["g1"],
+        "the desk and card predicates intersect rather than either winning"
+    );
+
+    // …and with `statuses`. Every gamma row is still `Pending`.
+    assert!(
+        runs.list_runs(
+            &gamma,
+            &RunFilter::for_agent("engineer").with_status(RunStatus::Succeeded)
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+
+    // A desk nobody ran is empty, not an error — a removed teammate's id, or a
+    // typo, must not look like a broken read.
+    assert!(
+        runs.list_runs(&gamma, &RunFilter::for_agent("nobody"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5666,4 +5882,219 @@ pub async fn assert_journal_import(journal: Arc<dyn crate::ports::journal::Journ
     journal.complete_import(&beta, Vec::new()).await.unwrap();
     assert!(journal.journal_imported(&beta).await.unwrap());
     assert!(journal.read_journal(&beta).await.unwrap().is_empty());
+}
+
+/// The workflow-run join, on every backend.
+///
+/// Split out of [`assert_run_store`] rather than folded into it so a backend can
+/// be brought up against the join alone, and so the assertion reads as one idea.
+pub async fn assert_run_store_workflow_join(runs: Arc<dyn crate::ports::runs::RunStore>) {
+    use crate::ports::runs::{NewRun, RunFilter};
+
+    let alpha = CompanyId::new("alpha");
+
+    // Two nodes of one workflow run, plus an ordinary card dispatch beside them.
+    runs.create_run(
+        &alpha,
+        NewRun::for_workflow_node("w1", "wr-1", "solve", "programmer"),
+    )
+    .await
+    .unwrap();
+    runs.create_run(
+        &alpha,
+        NewRun::for_workflow_node("w2", "wr-1", "check", "verifier"),
+    )
+    .await
+    .unwrap();
+    runs.create_run(
+        &alpha,
+        NewRun::for_workflow_node("w3", "wr-2", "solve", "programmer"),
+    )
+    .await
+    .unwrap();
+    runs.create_run(&alpha, NewRun::for_task("t1", "card", "ceo"))
+        .await
+        .unwrap();
+
+    // The fields round-trip.
+    let one = runs.get_run(&alpha, "w1").await.unwrap().unwrap();
+    assert_eq!(one.workflow_run_id.as_deref(), Some("wr-1"));
+    assert_eq!(one.node_id.as_deref(), Some("solve"));
+    assert_eq!(one.task_id, None, "a workflow node attempts no card");
+    assert_eq!(one.chat_id, None, "and belongs to no conversation");
+
+    // A card dispatch belongs to no workflow — `None` is true, not a placeholder.
+    let card = runs.get_run(&alpha, "t1").await.unwrap().unwrap();
+    assert_eq!(card.workflow_run_id, None);
+    assert_eq!(card.node_id, None);
+
+    // The filter selects exactly one run's nodes.
+    let mine = runs
+        .list_runs(&alpha, &RunFilter::for_workflow_run("wr-1"))
+        .await
+        .unwrap();
+    let mut ids: Vec<&str> = mine.iter().map(|r| r.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["w1", "w2"], "only wr-1's nodes");
+
+    // An unknown workflow run matches nothing rather than everything — the
+    // failure mode of a filter that is silently dropped.
+    assert!(
+        runs.list_runs(&alpha, &RunFilter::for_workflow_run("nope"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // An unfiltered list still sees them all, including the card dispatch.
+    let all = runs.list_runs(&alpha, &RunFilter::default()).await.unwrap();
+    assert_eq!(all.len(), 4);
+}
+
+/// Every backend's [`DeepTraceStore`](crate::ports::deep_trace::DeepTraceStore)
+/// must agree on isolation, replacement, ordering, pruning and purge.
+///
+/// The contract this pins is narrow but load-bearing: the store holds secrets,
+/// so "company A cannot see company B" and "purge really destroys" are not
+/// niceties, and a backend that quietly diverges on either is a disclosure bug
+/// rather than a bug.
+pub async fn assert_deep_trace_store(deep: Arc<dyn crate::ports::deep_trace::DeepTraceStore>) {
+    use crate::ports::deep_trace::{RunStepDetailRecord, TurnStepDetail};
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let record = |run: &str, seq: u32, at: u64, reasoning: &str| RunStepDetailRecord {
+        run_id: run.to_string(),
+        step_seq: seq,
+        at_millis: at,
+        detail: TurnStepDetail {
+            reasoning: Some(reasoning.to_string()),
+            ..TurnStepDetail::default()
+        },
+    };
+
+    // -- a run with no detail reads as empty, not as an error ----------------
+
+    assert!(
+        deep.list_step_details(&alpha, "missing")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a run that recorded nothing reads empty"
+    );
+
+    // -- append and read back, ordered by step_seq ---------------------------
+
+    // Deliberately written out of order: the store orders, the caller does not.
+    deep.append_step_detail(&alpha, &record("r1", 2, 20, "second"))
+        .await
+        .unwrap();
+    deep.append_step_detail(&alpha, &record("r1", 0, 10, "first"))
+        .await
+        .unwrap();
+    deep.append_step_detail(&alpha, &record("r1", 1, 15, "middle"))
+        .await
+        .unwrap();
+
+    let got = deep.list_step_details(&alpha, "r1").await.unwrap();
+    assert_eq!(got.len(), 3);
+    assert_eq!(
+        got.iter().map(|r| r.step_seq).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "details come back in step order regardless of write order"
+    );
+    assert_eq!(got[0].detail.reasoning.as_deref(), Some("first"));
+    assert_eq!(got[2].detail.reasoning.as_deref(), Some("second"));
+
+    // -- replacement on (run_id, step_seq), not duplication ------------------
+
+    // A reasoning run flushes partway and again at close under the same ordinal.
+    deep.append_step_detail(&alpha, &record("r1", 1, 30, "middle, finished"))
+        .await
+        .unwrap();
+    let got = deep.list_step_details(&alpha, "r1").await.unwrap();
+    assert_eq!(got.len(), 3, "a re-write replaces rather than stacking");
+    assert_eq!(
+        got[1].detail.reasoning.as_deref(),
+        Some("middle, finished"),
+        "the later write is the truth"
+    );
+
+    // -- per-company isolation ----------------------------------------------
+
+    deep.append_step_detail(&beta, &record("r1", 0, 10, "beta's secret"))
+        .await
+        .unwrap();
+    let alpha_view = deep.list_step_details(&alpha, "r1").await.unwrap();
+    assert_eq!(alpha_view.len(), 3, "beta's row is invisible to alpha");
+    assert!(
+        alpha_view
+            .iter()
+            .all(|r| r.detail.reasoning.as_deref() != Some("beta's secret")),
+        "a run id shared across companies must not leak"
+    );
+    assert_eq!(deep.list_step_details(&beta, "r1").await.unwrap().len(), 1);
+
+    // -- every field survives the round trip ---------------------------------
+
+    let rich = RunStepDetailRecord {
+        run_id: "r2".to_string(),
+        step_seq: 0,
+        at_millis: 99,
+        detail: TurnStepDetail {
+            reasoning: Some("why".to_string()),
+            arguments: Some(r#"{"cmd":"ls"}"#.to_string()),
+            output: Some("a\nb\n".to_string()),
+            display_detail: Some("listing".to_string()),
+            iteration: Some(3),
+            clipped: true,
+        },
+    };
+    deep.append_step_detail(&alpha, &rich).await.unwrap();
+    assert_eq!(
+        deep.list_step_details(&alpha, "r2").await.unwrap(),
+        vec![rich],
+        "read-back is byte-identical (the export-totality precondition)"
+    );
+
+    // -- purge one run leaves the others -------------------------------------
+
+    let removed = deep.purge_deep_trace(&alpha, Some("r2")).await.unwrap();
+    assert_eq!(removed, 1, "purge reports what it destroyed");
+    assert!(
+        deep.list_step_details(&alpha, "r2")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        deep.list_step_details(&alpha, "r1").await.unwrap().len(),
+        3,
+        "purging one run does not touch another"
+    );
+    assert_eq!(
+        deep.list_step_details(&beta, "r1").await.unwrap().len(),
+        1,
+        "purging alpha does not touch beta"
+    );
+
+    // Purging what is already gone is not an error.
+    assert_eq!(deep.purge_deep_trace(&alpha, Some("r2")).await.unwrap(), 0);
+
+    // -- purge the whole company ---------------------------------------------
+
+    let removed = deep.purge_deep_trace(&alpha, None).await.unwrap();
+    assert_eq!(removed, 3);
+    assert!(
+        deep.list_step_details(&alpha, "r1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        deep.list_step_details(&beta, "r1").await.unwrap().len(),
+        1,
+        "a company-wide purge is still scoped to that company"
+    );
 }

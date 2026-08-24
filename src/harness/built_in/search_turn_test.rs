@@ -272,6 +272,7 @@ async fn harness(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(meter.clone()),
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
@@ -323,9 +324,8 @@ async fn harness(
         // test exercises the #238 search path only, and an unwired store is the
         // fail-closed default everywhere but the runtime builder.
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let record = CompanyRecord {

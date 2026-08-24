@@ -49,6 +49,11 @@ pub mod ledger_file;
 pub mod ledgers;
 mod manifest;
 pub mod mcp;
+/// The bundle's MCP declaration file: `companies/<name>/mcp.json`. A vertical
+/// ships the tool servers its work needs the way it already ships its ledgers,
+/// rather than starting with an empty tool surface somebody has to fill in by
+/// hand from the console before the company can do anything.
+pub mod mcp_file;
 pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
 // per-tenant browser sign-in flow. Needs the vendored `oh::mcp::config_servers` discovery
@@ -78,17 +83,16 @@ pub mod search;
 // inference credential still gets a real team.
 pub mod setup;
 mod skill_file;
-// The company's Smithery directory credential (issue #1287): the key that
-// decides whether the MCP directory has hosted servers to show. Always compiled
-// — the console must be able to manage it in a build with no `mcp` feature, the
-// same way it manages the Composio token without the harness.
-pub mod smithery;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
 pub mod steer;
+/// Seed board cards: `globals/tasks.toml` and `companies/<name>/tasks.toml`. A
+/// company boots with the setup work it obviously has already on the board,
+/// rather than with an empty To-do column and agents that have nothing to pick
+/// up.
+pub mod task_file;
 pub mod task_intent;
-pub mod telegram;
 // The one list of tools a company can grant — built-ins, MCP servers and
 // Composio toolkits in a single vocabulary. Always compiled: it is a projection
 // over the manifest, and the console route that renders it is in the default
@@ -148,7 +152,9 @@ pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
 #[cfg(test)]
 pub(crate) use manifest::is_snake_case;
 pub use manifest::{DELEGATES_TO_WILDCARD, LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
+pub use mcp_file::{MCP_FILE, has_mcp_file, load_dir_mcp_servers};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
+pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{
     ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,
     Company, CompanyManifest, ComposioTools, Connection, ContextAccess, ContextEntry,
@@ -160,8 +166,7 @@ pub use types::{
     PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
     TOOL_PROVIDERS, Tools, grants_chargebee_explicit, grants_composio_explicit,
     grants_files_or_docs, grants_hosting_explicit, grants_media_explicit, grants_paypal_explicit,
-    grants_repo_explicit, grants_repo_write_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, orchestrator_id,
+    grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
     STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
