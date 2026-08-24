@@ -618,22 +618,26 @@ async fn edit_agent(
     // resolution is deliberately moved ahead of the write lock (see the note
     // there). That ordering must not also move it ahead of the roster check: an
     // id that names nobody has a `404` coming, not a `400` (or up to 4 MiB of
-    // I/O) spent proving the shape of a body nobody could have applied. So the
-    // roster is read once, unlocked, and an unknown id is refused before any
-    // avatar work; the lock below re-reads and re-checks, because the roster
-    // may have changed while the avatar was resolving.
-    let early = company
-        .runtime
-        .store()
-        .load(company.id())
-        .await?
-        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
-    if !early.is_roster_agent(&agent_id) {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
-            "teammate {agent_id}"
-        )))
-        .into_response()
-        .into());
+    // I/O) spent proving the shape of a body nobody could have applied. So when
+    // the body carries an avatar, the roster is read once, unlocked, and an
+    // unknown id is refused before any avatar work; the lock below re-reads and
+    // re-checks, because the roster may have changed while the avatar was
+    // resolving. A body without an avatar has nothing slow to get ahead of, so
+    // the single locked check below is enough for it.
+    if body.avatar.is_some() {
+        let early = company
+            .runtime
+            .store()
+            .load(company.id())
+            .await?
+            .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
+        if !early.is_roster_agent(&agent_id) {
+            return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+                "teammate {agent_id}"
+            )))
+            .into_response()
+            .into());
+        }
     }
 
     // A submitted face is resolved *before* the write lock below is taken.
