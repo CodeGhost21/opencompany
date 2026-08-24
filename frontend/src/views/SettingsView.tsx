@@ -174,7 +174,13 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
                 >
                   <Compass className="size-4" /> Replay tour
                 </Button>
-                <Button variant="outline" render={<a href="#/setup" />}>
+                {/* The route is `#/setup`, but the anchor has to say so with the
+                    host scope carried: a Ctrl/Cmd-click opens a new tab, and a
+                    tab has no `useHostAddress` repairer — it boots with the
+                    address as written. Without the param the new tab would pick
+                    its bootstrap/default host and setup could staff the wrong
+                    company in a multi-host console (issue #1417 review). */}
+                <Button variant="outline" render={<a href={withHostParam("setup")} />}>
                   Set up company
                 </Button>
               </div>
