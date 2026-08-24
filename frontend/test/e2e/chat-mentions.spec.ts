@@ -146,16 +146,16 @@ test("Enter with the picker shut sends, and carries the resolved mention", async
 
   await expect.poll(() => sent.length).toBe(1);
   const body = sent[0];
-  expect(body.text).toContain("@engineer");
+  expect(body.text).toContain("@Ada");
   // Structured, not re-guessed from the text: the host is told exactly who the
   // person picked.
   expect(body.mentions).toHaveLength(1);
   expect(body.mentions?.[0].target).toEqual({ kind: "agent", id: "engineer" });
-  expect(body.mentions?.[0].text).toBe("@engineer");
+  expect(body.mentions?.[0].text).toBe("@Ada");
   // The span has to actually sit at the recorded offset, or the chip renders
   // over the wrong characters.
   const { offset, text } = body.mentions![0];
-  expect(body.text.slice(offset, offset + text.length)).toBe("@engineer");
+  expect(body.text.slice(offset, offset + text.length)).toBe("@Ada");
 });
 
 test("Escape closes the picker and leaves the draft alone", async ({ page }) => {
