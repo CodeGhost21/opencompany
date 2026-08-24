@@ -195,6 +195,53 @@ describe("changing the autonomy tier", () => {
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
 
+  it("keeps the dialog up when Escape is pressed while the save is in flight", async () => {
+    // The PUT stays unresolved, so `saving` is true while the dialog is open —
+    // exactly the window where Base UI forwards an Escape close request.
+    let resolvePut: (saved: PolicyStatus) => void = () => {};
+    const put = vi.fn(
+      async (_path: string, body: { mode?: string }) =>
+        new Promise<PolicyStatus>((resolve) => {
+          resolvePut = resolve;
+        }),
+    );
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async () => status("supervised"),
+      put,
+      del: async () => status("supervised"),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+    });
+    expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { mode: "full" });
+
+    // Escape while the PUT is still in flight must not dismiss the dialog:
+    // the request is still running and its outcome owns this screen.
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).not.toBeNull();
+
+    // The request resolving (here: succeeding) is what closes the dialog.
+    await act(async () => {
+      resolvePut(status("full"));
+      await Promise.resolve();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+  });
+
   it("drops a pending confirmation when the company changes underneath it", async () => {
     const { client, put } = makeClient(status("supervised"));
     await mount(client);
