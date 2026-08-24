@@ -244,7 +244,28 @@ pub async fn resolve(
         bytes.extend_from_slice(&chunk);
     }
     match sniff_image(&bytes) {
-        Some(_) => Ok(stored),
+        Some(sniffed) => {
+            // The bytes and the stored type have to agree, because the type a
+            // node was stored under is a claim by whoever uploaded it: the
+            // generic workspace route keeps the declared `Content-Type`, and
+            // only the avatar route sniffs before storing. A `blob:` whose
+            // stored `image/png` is really a GIF would render as a PNG from
+            // this path and as a GIF from the Files tab — the same bytes, two
+            // faces. A node with no declared type has nothing to agree with,
+            // so it is refused too; every path that stores an avatar records
+            // the sniffed type.
+            let essence = node
+                .mime
+                .as_deref()
+                .and_then(|m| m.split(';').next())
+                .map(str::trim)
+                .map(str::to_ascii_lowercase);
+            if essence.as_deref() == Some(sniffed) {
+                Ok(stored)
+            } else {
+                Err(not_an_image())
+            }
+        }
         None => Err(not_an_image()),
     }
 }
