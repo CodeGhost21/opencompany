@@ -2358,6 +2358,19 @@ impl HarnessBrain {
     /// addressed to something that does not exist, and those are very different
     /// facts. The log line is what makes the second one a greppable event in a
     /// tenant's log instead of a silent wrong-agent answer.
+    /// The desk key `@everyone` expands against for a message addressed to
+    /// `chat`. Folds the General-desk spellings [`is_general_chat`] admits
+    /// (`None`, `""`, `"main"`, `"General"`) to [`DEFAULT_DESK`], so a
+    /// broadcast from the console's default thread — which sends
+    /// `chat: "main"`, an alias `resolve_desk_id` does not know — expands
+    /// against the General desk rather than no desk at all.
+    fn everyone_desk(chat: Option<&str>) -> &str {
+        match chat {
+            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
+            _ => crate::server::ops::language::DEFAULT_DESK,
+        }
+    }
+
     fn responder_for(&self, chat: Option<&str>) -> String {
         let Some(chat) = chat else {
             return self.responder.clone();
