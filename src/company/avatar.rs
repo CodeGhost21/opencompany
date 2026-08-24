@@ -227,7 +227,11 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         // are not SOF: DHT (C4), JPG (C8), DAC (CC), DNL (DC), DRI (DD).
         if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC | 0xDC | 0xDD)
         {
-            if i + 4 + len > bytes.len() {
+            // `len` covers the length field and the payload but not the marker,
+            // so the segment ends at `i + 2 + len`. A real SOF always carries
+            // at least one component, so `len >= 10` and the size bytes below
+            // are guaranteed to sit inside it.
+            if i + 2 + len > bytes.len() {
                 return None;
             }
             let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
