@@ -110,6 +110,7 @@ describe("what an agent's tools amount to", () => {
       requested: [],
       companyAllow: ["workspace", "composio"],
       deskAllow: [],
+      deskCeilingActive: false,
       effective: ["workspace", "composio"],
     });
     expect(summary.standardGrant).toBe(true);
