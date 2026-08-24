@@ -839,6 +839,7 @@ function RunFilesSection({
   const [files, setFiles] = useState<RunArtifactRow[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   // A one-shot latch: the fetch runs on the first open and not on every toggle,
   // and a collapse-then-reopen does not re-hit the route. Cleared on failure so
   // a reopen can retry.
