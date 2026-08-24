@@ -1856,7 +1856,9 @@ async fn accept_chat_turn(
     if let CompanyEvent::OperatorMessage { mentions, .. } = &message_event
         && !mentions.is_empty()
     {
-        runtime.notify_mentions(id, mentions, &message_seq, by, desk).await;
+        runtime
+            .notify_mentions(id, mentions, &message_seq, by, desk)
+            .await;
     }
 
     let turn_id = crate::ports::generate_id();
@@ -2249,7 +2251,9 @@ async fn journal_chat_replies(
                 // which is worst for exactly the person it is meant to reach:
                 // offline when the reply lands.
                 if !reply_mentions.is_empty() {
-                    runtime.notify_mentions(id, &reply_mentions, &seq, None, desk).await;
+                    runtime
+                        .notify_mentions(id, &reply_mentions, &seq, None, desk)
+                        .await;
                 }
             }
             Err(err) => tracing::warn!(
@@ -9186,8 +9190,8 @@ mode = "full"
     #[tokio::test]
     async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
         let home_dir = home();
-        let c = multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None)
-            .await;
+        let c =
+            multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None).await;
 
         let response = c
             .app
@@ -9278,12 +9282,13 @@ mode = "full"
         let note = &mentions[0].notification;
         assert_eq!(note.context.as_deref(), Some("sales"));
         assert_eq!(
-            note.title,
-            "Someone mentioned you in sales",
+            note.title, "Someone mentioned you in sales",
             "a continuation has no author, so the generic label is the honest one"
         );
         assert!(
-            note.audience.as_ref().is_some_and(|a| a.contains(&admin.id)),
+            note.audience
+                .as_ref()
+                .is_some_and(|a| a.contains(&admin.id)),
             "the named user must be in the notification's audience"
         );
     }
@@ -9628,7 +9633,7 @@ mode = "full"
 
         for general in ["General", "general", "main", ""] {
             assert_eq!(
-                runtime.mention_context(&id, &[],general).await,
+                runtime.mention_context(&id, &[], general).await,
                 crate::server::chat_history::MAIN_THREAD_ID,
                 "a mention in the General desk ({general:?}) has to store the console's \
                  main-thread id, which the rail aliases onto its first rendered desk \
