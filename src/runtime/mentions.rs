@@ -1123,6 +1123,15 @@ members = ["engineer", "ceo"]
         assert!(resolve_text(text).is_empty());
     }
 
+    /// A CRLF line ending is still a close — the `\r` is part of the ending,
+    /// not fence text, and must keep closing the block as it did before the
+    /// suffix was restricted.
+    #[test]
+    fn a_fence_closed_over_crlf_still_masks() {
+        let text = "before\n```\n@engineer\n```\r\nafter";
+        assert!(resolve_text(text).is_empty());
+    }
+
     /// The reason [`strip_code_regions`] blanks rather than removes: a mention
     /// *after* a code span must still land on its real byte offset.
     #[test]
