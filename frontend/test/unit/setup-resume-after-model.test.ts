@@ -384,7 +384,10 @@ describe("leaving the completion screen to wire a model", () => {
       listTeam: async () => [...roster],
       get: async () => ({ cognition: "echo" }),
       post: async () => ({
-        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        agents: [
+          { name: "Ada", role: "Operations", description: "Runs the desk." },
+          { name: "Cara", role: "Support", description: "Answers the inbox." },
+        ],
         template: "ecommerce",
         source: "fallback",
         reason: "no_model",
@@ -402,7 +405,7 @@ describe("leaving the completion screen to wire a model", () => {
     await runFlow();
 
     // Leave for model settings, persisting the fallback team as the redesign's
-    // boundary — the first pass created exactly one teammate.
+    // boundary — the first pass created exactly two teammates.
     await act(async () => {
       (addModelLink() as HTMLElement).click();
     });
@@ -412,12 +415,12 @@ describe("leaving the completion screen to wire a model", () => {
     roster.push({ id: "bob", role: "Support", inboxEnabled: false } as TeamMemberDto);
 
     // Return: the redesign reopens, and the second build-out must replace only
-    // the fallback team — ada — leaving bob, someone else's work, alone.
+    // the fallback team — ada and cara — leaving bob, someone else's work, alone.
     await goTo("#/overview");
     expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
     await runFlow();
 
-    expect(removed, "the fallback team should be replaced").toContain("ada");
+    expect(removed, "the fallback team should be replaced").toEqual(["ada", "cara"]);
     expect(removed, "a teammate staffed while settings were open must survive").not.toContain("bob");
   });
 });
