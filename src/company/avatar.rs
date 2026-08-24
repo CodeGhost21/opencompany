@@ -1052,7 +1052,7 @@ mod test {
             // Frame header X(3) Y(3) W−1(3) H−1(3) duration(3) flags(1) — 16
             // bytes — then the frame's own VP8 sub-chunk (8 + 10).
             v.extend_from_slice(b"ANMF");
-            v.extend_from_slice(&(16 + 8 + 10)u32.to_le_bytes());
+            v.extend_from_slice(&34u32.to_le_bytes());
             v.extend_from_slice(&[0x00, 0x00, 0x00]); // X
             v.extend_from_slice(&[0x00, 0x00, 0x00]); // Y
             v.extend_from_slice(&fw1.to_le_bytes()[..3]);
