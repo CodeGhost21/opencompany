@@ -149,6 +149,16 @@ export function SetupDialog({
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
   const [phase, setPhase] = useState<Phase>({ kind: "asking", step: 0 });
   const [inference, setInference] = useState<InferenceReadiness>("checking");
+  /**
+   * Whether this host can ever run the design path, whatever model is wired.
+   *
+   * `false` (an `openhuman`-less binary, or one with no pool attached) makes
+   * the "Set up a model" call-to-action a dead end — the CTA is omitted rather
+   * than send the operator round a redesign loop that cannot end. Defaults to
+   * `true` while the status is unread, so a host we could not ask is offered
+   * the CTA as before rather than having it silently taken away.
+   */
+  const [harnessReachable, setHarnessReachable] = useState(true);
   const [touched, setTouched] = useState(false);
   /**
    * Whether this run of the flow replaces the team the company already has.
