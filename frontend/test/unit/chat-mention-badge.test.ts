@@ -295,4 +295,49 @@ describe("mentionsToClear", () => {
       ).toEqual(["r"]);
     });
   });
+
+  /**
+   * The Conversation read path for a main-thread mention on a company with
+   * real desks. The badge maps `main` onto the first desk's rail channel, but
+   * that channel hydrates the desk's own thread — so the main-thread subject
+   * can never be in the channel's loaded set. Conversation renders the `main`
+   * thread, and reports that view with the *thread's* loaded ids; when those
+   * contain the subject, the mention must clear exactly as a desk-channel
+   * mention would. This is the case that makes the "subject must be loaded"
+   * gate usable rather than a permanent badge: the surface that shows the
+   * message supplies the set that proves it.
+   */
+  describe("with a main-context mention read through the Conversation main thread", () => {
+    const feed = [note({ id: "main-1", context: "main", subjectId: "7" })];
+
+    it("clears it when the main thread has loaded the subject", () => {
+      expect(
+        mentionsToClear(
+          feed,
+          "engineering",
+          "engineering",
+          new Set(["engineering"]),
+          new Set(["engineering"]),
+          new Map(),
+          null,
+          new Set(["h7"]),
+        ),
+      ).toEqual(["main-1"]);
+    });
+
+    it("keeps it while the main thread has not loaded the subject", () => {
+      expect(
+        mentionsToClear(
+          feed,
+          "engineering",
+          "engineering",
+          new Set(["engineering"]),
+          new Set(["engineering"]),
+          new Map(),
+          null,
+          new Set(["h1", "h2"]),
+        ),
+      ).toEqual([]);
+    });
+  });
 });
