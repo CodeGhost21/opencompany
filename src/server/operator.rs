@@ -9767,6 +9767,7 @@ mode = "full"
                         text: "cc @everyone on this".into(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
