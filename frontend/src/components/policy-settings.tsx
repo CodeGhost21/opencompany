@@ -207,6 +207,10 @@ export function PolicySettings({ client, company }: Props) {
   // the dialog is confirming so the confirm button performs the same one the
   // operator asked for.
   const [pendingReset, setPendingReset] = useState(false);
+  // A direct spend-cap raise lets more payments through without asking — the
+  // same widening the tier buttons and a loosening reset confirm. Remember the
+  // target so the dialog's confirm button saves the value the operator typed.
+  const [pendingCapRaise, setPendingCapRaise] = useState<number | null>(null);
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
