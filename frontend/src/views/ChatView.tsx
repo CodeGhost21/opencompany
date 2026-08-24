@@ -787,8 +787,14 @@ export function ChatView({
   // a thread opens or closes: opening a thread renders its replies, so the
   // replies' mentions — which the channel-open alone must not clear — clear
   // the moment the thread makes them visible.
+  //
+  // Gated on the transcript actually being on screen: below `lg`, `mobilePane
+  // === "rail"` hides the pane, and a mention that lands while the operator is
+  // only looking at the channel rail must not be marked read behind their back.
+  // The gate itself is a dependency, so re-opening the pane from the rail
+  // re-runs the report and clears whatever is newly visible.
   useEffect(() => {
-    if (channel)
+    if (channel && chatPaneVisible)
       onChannelViewed?.(
         channel.id,
         historyPending,
@@ -806,6 +812,7 @@ export function ChatView({
     replyParents,
     openThreadId,
     loadedMessageIds,
+    chatPaneVisible,
   ]);
 
   // Three ways to have no channel on screen, which used to be one blank pane.
