@@ -280,6 +280,7 @@ describe("mentionsToClear", () => {
 
     it("still clears a thread reply mention when its parent thread is open and the reply is loaded", () => {
       const replies = new Map([["h42", "h7"]]);
+      const loadedWithReply = new Set(["h1", "h2", "h7", "h42"]);
       expect(
         mentionsToClear(
           [note({ id: "r", context: "engineering", subjectId: "42" })],
@@ -289,7 +290,7 @@ describe("mentionsToClear", () => {
           new Set(),
           replies,
           "h7",
-          loaded,
+          loadedWithReply,
         ),
       ).toEqual(["r"]);
     });
