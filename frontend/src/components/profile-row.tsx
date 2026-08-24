@@ -54,6 +54,11 @@ export function ProfileRow({
     };
   }, [client, company]);
 
+  // `me` is trusted by the type system and not by reality: a host that answers
+  // this route with a different shape — an older one, a proxy, a stub that
+  // returns `[]` for anything it does not recognise — must not blank the whole
+  // console over a sidebar row. Same class as the `mentionables` guard in
+  // AppShell; there it took out every test in chat-channel-membership.spec.ts.
   if (!me || typeof me !== "object" || !("email" in me) || !("id" in me)) return null;
   const name = personName(me);
 
