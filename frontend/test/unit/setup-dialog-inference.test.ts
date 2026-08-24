@@ -447,6 +447,19 @@ describe("the finished build-out points at what would actually help", () => {
     );
   });
 
+  it("withholds the connection check from a member who cannot change it", async () => {
+    await show(clientWith({ source: "fallback", reason: "model_unreachable", role: "member" }));
+    await runFlow();
+    // The retry is still theirs — a transient blip may have passed. The
+    // Settings link is not: a member cannot land the connection check it
+    // advertises, so the admin-directed copy takes its place.
+    expect(find("setup-check-connection"), "handed a dead-end settings link").toBeNull();
+    expect(find("setup-try-redesign")).toBeTruthy();
+    expect(find("setup-check-connection-member")?.textContent).toContain(
+      "Ask an admin to check the connection",
+    );
+  });
+
   it('"Check connection in Settings" records the redesign debt like the wiring CTA', async () => {
     const redesigned: string[][] = [];
     await show(clientWith({ source: "fallback", reason: "model_unreachable" }), {
