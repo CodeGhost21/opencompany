@@ -113,6 +113,7 @@ fn operator_request() -> CycleRequest {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }],
         event_seqs: Vec::new(),
     }
@@ -514,6 +515,7 @@ async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -571,6 +573,7 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();

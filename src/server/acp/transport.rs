@@ -301,6 +301,7 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
             parent: None,
             deliverable: None,
             mentions,
+            attachments: Vec::new(),
         }])
         .await
         .map_err(|e| e.to_string())?;
