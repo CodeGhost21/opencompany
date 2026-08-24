@@ -490,7 +490,7 @@ async fn edit_agent(
         .load(company.id())
         .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response().into()
         })?;
 
     // Identity before validation, so an unknown id is a 404 rather than a

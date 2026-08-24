@@ -1521,7 +1521,7 @@ async fn run_workflow(
         &wid,
     )?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
+        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into()
     })?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -2161,7 +2161,7 @@ async fn fix_from_run(
         &wid,
     )?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
+        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into()
     })?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
     // field on `WorkflowNodeSpec` (the builder never authors them — see its
@@ -2330,7 +2330,7 @@ async fn workflow_tool_slugs(
             ApiError(OpenCompanyError::CompanyNotFound(
                 company.runtime.id().to_string(),
             ))
-            .into_response()
+            .into_response().into()
         })?;
     // `None` — no harness deps on this runtime — means the wiring is unknowable,
     // not that nothing is wired. Both helpers below read it that way: `slugs`

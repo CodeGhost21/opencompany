@@ -2605,7 +2605,7 @@ async fn attribution_audit_response(
         .load(runtime.id())
         .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.to_string())).into_response().into()
         })?;
     let audit = channel_attributed_replies(&runtime, &record)
         .await?;
