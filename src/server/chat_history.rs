@@ -10,6 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -245,7 +247,8 @@ pub struct MessageView {
 }
 
 /// One mention inside one message, as a reader sees it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MentionView {
     /// The literal span the author typed, so the renderer highlights what is
     /// actually in the text rather than what the target is called now.
@@ -519,7 +522,7 @@ impl MessageView {
 ///   its `@` — which is exactly what a reader would have seen anyway.
 /// * **`mine` is decided.** Per viewer, and `true` for `@everyone` as well as
 ///   for a direct mention, because a broadcast is addressed to this reader too.
-fn project_mentions(
+pub(crate) fn project_mentions(
     mentions: &[Mention],
     authors: &HashMap<String, String>,
     viewer: &Viewer,

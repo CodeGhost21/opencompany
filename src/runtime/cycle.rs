@@ -1422,6 +1422,7 @@ approval.]"
                 text: "This approval was already resolved.".to_string(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
                 message_id: None,
             }],
             executed_effects: Vec::new(),
@@ -1453,6 +1454,7 @@ approval.]"
                     .to_string(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
                 message_id: None,
             }],
             executed_effects: Vec::new(),
@@ -1720,6 +1722,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                         text: text.to_string(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     })
                     .await?;
                 break;
@@ -3044,6 +3047,7 @@ mod test {
                         text: format!("handled: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -3078,6 +3082,7 @@ mod test {
                         text: format!("that needs your approval: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -3108,6 +3113,7 @@ mod test {
                         text: "orchestrator".into(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     },
                     OutboundMessage {
                         message_id: None,
@@ -3120,6 +3126,7 @@ mod test {
                         reply_to: Some(ReplyTo {
                             chat_id: "strategy".into(),
                         }),
+                        mentions: Vec::new(),
                     },
                 ],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "delegating cycle")],
@@ -3223,6 +3230,7 @@ mod test {
                     text: "settled".into(),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 }],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "settling cycle")],
                 ledger_deltas: Vec::new(),
@@ -4982,6 +4990,7 @@ mod test {
                     text: "thought about it".into(),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 }],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "metered cycle")],
                 ledger_deltas: Vec::new(),
