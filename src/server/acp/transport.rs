@@ -393,7 +393,7 @@ mod test {
     use crate::ports::{Brain, CompanyStore, CycleHost};
     use crate::server::graphql::auth::UserPrincipal;
     use crate::store::FsCompanyStore;
-    use crate::{AppConfig, CompanyRecord};
+    use crate::{AppConfig, ports::types::CompanyRecord};
 
     #[test]
     fn target_requires_an_explicit_company() {
