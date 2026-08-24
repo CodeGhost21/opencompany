@@ -228,7 +228,7 @@ describe("grantCeiling", () => {
 });
 
 describe("isEditable", () => {
-  it("accepts `tools`, which the host lists but no form field carries", () => {
+  it("accepts `tools`, which the Tools card's editor sends on save", () => {
     expect(isEditable(agent(), "tools")).toBe(true);
     // A member gets every other key and not this one — the host gates `tools`
     // on admin because an empty list is a potential widening.
