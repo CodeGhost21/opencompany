@@ -1239,9 +1239,9 @@ export function AppShell({
         setMentionFeed(Array.isArray(feed?.notifications) ? feed.notifications : []);
       })
       .catch(() => {
-        if (revision === mentionFeedRevision.current && requestCompany === companyRef.current) {
-          setMentionFeed([]);
-        }
+        // A transient refresh failure must not erase the last successful feed:
+        // keeping it is safer than making durable unread mentions disappear.
+        // The next successful refresh reconciles the optimistic snapshot.
       });
   }, [client, company]);
 
