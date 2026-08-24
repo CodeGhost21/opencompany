@@ -791,4 +791,15 @@ mod test {
             );
         }
     }
+
+    /// A SOF segment whose declared length is too short to hold the size bytes
+    /// used to slip past the segment-end check and then read past the buffer
+    /// when the fixed height/width indexes were applied. It must be refused,
+    /// not panic the request task.
+    #[test]
+    fn size_check_refuses_an_undersized_sof() {
+        let undersized = b"\xff\xd8\xff\xc0\x00\x02";
+        assert!(image_dimensions(undersized).is_none());
+        assert!(check_image_dimensions(undersized).is_err());
+    }
 }
