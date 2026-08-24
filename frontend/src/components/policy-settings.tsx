@@ -311,6 +311,7 @@ export function PolicySettings({ client, company }: Props) {
     next: PolicyStatus,
     message: string,
     resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
+    takesEffect?: string,
   ) => {
     setStatus(next);
     const { alwaysAsk = true, spendCap = true, deadline = true } = resync;
@@ -325,7 +326,7 @@ export function PolicySettings({ client, company }: Props) {
     if (deadline) {
       setDraftDeadline((next.approvalTtlHours ?? 24).toString());
     }
-    toast.success(message, { description: next.takesEffect });
+    toast.success(message, { description: takesEffect ?? next.takesEffect });
   };
 
   const chooseTier = async (mode: string) => {
