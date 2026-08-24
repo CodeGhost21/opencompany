@@ -209,7 +209,7 @@ impl ManifestApprovalGate {
             .map(|hours| hours.saturating_mul(60 * 60 * 1000))
             .unwrap_or(DEFAULT_TTL_MILLIS);
         Self {
-            policy,
+            policy: RwLock::new(policy),
             ttl_millis: AtomicU64::new(ttl_millis),
             parked: Mutex::new(HashMap::new()),
             emergency: AtomicBool::new(false),
