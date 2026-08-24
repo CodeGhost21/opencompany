@@ -42,6 +42,24 @@ use crate::ports::users::UserStore;
 use crate::ports::workflow_revisions::WorkflowRevisionStore;
 use crate::ports::workspace::WorkspaceStore;
 
+/// Safe access to the provider-only context partitions.
+///
+/// This is deliberately a facade, not the underlying `MemoryProvider`: every
+/// method still derives the company namespace from a [`CompanyId`], so wiring
+/// it onto a runtime cannot reopen the raw-namespace escape hatch.
+#[async_trait]
+pub trait MemoryScopes: Send + Sync {
+    /// One agent's private context partition.
+    fn agent_context(&self, agent_id: &str) -> Arc<dyn ContextStore>;
+    /// One desk's shared context partition.
+    fn desk_context(&self, desk_id: &str) -> Arc<dyn ContextStore>;
+    /// Traces retained when normal trace eviction archives them.
+    async fn archived_traces(
+        &self,
+        company: &CompanyId,
+    ) -> Result<Vec<crate::ports::CompressedTrace>>;
+}
+
 /// Which storage backend hosts the durable ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StorageKind {
