@@ -283,6 +283,35 @@ describe("readiness is the addressed company's, not the host's", () => {
     expect(linkNamed("Restart the company")).toBeUndefined();
   });
 
+  it("withholds the model CTA until the host names the operator's role", async () => {
+    // canManage is tri-state: while the role read is outstanding — and if it
+    // fails — the admin actions stay withheld rather than guessed. A member must
+    // never be handed the Settings link off a default that read as admin.
+    let resolveRole: (who: unknown) => void = () => {};
+    const roleRead = new Promise<unknown>((resolve) => {
+      resolveRole = resolve;
+    });
+    const client = {
+      ...clientWith({}),
+      get: (path: string) => {
+        if (path.endsWith("/auth/me")) return roleRead;
+        return Promise.resolve(ECHO);
+      },
+    } as unknown as OpenCompanyClient;
+
+    await show(client);
+    expect(find("setup-inference-notice")?.textContent).toContain("can't reach a model");
+    expect(
+      linkNamed("Set up a model"),
+      "offered the admin action before the role read settled",
+    ).toBeUndefined();
+
+    await act(async () => {
+      resolveRole(ME_ADMIN);
+    });
+    expect(linkNamed("Set up a model")).toBeTruthy();
+  });
+
   it("ignores a delayed status from the company the dialog was on before", async () => {
     // The readiness check answers the *addressed* company. Switching companies
     // cleans up the old check, but a response already in flight still resolves —
