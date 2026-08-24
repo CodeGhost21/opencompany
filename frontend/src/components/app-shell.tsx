@@ -65,6 +65,7 @@ import { useHashView } from "@/hooks/use-hash-view";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -104,8 +105,8 @@ import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
+import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { SettingsSection } from "@/views/SettingsSection";
-import { isSettingsPage } from "@/views/settings-pages";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
 // React Flow is heavy and only used here — load it on demand.
@@ -275,47 +276,6 @@ const MAIN_CONTENT_ID = "main-content";
  * outright, and this only governs the no-segment case.
  */
 const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
-
-/**
- * `#/tasks` with no card named the board page, which is retired (issue #1140).
- * `#/memory` is the Brain browser's legacy address after it moved under
- * Settings (issue #1416).
- *
- * Each retired route lands at its current home, so a bookmark, a habit, or a
- * link written before the move still reaches the intended surface rather than
- * a 404. `#/tasks/<malformed>` names no card, so it goes to the board; a real
- * `#/tasks/<id>` returns `null` from here and resolves untouched.
- *
- * Module scope, because `useHashView` holds this in a `useCallback` dependency
- * list: an inline arrow would be a new identity on every render and would
- * re-resolve the route on each one.
- */
-const REWRITE_RETIRED = (
-  head: string,
-  sub: string | null,
-): [View, string | null] | null => {
-  if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
-  if (head === "memory") return ["settings", "brain"];
-  // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
-  // Team and Workspace. Do not render General under an address that names no
-  // page: a bookmark or shared link must say where it actually lands.
-  if (head === "settings" && sub !== null && !isSettingsPage(sub)) return ["settings", "general"];
-  // Bare `#/team` is the Company page now (issue #1141). It rendered the
-  // teammate card grid from a route with no nav entry, so nobody arrived at it;
-  // the grid is Company's Cards half, and leaving `#/team` answering as well
-  // would leave two live addresses drawing one grid with no relationship
-  // between them. A named teammate is untouched — `#/team/<agentId>` is the
-  // detail sub-page (issue #264), it is what the org chart's rows and the chat
-  // pane's chips link to, and it is deliberately a page so it can be linked.
-  if (head === "team" && !sub) return ["company", null];
-  // `#/connections` predates the split into OAuth / MCP / Inference; the
-  // accounts it named are the OAuth page.
-  if (head === "connections") return ["settings", "oauth"];
-  if (head === "oauth") return ["settings", "oauth"];
-  if (head === "mcp") return ["settings", "mcp"];
-  if (head === "people") return ["settings", "people"];
-  return null;
-};
 
 const LEGACY_CONNECT_QUERY_KEYS = ["connected", "connect_error", "provider"] as const;
 
@@ -514,6 +474,15 @@ export function AppShell({
   const [setupOpen, setSetupOpen] = useState(true);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
+  // `#/setup` is an intentional, manual recovery path. It is a route rather
+  // than a nav page: setup remains a dialog over the ordinary console, but the
+  // address works for staffed companies and after someone has skipped. Entering
+  // it forces the dialog open; leaving it (Back, or an edit) hands the dialog
+  // back to `SetupController`'s `routeOpen` edge, which closes what the route
+  // opened.
+  useEffect(() => {
+    if (view === "setup") setSetupForced(true);
+  }, [view]);
   /**
    * Did this mount start on a view the operator named?
    *
@@ -2113,7 +2082,7 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
-          {view === "overview" && (
+          {(view === "overview" || view === "setup") && (
             <OperatorOverview
               client={client}
               company={company}
@@ -2466,6 +2435,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
+          {view === "not-found" && <UnknownRouteView address={sub} />}
         </ContentSurface>
         </AgentProfileProvider>
 
@@ -2498,6 +2468,7 @@ export function AppShell({
         client={client}
         company={company}
         force={setupForced}
+        routeOpen={view === "setup"}
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
@@ -2508,6 +2479,7 @@ export function AppShell({
           setSetupCompleted(true);
           setView("company");
         }}
+        onRouteDismiss={() => setView("overview")}
       />
 
       <TourController
