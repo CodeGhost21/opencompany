@@ -1491,4 +1491,45 @@ rl.on('line', (line) => {
         );
         assert!(runtime.list().expect("list").is_empty());
     }
+
+    /// `get` on an install that was never persisted reports `McpServerNotFound`
+    /// — the "genuinely absent" half of the store-error split.
+    #[test]
+    fn get_on_an_absent_server_reports_not_found() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = McpRuntime::new(temp.path().join("workspace"));
+        let error = runtime
+            .get("no-such-server")
+            .expect_err("an absent install must not resolve");
+        assert!(
+            matches!(error, OpenCompanyError::McpServerNotFound(ref id) if id == "no-such-server"),
+            "absent install must be McpServerNotFound, got: {error:?}"
+        );
+    }
+
+    /// `get` on a store that fails to read must NOT be reported as a missing
+    /// server — the caller would be told to reinstall something that is there.
+    /// Truncating the SQLite file beneath the runtime's open connection forces
+    /// the next `get_server` read to fail, and the error must surface as a
+    /// `Store` error rather than the blanket `McpServerNotFound` the pre-split
+    /// code produced for every failure.
+    #[test]
+    fn get_on_a_store_that_fails_to_read_reports_store_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let runtime = McpRuntime::new(workspace.clone());
+        // Open the host so the store and its schema exist on disk.
+        runtime.list().expect("open the mcp store");
+        // Corrupt the file beneath the open connection: the query can no longer
+        // be satisfied, so `get_server` must fail with a store error.
+        let db = workspace.join("mcp_clients").join("mcp_clients.db");
+        std::fs::write(&db, b"this is not a sqlite database").expect("corrupt the store file");
+        let error = runtime
+            .get("some-server")
+            .expect_err("a store that cannot read must not resolve");
+        assert!(
+            matches!(error, OpenCompanyError::Store(_)),
+            "a failing store read must surface as Store, got: {error:?}"
+        );
+    }
 }
