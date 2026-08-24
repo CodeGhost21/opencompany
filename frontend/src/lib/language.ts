@@ -397,7 +397,8 @@ export function toolAction(kind: string): string {
  */
 export function grantHeadline(g: StandingGrant): string {
   const action = toolAction(g.tool);
-  return g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  const target = g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  return g.verdict === "deny" ? `Don't allow ${target}` : target;
 }
 
 /**

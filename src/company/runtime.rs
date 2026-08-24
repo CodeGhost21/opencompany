@@ -2556,6 +2556,17 @@ impl CompanyRuntime {
                 // cannot disagree.
                 broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
+                // Issue #1458: a standing **denial** is enforced only on the
+                // agent turn path (`standing_deny_applies`); the workflow gate
+                // does not honour `Deny`, and the resolve route's 400 refuses a
+                // workflow standing denial before the gate is touched. So the
+                // deny control is offered only where the runtime will actually
+                // enforce it — an agent subject — while the grant half above
+                // still covers a workflow, which can hold a standing permission.
+                broadly_deniable: matches!(
+                    crate::runtime::grants::subject_of(&p.effect),
+                    Some(crate::runtime::grants::GrantSubject::Agent(_))
+                ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction

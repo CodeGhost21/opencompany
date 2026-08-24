@@ -3221,6 +3221,7 @@ mod tests {
             agent: "ops".to_string(),
             workflow: None,
             tool: COMPOSIO_EXECUTE.to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,
                 id: "user-1".to_string(),

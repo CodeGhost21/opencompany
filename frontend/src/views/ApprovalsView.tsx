@@ -14,6 +14,7 @@ import {
 } from "@/api/types";
 import {
   ApprovalHeadline,
+  DeclineScopeControl,
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
@@ -532,7 +533,7 @@ function StandingPermissions({
     <section className="mt-8">
       <h2 className="mb-1 text-sm font-medium text-muted-foreground">Standing permissions</h2>
       <p className="mb-3 text-xs text-muted-foreground">
-        Tools you've let a teammate use without asking each time. Each one expires on its own;
+        Tools you've allowed or blocked without asking each time. Each one expires on its own;
         you can end it sooner.
       </p>
       <div className="flex flex-col gap-2">
@@ -548,7 +549,7 @@ function StandingPermissions({
                   <p className="text-xs text-muted-foreground">
                     {askerNames.get(g.agent) ?? g.agent} ·{" "}
                     {expired ? "expired" : `expires ${untilLabel(g.expires_at_millis, now)}`} ·
-                    granted {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
+                    {g.verdict === "deny" ? "declined" : "granted"} {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
                   </p>
                 </div>
                 <Button
@@ -563,7 +564,7 @@ function StandingPermissions({
                   }}
                 >
                   {busy ? <Loader2 className="size-4 animate-spin" /> : <X className="size-4" />}{" "}
-                  Revoke
+                  Remove
                 </Button>
               </CardContent>
             </Card>
@@ -641,6 +642,7 @@ export function ApprovalCard({
   // card decided without touching the control behaves exactly as it did before
   // #374 — the scope is opt-in at every level, including this one.
   const [scope, setScope] = useState<GrantScope>({ kind: "once" });
+  const [declineScope, setDeclineScope] = useState<GrantScope>({ kind: "once" });
 
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
@@ -673,6 +675,7 @@ export function ApprovalCard({
           onChange={setScope}
           disabled={deciding !== null}
         />
+        <DeclineScopeControl approval={a} scope={declineScope} onChange={setDeclineScope} disabled={deciding !== null} />
 
         <ApprovalMeta
           approval={a}
@@ -711,7 +714,7 @@ export function ApprovalCard({
             disabled={deciding !== null}
             /* A decline never carries a scope — there is nothing to grant,
                and the host refuses the pairing anyway. */
-            onClick={() => onDecide("deny", { kind: "once" })}
+            onClick={() => onDecide("deny", declineScope)}
           >
             {deciding === "deny" ? (
               <Loader2 className="size-4 animate-spin" />
