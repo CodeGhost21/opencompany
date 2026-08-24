@@ -99,12 +99,6 @@ pub struct PasswordIssueContext<'a> {
 /// holder are different people.
 pub async fn issue_password(
     context: PasswordIssueContext<'_>,
-    users: &Arc<dyn UserStore>,
-    sessions: &Arc<dyn crate::ports::sessions::SessionStore>,
-    login_codes: &Arc<dyn crate::ports::login_codes::LoginCodeStore>,
-    company: &CompanyId,
-    manifest_admins: &[String],
-    bootstrap_admin: Option<&str>,
     email: &str,
     plaintext: &str,
     require_change: bool,
@@ -228,12 +222,14 @@ mod test {
         let company = CompanyId::new("acme");
 
         let issued = issue_password(
-            &users,
-            &sessions,
-            &login_codes,
-            &company,
-            &[],
-            Some("Founder@Acme.test"),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &[],
+                Some("Founder@Acme.test"),
+            ),
             "founder@acme.test",
             GOOD,
             false,
@@ -267,12 +263,14 @@ mod test {
         let company = CompanyId::new("acme");
 
         issue_password(
-            &users,
-            &sessions,
-            &login_codes,
-            &company,
-            &["ada@acme.test".into()],
-            None,
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &["ada@acme.test".into()],
+                None,
+            ),
             "ada@acme.test",
             GOOD,
             false,
@@ -299,12 +297,14 @@ mod test {
         let company = CompanyId::new("acme");
 
         let error = issue_password(
-            &users,
-            &sessions,
-            &login_codes,
-            &company,
-            &["ada@acme.test".into()],
-            Some("founder@acme.test"),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &["ada@acme.test".into()],
+                Some("founder@acme.test"),
+            ),
             "stranger@elsewhere.test",
             GOOD,
             false,
@@ -336,12 +336,14 @@ mod test {
         let company = CompanyId::new("acme");
 
         issue_password(
-            &users,
-            &sessions,
-            &login_codes,
-            &company,
-            &[],
-            Some("ada@acme.test"),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+            ),
             "ada@acme.test",
             GOOD,
             false,
@@ -351,12 +353,7 @@ mod test {
 
         // Now nobody is named: no manifest admins, no bootstrap admin.
         let again = issue_password(
-            &users,
-            &sessions,
-            &login_codes,
-            &company,
-            &[],
-            None,
+            context(&users, &sessions, &login_codes, &company, &[], None),
             "ada@acme.test",
             "a different long password",
             false,
@@ -412,12 +409,14 @@ mod test {
         let company = CompanyId::new("acme");
 
         let issued = issue_password(
-            &users,
-            &sessions,
-            &login_codes,
-            &company,
-            &[],
-            Some("ada@acme.test"),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+            ),
             "ada@acme.test",
             GOOD,
             true,
@@ -444,12 +443,14 @@ mod test {
         let company = CompanyId::new("acme");
 
         issue_password(
-            &users,
-            &sessions,
-            &login_codes,
-            &company,
-            &[],
-            Some("ada@acme.test"),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+            ),
             "ada@acme.test",
             "short",
             false,
