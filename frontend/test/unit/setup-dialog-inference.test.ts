@@ -38,6 +38,7 @@ const HARNESS: InferenceStatus = {
   keyConfigured: true,
   cognition: "harness",
   usageMetering: "perTurn",
+  harnessReachable: true,
 } as InferenceStatus;
 
 const ECHO: InferenceStatus = { ...HARNESS, cognition: "echo" } as InferenceStatus;
