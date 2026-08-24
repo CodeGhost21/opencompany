@@ -206,17 +206,20 @@ function useAvatarSrc(ref: string): string | null {
     // shell, or before one is chosen. A mascot still resolves; an uploaded face
     // draws as the tone tile, which is the same thing a deleted one does.
     const resolved = client ? resolveAvatarSrc(client, company, ref) : immediate;
+    // The URL is stored beside the scope it was fetched under, so the render
+    // guard above can tell a same-`ref` result fetched under the previous scope
+    // from one fetched under the current one.
     if (typeof resolved === "string" || resolved === null) {
-      setFetched({ ref, src: resolved });
+      setFetched({ client, company, ref, src: resolved });
       return;
     }
     // A reference that changed while a fetch was in flight must not have the
     // stale result written over it — the tile would show the previous person's
     // face, which is worse than showing none.
     let live = true;
-    setFetched({ ref, src: null });
+    setFetched({ client, company, ref, src: null });
     void resolved.then((url) => {
-      if (live) setFetched({ ref, src: url });
+      if (live) setFetched({ client, company, ref, src: url });
     });
     return () => {
       live = false;
