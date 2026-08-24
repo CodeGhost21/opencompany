@@ -315,7 +315,42 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
   });
 
-  it("names each permission revocation with the grantee it affects (#1411)", async () => {
+  it("names each identical batched approval by its human-readable position (#1411)", async () => {
+    const first = { ...APPROVAL, id: "batch-1" };
+    const second = { ...APPROVAL, id: "batch-2" };
+    await act(async () => {
+      root.render(
+        createElement("div", null,
+          createElement(ApprovalCard, {
+            approval: first,
+            now: T0,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 1,
+            batchTotal: 2,
+            onDecide: () => {},
+          }),
+          createElement(ApprovalCard, {
+            approval: second,
+            now: T0,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 2,
+            batchTotal: 2,
+            onDecide: () => {},
+          }),
+        ),
+      );
+    });
+    const labels = Array.from(container.querySelectorAll("button"), (button) =>
+      button.getAttribute("aria-label"),
+    );
+    expect(labels.filter((label) => label?.startsWith("Approve:"))).toEqual([
+      expect.stringContaining("approval 1 of 2"),
+      expect.stringContaining("approval 2 of 2"),
+    ]);
+  });
+
     await act(async () => {
       root.render(
         createElement(StandingPermissions, {
