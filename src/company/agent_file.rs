@@ -86,6 +86,20 @@ struct AgentFile {
     /// this file cannot see them.
     #[serde(default)]
     harness: Option<String>,
+    /// Which model that harness should run this agent on.
+    ///
+    /// Cross-checked in `CompanyManifest::validate` alongside `harness`, for
+    /// the same reason: a model only means something relative to the harness
+    /// it is set against, and this file cannot see the company's.
+    ///
+    /// Absent from this struct until now, while `Agent` had the field — so a
+    /// bundle whose roster lives in `agents/<id>.toml` had its `model` line
+    /// dropped by serde as an unknown key and hardcoded to `None` below. That
+    /// skipped validation too, so the file was neither honoured nor refused:
+    /// the teammate simply ran on the harness default while its own file said
+    /// otherwise.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
@@ -271,6 +285,7 @@ fn parse_agent_file(
         // Provenance is set by whoever merges the baseline in, never by a file:
         // this same parser reads both a company's `agents/` and `globals/`.
         global: false,
+        model: file.model,
     })
 }
 
@@ -477,6 +492,30 @@ mod tests {
             );
             assert!(problems[0].contains("outside"), "{escape} → {problems:?}");
         }
+    }
+
+    /// A per-file teammate's `model` is carried, like its `harness`.
+    ///
+    /// `AgentFile` had `harness` but not `model`, so serde dropped the line as
+    /// an unknown key and the built `Agent` hardcoded `None`. The failure was
+    /// silent in both directions: the override never applied, and because
+    /// `CompanyManifest::validate` only sees what parsing produced, the file
+    /// was not refused either. A bundle could state a model, be accepted, and
+    /// run on the harness default.
+    #[test]
+    fn a_per_file_teammate_carries_its_model_override() {
+        let dir = bundle(&[(
+            "critic.toml",
+            "role = \"Critic\"\nharness = \"laptop\"\nmodel = \"claude-opus-4-5\"\n",
+        )]);
+        let agents = load_agents(dir.path()).expect("loads");
+        let critic = agents.iter().find(|a| a.id == "critic").expect("parsed");
+        assert_eq!(critic.harness.as_deref(), Some("laptop"));
+        assert_eq!(
+            critic.model.as_deref(),
+            Some("claude-opus-4-5"),
+            "a model in the file must reach the agent, or it is neither honoured nor refused"
+        );
     }
 
     #[test]

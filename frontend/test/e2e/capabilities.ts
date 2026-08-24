@@ -20,7 +20,7 @@
  *
  * Four of the suite's best specs sit behind `LIVE_BRAIN`, and they are the ones
  * that exercise the product rather than the console's own rendering. CI runs
- * them: `Console E2E (live brain)` builds `--features openhuman,tinycortex,mcp`
+ * them: `Console E2E (live brain)` builds `--features openhuman,mcp`
  * and `playwright.config.ts` stands up `mock-brain.mjs` and `mcp-server.mjs`
  * behind it. The default-feature `Console E2E` lane still skips them, because
  * on a host without the harness the thing they test is not compiled in — that
@@ -28,7 +28,7 @@
  */
 
 /**
- * A host built with `--features openhuman,tinycortex,mcp` **and** an inference
+ * A host built with `--features openhuman,mcp` **and** an inference
  * backend behind it — either the mock that echoes `__MOCK_LLM__` or one whose
  * tool choices are scripted (`SPAWNONE`).
  *
@@ -109,7 +109,7 @@ export const MCP_SERVER =
 
 /** The reason string a `LIVE_BRAIN` skip carries, so no skip is ever bare. */
 export const LIVE_BRAIN_REASON =
-  "needs a --features openhuman,tinycortex,mcp host plus an inference backend; " +
+  "needs a --features openhuman,mcp host plus an inference backend; " +
   "set PW_LIVE_BRAIN=1 to run. The `Console E2E (live brain)` CI lane does " +
   "(issue #467).";
 
@@ -146,7 +146,7 @@ export const LIVE_LLM_BIND = process.env.PW_LIVE_LLM_BIND || "127.0.0.1:8096";
 
 /** The reason string a `LIVE_LLM` skip carries, so no skip is ever bare. */
 export const LIVE_LLM_REASON =
-  "needs a --features openhuman,tinycortex,mcp host pointed at a real model; " +
+  "needs a --features openhuman,mcp host pointed at a real model; " +
   "run `npm run e2e:live-llm` (which sets PW_LIVE_LLM=1 and starts " +
   "test/e2e/live-brain-proxy.mjs in front of the configured router).";
 
@@ -223,3 +223,47 @@ export const EULER_REASON =
   "needs a host serving companies/agentic_math_lab and thinking with a real model; " +
   "run `npm run e2e:euler` (which sets PW_EULER=1 and PW_LIVE_LLM=1). " +
   "Point it at another problem with PW_EULER_PROBLEM=<number>.";
+
+/**
+ * Whether this run is the **visual lane**: the same default-feature host every
+ * ordinary run drives, but running `visual.spec.ts`, which compares full-page
+ * renders of the console's top-level surfaces against committed baselines.
+ *
+ * Set `PW_VISUAL=1`, or run `npm run e2e:visual`.
+ *
+ * ## Why a lane rather than screenshots inside the specs that already exist
+ *
+ * Because a screenshot answers a different question, and answering it in the
+ * wrong place would degrade the specs that already work. `shell-two-layer.spec.ts`
+ * says outright why it asserts geometry instead of pixels: a sliver of inset
+ * over a flat tint is structurally a two-layer shell and visually nothing, and
+ * only a named quantity — eight pixels on all four sides, a fill measurably
+ * different from the chrome — fails that. Every such assertion in this suite is
+ * a claim someone can read, and none of them should become "it looks like it
+ * did last week".
+ *
+ * What a baseline catches is the complement: the regression nobody had a
+ * quantity for. A token that changed lightness everywhere, a font that stopped
+ * loading and fell back, a card that lost its padding on one view out of nine.
+ * No geometric assertion names those because nobody knew to write one, and they
+ * are exactly what a reviewer notices in a screenshot within a second.
+ *
+ * ## Why it is not a required check
+ *
+ * Baselines are per-platform — Playwright suffixes them with the platform name,
+ * and the ones committed here were generated on `linux`. A contributor on macOS
+ * regenerates their own on first run; a required check that fails for everyone
+ * who is not on the recording platform teaches people to pass `-u` reflexively,
+ * which is how a baseline suite stops meaning anything. It is a tool for
+ * looking at a change, not a gate on merging one.
+ *
+ * Run it before and after a styling change and read the diff Playwright writes
+ * into `playwright-report/`. Re-record with `npm run e2e:visual:update` — and
+ * read what you re-recorded, because accepting a diff is the whole risk here.
+ */
+export const VISUAL = process.env.PW_VISUAL === "1";
+
+/** The reason string a `VISUAL` skip carries, so no skip is ever bare. */
+export const VISUAL_REASON =
+  "compares committed per-platform screenshot baselines; run `npm run e2e:visual` " +
+  "(which sets PW_VISUAL=1), and `npm run e2e:visual:update` to re-record.";

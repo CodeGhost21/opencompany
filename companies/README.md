@@ -21,6 +21,16 @@ Every folder follows the same shape:
   shared library at [`../skills/`](../skills/) uses.
 - `workflows/<id>.toml` — the graphs `[workflows].enabled` turns on.
 - `workspace/**` — the Obsidian-style notes the company starts with, seeded once.
+- `mcp.json` — the MCP tool servers this vertical's work needs, in the
+  `{"mcpServers": {…}}` shape every other MCP host uses. Merged into the
+  manifest at load, so a bundle server is held to the same rules an inline
+  `[[mcp_server]]` is; a name declared in both is refused rather than resolved.
+  Anything needing a credential ships disabled — see
+  [`../docs/spec/runtime/tools.md`](../docs/spec/runtime/tools.md).
+- `tasks.toml` — the setup work this vertical starts with, seeded onto the
+  board in To-do at first boot, on top of the baseline's own cards in
+  [`../globals/tasks.toml`](../globals/tasks.toml). Seeded cards never enter a
+  column that dispatches a run.
 
 Adding a business is a new folder, not a new crate. The behavior lives entirely
 in the host and the vendored runtimes; each definition just configures it.

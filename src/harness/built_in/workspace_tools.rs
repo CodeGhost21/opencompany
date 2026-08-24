@@ -194,7 +194,7 @@
 //!   cut away on precisely the listings long enough to need it. Both now sit
 //!   above the entries, and the entries stop on bytes rather than on a count.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -598,6 +598,25 @@ struct PathIndex {
     /// per node id rather than per rendered path (two folders may share a
     /// path; they never share an id).
     child_count: HashMap<String, usize>,
+    /// Every node the store returned, keyed by id — including the ones
+    /// excluded from `by_path` and `by_id` above.
+    ///
+    /// `by_id` deliberately omits unaddressable nodes so no tool can reach them
+    /// by id; this map exists for the one gate that must inspect them anyway: a
+    /// rename of a folder re-renders the path of *every* node under it, so the
+    /// ownership check has to read the authorship of descendants the path maps
+    /// cannot see, not merely count them (which `child_count` already does).
+    all_nodes: HashMap<String, WorkspaceNode>,
+    /// Parent id → child node ids, over **every** node the store returned —
+    /// including the ones excluded from `by_path` and `by_id` above.
+    ///
+    /// The sibling of [`child_count`](Self::child_count) with the ids kept:
+    /// counting told the delete gate whether a folder was empty, and a subtree
+    /// walk over parent ids tells the rename gate which nodes a folder rename
+    /// would actually move, addressable or not. Built from the same
+    /// unfiltered pass, so it sees a child whether or not that child has a
+    /// renderable path.
+    children: HashMap<String, Vec<String>>,
 }
 
 impl PathIndex {
@@ -624,8 +643,14 @@ impl PathIndex {
         // about to be dropped from both maps is still counted against its
         // parent. See `child_count`.
         for node in &nodes {
+            index.all_nodes.insert(node.id.clone(), node.clone());
             if let Some(parent) = node.parent_id.as_deref() {
                 *index.child_count.entry(parent.to_string()).or_insert(0) += 1;
+                index
+                    .children
+                    .entry(parent.to_string())
+                    .or_default()
+                    .push(node.id.clone());
             }
         }
         for node in &nodes {
@@ -674,6 +699,37 @@ impl PathIndex {
                 _ => true,
             })
             .collect()
+    }
+
+    /// Every node id under `root_id` in the store's parent-id tree — the nodes
+    /// a rename of `root_id` would re-render, whether or not each one has a
+    /// renderable path. The root itself is excluded: the caller has already
+    /// resolved and checked it.
+    ///
+    /// Path-based descent ([`entries_under`](Self::entries_under)) cannot see
+    /// an unaddressable descendant, and this is exactly the gate that needs to:
+    /// a folder rename moves the whole subtree, so a descendant the path rules
+    /// exclude must still have its authorship checked. Walking parent ids is
+    /// structural, like the emptiness gate, and terminates on a visited set so
+    /// a hand-edited backing store that cycles cannot hang it.
+    fn subtree_ids(&self, root_id: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack: Vec<&str> = self
+            .children
+            .get(root_id)
+            .map(|kids| kids.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            out.push(id);
+            if let Some(kids) = self.children.get(id) {
+                stack.extend(kids.iter().map(String::as_str));
+            }
+        }
+        out
     }
 
     /// Every entry carrying `path`, matching the literal path first and its
@@ -2223,6 +2279,132 @@ pub fn workspace_tools(
     tools
 }
 
+/// Whether a workspace mutation is confined to work the calling agent owns.
+///
+/// This is deliberately a policy helper rather than a tool-execution shortcut:
+/// the tools still validate their full arguments and enforce their own scope.
+/// The approval path asks the narrower question needed to avoid prompting for
+/// an agent tidying its own work, and fails closed on every unresolved or stale
+/// shape. A node is owned only when both durable origins name this agent; an
+/// operator or teammate edit must restore the approval gate. A rename that
+/// moves a node must also not land it in an operator- or teammate-authored
+/// folder: the destination parent has to be owned by this agent (the home root
+/// excepted), the same rule `workspace_create` applies to a nested parent. A
+/// folder rename goes further — it re-renders the path of every node inside the
+/// folder — so every descendant must be owned by this agent as well
+/// (descendants the path rules exclude included, or the rename may not take
+/// the exception).
+pub(crate) async fn mutation_is_owned_by_agent(
+    store: &Arc<dyn WorkspaceStore>,
+    company: &CompanyId,
+    agent_id: &str,
+    tool: &str,
+    args: &Value,
+) -> bool {
+    if !matches!(
+        tool.to_ascii_lowercase().as_str(),
+        WORKSPACE_CREATE_TOOL
+            | WORKSPACE_WRITE_TOOL
+            | WORKSPACE_DELETE_TOOL
+            | WORKSPACE_RENAME_TOOL
+    ) {
+        return false;
+    }
+    let workspace = CompanyWorkspace::new(store.clone(), company.clone(), agent_id.to_string());
+
+    if tool.eq_ignore_ascii_case(WORKSPACE_CREATE_TOOL) {
+        let Some(path) = args.get("path").and_then(Value::as_str) else {
+            return false;
+        };
+        let Ok(segments) = split_logical_path(path.trim()) else {
+            return false;
+        };
+        if !workspace.is_strictly_inside_own_home(&segments) {
+            return false;
+        }
+        // A direct child of the home is safe even before that home exists: the
+        // create tool mints it on demand and stamps both origins with this
+        // agent. Deeper creations need an affirmative owned parent, so an
+        // operator-created folder inside an agent's home cannot become an
+        // unreviewed landing zone merely because its path looks familiar.
+        if segments.len() == 3 {
+            return true;
+        }
+        let Ok(index) = workspace.index().await else {
+            return false;
+        };
+        let parent = segments[..segments.len() - 1].join("/");
+        let Ok(entry) = index.resolve(Some(&parent), None) else {
+            return false;
+        };
+        let own_origin = WorkspaceOrigin::Agent {
+            id: agent_id.to_string(),
+        };
+        return entry.node.created_by == own_origin && entry.node.updated_by == own_origin;
+    }
+
+    let path = args.get("path").and_then(Value::as_str).map(str::trim);
+    let path = path.filter(|path| !path.is_empty());
+    let id = args.get("id").and_then(Value::as_str).map(str::trim);
+    let id = id.filter(|id| !id.is_empty());
+    let Ok(index) = workspace.index().await else {
+        return false;
+    };
+    let Ok(entry) = index.resolve(path, id) else {
+        return false;
+    };
+    let own_origin = WorkspaceOrigin::Agent {
+        id: agent_id.to_string(),
+    };
+    if entry.node.created_by != own_origin || entry.node.updated_by != own_origin {
+        return false;
+    }
+    // A rename re-renders the path of every node inside a folder, so the
+    // target's own authorship is not enough: an agent-created folder that has
+    // since accumulated an operator- or teammate-authored node would let this
+    // agent silently relocate that work. Every descendant must be owned by
+    // this agent too — including descendants the path maps cannot see. A node
+    // whose name carries a separator (the sqlite and mongodb backends accept
+    // them) or whose chain dangles has no renderable path, so a path-prefix
+    // scan misses it while the store's recursive move still relocates it; the
+    // walk below follows parent ids instead, exactly as the delete emptiness
+    // gate counts them. Write, delete and create touch only the node they
+    // name (delete refuses a folder that still holds anything), so those keep
+    // the target-only check.
+    if tool.eq_ignore_ascii_case(WORKSPACE_RENAME_TOOL) {
+        // A move into a nested folder must meet the same landing-zone rule
+        // `workspace_create` applies to minting one: the destination has to be
+        // owned by this agent, or it is an operator- or teammate-authored
+        // folder the agent may populate only under review. The home root is
+        // the exception — it is the agent's own space whatever its stored
+        // origin, the same carve-out that lets create mint a direct child. A
+        // `new_parent` that trims to nothing means "move to the workspace
+        // root", which the tool refuses; failing closed here keeps the approval
+        // gate in step with the tool's refusal.
+        if let Some(raw) = args.get("new_parent").and_then(Value::as_str) {
+            let Ok(segments) = split_logical_path(raw.trim()) else {
+                return false;
+            };
+            if !workspace.is_own_home(&segments) {
+                let parent_path = segments.join("/");
+                let Ok(parent) = index.resolve(Some(&parent_path), None) else {
+                    return false;
+                };
+                if parent.node.created_by != own_origin || parent.node.updated_by != own_origin {
+                    return false;
+                }
+            }
+        }
+        if entry.node.kind == NodeKind::Folder {
+            return index.subtree_ids(&entry.node.id).iter().all(|id| {
+                let node = &index.all_nodes[*id];
+                node.created_by == own_origin && node.updated_by == own_origin
+            });
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2479,6 +2661,224 @@ mod tests {
             index.child_count.get("f").copied().unwrap_or_default(),
             1,
             "the structural measure must see a child the path rules exclude"
+        );
+    }
+
+    /// A rename re-renders the path of every node under a folder, so the
+    /// ownership gate must see descendants the path maps omit. This is the
+    /// rename-side half of the emptiness test above: `entries_under` reads
+    /// `by_path`, which cannot see `hidden` at all, while a parent-id walk must
+    /// hand the gate exactly that node — and its own descendants too.
+    #[test]
+    fn a_folder_rename_sees_unaddressable_descendants() {
+        let nodes = vec![
+            folder("f", "archive", None),
+            // Name carries a separator: no renderable path, absent from the
+            // address maps, but still moved by a parent-id `rename_move`.
+            file("hidden", "quarterly/report.md", Some("f")),
+            // A grandchild under the unaddressable node is itself unaddressable
+            // (its chain carries an illegal name), and must also be found.
+            file("nested", "nested.md", Some("hidden")),
+            // An ordinary addressable sibling stays included as before.
+            file("plain", "plain.md", Some("f")),
+        ];
+        let index = PathIndex::build(nodes);
+
+        assert_eq!(index.unaddressable, 2, "hidden and nested must be excluded");
+        assert!(
+            !index.by_id.contains_key("hidden") && !index.by_id.contains_key("nested"),
+            "an unaddressable node must not be reachable by id either"
+        );
+
+        let mut subtree = index.subtree_ids("f");
+        subtree.sort_unstable();
+        assert_eq!(
+            subtree,
+            vec!["hidden", "nested", "plain"],
+            "the walk must see the addressable child and both unaddressable ones"
+        );
+    }
+
+    /// The parent-id walk used by the rename gate must terminate on a
+    /// hand-edited backing store that cycles, exactly as the path renderer's
+    /// depth limit does — a cycle inside a subtree would otherwise hang the
+    /// walk on a folder rename.
+    #[test]
+    fn subtree_ids_terminates_on_a_cycle() {
+        // x ↔ y: each names the other as its parent, so no path exists for
+        // either — but a parent-id walk from one of them must still finish.
+        let cyclic = vec![folder("x", "X", Some("y")), folder("y", "Y", Some("x"))];
+        let index = PathIndex::build(cyclic);
+        let mut subtree = index.subtree_ids("x");
+        subtree.sort_unstable();
+        assert_eq!(
+            subtree,
+            vec!["x", "y"],
+            "the visited set must keep the walk finite and still name both nodes"
+        );
+    }
+
+    /// A [`WorkspaceStore`] returning a fixed tree, for ownership-gate shapes
+    /// the `fs` backend refuses to create: a name carrying a separator has no
+    /// renderable path, yet a parent-id rename still moves it, so the gate has
+    /// to decide on nodes no `FsOps`-seeded test can reach.
+    #[derive(Clone)]
+    struct FixedWorkspaceTree(Vec<WorkspaceNode>);
+
+    #[async_trait]
+    impl WorkspaceStore for FixedWorkspaceTree {
+        async fn tree(&self, _company: &CompanyId) -> crate::Result<Vec<WorkspaceNode>> {
+            Ok(self.0.clone())
+        }
+        async fn read(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, String)>> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn write(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _content: &str,
+            _author: WorkspaceOrigin,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn create(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _content: Option<&str>,
+        ) -> crate::Result<()> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn adopt_or_create_folder(
+            &self,
+            _company: &CompanyId,
+            _parent: Option<&str>,
+            _name: &str,
+            _origin: WorkspaceOrigin,
+        ) -> crate::Result<crate::ports::workspace::FolderClaim> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn create_binary(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _bytes: &[u8],
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn write_binary(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _bytes: &[u8],
+            _mime: Option<&str>,
+            _author: WorkspaceOrigin,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn read_bytes(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn rename_move(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _name: Option<&str>,
+            _parent: Option<Option<&str>>,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn swap_files(
+            &self,
+            _company: &CompanyId,
+            _expected_id: Option<&str>,
+            _replacement_id: &str,
+            _name: &str,
+        ) -> crate::Result<Option<WorkspaceNode>> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn is_empty(&self, _company: &CompanyId) -> crate::Result<bool> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+    }
+
+    /// The rename half of the auto-tier exception must fail closed on an
+    /// unaddressable descendant. A folder holding an operator-authored node
+    /// whose name the path rules exclude (creatable through the sqlite and
+    /// mongodb backends, which do not run `reject_unsafe_name`) would still be
+    /// relocated by a parent-id `rename_move`, so the gate must park even
+    /// though `entries_under` cannot see the node.
+    #[tokio::test]
+    async fn rename_of_a_folder_with_an_unaddressable_operator_descendant_parks() {
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: TEST_AGENT.to_string(),
+        };
+        let mut agent_folder = folder("f", "archive", None);
+        agent_folder.created_by = own.clone();
+        agent_folder.updated_by = own.clone();
+        // Name carries a separator: no renderable path, operator-authored.
+        let mut operator_hidden = file("hidden", "quarterly/report.md", Some("f"));
+        operator_hidden.created_by = WorkspaceOrigin::Operator;
+        operator_hidden.updated_by = WorkspaceOrigin::Operator;
+        let store: Arc<dyn WorkspaceStore> =
+            Arc::new(FixedWorkspaceTree(vec![agent_folder, operator_hidden]));
+
+        let owned = mutation_is_owned_by_agent(
+            &store,
+            &company,
+            TEST_AGENT,
+            WORKSPACE_RENAME_TOOL,
+            &serde_json::json!({ "id": "f" }),
+        )
+        .await;
+        assert!(
+            !owned,
+            "an unaddressable operator-authored child must restore the approval gate"
+        );
+    }
+
+    /// The same shape with the hidden child agent-authored stays inside the
+    /// exception — an agent's own tidying runs unattended even when one of its
+    /// notes has a name no path can render.
+    #[tokio::test]
+    async fn rename_of_a_folder_with_an_unaddressable_agent_descendant_runs() {
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: TEST_AGENT.to_string(),
+        };
+        let mut agent_folder = folder("f", "archive", None);
+        agent_folder.created_by = own.clone();
+        agent_folder.updated_by = own.clone();
+        let mut agent_hidden = file("hidden", "quarterly/report.md", Some("f"));
+        agent_hidden.created_by = own.clone();
+        agent_hidden.updated_by = own;
+        let store: Arc<dyn WorkspaceStore> =
+            Arc::new(FixedWorkspaceTree(vec![agent_folder, agent_hidden]));
+
+        let owned = mutation_is_owned_by_agent(
+            &store,
+            &company,
+            TEST_AGENT,
+            WORKSPACE_RENAME_TOOL,
+            &serde_json::json!({ "id": "f" }),
+        )
+        .await;
+        assert!(
+            owned,
+            "an unaddressable descendant the agent itself authored stays within the exception"
         );
     }
 

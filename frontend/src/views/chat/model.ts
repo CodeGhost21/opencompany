@@ -226,6 +226,29 @@ export function resolveDmChannelId(id: string, members: TeamMember[]): string | 
   return match ? dmChannelId(match) : null;
 }
 
+/**
+ * The channel id a `#/chat/<id>` hash segment names, with the URL escaping
+ * undone.
+ *
+ * The hash router hands views its raw segments without decoding, while hrefs
+ * that mint channel links — an approval card's "Open the conversation" pill —
+ * write them with `encodeURIComponent`, so a DM id arrives as `dm%3A<agent-id>`
+ * rather than `dm:<agent-id>`. Decode here, the same boundary
+ * `taskIdFromSegment` keeps for `#/tasks/<id>`.
+ *
+ * On a malformed escape the raw segment comes back rather than `null`: a
+ * typo'd address should still surface as an unknown channel (issue #370's
+ * notice), not silently collapse onto the fallback.
+ */
+export function channelIdFromSegment(segment: string | null): string | null {
+  if (!segment) return null;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 function nameHash(name: string): string {
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
@@ -451,6 +474,17 @@ export interface Sender {
    * issue #1185.
    */
   avatar?: string;
+  /**
+   * The roster agent id behind this voice, when there is one — what a click on
+   * the face opens the profile panel on (issue #1653).
+   *
+   * Set only on a voice that actually **matched** the roster, never on the
+   * channel slug that seeded the face. A desk-originated cross-post carries a
+   * desk id in that slot (see `api/types.ts` on `thread`), and opening a
+   * teammate profile on a desk id would ask the host for an agent that does not
+   * exist.
+   */
+  agentId?: string;
 }
 
 /** Channel names the host uses for its own voice rather than a named agent. */
@@ -484,6 +518,7 @@ export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]
       kind: "agent",
       tone: named,
       avatar: agent?.avatar,
+      agentId: agent?.id,
     };
   }
 
@@ -496,6 +531,9 @@ export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]
     kind: channel.kind === "dm" || channel.tone ? "agent" : "company",
     tone: channel.tone,
     avatar: channel.member?.avatar,
+    // A DM's other end is a roster teammate; a desk channel's voice is the desk
+    // itself, which has no profile of its own to open.
+    agentId: channel.member?.id,
   };
 }
 

@@ -926,6 +926,7 @@ mod test {
         let id = runtime.id().clone();
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "kick off".into(),
                 by: None,
@@ -1518,6 +1519,8 @@ mod test {
             role: "Design".into(),
             description: Some("Owns the brand".into()),
             tools: Vec::new(),
+            model: None,
+            harness: None,
         }];
         // That teammate added to the `eng` desk through the membership overlay.
         let desk_members = vec![OverlayDeskMember {
@@ -2041,6 +2044,7 @@ mod test {
         let id = runtime.id().clone();
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,

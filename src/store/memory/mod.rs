@@ -71,7 +71,8 @@ pub mod facades;
 pub mod migrate;
 mod namespace;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use tinymemory::registry::DriverClass;
 use tinymemory_api::capabilities::Capabilities;
@@ -122,6 +123,7 @@ pub struct BoundMemory {
     class: DriverClass,
     driver_id: String,
     capabilities: Capabilities,
+    context_stores: Arc<OnceLock<std::sync::Mutex<HashMap<String, Arc<ProviderContextStore>>>>>,
 }
 
 impl std::fmt::Debug for BoundMemory {
@@ -161,10 +163,11 @@ impl BoundMemory {
             capabilities: provider.capabilities(),
             provider,
             class,
+            context_stores: Arc::new(OnceLock::new()),
         })
     }
 
-    /// The bound engine's own name (`tinycortex`, `supermemory`, `null`, …).
+    /// The bound provider's own name (`supermemory`, `mem0`, `cognee`, `null`, …).
     ///
     /// Safe to surface to an operator — unlike the endpoint and the credential,
     /// which are not.
@@ -221,19 +224,35 @@ impl BoundMemory {
         ))
     }
 
-    /// One agent's private partition.
     pub fn agent_context(&self, agent_id: &str) -> Arc<dyn ContextStore> {
-        Arc::new(ProviderContextStore::new(self.bound(
-            Scope::Agent(agent_id.to_string()),
-            MemoryTaint::Internal,
-        )))
+        self.scoped_context(format!("agent:{agent_id}"), || {
+            ProviderContextStore::new(
+                self.bound(Scope::Agent(agent_id.to_string()), MemoryTaint::Internal),
+            )
+        })
     }
 
     /// One desk's shared partition.
     pub fn desk_context(&self, desk_id: &str) -> Arc<dyn ContextStore> {
-        Arc::new(ProviderContextStore::new(
-            self.bound(Scope::Desk(desk_id.to_string()), MemoryTaint::Internal),
-        ))
+        self.scoped_context(format!("desk:{desk_id}"), || {
+            ProviderContextStore::new(
+                self.bound(Scope::Desk(desk_id.to_string()), MemoryTaint::Internal),
+            )
+        })
+    }
+
+    fn scoped_context(
+        &self,
+        key: String,
+        make: impl FnOnce() -> ProviderContextStore,
+    ) -> Arc<dyn ContextStore> {
+        self.context_stores
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+            .lock()
+            .expect("context store cache lock poisoned")
+            .entry(key)
+            .or_insert_with(|| Arc::new(make()))
+            .clone()
     }
 
     /// Provisional working-out, unreachable from durable recall.

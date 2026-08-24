@@ -826,8 +826,48 @@ impl MemoryStore for ProviderMemoryStore {
 
 #[cfg(test)]
 mod test {
+    use std::sync::{Arc, Mutex};
+
     use super::super::namespace::Scope;
     use super::*;
+
+    /// Captures warnings emitted synchronously on this test's thread.
+    fn warnings_from(body: impl FnOnce()) -> String {
+        use std::io::Write;
+
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("warning sink").extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Writer;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                Writer(Arc::clone(&self.0))
+            }
+        }
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Sink(Arc::clone(&sink)))
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = sink.lock().expect("warning sink").clone();
+        String::from_utf8(bytes).expect("warnings are utf-8")
+    }
 
     /// Derives a real namespace the same way production does. These tests never
     /// build one from a raw string, because production code cannot either —
@@ -1038,9 +1078,22 @@ mod test {
         let future = r#"{"v":9,"record":{"shape":"unknown"}}"#;
         assert_eq!(decode::<u32>(&entry(future), &namespace), None);
 
-        // Matching version, unreadable record: the corruption path.
-        let mangled = r#"{"v":1,"record":{"at_millis":[REDACTED_PII_CREDIT_CARD]}}"#;
-        assert_eq!(decode::<u32>(&entry(mangled), &namespace), None);
+        // Matching version, unreadable record: the corruption path. The valid
+        // envelope ensures this reaches record deserialization after the
+        // version check instead of duplicating the malformed-JSON case below.
+        #[derive(Deserialize)]
+        struct Timestamp {
+            #[allow(dead_code)]
+            at_millis: u64,
+        }
+        let mangled = r#"{"v":1,"record":{"at_millis":"not-a-number"}}"#;
+        let warnings = warnings_from(|| {
+            assert!(decode::<Timestamp>(&entry(mangled), &namespace).is_none());
+        });
+        assert!(
+            warnings.contains("memory entry in our namespace failed to decode"),
+            "matching-version record corruption must be reported: {warnings:?}"
+        );
 
         // No envelope at all: also the corruption path.
         assert_eq!(decode::<u32>(&entry("not json"), &namespace), None);

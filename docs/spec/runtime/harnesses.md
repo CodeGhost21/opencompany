@@ -86,7 +86,6 @@ real adapters (issue #1245), not guessed — whichever this build knows for that
 | `agent` | lever |
 |---|---|
 | `claude` | startup env var `ANTHROPIC_MODEL` |
-| `goose` | startup env var `GOOSE_MODEL` |
 | `codex` | no startup env var (`OPENAI_MODEL`, `CODEX_MODEL`, `MODEL` and `OPENAI_DEFAULT_MODEL` all tried, none had any effect) — instead, `session/set_config_option` right after `session/new`, using the `configOptions` entry `codex-acp` itself advertises with `category: "model"` |
 
 The `set_config_option` fallback is not codex-specific in the code — it fires
@@ -152,7 +151,7 @@ expensive way to discover that `[harness.inference]` needs `kind = "built_in"`.
 ```toml
 [harness.acp]
 transport = "local"      # spawn an agent on this machine
-agent     = "claude"     # claude | codex | goose
+agent     = "claude"     # claude | codex
 
 [harness.acp]
 transport = "runner"     # reach one that dialed in
@@ -264,6 +263,63 @@ silent fallback either.
   resolved against whatever provider its harness turns out to use, so an agent
   keeps its tier when it moves between harnesses. See
   [providers.md](providers.md).
+
+---
+
+## OpenHuman's own library front door
+
+Upstream now exposes an agent turn as a **library call**. `openhuman_core`
+re-exports `Harness`, `HarnessBuilder`, `Provider`, `Workspace`, `Session`,
+`Access` and `Turn`; a host configures a provider, a workspace and an access
+tier — plus MCP servers and skill bundles where those features are compiled in
+— and then runs turns on it:
+
+```rust
+use openhuman_core::{Harness, Provider, Session, Workspace};
+
+let harness = Harness::builder()
+    .provider(Provider::openai_compatible(endpoint, key).model("gpt-5"))
+    .workspace(Workspace::Ephemeral)
+    .session(Session::local("my-host"))
+    .build()
+    .await?;
+
+println!("{}", harness.run("Say hello.").await?.reply);
+```
+
+This is the layer *above* `CoreBuilder`/`CoreRuntime`: it builds the runtime
+from typed inputs, owns the workspace's lifetime, and applies its own provider
+and access defaults to every turn. Declared MCP servers compile to the same
+`McpServerConfig` a `[[mcp_client.servers]]` block parses into and are pushed
+onto the config before the core boots, so their bridge tools reach the prompt's
+tool catalogue; declared skill bundles are **copied** into `<workspace>/skills`
+(not symlinked — discovery rejects symlinked bundles on purpose) so the skills
+catalogue renders.
+
+### Why `built_in` does not use it
+
+**One harness per process.** The keyring master key, the RPC bearer, the global
+event bus and the `Once`-guarded domain subscribers are all process-scoped, so
+`HarnessBuilder::build` returns `HarnessError::AlreadyRunning` rather than let
+two harnesses silently share them. A single OpenCompany process runs many
+companies × many teammates, each with its own workspace, provider route and
+metered tool belt — so a per-agent `Harness` is a non-starter until upstream
+phase 3 of `docs/plans/pluggable-core/` lifts the restriction.
+
+`built_in` therefore keeps assembling the agent one level down, through
+`oh::agent::AgentBuilder` (`src/harness/built_in/build.rs`) — which is equally
+a library call, just one that lets this crate supply its own tool vector,
+`SystemPromptBuilder`, tool policy and metering. Nothing about the tool, MCP or
+skills surface is lost by that: MCP servers become an `McpServerRegistry` built
+from the company's `McpServerDecl`s and reach the prompt as bridge tools, and
+the skills catalogue is rendered into the persona body because upstream's
+`omit_skills_catalog` flag is inert (see `src/harness/built_in/skills.rs`).
+
+Two further things a host must do for itself, documented upstream and true of
+this crate's embed too: size the tokio worker stacks
+(`AGENT_WORKER_STACK_BYTES`, `MAX_BLOCKING_THREADS` — see the `RUST_MIN_STACK`
+note in `CLAUDE.md`), and point non-inference backend calls somewhere valid when
+running on an operator-supplied credential rather than a signed-in account.
 
 ---
 

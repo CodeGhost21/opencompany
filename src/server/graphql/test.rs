@@ -543,6 +543,8 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
         role: "Growth".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -627,6 +629,8 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         role: "Growth".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     record.overlay_agents.push(OverlayAgent {
         id: "uncapped".to_string(),
@@ -634,6 +638,8 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         role: "Ops".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -746,6 +752,8 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 task_id: None,
                 chat_id: "General".to_string(),
@@ -761,6 +769,8 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 task_id: None,
                 chat_id: "main".to_string(),
@@ -809,6 +819,8 @@ async fn chat_history_clamps_an_oversized_page_request() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -884,6 +896,8 @@ async fn chat_history_projects_the_card_a_reply_opened() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id,
                     chat_id: "General".to_string(),
@@ -939,6 +953,8 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 task_id: None,
                 chat_id: "General".to_string(),
@@ -954,6 +970,8 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: Some(root),
                 task_id: None,
                 chat_id: "General".to_string(),

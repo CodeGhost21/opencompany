@@ -127,6 +127,8 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
 
         <MemoryEngineCard client={client} />
 
+        <MemoryEngineCard client={client} />
+
         {/* Lifecycle */}
         {scoped ? (
           <LifecycleControls client={client} company={scoped} feed={feed} />
@@ -446,6 +448,11 @@ function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
             {engine.capabilities.length > 0
               ? engine.capabilities.join(", ")
               : "not negotiated"}
+          </span>
+        </InfoRow>
+        <InfoRow label="Not served">
+          <span className="text-sm">
+            {unservedFamilies.length > 0 ? unservedFamilies.join(", ") : "none in this set"}
           </span>
         </InfoRow>
         <InfoRow label="Not served">
