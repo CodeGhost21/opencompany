@@ -8,7 +8,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { observatoryHref } from "@/views/observatory/hash";
 import { Button } from "@/components/ui/button";
 import type { OpenCompanyClient } from "@/api/client";
 import {
@@ -436,20 +435,6 @@ function RunHistoryRow({
             scheduled
           </Badge>
         )}
-        {/* The bridge to the Observatory: this panel says what each NODE did,
-            and that view says what each node's AGENT did — the steps, the tool
-            calls, the reasoning. Rendered only when the row carries a run id,
-            since a row journaled before #371 has none to address. */}
-        {run.runId && (
-          <a
-            href={observatoryHref(run.runId)}
-            className="text-2xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-            data-testid="workflow-run-inspect"
-            onClick={(event) => event.stopPropagation()}
-          >
-            Inspect
-          </a>
-        )}
         <span
           className="text-2xs text-muted-foreground"
           title={new Date(run.atMillis).toLocaleString()}
@@ -844,36 +829,19 @@ function RunFilesSection({
   // a reopen can retry.
   const requested = useRef(false);
   const detailsRef = useRef<HTMLDetailsElement>(null);
-  // The scope the most recent request was made for, kept current on every
-  // render. A response that settles after a company/runId change can compare
-  // the scope it was fired for against this and recognise itself as stale —
-  // the race in issue #1693 where the previous request's `.then`/`.catch`
-  // would otherwise overwrite the new scope's state.
-  const scopeRef = useRef({ company, runId });
-  scopeRef.current = { company, runId };
 
   const load = useCallback(() => {
     if (requested.current) return;
     requested.current = true;
     setLoading(true);
     setError(false);
-    const scope = { company, runId };
-    const stale = () =>
-      scopeRef.current.company !== scope.company ||
-      scopeRef.current.runId !== scope.runId;
     fetchRunArtifacts(client, company, runId)
-      .then((rows) => {
-        if (stale()) return;
-        setFiles(rows);
-      })
+      .then((rows) => setFiles(rows))
       .catch(() => {
-        if (stale()) return;
         requested.current = false;
         setError(true);
       })
-      .finally(() => {
-        if (!stale()) setLoading(false);
-      });
+      .finally(() => setLoading(false));
   }, [client, company, runId]);
 
   // `RunHistoryPanel` keys each row only by `run.seq` (not by company), and
