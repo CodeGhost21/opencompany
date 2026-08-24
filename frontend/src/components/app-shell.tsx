@@ -1284,7 +1284,11 @@ export function AppShell({
       // the whole app, not just the badge. The badge is the least important
       // thing on the screen and must fail like it.
       .then((feed) => {
-        if (revision !== mentionFeedRevision.current || requestCompany !== companyRef.current) return;
+        if (
+          revision !== mentionFeedRevision.current ||
+          requestCompany !== scopeRef.current.company
+        )
+          return;
         setMentionFeed(Array.isArray(feed?.notifications) ? feed.notifications : []);
       })
       .catch(() => {
