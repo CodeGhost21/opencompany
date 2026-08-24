@@ -1230,6 +1230,10 @@ members = ["writer", "ceo"]
             "{writer}"
         );
         assert_eq!(
+            writer["tools"]["deskCeilingActive"], true,
+            "a desk ceiling is in play for a member of the desk: {writer}"
+        );
+        assert_eq!(
             strings(&writer["tools"]["effective"]),
             vec!["workspace.read"],
             "the desk ceiling must bite on a member that requested nothing: {writer}"
@@ -1242,6 +1246,10 @@ members = ["writer", "ceo"]
         assert!(
             strings(&hermit["tools"]["deskAllow"]).is_empty(),
             "{hermit}"
+        );
+        assert_eq!(
+            hermit["tools"]["deskCeilingActive"], false,
+            "no desk states a ceiling for hermit: {hermit}"
         );
         assert_eq!(
             strings(&hermit["tools"]["effective"]),
