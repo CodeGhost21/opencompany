@@ -100,6 +100,7 @@ describe("what the panel says a teammate is", () => {
         tools: {
           requested: ["workspace.*", "finance.*"],
           companyAllow: ["workspace.*"],
+          deskAllow: [],
           effective: ["workspace.*"],
         },
       }),
