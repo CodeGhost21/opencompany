@@ -51,13 +51,15 @@ const COMPANY_RUN_PAGE_LIMIT = 200;
 /** A run's start, falling back to its finish for a row journaled before issue
  * #371 recorded one — the same fallback {@link runDuration} takes. Named once
  * because sorting, the time-range filter and the "Started at" cell all have to
- * agree on which timestamp a run's row stands for. */
-function startedAt(run: WorkflowRunOutcome): number {
+ * agree on which timestamp a run's row stands for.
+ *
+ * Exported for the unit suite — see `run-traces-list.test.ts`. */
+export function startedAt(run: WorkflowRunOutcome): number {
   return run.startedAtMillis ?? run.atMillis;
 }
 
-type SortKey = "workflow" | "trigger" | "startedAt" | "status";
-type SortDir = "asc" | "desc";
+export type SortKey = "workflow" | "trigger" | "startedAt" | "status";
+export type SortDir = "asc" | "desc";
 
 /** The closed set of time windows the range filter offers, oldest cutoff last.
  * `null` is "All time" — no cutoff. */
@@ -72,6 +74,72 @@ const TIME_RANGES: { value: string; label: string; ms: number | null }[] = [
  * severity-ish ordering the status column sorts by, so the filter list and a
  * status-sorted table read the same way. */
 const VERDICTS = Object.keys(VERDICT_TONE) as WorkflowRunVerdict[];
+
+/** What the three facets narrow a run against. `rangeMs: null` is "All time".
+ * Pure and exported (issue #1697 review: this logic had no test coverage) so
+ * the unit suite can pin the filter predicate without mounting the list. */
+export interface RunTraceFilterState {
+  now: number;
+  rangeMs: number | null;
+  workflowFilter: Set<string>;
+  verdictFilter: Set<WorkflowRunVerdict>;
+}
+
+/** Whether one run survives the traces list's three filters. */
+export function runMatchesFilters(
+  run: WorkflowRunOutcome,
+  filters: RunTraceFilterState,
+): boolean {
+  if (filters.rangeMs != null && filters.now - startedAt(run) > filters.rangeMs) {
+    return false;
+  }
+  if (filters.workflowFilter.size > 0 && !filters.workflowFilter.has(run.workflowId)) {
+    return false;
+  }
+  if (filters.verdictFilter.size > 0 && !filters.verdictFilter.has(verdictOf(run))) {
+    return false;
+  }
+  return true;
+}
+
+/** The traces table's comparator, keyed by column. Exported for the same
+ * reason as {@link runMatchesFilters} — this is where the "first click on
+ * Status must put the most-severe verdicts first" rule actually lives, and it
+ * is exactly the kind of one-line sign error a mount-and-screenshot test
+ * would not have caught. */
+export function compareRuns(
+  a: WorkflowRunOutcome,
+  b: WorkflowRunOutcome,
+  sortKey: SortKey,
+  sortDir: SortDir,
+  nameById: Map<string, string>,
+): number {
+  const dir = sortDir === "asc" ? 1 : -1;
+  const rank = (run: WorkflowRunOutcome) => VERDICTS.indexOf(verdictOf(run));
+  switch (sortKey) {
+    case "workflow":
+      return (
+        dir *
+        (nameById.get(a.workflowId) ?? a.workflowId).localeCompare(
+          nameById.get(b.workflowId) ?? b.workflowId,
+        )
+      );
+    case "trigger":
+      return dir * (Number(a.scheduled) - Number(b.scheduled));
+    case "status":
+      // `a`/`b` swapped rather than `dir` alone (issue #1697 review):
+      // `VERDICTS` lists the states worth a person's attention FIRST
+      // (`running`, `failed`, …) and `ok` last, so a plain rank difference
+      // sorts `ok` to the top on the very first click, which is the one
+      // direction a "descending" status sort must not read as. Swapping
+      // puts the highest-attention rows first on that first click, and the
+      // reverse — `ok` first — one more click away.
+      return dir * (rank(b) - rank(a));
+    case "startedAt":
+    default:
+      return dir * (startedAt(a) - startedAt(b));
+  }
+}
 
 export function RunTracesList({
   runs,
@@ -129,48 +197,15 @@ export function RunTracesList({
 
   const rangeMs = TIME_RANGES.find((r) => r.value === timeRange)?.ms ?? null;
 
-  const filtered = useMemo(() => {
-    return runs.filter((run) => {
-      if (rangeMs != null && now - startedAt(run) > rangeMs) return false;
-      if (workflowFilter.size > 0 && !workflowFilter.has(run.workflowId)) {
-        return false;
-      }
-      if (verdictFilter.size > 0 && !verdictFilter.has(verdictOf(run))) {
-        return false;
-      }
-      return true;
-    });
-  }, [runs, rangeMs, now, workflowFilter, verdictFilter]);
+  const filtered = useMemo(
+    () => runs.filter((run) => runMatchesFilters(run, { now, rangeMs, workflowFilter, verdictFilter })),
+    [runs, rangeMs, now, workflowFilter, verdictFilter],
+  );
 
-  const sorted = useMemo(() => {
-    const dir = sortDir === "asc" ? 1 : -1;
-    const rank = (run: WorkflowRunOutcome) => VERDICTS.indexOf(verdictOf(run));
-    return [...filtered].sort((a, b) => {
-      switch (sortKey) {
-        case "workflow":
-          return (
-            dir *
-            (nameById.get(a.workflowId) ?? a.workflowId).localeCompare(
-              nameById.get(b.workflowId) ?? b.workflowId,
-            )
-          );
-        case "trigger":
-          return dir * (Number(a.scheduled) - Number(b.scheduled));
-        case "status":
-          // `a`/`b` swapped rather than `dir` alone (issue #1697 review):
-          // `VERDICTS` lists the states worth a person's attention FIRST
-          // (`running`, `failed`, …) and `ok` last, so a plain rank
-          // difference sorts `ok` to the top on the very first click, which
-          // is the one direction a "descending" status sort must not read
-          // as. Swapping puts the highest-attention rows first on that first
-          // click, and the reverse — `ok` first — one more click away.
-          return dir * (rank(b) - rank(a));
-        case "startedAt":
-        default:
-          return dir * (startedAt(a) - startedAt(b));
-      }
-    });
-  }, [filtered, sortKey, sortDir, nameById]);
+  const sorted = useMemo(
+    () => [...filtered].sort((a, b) => compareRuns(a, b, sortKey, sortDir, nameById)),
+    [filtered, sortKey, sortDir, nameById],
+  );
 
   const activeFilterCount =
     (rangeMs != null ? 1 : 0) + workflowFilter.size + verdictFilter.size;

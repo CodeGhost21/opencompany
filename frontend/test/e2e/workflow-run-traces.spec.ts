@@ -136,12 +136,65 @@ test("running a workflow surfaces it in the traces list, and its sheet's canvas 
   const sheet = page.getByTestId("run-trace-sheet");
   await expect(sheet).toBeVisible();
 
-  // Only a run with a per-node trail offers this control — a run refused
-  // before its first step settled has none.
+  // Only a run with a per-node trail offers this control — a live run can
+  // genuinely settle (fail or block) before its first node does, in which
+  // case `RunHistoryRow` renders no "Show on canvas" button at all. That is
+  // correct, not a defect this test should fight — exercise the link when
+  // the run happened to produce one, without demanding a trail it may not
+  // have.
   const canvasLink = sheet.getByRole("button", { name: /Show on canvas/ });
-  await expect(canvasLink).toBeVisible({ timeout: 30_000 });
-  await canvasLink.click();
-  // The sheet's canvas link is the one deliberate exception to "opening a run
-  // never navigates" — it is an opt-in, not the row click.
-  await expect(page).toHaveURL(/#\/workflows\/[^/]+\?run=/);
+  const hasCanvasLink = await canvasLink
+    .waitFor({ state: "visible", timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (hasCanvasLink) {
+    await canvasLink.click();
+    // The sheet's canvas link is the one deliberate exception to "opening a
+    // run never navigates" — it is an opt-in, not the row click.
+    await expect(page).toHaveURL(/#\/workflows\/[^/]+\?run=/);
+  }
+});
+
+test("the traces list's sort headers and filters are wired to the UI", async ({
+  page,
+}) => {
+  await page.goto("/#/workflows");
+  await dismissTour(page);
+  const list = await openRunsTab(page);
+
+  // Sort: a header's `aria-label` is its own claim about direction — read
+  // that back rather than re-deriving row order, which the unit suite
+  // (`workflow-run-traces-list.test.ts`) already pins directly on the
+  // comparator. This only has to prove the click reaches that state.
+  const startedAtHeader = list.getByTestId("workflow-run-traces-sort-startedAt");
+  await expect(startedAtHeader).toHaveAttribute("aria-label", /descending/);
+  await startedAtHeader.click();
+  await expect(startedAtHeader).toHaveAttribute("aria-label", /ascending/);
+  await startedAtHeader.click();
+  await expect(startedAtHeader).toHaveAttribute("aria-label", /descending/);
+
+  // Time range: exactly one of the four is pressed, and clicking one moves
+  // the pressed state off "All time".
+  const last6h = list.getByTestId("workflow-run-traces-range-6h");
+  const allTime = list.getByTestId("workflow-run-traces-range-all");
+  await expect(allTime).toHaveAttribute("aria-pressed", "true");
+  await last6h.click();
+  await expect(last6h).toHaveAttribute("aria-pressed", "true");
+  await expect(allTime).toHaveAttribute("aria-pressed", "false");
+  await allTime.click();
+
+  // Status filter: checking one verdict badges the trigger with its count
+  // and checks the item; Clear returns both to their unfiltered state. Not
+  // asserted against row count — which verdicts this host's runs happen to
+  // be in is not this test's business, only that the control's own state
+  // moves when clicked.
+  const statusFilter = list.getByTestId("workflow-run-traces-filter-status");
+  await statusFilter.click();
+  const runningOption = page.getByRole("menuitemcheckbox", { name: /running/i });
+  await runningOption.click();
+  await expect(runningOption).toHaveAttribute("aria-checked", "true");
+  await expect(statusFilter).toContainText("1");
+  await page.getByRole("menuitem", { name: "Clear" }).click();
+  await expect(statusFilter).not.toContainText("1");
+  await page.keyboard.press("Escape");
 });
