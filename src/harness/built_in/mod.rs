@@ -2679,6 +2679,24 @@ async fn refresh_oauth_decls(
 ) {
 }
 
+/// Whether an override row is purely a face — `avatar` set and nothing the
+/// harness reads set. Such a row must not move a fingerprint: the fingerprints
+/// hash what a teammate *is* (name, role, description, toolbelt, persona), and
+/// an avatar is none of those. A row that changed only the face would otherwise
+/// count itself and its `agent_id` into the hash, rebuild the roster, and drop
+/// every live agent session for a cosmetic change — issue #1676's review note.
+///
+/// An explicit `Some(vec![])` tool list and `Some("")` instructions stay real
+/// overrides ("the company's standard grant" / "cleared"), so only the
+/// all-`None` row is filtered, not the emptied one.
+fn is_avatar_only(edit: &crate::ports::types::AgentOverride) -> bool {
+    edit.name.is_none()
+        && edit.role.is_none()
+        && edit.description.is_none()
+        && edit.tools.is_none()
+        && edit.instructions.is_none()
+}
+
 /// A stable fingerprint of the roster overlay — the operator-added teammates
 /// (issue #71) **and** the operator's edits of the manifest-declared ones —
 /// used to detect a teammate add/remove/edit between [`HarnessPool::ensure`]
@@ -2691,6 +2709,10 @@ async fn refresh_oauth_decls(
 /// roster, so a console rename that moved no fingerprint would persist, read
 /// back correctly on the Team page, and be invisible to every turn the teammate
 /// took until the process restarted.
+///
+/// Avatar-only rows ([`is_avatar_only`]) are excluded: the face a teammate
+/// wears is display data resolved at render time, never part of the persona the
+/// harness builds, so a choice of face must not discard live agent sessions.
 fn overlay_fingerprint(
     agents: &[OverlayAgent],
     edits: &[crate::ports::types::AgentOverride],
