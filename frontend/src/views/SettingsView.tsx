@@ -452,8 +452,17 @@ function MemoryEngineCard({
       <CardHeader>
         <CardTitle className="text-base">Memory engine</CardTitle>
         <CardDescription>
-          Set by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>, read
-          at boot). Instance-wide; read-only here by design.
+          {engine.layer === "config.toml" ? (
+            <>
+              Selected in the company configuration and managed by the console. Instance-wide;
+              read-only here by design.
+            </>
+          ) : (
+            <>
+              Set by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>, read
+              at boot). Instance-wide; read-only here by design.
+            </>
+          )}
           {discarding &&
             " This engine accepts and discards every write — nothing this company is told will be remembered."}
         </CardDescription>
