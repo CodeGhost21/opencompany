@@ -755,7 +755,11 @@ impl RuntimeBuilder {
     /// while an engine bound through the `MemoryProvider` contract covers all
     /// three ports. Taking whichever the overlay offers is what keeps one
     /// company's memory on one engine instead of split across two (issue #914).
-    pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
+    pub fn with_memory_overlay(mut self, overlay: &crate::store::MemoryOverlay) -> Self {
+        // The engine selection is explicit here: on a live rebuild the overlay's
+        // ports must replace the outgoing engine's, never inherit them (see
+        // `memory_overlay_applied`).
+        self.memory_overlay_applied = true;
         let mut builder = self
             .with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone());
@@ -775,6 +779,20 @@ impl RuntimeBuilder {
             Some(facts) => builder.with_facts(facts.clone()),
             None => builder,
         }
+    }
+
+    /// Marks the memory engine for this build as the base backend (no overlay).
+    ///
+    /// The mirror of [`with_memory_overlay`](Self::with_memory_overlay) for a
+    /// rebuild that is switching TO the base backend (`store`): the overlay was
+    /// explicitly cleared, so the handover's provider-backed ports must not be
+    /// inherited. The builder's own memory-family ports (from
+    /// [`with_stores`](Self::with_stores) or the fs defaults) become
+    /// authoritative instead — a provider engine cannot be left serving a
+    /// company that has selected `store`.
+    pub fn with_memory_overlay_cleared(mut self) -> Self {
+        self.memory_overlay_applied = true;
+        self
     }
 
     /// Swaps just the runtime journal's durable sink (default: the company
