@@ -575,23 +575,53 @@ export function SetupDialog({
  * The no-model path is an intentional escape hatch, not a surprise on the
  * completion screen. This is kept beside the first question so every answer
  * after it is given with its consequence visible.
+ *
+ * The "Set up a model" call-to-action is only honest when this host could run
+ * the design path at all — a binary without the `openhuman` feature, or one
+ * with no harness pool attached, can never get there however the credential
+ * changes. Offering the CTA there would send the operator round a redesign
+ * loop that cannot end, so it is omitted and the standard team is the whole
+ * story.
  */
-function InferenceNotice({ unavailable, onLeave }: { unavailable: boolean; onLeave: () => void }) {
+function InferenceNotice({
+  unavailable,
+  harnessReachable,
+  onLeave,
+}: {
+  unavailable: boolean;
+  harnessReachable: boolean;
+  onLeave: () => void;
+}) {
+  const noModel = unavailable && !harnessReachable;
   return (
     <Alert data-testid="setup-inference-notice">
-      <AlertTitle>{unavailable ? "This host can't reach a model right now" : "We couldn't check this host's model"}</AlertTitle>
+      <AlertTitle>
+        {noModel
+          ? "This deployment can't run a model"
+          : unavailable
+            ? "This host can't reach a model right now"
+            : "We couldn't check this host's model"}
+      </AlertTitle>
       <AlertDescription>
-        {unavailable
-          ? "Your answers will create a standard team for your industry rather than tailor one to them."
-          : "Your answers may create a standard team rather than a tailored one."}{" "}
-        <a
-          href="#/settings/connections"
-          onClick={onLeave}
-          className="font-medium underline underline-offset-4"
-        >
-          Set up a model
-        </a>{" "}
-        or carry on with the standard team.
+        {noModel
+          ? "Your answers will create a standard team for your industry — no model on this host could tailor one."
+          : unavailable
+            ? "Your answers will create a standard team for your industry rather than tailor one to them."
+            : "Your answers may create a standard team rather than a tailored one."}{" "}
+        {harnessReachable ? (
+          <>
+            <a
+              href="#/settings/connections"
+              onClick={onLeave}
+              className="font-medium underline underline-offset-4"
+            >
+              Set up a model
+            </a>{" "}
+            or carry on with the standard team.
+          </>
+        ) : (
+          "Carry on with the standard team."
+        )}
       </AlertDescription>
     </Alert>
   );
