@@ -179,16 +179,21 @@ const MAX_BLOB_URLS = 64;
  * is waiting on. The pending set is bounded by how many faces a single screen
  * can mount at once; every one of them lands in `blobUrlValues` on success,
  * which is where the cap actually bites.
+ *
+ * Returns whether anything was evicted — `false` when every resolved entry is
+ * pinned by a mounted tile, which is the signal that a new face must be handed
+ * out without becoming cache-owned.
  */
-function evictOldestBlobUrl() {
+function evictOldestBlobUrl(): boolean {
   for (const key of blobUrls.keys()) {
     const url = blobUrlValues.get(key);
     if (url === undefined || (blobUrlRefs.get(key) ?? 0) > 0) continue;
     URL.revokeObjectURL(url);
     blobUrlValues.delete(key);
     blobUrls.delete(key);
-    return;
+    return true;
   }
+  return false;
 }
 
 function avatarCacheKey(client: OpenCompanyClient, company: string | null, nodeId: string): string {
