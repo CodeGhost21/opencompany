@@ -139,14 +139,30 @@ export function setupRedesign(scope: LocalScope): boolean {
  * [`markSetupResuming`]: a company that had been skipped before can be forced
  * open again, and clearing the skip here would silently re-enable the
  * unprompted offer.
+ *
+ * `fallbackIds` is the host ids of the team the first pass created, so the
+ * redesign replaces exactly that team and nothing another operator added while
+ * model settings were open. Captured at leave time — the roster on return is a
+ * snapshot of everyone's work since, and must not be the boundary of what a
+ * redesign may remove.
  */
-export function markSetupRedesign(scope: LocalScope): void {
+export function markSetupRedesign(scope: LocalScope, fallbackIds?: string[]): void {
   try {
-    const next: SetupState = { ...read(scope), redesign: true, at: Date.now() };
+    const next: SetupState = {
+      ...read(scope),
+      redesign: true,
+      ...(fallbackIds?.length ? { fallbackIds } : {}),
+      at: Date.now(),
+    };
     localStorage.setItem(KEY(scope), JSON.stringify(next));
   } catch {
     /* private mode / quota — the Company page's prompt is still the way back */
   }
+}
+
+/** The fallback team's host ids a pending redesign may replace, if any. */
+export function setupRedesignIds(scope: LocalScope): string[] {
+  return read(scope).fallbackIds ?? [];
 }
 
 /** Forget the redesign debt, once it has been paid by reopening the dialog. */
