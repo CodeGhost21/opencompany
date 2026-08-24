@@ -20,6 +20,7 @@ import {
   mentionsOutsideChannel,
   rankMentionables,
   reconcileMentions,
+  reconcileWrap,
   resolvableMentions,
   stripCodeRegions,
   type Mention,
