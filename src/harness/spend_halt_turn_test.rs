@@ -381,6 +381,7 @@ fn chat(text: &str) -> CycleRequest {
             deliverable: None,
         }],
         event_seqs: Vec::new(),
+        policy: None,
     }
 }
 

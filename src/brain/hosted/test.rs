@@ -116,6 +116,7 @@ fn operator_request() -> CycleRequest {
             deliverable: None,
         }],
         event_seqs: Vec::new(),
+        policy: None,
     }
 }
 

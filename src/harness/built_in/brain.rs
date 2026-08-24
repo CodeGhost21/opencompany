@@ -2718,7 +2718,21 @@ impl HarnessBrain {
         // harnesses has one pool per `built_in` harness, and each named lane's
         // own pool must be populated before its first turn, or a bound agent
         // fails with "company not found" while the default lane looks fine.
-        self.run_turn().ensure(&self.record()).await?;
+        //
+        // Issue #1455: when the runtime captured the policy at the top of this
+        // cycle — the same snapshot the native gate was re-applied from — the
+        // roster rebuilds against *that*, not the store. A console override that
+        // landed mid-turn (after the runtime's load, before this refresh) must
+        // not reach the harness gate a turn early, or one turn would run with
+        // the harness auto-approving what the native gate still parks.
+        match &req.policy {
+            Some(policy) => {
+                self.run_turn()
+                    .ensure_with_policy(&self.record(), policy)
+                    .await?
+            }
+            None => self.run_turn().ensure(&self.record()).await?,
+        }
 
         let mut channel_responses = Vec::new();
         for event in &req.events {
@@ -3282,6 +3296,7 @@ description = "Runs Acme."
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
+            policy: None,
         }
     }
 
@@ -7107,6 +7122,7 @@ members = ["eng1", "eng2"]
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
+            policy: None,
         }
     }
 

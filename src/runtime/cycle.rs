@@ -501,6 +501,11 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
+            // The same snapshot the native gate was re-applied from above: the
+            // harness rebuilds its roster against it, so a console override
+            // that lands mid-turn (between this load and the harness's own
+            // refresh) reaches neither gate until the next cycle boundary.
+            policy: record.as_ref().map(|record| record.effective_policy()),
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.

@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::company::Policy;
 use crate::company::steer::SteerControl;
 use crate::error::OpenCompanyError;
 use crate::harness::built_in::TurnOutcome;
@@ -231,6 +232,32 @@ impl RunTurn for HarnessRouter {
         let mut outcomes = Vec::with_capacity(self.engines.len());
         for (harness, engine) in &self.engines {
             outcomes.push((harness.clone(), engine.ensure(company).await));
+        }
+        let mut failures = self.failures.lock().expect("router failures");
+        for (harness, result) in outcomes {
+            match result {
+                Ok(()) => {
+                    failures.remove(&harness);
+                }
+                Err(err) => {
+                    failures.insert(harness, err.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_with_policy(&self, company: &CompanyRecord, policy: &Policy) -> Result<()> {
+        // The same fan-out as `ensure`, but every lane pins its policy axis to
+        // the cycle-start snapshot, so no engine's roster can drift from the
+        // native gate's mid-turn. Lanes that do not override this fall back to
+        // their own `ensure`.
+        let mut outcomes = Vec::with_capacity(self.engines.len());
+        for (harness, engine) in &self.engines {
+            outcomes.push((
+                harness.clone(),
+                engine.ensure_with_policy(company, policy).await,
+            ));
         }
         let mut failures = self.failures.lock().expect("router failures");
         for (harness, result) in outcomes {

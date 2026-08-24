@@ -188,8 +188,8 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk,
-    OverlayDeskMember, PolicyOverride, TurnStep,
+    Actor, ActorKind, AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent,
+    OverlayDesk, OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
@@ -1385,6 +1385,33 @@ impl HarnessPool {
     /// rebuilding the roster *is* the enforcement update. That is what makes
     /// "no restart, no redeploy" a property of the design rather than a claim.
     pub async fn ensure(&self, company: &CompanyRecord, deps: &HarnessDeps) -> crate::Result<()> {
+        self.ensure_impl(company, deps, None).await
+    }
+
+    /// [`ensure`](Self::ensure) with the policy axis pinned to an explicit
+    /// cycle-start snapshot instead of the live store overlay.
+    ///
+    /// The runtime's native gate is re-applied from the record loaded at the
+    /// top of a cycle, and this is the same snapshot: a console policy override
+    /// that lands mid-turn (after that load, before the harness's own refresh)
+    /// must reach *neither* gate until the next cycle boundary. Letting the
+    /// roster pick it up early would run one turn with the harness
+    /// auto-approving what the native gate parks (issue #1455).
+    pub async fn ensure_with_policy(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        policy: &Policy,
+    ) -> crate::Result<()> {
+        self.ensure_impl(company, deps, Some(policy)).await
+    }
+
+    async fn ensure_impl(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        policy_snapshot: Option<&Policy>,
+    ) -> crate::Result<()> {
         // Re-resolve + fingerprint the effective MCP set (cheap; no rebuild yet).
         let effective_mcp = self.resolve_effective_mcp(company, deps).await;
         let mcp_fp = mcp_fingerprint(&effective_mcp);
@@ -1400,7 +1427,16 @@ impl HarnessPool {
         // roster, so an edit unseen by any fingerprint would not reach the
         // system prompt until a restart.
         let override_fp = override_fingerprint(&overlay.agent_edits);
-        let policy_fp = policy_fingerprint(overlay.policy.as_ref());
+        // The policy axis. A cycle pins it to the snapshot the native gate was
+        // re-applied from (so a mid-turn override reaches neither gate); a
+        // direct `ensure` fingerprints the live store overlay, as before.
+        let policy_fp = match policy_snapshot {
+            Some(policy) => {
+                let override_ = policy_override_for(policy, &company.manifest.policy);
+                policy_fingerprint(Some(&override_))
+            }
+            None => policy_fingerprint(overlay.policy.as_ref()),
+        };
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
         // a console desk-ceiling edit — or seating a teammate on a restricted
@@ -1572,7 +1608,15 @@ impl HarnessPool {
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
         // the next turn runs on.
-        fresh_company.overlay_policy = overlay.policy;
+        //
+        // A cycle's `ensure_with_policy` installs the snapshot instead: the
+        // override synthesized below reproduces exactly the policy the native
+        // gate is evaluating this turn against, so the roster's ApprovalPolicy
+        // and the gate cannot disagree about which tier is live.
+        fresh_company.overlay_policy = match policy_snapshot {
+            Some(policy) => Some(policy_override_for(policy, &company.manifest.policy)),
+            None => overlay.policy,
+        };
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
         //
@@ -2042,6 +2086,14 @@ impl HarnessPool {
             .await
             .get(company)
             .copied()
+    }
+
+    /// The current policy fingerprint for a company (test-only), so a
+    /// policy-freshness test can assert the roster was rebuilt against the
+    /// cycle-start snapshot and not against a mid-turn store edit (issue #1455).
+    #[cfg(test)]
+    pub async fn policy_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.policy_fingerprints.read().await.get(company).copied()
     }
 
     /// The current billing-connection fingerprint for a company (test-only), so
@@ -2841,6 +2893,40 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
         None => 0u8.hash(&mut hasher),
     }
     hasher.finish()
+}
+
+/// Synthesizes the override that makes `manifest ⊕ result == policy`.
+///
+/// `ensure_with_policy` pins the roster's policy axis to the cycle-start
+/// snapshot the native gate was re-applied from, and `build_roster` only knows
+/// how to read a policy through `CompanyRecord::effective_policy` — so this is
+/// the inverse of that merge: for each field, override it iff the snapshot
+/// differs from the manifest. The attribution fields are transient (never
+/// persisted, and neither `policy_fingerprint` nor `build_roster` reads them),
+/// so a synthetic system actor is honest about what they are.
+fn policy_override_for(policy: &Policy, manifest: &Policy) -> PolicyOverride {
+    PolicyOverride {
+        mode: (policy.mode != manifest.mode).then(|| policy.mode.clone()),
+        always_approve: (policy.always_approve != manifest.always_approve)
+            .then(|| policy.always_approve.clone()),
+        auto_approve_under_usd: (policy.auto_approve_under_usd != manifest.auto_approve_under_usd)
+            .then_some(policy.auto_approve_under_usd),
+        // The TTL is a bare `Option` whose `None` falls through the merge, so
+        // the override reproduces a differing value by naming it directly and
+        // reproduces an equal one by saying nothing. (Inert on the roster —
+        // `ApprovalPolicy` carries no TTL — and absent from the fingerprint,
+        // so this arm only keeps the synthesis honest.)
+        approval_ttl_hours: if policy.approval_ttl_hours != manifest.approval_ttl_hours {
+            policy.approval_ttl_hours
+        } else {
+            None
+        },
+        set_by: Actor {
+            kind: ActorKind::System,
+            id: "harness".to_string(),
+        },
+        at_millis: 0,
+    }
 }
 
 /// The live overlay state one roster rebuild is resolved against.
@@ -5814,6 +5900,74 @@ description = "Builds the product."
         // A third ensure with no further change is a no-op (fingerprint stable).
         pool.ensure(&rec, &deps).await.expect("third ensure");
         assert_eq!(pool.overlay_fingerprint_of(&rec.id).await, Some(after));
+    }
+
+    /// Issue #1455: the roster's approval policy is pinned to the cycle-start
+    /// snapshot the native gate was re-applied from, so a console override that
+    /// lands mid-turn (after the runtime's store load, before the harness's own
+    /// refresh) cannot reach the harness gate a turn early. The override is not
+    /// lost — it moves the fingerprint on the NEXT cycle, the same boundary the
+    /// native gate moves on.
+    #[tokio::test]
+    async fn a_cycle_policy_snapshot_wins_over_a_mid_turn_store_edit() {
+        let live_store = Arc::new(LiveStore::default());
+        let mut rec = record();
+        rec.overlay_policy = Some(fp_entry_full(Some("supervised"), None, None, None));
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        // The snapshot the runtime loads at the top of the cycle and re-applies
+        // to the native gate.
+        let snapshot = rec.effective_policy();
+
+        // First cycle: the roster builds against the snapshot.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("first ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // A redundant ensure with the same snapshot is a no-op — the stability
+        // direction the mid-turn assertion below is read against.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("redundant ensure");
+        assert_eq!(pool.policy_fingerprint_of(&rec.id).await, Some(pinned));
+
+        // Mid-window PUT: the store now holds a `full` override. The brain's
+        // refresh picks this record up, but the cycle still carries the old
+        // snapshot — so the roster must not rebuild against `full` a turn early.
+        let mut edited = rec.clone();
+        edited.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
+        live_store.save(&edited).await.unwrap();
+
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("mid-turn ensure");
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "a mid-turn store edit must not reach the roster while the cycle still \
+             carries the old snapshot"
+        );
+
+        // The NEXT cycle captures the new policy: the fingerprint moves, the
+        // roster rebuilds — deferred to the same boundary the native gate moves
+        // on, so the change is applied, just not a turn early.
+        let next = edited.effective_policy();
+        pool.ensure_with_policy(&rec, &fx.deps, &next)
+            .await
+            .expect("next cycle");
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "the new policy must reach the roster on the next cycle"
+        );
     }
 
     // --- Capability-budget freshness (issue #108) ---------------------------

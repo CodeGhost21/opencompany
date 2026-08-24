@@ -2267,8 +2267,14 @@ impl TokenUsage {
 /// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
 /// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
 /// the `openhuman` feature). Traces are still *written* every cycle and kept
-/// in a bounded inspection window; nothing reads them back. Do not re-add a
-/// field here until something consumes it.
+/// in a bounded inspection window; nothing reads them back.
+///
+/// The one field added back since #1175 is [`Self::policy`], and it is added
+/// deliberately: it is the cycle-start approval policy, consumed by
+/// [`HarnessBrain`](crate::harness::built_in::brain::HarnessBrain) so the
+/// harness roster rebuilds against the same snapshot the native gate was
+/// re-applied from. Do not re-add any other field here until something consumes
+/// it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
@@ -2284,6 +2290,15 @@ pub struct CycleRequest {
     /// idempotent `POST /events` on the durable log seq.
     #[serde(default)]
     pub event_seqs: Vec<EventSeq>,
+    /// The effective approval policy this cycle's runtime snapshot enforces,
+    /// captured at the same store load the native gate is re-applied from
+    /// (issue #1455). The harness rebuilds its roster against this boundary so
+    /// both gates judge one turn on one policy: a console override that lands
+    /// after the load is invisible to both, and one that landed before is in
+    /// both. `None` for callers building a request without a company record
+    /// (a brain then falls back to its own store read).
+    #[serde(default)]
+    pub policy: Option<Policy>,
 }
 
 /// The brain's output from one cycle.

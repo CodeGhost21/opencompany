@@ -22,6 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::company::Policy;
 use crate::company::steer::{
     InflightEntry, InflightKind, InflightRegistry, SteerAction, SteerControl,
 };
@@ -127,6 +128,18 @@ pub trait RunTurn: Send + Sync {
     /// pool overrides it so a caller can ensure every lane before dispatch.
     async fn ensure(&self, _company: &CompanyRecord) -> Result<()> {
         Ok(())
+    }
+
+    /// Warms the roster against an explicit cycle-start policy snapshot instead
+    /// of the live store overlay.
+    ///
+    /// Defaults to [`ensure`](Self::ensure), so lanes that do not distinguish
+    /// the two — and every test double — keep their existing behaviour. The
+    /// built-in harness overrides it so its roster's approval policy cannot
+    /// drift from the native gate's mid-turn (issue #1455): both are pinned to
+    /// the same record loaded at the top of the cycle.
+    async fn ensure_with_policy(&self, company: &CompanyRecord, _policy: &Policy) -> Result<()> {
+        self.ensure(company).await
     }
 }
 
