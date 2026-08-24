@@ -364,7 +364,6 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
 }
 
 /** On the index, group attempts by the workflow run that spawned them. */
-function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
   const grouped = useMemo(() => [...byWorkflowRun(runs).entries()], [runs]);
   if (grouped.length === 0) return null;
   return (
