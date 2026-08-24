@@ -85,12 +85,50 @@ const find = (testId: string) => document.querySelector(`[data-testid="${testId}
 const modelLink = () =>
   Array.from(document.querySelectorAll("a")).find((a) => a.textContent?.trim() === "Set up a model");
 
+const addModelLink = () =>
+  Array.from(document.querySelectorAll("a")).find(
+    (a) => a.textContent?.trim() === "Add a model in Settings",
+  );
+
 /** Navigate as the console does — a hash change the controller can hear. */
 async function goTo(hash: string) {
   await act(async () => {
     window.location.hash = hash;
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
+}
+
+/** Answer the three questions and let the build-out finish. */
+async function runFlow() {
+  const setField = async (testId: string, value: string) => {
+    const field = document.querySelector(`[data-testid="${testId}"]`) as
+      | HTMLInputElement
+      | HTMLTextAreaElement
+      | null;
+    expect(field, `no field ${testId}`).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        field instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(field, value);
+      field!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (document.querySelector('[data-testid="setup-next"]') as HTMLElement).click();
+    });
+  };
+  await setField("setup-field-industry", "E-commerce — homeware");
+  await setField("setup-field-teamHint", "");
+  await setField("setup-field-automate", "");
+  for (let i = 0; i < 40 && !addModelLink(); i++) {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
+  }
+  expect(addModelLink(), "completion CTA never appeared").toBeTruthy();
 }
 
 /** Follow "Set up a model", which both closes the dialog and navigates. */
