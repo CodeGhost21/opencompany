@@ -169,7 +169,10 @@ describe("resolveAvatarSrc bounded cache", () => {
 
   it("forgetAvatarNode fires subscribers so a mounted tile re-resolves", async () => {
     const { resolveAvatarSrc, forgetAvatarNode, subscribeAvatarNode } = await freshAvatar();
-    const { revokeObjectURL } = stubUrlApi();
+    // Stubbed for its side effect: the URL APIs have to be observable for the
+    // revoke assertions in the sibling tests, and this test only watches the
+    // subscription side of a forget.
+    stubUrlApi();
     const requested = stubFetch();
     const c = client();
     const id = node(0);
