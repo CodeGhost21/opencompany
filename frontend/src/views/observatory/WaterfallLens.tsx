@@ -64,7 +64,7 @@ export function WaterfallLens({ spans, nowMs, selectedId, onSelect }: Props) {
     <div className="flex flex-col gap-2">
       {/* The scale, labelled as elapsed time: the question here is "how long
           did this take", and a column of timestamps answers a different one. */}
-      <div className="text-muted-foreground relative h-4 text-[10px]">
+      <div className="text-muted-foreground relative h-4 text-3xs">
         {marks.map((tick) => (
           <span
             key={tick.offset}
