@@ -46,6 +46,9 @@ function host() {
       // Only the second company's read is held open, so the test can look at
       // the row between "the scope changed" and "the new identity arrived".
       if (company === "beta") return beta.promise;
+      // A company with no sign-in has no `me` to read; the console answers 404
+      // and the row is expected to stay empty.
+      if (company === "ghost") throw new Error("no sign-in");
       return meFor(company);
     },
   } as unknown as OpenCompanyClient;
