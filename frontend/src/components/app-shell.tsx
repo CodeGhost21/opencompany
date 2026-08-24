@@ -83,6 +83,7 @@ import {
   hostMessageId,
   liveReplyIdentity,
   makeMessage,
+  MAIN_THREAD_ID,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
