@@ -1022,6 +1022,21 @@ export function ChatView({
         void client
           .getChatHistory(chatId, company)
           .then((entries) => {
+            // The reply was optimistic; the history fetch that hydrates it lands
+            // asynchronously. If the operator switched company, channel or
+            // connection in between, this target has been re-homed — merging the
+            // old scope's mention DTOs onto an unrelated same-id message would
+            // decorate the wrong transcript. Drop the hydration in that case;
+            // the next history fetch for the new scope is authoritative.
+            const latestScope = scopeRef.current;
+            if (
+              latestScope &&
+              (scopeAtSend.company !== latestScope.company ||
+                scopeAtSend.connection !== latestScope.connection ||
+                scopeAtSend.client !== latestScope.client)
+            ) {
+              return;
+            }
             const hydrated = fromHistory(entries);
             const byId = new Map(hydrated.map((message) => [message.id, message]));
             setTranscripts((transcripts) => ({
