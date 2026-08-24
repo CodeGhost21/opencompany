@@ -3924,7 +3924,10 @@ mod test {
         #[test]
         fn a_write_grant_does_not_cover_a_read_glob_request() {
             assert!(!allow_covers(&strings(&["workspace"]), "workspace.*"));
-            assert!(allow_covers(&strings(&["workspace", "workspace.*"]), "workspace.*"));
+            assert!(allow_covers(
+                &strings(&["workspace", "workspace.*"]),
+                "workspace.*"
+            ));
             assert!(!allow_covers(&strings(&["*"]), "workspace.write"));
         }
 
