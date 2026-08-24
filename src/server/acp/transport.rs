@@ -386,9 +386,7 @@ mod test {
     use serde_json::json;
 
     use crate::company::CompanyManifest;
-    use crate::ports::types::{
-        CompressedTrace, CycleRequest, CycleResult, TokenUsage,
-    };
+    use crate::ports::types::{CompressedTrace, CycleRequest, CycleResult, TokenUsage};
     use crate::ports::users::{UserRecord, UserRole, UserStatus};
     use crate::ports::{Brain, CompanyStore, CycleHost};
     use crate::server::graphql::auth::UserPrincipal;
@@ -468,7 +466,11 @@ mod test {
 
     #[async_trait]
     impl Brain for SilentBrain {
-        async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> crate::Result<CycleResult> {
+        async fn run_cycle(
+            &self,
+            req: CycleRequest,
+            _host: &dyn CycleHost,
+        ) -> crate::Result<CycleResult> {
             Ok(CycleResult {
                 channel_responses: Vec::new(),
                 new_traces: vec![CompressedTrace::now(req.cycle_id, "silent test brain")],
