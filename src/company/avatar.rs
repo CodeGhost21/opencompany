@@ -693,10 +693,10 @@ mod test {
         assert_eq!(image_dimensions(&webp_vp8(192, 192)).unwrap(), (192, 192));
     }
 
-    /// The VP8 height is a full 14 bits, not 10: the top four bits live in the
-    /// fourth byte of the frame, and a parse that dropped them measured a
-    /// 4096×16383 frame as 4096×1023 — under the dimension cap, so the
-    /// decompression-bomb check let a 67-megapixel frame through.
+    /// The VP8 height is a full 14 bits, not 10: the high six bits live in the
+    /// second size word's top bits (`data[9]`), and a parse that dropped them
+    /// measured a 4096×16383 frame as 4096×1023 — under the dimension cap, so
+    /// the decompression-bomb check let a 67-megapixel frame through.
     #[test]
     fn vp8_height_uses_all_fourteen_bits() {
         let (w, h) = (MAX_AVATAR_DIMENSION, 16383);
@@ -705,6 +705,26 @@ mod test {
         assert!(
             check_image_dimensions(&tall).is_err(),
             "a 4096×16383 frame must be refused, not measured as 4096×1023"
+        );
+    }
+
+    /// A real 1920×1080 lossy WebP: width and height each occupy their own
+    /// little-endian 16-bit field (RFC 6386 §9.1), the height bytes being
+    /// `0x38, 0x04`. A parse that packed the two together read that height as
+    /// 4320 and refused a perfectly ordinary landscape upload.
+    #[test]
+    fn vp8_height_is_its_own_two_byte_field() {
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&30u32.to_le_bytes());
+        v.extend_from_slice(b"WEBPVP8 ");
+        v.extend_from_slice(&10u32.to_le_bytes());
+        v.extend_from_slice(&[0x9D, 0x01, 0x2A, 0x9D, 0x01, 0x2A]);
+        // w = 1920 (0x0780), h = 1080 (0x0438), both scale bits clear.
+        v.extend_from_slice(&[0x80, 0x07, 0x38, 0x04]);
+        assert_eq!(image_dimensions(&v).unwrap(), (1920, 1080));
+        assert!(
+            check_image_dimensions(&v).is_ok(),
+            "a 1920×1080 landscape WebP must be accepted"
         );
     }
 
