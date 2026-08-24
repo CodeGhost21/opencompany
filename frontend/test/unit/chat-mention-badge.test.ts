@@ -179,6 +179,18 @@ describe("mentionsToClear", () => {
   });
 
   /**
+   * The mirror of the count-arm drop: with `mainChannelId` undefined the count
+   * never badged a general-chat spelling, so opening any real channel must not
+   * clear one either — clearing would hand the clear back to the host for a
+   * notification that never rendered.
+   */
+  it("never clears a general-chat mention when no rendered main channel exists", () => {
+    expect(mentionsToClear([note({ id: "a", context: "General" })], "engineering", undefined)).toEqual(
+      [],
+    );
+  });
+
+  /**
    * Same real-desk-id hazard as the count: when `general` is a real desk that
    * is not the default thread, its canonical id is a rendered channel, so
    * opening the *default* thread must not clear it — that is the summons
