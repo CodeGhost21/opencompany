@@ -2734,9 +2734,12 @@ fn overlay_fingerprint(
     // Hashed in stored order, which `upsert_agent_override` keeps stable: it
     // replaces an existing entry in place and only ever appends a new one, so a
     // repeated edit of one teammate does not permute the list and drop every
-    // live session for a change that touched nobody else.
-    edits.len().hash(&mut hasher);
-    for edit in edits {
+    // live session for a change that touched nobody else. Avatar-only rows are
+    // skipped (`is_avatar_only`): they carry no persona, so they must not move
+    // the fingerprint.
+    let persona_edits: Vec<_> = edits.iter().filter(|edit| !is_avatar_only(edit)).collect();
+    persona_edits.len().hash(&mut hasher);
+    for edit in persona_edits {
         edit.agent_id.hash(&mut hasher);
         edit.name.hash(&mut hasher);
         edit.role.hash(&mut hasher);
