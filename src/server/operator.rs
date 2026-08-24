@@ -9779,6 +9779,54 @@ mode = "full"
         );
     }
 
+    /// A desk id that collides with a **human user id** still files under the
+    /// desk. `assignee::resolve`'s desk-first ordering — the same one
+    /// `responder_for` uses — outranks the user directory, and the directory
+    /// must not get a say ahead of it. Pre-fix, a `users` pre-check ran before
+    /// the resolution and returned `dm:<id>` for any bare key matching a human,
+    /// so a mention aimed at a desk whose id happened to match a human id would
+    /// badge a nonexistent DM channel and could never be cleared from the desk
+    /// it was meant for.
+    #[tokio::test]
+    async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A human whose id collides with the `engineering` desk's id. The human
+        // directory must not win: the message is aimed at the desk.
+        let human = crate::ports::users::UserRecord {
+            id: "engineering".to_string(),
+            email: "human@example.test".to_string(),
+            display_name: None,
+            role: crate::ports::users::UserRole::Member,
+            status: crate::ports::users::UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: crate::ports::now_millis(),
+            last_seen_at_millis: None,
+            updated_at_millis: crate::ports::now_millis(),
+        };
+
+        assert_eq!(
+            runtime.mention_context(&id, &[human.clone()], "engineering").await,
+            "engineering",
+            "a desk id that matches a human id files under the desk, not dm:<id>"
+        );
+        assert_eq!(
+            runtime.mention_context(&id, &[human.clone()], "dm:engineering").await,
+            "engineering",
+            "the same collision through a dm:-prefixed key still files under the desk"
+        );
+        // A DM the human is actually a teammate of still badges as a DM.
+        assert_eq!(
+            runtime.mention_context(&id, &[human], "dm:backend_engineer").await,
+            "dm:backend_engineer",
+            "a real DM channel is unaffected by the collision guard"
+        );
+    }
+
     /// [`mention_context`] stores the **canonical** id for a key typed in a
     /// noncanonical shape — a desk by its display name, a teammate by a
     /// case-variant of their id. `assignee::resolve` already returns canonical
