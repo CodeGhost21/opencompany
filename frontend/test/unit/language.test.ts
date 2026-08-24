@@ -230,7 +230,7 @@ describe("the decide buttons' label (#1411)", () => {
     // member, and the phrase is the one `ApprovalRow` already uses.
     expect(
       decisionLabel(approval({ kind: "payment.send", contents_hidden: true }), askers, NOW),
-    ).toBe("Send a payment — details hidden by your role — composed 1m ago — asked by Sam");
+    ).toBe("Send a payment — details hidden by your role — composed 1m ago (1000) — request 1000 — asked by Sam");
   });
 
   it("keeps two hidden cards' decide buttons apart by their composition time", () => {
