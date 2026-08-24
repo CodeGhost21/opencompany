@@ -296,13 +296,10 @@ async fn do_disconnect_from(
 /// stored tokens and best-effort revokes them upstream — irreversible, and a
 /// decision about the company's access rather than the caller's.
 async fn disconnect(
-    company: AdminScopedCompany,
-    Path(ProviderPath { provider }): Path<ProviderPath>,
+    _company: AdminScopedCompany,
+    Path(_provider): Path<ProviderPath>,
 ) -> Response {
-    do_disconnect(company.runtime, &provider)
-        .await
-        .map(IntoResponse::into_response)
-        .unwrap_or_else(IntoResponse::into_response)
+    native_oauth_start_retired()
 }
 
 #[cfg(test)]
