@@ -82,7 +82,7 @@ export function OperatorOverview({
   const fetchRuns = useCallback(async () => {
     const [stopped, failed] = await Promise.all([
       listRuns(client, company, { status: ["failed", "paused"], limit: 12 }),
-      listRuns(client, company, { status: ["failed"], limit: 50 }),
+      listRuns(client, company, { status: ["failed"], limit: FAILED_READ_LIMIT }),
     ]);
     return { stopped, failed };
   }, [client, company]);
@@ -90,15 +90,16 @@ export function OperatorOverview({
   useEffect(() => {
     let live = true;
     setRunLoad("loading");
+    const gen = ++runReadGen.current;
     fetchRuns()
       .then(({ stopped, failed }) => {
-        if (!live) return;
+        if (!live || gen !== runReadGen.current) return;
         setStoppedRuns(stopped);
         setFailedRuns(failed);
         setRunLoad("ready");
       })
       .catch(() => {
-        if (live) setRunLoad("error");
+        if (live && gen === runReadGen.current) setRunLoad("error");
       });
     return () => {
       live = false;
@@ -108,24 +109,26 @@ export function OperatorOverview({
   // Issue #1015: re-read (silently — no loading flash) when the shell reports a
   // run status change while this page stays open. The initial-load effect above
   // owns the "loading"/"error" states; a re-read that fails keeps the last good
-  // lists rather than dropping a settled page to the error state mid-view.
+  // lists rather than dropping a settled page to the error state mid-view. The
+  // generation ticket means a slower *initial* read can no longer land after
+  // this fresher answer and overwrite it.
   const seenRunTick = useRef(attemptEventTick);
   useEffect(() => {
     if (attemptEventTick === undefined || attemptEventTick === seenRunTick.current) return;
     seenRunTick.current = attemptEventTick;
-    let live = true;
+    const gen = ++runReadGen.current;
     fetchRuns()
       .then(({ stopped, failed }) => {
-        if (!live) return;
+        if (gen !== runReadGen.current) return;
         setStoppedRuns(stopped);
         setFailedRuns(failed);
+        // If the initial read was still in flight, this is the freshest answer:
+        // settle to ready rather than leaving the panel on its loading text.
+        setRunLoad("ready");
       })
       .catch(() => {
         /* the current lists stay; the next event or reload re-reads */
       });
-    return () => {
-      live = false;
-    };
   }, [attemptEventTick, fetchRuns]);
 
   useEffect(() => {
