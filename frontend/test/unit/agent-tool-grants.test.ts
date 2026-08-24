@@ -26,7 +26,7 @@ function agent(over: Partial<AgentDetailDto> = {}): AgentDetailDto {
     source: "overlay",
     editable: ["name", "role", "description", "instructions", "tools"],
     isOrchestrator: false,
-    tools: { requested: [], companyAllow: ["*"], deskAllow: [], effective: ["*"] },
+    tools: { requested: [], companyAllow: ["*"], deskAllow: [], deskCeilingActive: false, effective: ["*"] },
     desks: [],
     inboxEnabled: false,
     ...over,
