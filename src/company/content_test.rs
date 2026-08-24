@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
-    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_ledgers,
-    load_dir_skills, parse_workflow, walk_workspace,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
+    grants_workspace_write_explicit, load_dir_ledgers, load_dir_skills, parse_workflow,
+    walk_workspace,
 };
-use crate::runtime::builder::effective_grants;
+use crate::runtime::builder::{agent_scoped_grants, effective_grants};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -102,16 +103,28 @@ fn every_company_skill_and_workspace_parses() {
 /// Whether a template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
-const SEARCH_GRANTED_COMPANIES: [&str; 9] = [
+const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
+    "agentic_accounting_firm",
     "agentic_consultation_firm",
+    "agentic_customer_support",
     "agentic_design_studio",
+    "agentic_enterprise_sales",
+    "agentic_game_business",
+    "agentic_game_studio",
+    "agentic_influencer_business",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_pharma_startup",
     "agentic_product_team",
+    "agentic_realestate_company",
+    "agentic_recruiting_company",
     "agentic_research_lab",
     "agentic_software_company",
+    "agentic_venture_capital",
+    "agentic_venture_studio",
     "signals_opportunity_studio",
+    "startup_accelerator",
 ];
 
 /// Templates that must NEVER reach the metered search backend: `e2e_harness` and
@@ -134,6 +147,15 @@ const SEARCH_DENIED_COMPANIES: [&str; 4] = [
 /// path — nobody has decided their roster needs the web. Moving one into
 /// [`SEARCH_GRANTED_COMPANIES`] is an ordinary product call, not a violation.
 ///
+/// **Empty, and kept anyway.** `search` is in the global `default_allow` now,
+/// so a company that declares no `[tools]` section inherits it: the twelve
+/// templates that used to sit here were never *deciding* against search, they
+/// had simply never been edited, and their agents reported the tool as not
+/// enabled. They moved to the granted list unchanged. The bucket stays because
+/// the partition is the mechanism — the next template that genuinely wants to
+/// leave search off, without the hermetic-fixture argument that puts a company
+/// in [`SEARCH_DENIED_COMPANIES`], is declared here.
+///
 /// This list exists so the posture is a *partition* rather than an allow-list.
 /// An allow-list asserts a decision someone remembered, so it cannot notice a
 /// company nobody remembered: `agentic_software_company` shipped with nine
@@ -141,20 +163,7 @@ const SEARCH_DENIED_COMPANIES: [&str; 4] = [
 /// [`every_company_declares_a_search_posture`] asserts this list plus the other
 /// two covers `companies/` exactly, so a new template fails CI until whoever
 /// adds it writes the decision down here.
-const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
-    "agentic_accounting_firm",
-    "agentic_customer_support",
-    "agentic_enterprise_sales",
-    "agentic_game_business",
-    "agentic_game_studio",
-    "agentic_influencer_business",
-    "agentic_pharma_startup",
-    "agentic_realestate_company",
-    "agentic_recruiting_company",
-    "agentic_venture_capital",
-    "agentic_venture_studio",
-    "startup_accelerator",
-];
+const SEARCH_UNGRANTED_COMPANIES: [&str; 0] = [];
 
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
@@ -358,19 +367,27 @@ fn every_company_declares_a_search_posture() {
 }
 
 /// The footgun this suite exists to catch: `[tools].allow` **replaces** the
-/// default (`["*", "media", "composio"]`), it never extends it. A reviewer
-/// "simplifying" a grant to `allow = ["search"]` would silently strip
-/// files/docs/shell/code/web/subagent, `media` and `composio` from every agent
-/// in the company — no parse error, no warning, just a company that quietly
-/// lost its tool belt. This asserts both halves: the shipped form keeps the
-/// inherited entries, and the reduced form provably loses them.
+/// default (`globals/globals.toml`'s `default_allow`), it never extends it. A
+/// reviewer "simplifying" a grant to `allow = ["search"]` would silently strip
+/// files/docs/shell/code/web/subagent, workspace writes, `media`, `composio`
+/// and the MCP grants from every agent in the company — no parse error, no
+/// warning, just a company that quietly lost its tool belt. This asserts both
+/// halves: the shipped form keeps the inherited entries, and the reduced form
+/// provably loses them.
+///
+/// It used to open by asserting the default belt was search-free, which is no
+/// longer true — `search` ships in `default_allow`, so these templates now
+/// restate the default rather than restating-and-extending it. The invariant
+/// that mattered survives the change untouched: whatever the default carries,
+/// a template that writes its own `allow` must carry all of it.
 #[test]
 fn granting_search_never_strips_the_inherited_default_belt() {
     let default_allow = Tools::default().allow;
     assert!(
-        !grants_search_explicit(&default_allow),
-        "the default belt is expected to stay search-free (opt-in per #238); \
-         if that changed, these templates no longer need to restate it"
+        grants_search_explicit(&default_allow),
+        "`search` is expected to ship in the default belt now; if it was made \
+         opt-in again, these templates have to restate-and-extend once more \
+         and this test's premise needs rewriting rather than deleting"
     );
 
     for name in FULL_BELT_PLUS_SEARCH {
@@ -612,6 +629,69 @@ fn the_marketing_campaign_preset_is_runnable() {
     assert_eq!(research.config["on_error"], "continue");
 
     assert_eq!(node("publish").config["agent_ref"], "copywriter");
+}
+
+/// The marketing agency's creative desk ceiling must not strip the company's
+/// workspace-write grant.
+///
+/// The desk states `["*", "workspace.write"]`, and the `*` half deliberately
+/// confers no workspace writes — [`grants_workspace_write_explicit`] matches
+/// only the bare `workspace` or the exact `workspace.write` token — so the
+/// write token has to be restated in the ceiling for the desk's agents to hold
+/// it. Their own AGENTS.md promises the `agents/<id>/` folder is always
+/// writable, and `agent_scoped_grants` would silently strip that promise with
+/// a `["*"]`-only ceiling. Pinned through the *three-level* narrowing (the
+/// `effective_grants` the search-posture tests use ignores desks, which is
+/// precisely how this gap shipped) so a future edit cannot quietly reintroduce
+/// the stripping.
+#[test]
+fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
+    let manifest = load_company("agentic_marketing_agency");
+    let creative = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "creative")
+        .expect("the marketing agency declares the creative desk");
+    assert!(
+        !creative.tools.is_empty(),
+        "the creative desk must state a ceiling or this test asserts nothing"
+    );
+
+    for id in ["creative_director", "copywriter", "landing_page_builder"] {
+        let agent = manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .unwrap_or_else(|| panic!("{id} is a member of the creative desk"));
+        let desk_refs: Vec<&[String]> = manifest
+            .group_chats
+            .iter()
+            .filter(|chat| chat.members.iter().any(|member| member == id))
+            .map(|chat| chat.tools.as_slice())
+            .collect();
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+
+        assert!(
+            grants_workspace_write_explicit(&grants),
+            "{id}: the creative desk ceiling ({:?}) must keep the company's \
+             workspace write grant; effective grants: {grants:?}",
+            creative.tools
+        );
+        // The desk still deliberately withholds the billed / third-party
+        // opt-ins the company grants at the top level.
+        assert!(
+            !grants_search_explicit(&grants),
+            "{id}: the creative desk must stay searchless; effective grants: {grants:?}"
+        );
+        assert!(
+            !grants_media_explicit(&grants),
+            "{id}: the creative desk must stay media-less; effective grants: {grants:?}"
+        );
+        assert!(
+            !grants_composio_explicit(&grants),
+            "{id}: the creative desk must stay composio-less; effective grants: {grants:?}"
+        );
+    }
 }
 
 /// Every seeded `output` node names a destination its own manifest can resolve,

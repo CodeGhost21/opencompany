@@ -999,6 +999,21 @@ export interface AgentDetailDto {
 export interface AgentToolsDto {
   requested: string[];
   companyAllow: string[];
+  /**
+   * The ceiling contributed by the desks this agent sits on — the union of
+   * their `tools`, already narrowed by `companyAllow`. **Empty means the
+   * narrowed ceiling grants nothing**, not "no desk narrows anything" — see
+   * `deskCeilingActive`, which tells those apart.
+   */
+  deskAllow: string[];
+  /**
+   * Whether any desk this agent sits on states a `tools` ceiling. Distinct
+   * from `deskAllow`: a ceiling can be active yet narrow to an empty list
+   * (a desk whose only grant the company does not allow), and the preview
+   * must keep the desk level as the gate in that case instead of falling
+   * back to `companyAllow`.
+   */
+  deskCeilingActive: boolean;
   effective: string[];
 }
 
@@ -1033,67 +1048,22 @@ export interface EditAgentInput {
    * persona the operator did not touch.
    */
   instructions?: string | null;
-  /**
-   * The teammate's own model override (issue #1245's per-agent follow-up).
-   * Same double-option shape as `description`: absent leaves it alone, `null`
-   * clears it back to the harness's own default, and a string sets it.
-   * Admin-only on the host, alongside `tools` — a member's `PATCH` carrying
-   * this key gets a `403`.
-   */
+  /** The teammate's own model override. */
   model?: string | null;
-  /**
-   * Which declared harness this teammate runs on (issue #1245's
-   * harness-picker follow-up). Same double-option shape as `model`: absent
-   * leaves it alone, `null` clears it back to the company's default, and a
-   * string pins it to one of the ids `GET {scope}/harnesses` lists.
-   * Admin-only on the host, alongside `model`/`tools`.
-   */
+  /** Which declared harness this teammate runs on. */
   harness?: string | null;
+  /** The teammate's own tool-grant globs. */
+  tools?: string[];
 }
 
-/**
- * One declared `[[harness]]`, from `GET {scope}/harnesses` (issue #1245's
- * harness-picker follow-up) — what Settings' Harnesses card and the per-agent
- * Harness picker both read, so the two cannot disagree about what the
- * company has declared. Read-only: a harness lives in the version-controlled
- * `company.toml`, the same as everything else `AgentDetailDto` treats as the
- * blueprint.
- */
+/** One declared or detected harness. */
 export interface HarnessDto {
   id: string;
-  /** `"built_in"` (managed) or `"acp"` (external). */
   kind: "built_in" | "acp";
-  /** Whether a teammate naming no harness runs here. Exactly one entry sets this. */
   default: boolean;
-  /** `acp` harnesses only: which CLI (`claude`/`codex`), when `transport === "local"`. */
   agent?: string;
-  /**
-   * Whether the host serving this company can spawn this harness's transport.
-   *
-   * Answered by the host because the console cannot work it out: a desktop
-   * connected to a *remote* company still has its own local survey, and
-   * probing a declared `transport = "local"` harness against the operator's
-   * laptop reports readiness for a machine that will never run those turns.
-   *
-   * Optional so a host predating the field degrades to not probing rather
-   * than to probing wrongly — the safe direction, since "can't say from here"
-   * is a state the page already renders honestly.
-   */
   runsHere?: boolean;
-  /** `acp` harnesses only: `"local"` (spawned on this machine) or `"runner"` (a registered remote). */
   transport?: string;
-  /**
-   * Whether this entry is **declared** in `company.toml` (`false`) or merely
-   * **detected** (`true`) — a coding CLI this build can drive, bindable
-   * without any `[[harness]]` naming it.
-   *
-   * The distinction is what the External harnesses page is built on. A
-   * declared harness is a property of the *company*, identical wherever the
-   * manifest is opened. A detected one is a property of the *machine*: the
-   * host says only "you may bind to this id" and cannot know whether the CLI
-   * is installed or signed in — that answer comes from `acpHarnesses()` on
-   * the desktop, joined against this list by `id`.
-   */
   detected: boolean;
 }
 

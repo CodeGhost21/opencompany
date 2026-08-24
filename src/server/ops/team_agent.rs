@@ -11,13 +11,16 @@
 //!
 //! ## Effective, not declared
 //!
-//! [`AgentToolsDto`] carries three lists rather than one, because the
+//! [`AgentToolsDto`] carries the three levels rather than one, because the
 //! interesting number is the one nobody could see. `requested` is what the
 //! `[[agent]].tools` line asks for, `companyAllow` is the `[tools].allow`
 //! ceiling it is intersected with, and `effective` is what the agent actually
 //! ends up holding. An agent that requests `workspace.read` under a company
 //! that allows only `composio` requests one tool and holds none, and a surface
 //! that printed the request alone would report the opposite of the truth.
+//! A `deskCeilingActive` flag sits alongside the desk level so a reader can
+//! tell "no desk narrows anything" from "a desk narrows everything away" —
+//! the narrowed `deskAllow` list can be empty in both cases.
 //!
 //! `effective` is computed by
 //! [`agent_effective_grants`](crate::runtime::builder::agent_effective_grants)
@@ -228,11 +231,20 @@ pub(super) struct AgentToolsDto {
     /// The ceiling contributed by the desks this agent sits on — the union of
     /// their `tools`, already narrowed by `company_allow`.
     ///
-    /// **Empty means no desk narrows anything**, which is the same "empty is not
-    /// nothing" trap `requested` carries: a console rendering an empty list as
-    /// "this desk grants no tools" would invert the meaning. It is empty for
-    /// every company that has not set a desk ceiling, which is most of them.
+    /// **Empty means the narrowed ceiling grants nothing**, which is *not* the
+    /// same as "no desk narrows anything" — see `desk_ceiling_active`. A desk
+    /// ceiling can resolve to an empty list while still being active (its only
+    /// grant is an explicit opt-in the company's bare `*` does not confer), and
+    /// the console has to tell those apart or it substitutes `company_allow`
+    /// and promises grants the host drops. It is empty for every company that
+    /// has not set a desk ceiling, which is most of them.
     desk_allow: Vec<String>,
+    /// Whether any desk this agent sits on states a `tools` ceiling — distinct
+    /// from `desk_allow`, which is that ceiling *narrowed by the company grant*
+    /// and can legitimately resolve to empty. This is the sentinel the console
+    /// preview keys on: `true` means the desk level is in play even when the
+    /// narrowed list is empty.
+    desk_ceiling_active: bool,
     /// What the agent actually holds, after all three levels.
     effective: Vec<String>,
 }
@@ -419,10 +431,17 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
     // Reported already narrowed by the company grant, so the console can render
     // the three rows as a strictly shrinking chain. A raw union could show a
     // desk "granting" something the company never allowed.
-    let desk_allow = if desk_tools.iter().all(Vec::is_empty) {
-        Vec::new()
-    } else {
+    //
+    // `desk_ceiling_active` is a separate flag rather than `!desk_allow.is_empty()`:
+    // the narrowed list can resolve to empty while a ceiling is still in play
+    // (a desk whose only grant the company's `*` does not confer), and the
+    // console has to keep the desk level as the gate in that case instead of
+    // falling back to the company allow-list.
+    let desk_ceiling_active = !desk_tools.iter().all(Vec::is_empty);
+    let desk_allow = if desk_ceiling_active {
         agent_scoped_grants(company_allow, &desk_refs, &[])
+    } else {
+        Vec::new()
     };
 
     AgentToolsDto {
@@ -430,6 +449,7 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
         requested,
         company_allow: company_allow.to_vec(),
         desk_allow,
+        desk_ceiling_active,
     }
 }
 
@@ -1450,6 +1470,10 @@ agent = "claude"
                 strings(&body["tools"]["deskAllow"]).is_empty(),
                 "{agent}: {body}"
             );
+            assert_eq!(
+                body["tools"]["deskCeilingActive"], false,
+                "no desk states a ceiling, so the desk level is not in play: {agent}: {body}"
+            );
         }
     }
 
@@ -1473,6 +1497,10 @@ agent = "claude"
             "{writer}"
         );
         assert_eq!(
+            writer["tools"]["deskCeilingActive"], true,
+            "a desk ceiling is in play for a member of the desk: {writer}"
+        );
+        assert_eq!(
             strings(&writer["tools"]["effective"]),
             vec!["workspace.read"],
             "the desk ceiling must bite on a member that requested nothing: {writer}"
@@ -1485,6 +1513,10 @@ agent = "claude"
         assert!(
             strings(&hermit["tools"]["deskAllow"]).is_empty(),
             "{hermit}"
+        );
+        assert_eq!(
+            hermit["tools"]["deskCeilingActive"], false,
+            "no desk states a ceiling for hermit: {hermit}"
         );
         assert_eq!(
             strings(&hermit["tools"]["effective"]),
@@ -1513,6 +1545,50 @@ agent = "claude"
         assert!(
             !strings(&writer["tools"]["effective"]).contains(&"shell".to_string()),
             "{writer}"
+        );
+    }
+
+    /// A desk ceiling can resolve to an **empty** narrowed list while still
+    /// being active: `media` is an explicit opt-in that a bare `*` does not
+    /// confer, so a desk naming only `media` under a company that allows `*`
+    /// narrows everything away. The DTO must report the ceiling active with an
+    /// empty `deskAllow` — a console keying on `deskAllow`'s emptiness would
+    /// substitute `companyAllow` and promise grants the host drops.
+    #[tokio::test]
+    async fn an_active_desk_ceiling_that_resolves_empty_is_reported_active() {
+        let manifest = r#"
+[company]
+name = "Acme"
+[policy]
+mode = "full"
+[tools]
+allow = ["*"]
+
+[[agent]]
+id = "writer"
+role = "Writer"
+
+[[group_chat]]
+id = "creative"
+name = "Creative desk"
+members = ["writer"]
+tools = ["media"]
+"#;
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), manifest).await;
+
+        let (_, writer) = get_agent(&state, "writer").await;
+        assert!(
+            strings(&writer["tools"]["deskAllow"]).is_empty(),
+            "media under a bare * is an explicit opt-in that narrows to nothing: {writer}"
+        );
+        assert_eq!(
+            writer["tools"]["deskCeilingActive"], true,
+            "the desk states a ceiling even though the narrowed list is empty: {writer}"
+        );
+        assert!(
+            strings(&writer["tools"]["effective"]).is_empty(),
+            "with an empty ceiling the standard grant holds nothing: {writer}"
         );
     }
 
