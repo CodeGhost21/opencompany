@@ -294,6 +294,9 @@ pub(crate) async fn resolve_runs(
         limit: Some(limit.clamp(1, 200) as usize),
     };
     let rows = runtime.runs().list_runs(runtime.id(), &filter).await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
     // The index reads every returned run's trace, so fetch them all in one pass
     // rather than one store round trip per run. The filesystem backend rescans
     // the whole company-wide JSONL per per-run read, so a sequential loop would
