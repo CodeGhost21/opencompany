@@ -196,6 +196,60 @@ describe("readiness is the addressed company's, not the host's", () => {
     expect(find("setup-inference-notice")?.textContent).toContain("can't run a model");
     expect(linkNamed("Set up a model")).toBeUndefined();
   });
+
+  it("ignores a delayed status from the company the dialog was on before", async () => {
+    // The readiness check answers the *addressed* company. Switching companies
+    // cleans up the old check, but a response already in flight still resolves —
+    // without a guard it would overwrite the new company's reachability with the
+    // old host's answer, hiding the Settings CTA (or showing it) wrongly.
+    const statuses: Record<string, (s: InferenceStatus) => void> = {};
+    const asked: string[] = [];
+    const client = {
+      ...clientWith({}),
+      get: async (path: string) => {
+        const company = path.split("/").at(-2) ?? "?";
+        asked.push(company);
+        return new Promise<InferenceStatus>((resolve) => {
+          statuses[company] = resolve;
+        });
+      },
+    } as unknown as OpenCompanyClient;
+
+    const render = (company: string) =>
+      act(async () => {
+        root.render(
+          createElement(SetupDialog, {
+            open: true,
+            client,
+            company,
+            onSkip: () => {},
+            onLeave: () => {},
+            onDone: () => {},
+          }),
+        );
+      });
+
+    await render("acme");
+    await render("globex");
+    expect(asked).toEqual(["acme", "globex"]);
+
+    // Globex's host answers first: harness reachable, but on a path with no
+    // design pass — the notice offers the credential CTA.
+    await act(async () => {
+      statuses["globex"]({ ...ECHO, harnessReachable: true });
+    });
+    expect(find("setup-inference-notice")?.textContent).toContain("can't reach a model");
+    expect(linkNamed("Set up a model")).toBeTruthy();
+
+    // The acme response — the check the effect was cleaned up over — lands
+    // late. Its harness-less answer must not flip the notice to "can't run a
+    // model" and hide the CTA.
+    await act(async () => {
+      statuses["acme"]({ ...ECHO, harnessReachable: false });
+    });
+    expect(find("setup-inference-notice")?.textContent).toContain("can't reach a model");
+    expect(linkNamed("Set up a model")).toBeTruthy();
+  });
 });
 
 describe("a stalled readiness check cannot lock the operator in", () => {
