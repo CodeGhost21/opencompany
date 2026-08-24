@@ -1,0 +1,52 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a consulting firm is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-engagement-shape"
+title = "Set up the engagement shape"
+priority = "high"
+note = """
+Decide what an `engagements` row carries from first call to final deck: \
+scope, the client's actual question, the deliverable, and what is out of \
+scope.
+
+Scope stated only in conversation is scope that grows, and the growth is \
+unpaid.
+
+Done when live engagements have rows naming what is and is not included.\
+"""
+
+[[task]]
+id = "set-up-the-assumption-register"
+title = "Set up the assumption register"
+priority = "high"
+note = """
+State what goes on `assumptions`: every load-bearing thing a \
+recommendation rests on that has not been verified, and what would falsify \
+it.
+
+A deck's recommendations are only as good as the assumptions under them, \
+and the ones nobody wrote down are the ones that turn out to be wrong.
+
+Done when the rule is recorded and current engagements have their \
+assumptions listed.\
+"""
+
+[[task]]
+id = "set-up-the-recommendation-bar"
+title = "Set up the recommendation bar"
+priority = "medium"
+note = """
+Decide what a `recommendations` row must carry before it reaches a client: \
+the evidence, the cost, and what happens if the client does nothing.
+
+Done when the bar is a `decisions` row.\
+"""

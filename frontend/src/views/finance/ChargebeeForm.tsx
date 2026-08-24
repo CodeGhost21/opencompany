@@ -9,6 +9,17 @@ import {
 } from "@/api/billing";
 import type { OpenCompanyClient } from "@/api/client";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -181,9 +192,31 @@ export function ChargebeeForm({ client, company, status, onStatus }: Props) {
           Save
         </Button>
         {status.apiKeyConfigured || status.webhookConfigured ? (
-          <Button variant="ghost" onClick={onClear} disabled={busy} data-testid="billing-clear">
-            Disconnect
-          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger
+              render={
+                <Button variant="outline" disabled={busy} data-testid="billing-clear">
+                  Disconnect
+                </Button>
+              }
+            />
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Disconnect Chargebee?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This clears the Chargebee site, the write-only Chargebee API key and the
+                  payment-notification credential. They cannot be recovered; reconnect with new
+                  credentials to restore billing.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction variant="destructive" onClick={() => void onClear()}>
+                  Disconnect Chargebee
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         ) : null}
       </div>
     </div>

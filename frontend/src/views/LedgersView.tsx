@@ -241,6 +241,15 @@ export const RESERVED_SEGMENTS: readonly string[] = [
  */
 const EMPTY_APPROVALS: readonly ApprovalSummary[] = [];
 
+/** The task ledger is operated as a board; declared ledgers are read as rows. */
+export function defaultLedgerMode(
+  ledger: LedgerSummary | null,
+): "board" | "list" {
+  return ledger?.source === "native" && ledger.slug === BOARD_LEDGER
+    ? "board"
+    : "list";
+}
+
 /** A row is either being opened fresh or amended; the form differs only in id. */
 interface Composing {
   /** The row this edits, or empty for a new one. */
@@ -280,15 +289,8 @@ export function LedgersView({
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
   const [rendered, setRendered] = useState<string | null>(null);
-  /**
-   * Columns or rows.
-   *
-   * Board by default for anything with a status, because that is what a
-   * ledger's statuses *are* — a lifecycle, read left to right. The list is for
-   * reading a row's whole contents, which is what a ledger with long prose
-   * fields is actually for; the board truncates by construction.
-   */
-  const [mode, setMode] = useState<"board" | "list">("board");
+  /** Columns for dispatched tasks; rows for every agent-written ledger. */
+  const [mode, setMode] = useState<"board" | "list">("list");
   /**
    * The board's own create dialog, for the native `tasks` ledger only.
    *
@@ -330,6 +332,13 @@ export function LedgersView({
 
   /** The task board, as opposed to a ledger a company declared. */
   const isBoard = ledger?.source === "native" && ledger.slug === BOARD_LEDGER;
+
+  // A view choice belongs to the ledger it describes. Returning to Tasks
+  // restores its dispatch board; opening Goals or Decisions makes the closing
+  // reason readable without first finding and changing this toggle.
+  useEffect(() => {
+    setMode(defaultLedgerMode(ledger));
+  }, [ledger?.slug, ledger?.source]);
 
   const taskById = useMemo(
     () => new Map(tasks.map((task) => [task.id, task])),
@@ -836,6 +845,7 @@ export function LedgersView({
                   <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-8"
+                    aria-label="Search ledger entries"
                     placeholder="Search every field"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -853,7 +863,7 @@ export function LedgersView({
                       this read `all` while the list under it read "Every
                       status", and a chosen board column read `in_progress`
                       beside columns headed "In progress". */}
-                  <SelectTrigger className="w-[12rem]">
+                  <SelectTrigger className="w-[12rem]" aria-label="Filter by status">
                     <SelectValue>
                       {statusFilterLabel(ledger, statusFilter)}
                     </SelectValue>
@@ -911,7 +921,8 @@ export function LedgersView({
                   indistinguishably — the read is filtered server-side. The two
                   are not the same claim, and saying the stronger one over a
                   ledger the nav is counting 14 rows for is simply false. */}
-              {read &&
+              {mode === "list" &&
+                read &&
                 read.entries.length === 0 &&
                 !reading &&
                 (emptyNotice ? (
@@ -1232,6 +1243,11 @@ function BoardMode({
             >
               {ownerOf(entry, ledger) || entry.id}
             </span>
+            {entry.closed && entry.fields.reason?.trim() && (
+              <span className="mt-2 block line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                {entry.fields.reason}
+              </span>
+            )}
           </button>
         );
       }}
@@ -1269,40 +1285,62 @@ function EntryCard({
   onDelete: () => void;
 }) {
   const writable = isWritable(ledger);
+  const columns = columnsOf(ledger);
   return (
     <Card className={cn(entry.closed && "opacity-75")}>
-      <CardContent className="space-y-2 p-4">
+      <CardContent
+        className="space-y-2 p-4"
+        data-testid={`ledger-entry-${entry.id}`}
+      >
         <div className="flex flex-wrap items-start gap-2">
-          <code className="text-xs text-muted-foreground">{entry.id}</code>
-          {entry.status && (
-            <Badge variant={entry.closed ? "secondary" : "default"}>
-              {entry.closed && <CheckCircle2 className="mr-1 size-3" />}
-              {entry.status}
-            </Badge>
-          )}
           {onOpen ? (
             <button
               type="button"
-              className="flex-1 text-left font-medium hover:underline"
+              className="min-w-0 flex-1 text-left font-medium hover:underline"
               onClick={onOpen}
+              data-testid="ledger-entry-title"
             >
               {entry.title}
             </button>
           ) : (
-            <span className="flex-1 font-medium">{entry.title}</span>
+            <span
+              className="min-w-0 flex-1 font-medium"
+              data-testid="ledger-entry-title"
+            >
+              {entry.title}
+            </span>
           )}
+          {entry.status && (
+            <Badge variant="secondary" data-testid="ledger-entry-status">
+              {entry.closed && <CheckCircle2 className="mr-1 size-3" />}
+              {labelFor(columns, entry.status)}
+            </Badge>
+          )}
+          <code
+            className="text-xs text-muted-foreground"
+            data-testid="ledger-entry-id"
+          >
+            {entry.id}
+          </code>
         </div>
 
-        <dl className="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[10rem_1fr]">
+        <dl className="grid max-w-3xl gap-x-4 gap-y-1 text-sm sm:grid-cols-[8rem_minmax(0,1fr)]">
           {ledger.fields
-            .filter((field) => field.role !== "id" && field.role !== "title")
+            .filter(
+              (field) =>
+                field.role !== "id" &&
+                field.role !== "title" &&
+                field.role !== "status",
+            )
             .map((field) => {
               const value = entry.fields[field.name];
               if (!value) return null;
               return (
                 <div key={field.name} className="contents">
                   <dt className="text-muted-foreground">{field.name}</dt>
-                  <dd className="whitespace-pre-wrap">{value}</dd>
+                  <dd className="whitespace-pre-wrap">
+                    {compactFieldValue(value)}
+                  </dd>
                 </div>
               );
             })}
@@ -1338,6 +1376,16 @@ function EntryCard({
       </CardContent>
     </Card>
   );
+}
+
+/** Keep an empty paragraph from turning a compact list row into a document.
+    Only the blank lines go: indentation and aligned columns inside a line are
+    part of what was recorded, so the row still renders with `pre-wrap`. */
+function compactFieldValue(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .join("\n");
 }
 
 function ComposeDialog({

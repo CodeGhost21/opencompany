@@ -60,6 +60,11 @@ function stubClient(): OpenCompanyClient & { puts: unknown[] } {
     listTeam: async () => [],
     get: async (path: string) =>
       path.endsWith("/wired-channels") ? { channels: [] } : [],
+    // The dialog's 700ms preflight debounce calls `validateWorkflow`, which
+    // POSTs the graph. A stub without this throws synchronously out of the
+    // timer when the test runs long enough for it to fire — an unhandled
+    // error that fails the whole `vitest run` despite every test passing.
+    post: async () => ({ valid: true }),
     put: async (_path: string, body: unknown) => {
       puts.push(body);
       return savedGraph();

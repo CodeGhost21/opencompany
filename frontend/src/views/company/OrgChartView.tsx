@@ -1262,6 +1262,7 @@ function Unplaced({ tree }: { tree: OrgTree }) {
   if (tree.unassigned.length === 0 && tree.people.length === 0) return null;
   return (
     <div className="space-y-4">
+      <h2 className="sr-only">People outside desks</h2>
       {tree.unassigned.length > 0 && (
         <section className="space-y-2">
           <h3 className="text-sm font-medium text-muted-foreground">Not on a desk</h3>
