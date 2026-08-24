@@ -1506,7 +1506,7 @@ async fn run_workflow(
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into(),
+            OpenCompanyError::NotFound(format!("workflow {wid}")),
         );
     }
 
@@ -1521,7 +1521,7 @@ async fn run_workflow(
         &wid,
     )?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into()
+        OpenCompanyError::NotFound(format!("workflow {wid}"))
     })?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -2120,7 +2120,7 @@ async fn fix_from_run(
     // escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into(),
+            OpenCompanyError::NotFound(format!("workflow {wid}")),
         );
     }
 
@@ -2161,7 +2161,7 @@ async fn fix_from_run(
         &wid,
     )?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into()
+        OpenCompanyError::NotFound(format!("workflow {wid}"))
     })?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
     // field on `WorkflowNodeSpec` (the builder never authors them — see its
