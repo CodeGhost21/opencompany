@@ -963,12 +963,19 @@ export interface AgentToolsDto {
   companyAllow: string[];
   /**
    * The ceiling contributed by the desks this agent sits on — the union of
-   * their `tools`, already narrowed by `companyAllow`. **Empty means no desk
-   * narrows anything** (the same empty-is-not-nothing trap `requested` carries),
-   * so a preview has to pick `companyAllow` when this is empty and this list
-   * when it is not.
+   * their `tools`, already narrowed by `companyAllow`. **Empty means the
+   * narrowed ceiling grants nothing**, not "no desk narrows anything" — see
+   * `deskCeilingActive`, which tells those apart.
    */
   deskAllow: string[];
+  /**
+   * Whether any desk this agent sits on states a `tools` ceiling. Distinct
+   * from `deskAllow`: a ceiling can be active yet narrow to an empty list
+   * (a desk whose only grant the company does not allow), and the preview
+   * must keep the desk level as the gate in that case instead of falling
+   * back to `companyAllow`.
+   */
+  deskCeilingActive: boolean;
   effective: string[];
 }
 
