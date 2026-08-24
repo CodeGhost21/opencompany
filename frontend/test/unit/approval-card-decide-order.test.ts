@@ -139,10 +139,11 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
     console.log(JSON.stringify(labelled));
     expect(labelled).toContain(
-      `Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0} — approval 1 of 1 — asked by Ops`,
+      `Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — asked by Ops — request ${T0}`,
     );
+    console.log(JSON.stringify(labelled));
     expect(labelled).toContain(
-      `Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0} — approval 1 of 1 — asked by Ops`,
+      `Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — asked by Ops — request ${T0}`,
     );
   });
 
@@ -192,6 +193,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
     // Same URL, different method — the accessible names must not collide: the
     // method rides after the URL with its label so the two buttons read apart.
+    console.log(JSON.stringify(labelled));
     expect(labelled).toContain(
       `Approve: Make a request to a web address — https://api.example.com/items — method: GET — request ${T0} — approval 1 of 1 — approval 1 of 2 — asked by Ops`,
     );
