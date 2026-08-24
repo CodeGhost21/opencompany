@@ -750,9 +750,10 @@ function Identity({
           <button
             type="button"
             onClick={onPickAvatar}
+            disabled={avatarBusy}
             aria-label="Change this teammate's icon"
             title="Change icon"
-            className="rounded-xl ring-2 ring-transparent transition-colors hover:ring-primary focus-visible:ring-primary focus-visible:outline-none"
+            className="rounded-xl ring-2 ring-transparent transition-colors hover:ring-primary focus-visible:ring-primary focus-visible:outline-none disabled:cursor-wait"
             data-testid="agent-avatar-pick"
           >
             <TeammateAvatar
