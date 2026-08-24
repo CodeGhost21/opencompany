@@ -3751,6 +3751,48 @@ mod tests {
         );
     }
 
+    /// A **routing** edit of a manifest teammate — a model or harness re-bind —
+    /// has to move the same axis for the same reason: the roster the harness
+    /// builds reads the override's routing fields, so a re-bind that moved
+    /// nothing would be silently ignored until the process restarted (issue
+    /// #1676 review note). `Some("")` (the stored "cleared" form) is a distinct
+    /// routing state from `None` ("never edited"), mirroring the resolver's
+    /// reset-to-blueprint contract.
+    #[test]
+    fn overlay_fingerprint_moves_on_a_model_or_harness_edit_of_a_manifest_teammate() {
+        use crate::ports::types::AgentOverride;
+        let edit = |model: Option<&str>, harness: Option<&str>| {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                model: model.map(str::to_string),
+                harness: harness.map(str::to_string),
+                ..Default::default()
+            }]
+        };
+        let none: Vec<AgentOverride> = Vec::new();
+
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            "a model re-bind must move the fingerprint or it is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            overlay_fingerprint(&[], &edit(None, Some("acp")), &[]),
+            "a harness re-bind must move it too"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edit(Some(""), None), &[]),
+            "an explicit model clear must not hash like an untouched teammate"
+        );
+        // The same edit twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[])
+        );
+    }
+
     /// Choosing or clearing a face writes an `AgentOverride` row whose only set
     /// field is `avatar` (a teammate with no other override). The fingerprints
     /// hash what a teammate *is*, never its face, so such a row must not move
