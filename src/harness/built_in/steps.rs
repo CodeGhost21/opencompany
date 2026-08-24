@@ -437,9 +437,10 @@ impl StepTrace {
             }
             // Every delta after the first in a run. It yields no NEW step — the
             // run already claimed one — but it does carry text, so in deep mode
-            // it re-emits the SAME ordinal with the accumulated reasoning. The
-            // store replaces on `(run_id, step_seq)`, so the row converges
-            // rather than stacking.
+            // it re-emits the SAME ordinal with the bytes accumulated since the
+            // previous flush. The first delta already left as its own emission,
+            // and the sink appends each flush to the stored prefix, so the row
+            // converges rather than duplicating.
             //
             // Re-emitting per delta would be one store write per token. Flushing
             // only when the run closes would lose the reasoning entirely if the
