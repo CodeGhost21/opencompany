@@ -37,10 +37,21 @@ interface SetupState {
    * the whole failure this flag exists to prevent.
    *
    * Losing it anyway (private mode, cleared storage) costs nothing worse than
-   * the operator reaching setup through the Team page's prompt, exactly as they
-   * did before. It can only ever *offer* something.
+   * the operator reaching setup through the Company page's prompt, exactly as
+   * they did before. It can only ever *offer* something.
    */
   resuming?: boolean;
+  /**
+   * The operator finished a fallback team, was sent to Settings to wire a
+   * model, and is owed a redesign on return.
+   *
+   * Set by the completion screen's "Add a model in Settings" action. Distinct
+   * from [`resuming`] because the two returns differ: a resume reopens the
+   * questions over an **unstaffed** company, while a redesign reopens over the
+   * standard team the first pass just created — and must replace it rather than
+   * stack a second one.
+   */
+  redesign?: boolean;
   at?: number;
 }
 
