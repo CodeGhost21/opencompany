@@ -472,25 +472,53 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// the chunk payload — so this walks RIFF chunks, never touching the encoded
 /// frame bytes, in the same spirit as [`image_dimensions`].
 ///
-/// Returns `None` when the bytes are not a WebP, or a WebP with no ANMF chunks
-/// (nothing to count).
-fn webp_animation_cost(bytes: &[u8]) -> Option<u64> {
+/// Returns `Ok(None)` when the bytes are not a WebP, or a WebP with no ANMF
+/// chunks (nothing to count). Returns `Err` when an animated WebP's chunk
+/// stream is cut off: a viewer decodes the ANMF frames that are present, so a
+/// truncated animation must be held to [`MAX_AVATAR_ANIMATED_PIXELS`] just like
+/// a complete one.
+fn webp_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
     if !(bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP") {
-        return None;
+        return Ok(None);
     }
     let mut cost: u64 = 0;
     let mut saw_frame = false;
     let mut i = 12;
     while i + 8 <= bytes.len() {
-        let fourcc = bytes.get(i..i + 4)?;
-        let size = u32::from_le_bytes(bytes.get(i + 4..i + 8)?.try_into().ok()?) as usize;
-        let data = bytes.get(i + 8..i + 8 + size)?;
+        // A chunk header cut off mid-file. Once a frame is on the table the
+        // browser has already decoded it, so truncation here is a truncated
+        // animation; before any frame there is nothing animated to count.
+        let Some(fourcc) = bytes.get(i..i + 4) else {
+            return if saw_frame {
+                Err(truncated_animation())
+            } else {
+                Ok(None)
+            };
+        };
+        let Some(size) = bytes.get(i + 4..i + 8).and_then(|b| b.try_into().ok()) else {
+            return if saw_frame {
+                Err(truncated_animation())
+            } else {
+                Ok(None)
+            };
+        };
+        let size = u32::from_le_bytes(size) as usize;
+        let Some(data) = bytes.get(i + 8..i + 8 + size) else {
+            // The chunk's declared payload is not all present. A truncated
+            // ANMF is itself proof of animation — the fourcc names a frame —
+            // so it is refused even as the first frame.
+            return if saw_frame || fourcc == b"ANMF" {
+                Err(truncated_animation())
+            } else {
+                Ok(None)
+            };
+        };
         if fourcc == b"ANMF" {
             // A frame whose payload opens with X(3) + Y(3), then the 24-bit
             // `width−1` and `height−1` at 6..9 and 9..12. A shorter ANMF cannot
             // name its rectangle; refuse rather than misread it.
             if data.len() < 12 {
-                return None;
+                return Err(truncated_animation());
             }
             saw_frame = true;
             let frame_w =
@@ -501,7 +529,7 @@ fn webp_animation_cost(bytes: &[u8]) -> Option<u64> {
         }
         i += 8 + size + (size & 1);
     }
-    saw_frame.then_some(cost)
+    Ok(saw_frame.then_some(cost))
 }
 
 /// The total decoded area an APNG repaints in one full cycle.
