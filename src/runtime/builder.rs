@@ -6558,6 +6558,7 @@ needs_reason = true
             description: None,
             tools: None,
             instructions: None,
+            ..Default::default()
         });
         record.retire_agent("cto");
         store.save(&record).await.unwrap();

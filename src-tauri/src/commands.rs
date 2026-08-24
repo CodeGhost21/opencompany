@@ -471,10 +471,24 @@ pub async fn oc_acp_confirm_harness(
     state: tauri::State<'_, crate::AppHandleState>,
     id: String,
 ) -> Result<crate::acp::discovery::ConfirmedHarness, String> {
-    // Probed inside the shell's own data dir rather than a scratch temp: an
-    // agent that inspects its working directory on startup should see a
-    // stable, ordinary place, and this leaves nothing behind to clean up.
-    Ok(crate::acp::discovery::confirm(&id, &state.data_dir).await)
+    // A dedicated empty directory, not the data root itself.
+    //
+    // Still stable and ordinary — an agent that inspects its working directory
+    // on startup sees a real place, and nothing is left behind to clean up —
+    // but no longer the root holding every company's journal, ledger and
+    // derived state. These CLIs read their working directory on startup
+    // looking for project configuration and repository markers, and pointing
+    // one at the whole data root hands it that surface for no benefit the
+    // probe actually needs.
+    let cwd = state.data_dir.join("acp-probe");
+    if let Err(error) = std::fs::create_dir_all(&cwd) {
+        // Not fatal: the probe only needs *a* directory. Falling back keeps a
+        // read-only or full disk from turning every harness into "won't start"
+        // when the real answer has nothing to do with the harness.
+        tracing::debug!(%error, "could not create the ACP probe directory");
+        return Ok(crate::acp::discovery::confirm(&id, &state.data_dir).await);
+    }
+    Ok(crate::acp::discovery::confirm(&id, &cwd).await)
 }
 
 /// Installs (or updates) the ACP adapter this app owns for one harness.
@@ -495,31 +509,32 @@ pub async fn oc_acp_confirm_harness(
 /// install rather than as a collision.
 #[tauri::command]
 pub async fn oc_acp_install_harness(id: String) -> Result<(), String> {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::Mutex;
 
-    static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let in_flight = IN_FLIGHT.get_or_init(Default::default);
+    /// Serialises **every** install, not one per harness.
+    ///
+    /// Both adapters install into the same `npm --prefix` root, so two
+    /// concurrent `npm install` runs there interleave their writes to one
+    /// `node_modules` and one lockfile. An earlier version of this guarded
+    /// per-id so Claude's install would not block Codex's — which is exactly
+    /// the case that corrupts the tree, since those are the two that share the
+    /// prefix. The wait is seconds and the button is per-row, so the cost of
+    /// serialising is a queue nobody notices.
+    ///
+    /// A `tokio::sync::Mutex` rather than the `std` one because it is held
+    /// across an await. The guard also removes the need to un-register an id
+    /// by hand: a cancelled or panicking install drops the guard and releases
+    /// the lock, where the previous insert/remove pair leaked the id forever
+    /// and made every later attempt report "already running".
+    static INSTALLING: Mutex<()> = Mutex::const_new(());
 
     let harness = crate::acp::discovery::HARNESSES
         .iter()
         .find(|h| h.id == id)
         .ok_or_else(|| format!("`{id}` is not a harness this build knows"))?;
 
-    // A guard rather than holding the lock across the await: the install takes
-    // seconds, and a held `std::sync::Mutex` would serialise *different*
-    // harnesses too — installing Claude's adapter must not block Codex's.
-    {
-        let mut held = in_flight.lock().map_err(|_| "install lock poisoned")?;
-        if !held.insert(id.clone()) {
-            return Err(format!("an install of {id} is already running"));
-        }
-    }
-    let result = crate::acp::tools::install(harness).await;
-    if let Ok(mut held) = in_flight.lock() {
-        held.remove(&id);
-    }
-    result
+    let _guard = INSTALLING.lock().await;
+    crate::acp::tools::install(harness).await
 }
 
 #[cfg(test)]

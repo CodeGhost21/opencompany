@@ -55,7 +55,16 @@ fn model_env_var(agent: &str) -> Option<&'static str> {
 /// One spawned local-transport ACP harness, serving every teammate bound to
 /// it.
 pub struct LocalAcpAgent {
-    command: &'static str,
+    /// The adapter to spawn, resolved the same way the readiness probe
+    /// resolves it: the copy this app installed first, then `PATH`.
+    ///
+    /// Owned rather than `&'static str` because an app-owned install is an
+    /// absolute path under the data directory, not a name from the catalogue.
+    /// Spawning the catalogue name here — which is what this did — meant the
+    /// Install button produced an adapter the probe reported as `Ready` and
+    /// that no real turn ever used: the turn went to `PATH`, and on a machine
+    /// whose only adapter was the installed one it found nothing at all.
+    command: String,
     args: Vec<String>,
     env: Vec<(String, String)>,
     /// The desired model, kept regardless of whether an env var already
@@ -107,7 +116,9 @@ impl LocalAcpAgent {
         }
 
         Ok(Self {
-            command: def.command,
+            command: crate::acp::discovery::resolve_adapter(def)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| def.command.to_string()),
             args: def.args.iter().map(|a| a.to_string()).collect(),
             env,
             model: model.map(str::to_string),
@@ -157,7 +168,7 @@ impl LocalAcpAgent {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         let client = AcpClient::spawn(
-            self.command,
+            &self.command,
             &args,
             &self.workspace_root,
             &env,

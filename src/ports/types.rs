@@ -2865,6 +2865,18 @@ pub struct AgentOverride {
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// The model this teammate runs, as an overlay on the blueprint.
+    ///
+    /// `Some("")` is the stored form of "cleared", matching `description`:
+    /// the write path already treats a blank and an absent value as one state,
+    /// and a distinct `None` here would mean "never edited" instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The harness this teammate is bound to, as an overlay on the blueprint.
+    ///
+    /// Cleared the same way as [`Self::model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -3986,6 +3998,12 @@ impl CompanyRecord {
             if entry.instructions.is_some() {
                 held.instructions = entry.instructions;
             }
+            if entry.model.is_some() {
+                held.model = entry.model;
+            }
+            if entry.harness.is_some() {
+                held.harness = entry.harness;
+            }
             return;
         }
         self.overlay_agent_edits.push(entry);
@@ -4041,6 +4059,16 @@ impl CompanyRecord {
         }
         if let Some(instructions) = entry.instructions.as_ref() {
             merged.prompt = Some(instructions.clone());
+        }
+        // Issue #1245. Empty means cleared, as for `description`: an operator
+        // moving a teammate back to the company default stores a blank rather
+        // than deleting the row, so the field stops tracking the blueprint
+        // only while an override actually exists.
+        if let Some(model) = entry.model.as_ref() {
+            merged.model = Some(model.clone()).filter(|text| !text.is_empty());
+        }
+        if let Some(harness) = entry.harness.as_ref() {
+            merged.harness = Some(harness.clone()).filter(|text| !text.is_empty());
         }
         std::borrow::Cow::Owned(merged)
     }

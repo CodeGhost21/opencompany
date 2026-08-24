@@ -761,7 +761,19 @@ export function AgentDetailView({
                 setModelDraft(agent.model ?? "");
                 setEditingHarness(true);
               }}
-              onHarnessChange={setHarnessDraft}
+              onHarnessChange={(next) => {
+                setHarnessDraft(next);
+                // A model override only means anything against a harness that
+                // can be told which model to run. Switching to a `built_in`
+                // one — the host's own engine, whose model is the host's to
+                // choose — must drop the override rather than save a value
+                // that will silently never apply. Leaving it also made the
+                // form claim a binding it was not going to honour.
+                const bound = harnesses.find((h) => h.id === next);
+                if (next !== HARNESS_DEFAULT && bound && bound.kind !== "acp") {
+                  setModelDraft("");
+                }
+              }}
               onModelChange={setModelDraft}
               onCancel={() => setEditingHarness(false)}
               onSave={() => void saveHarnessAndModel()}

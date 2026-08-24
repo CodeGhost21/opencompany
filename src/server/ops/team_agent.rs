@@ -306,11 +306,12 @@ pub(super) fn declared_tier(record: &CompanyRecord, agent_id: &str) -> Option<St
 /// as `declared_tier`'s own contract: this is what the roster *wrote*, not a
 /// resolved answer.
 pub(super) fn declared_model(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    // Through `effective_agent`, not `manifest.agents` directly: a blueprint
+    // teammate's edit is stored as an overlay, and reading the raw manifest
+    // row skips it. That is what made a `PATCH` here look successful and read
+    // back at the old value — the write landed, this never looked at it.
     record
-        .manifest
-        .agents
-        .iter()
-        .find(|agent| agent.id == agent_id)
+        .effective_agent(agent_id)
         .and_then(|agent| agent.model.clone())
         .or_else(|| {
             record
@@ -330,11 +331,12 @@ pub(super) fn declared_model(record: &CompanyRecord, agent_id: &str) -> Option<S
 /// [`declared_tier`], every teammate resolves to *some* harness, this just
 /// says whether it named one explicitly.
 pub(super) fn declared_harness(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    // Through `effective_agent`, not `manifest.agents` directly: a blueprint
+    // teammate's edit is stored as an overlay, and reading the raw manifest
+    // row skips it. That is what made a `PATCH` here look successful and read
+    // back at the old value — the write landed, this never looked at it.
     record
-        .manifest
-        .agents
-        .iter()
-        .find(|agent| agent.id == agent_id)
+        .effective_agent(agent_id)
         .and_then(|agent| agent.harness.clone())
         .or_else(|| {
             record
@@ -721,6 +723,18 @@ async fn edit_agent(
                     .map(|text| text.trim().to_string())
                     .unwrap_or_default(),
             );
+        }
+        // Issue #1245's per-agent follow-up. These were advertised as editable
+        // and accepted by this handler, but the override built here carried
+        // only the four fields above — so a blueprint teammate's harness or
+        // model edit returned 200 and was then read back at its old value,
+        // with nothing anywhere reporting the loss. Blank is the stored form
+        // of "cleared", exactly as for `description`.
+        if let Some(model) = model {
+            entry.model = Some(model.unwrap_or_default());
+        }
+        if let Some(harness) = harness {
+            entry.harness = Some(harness.unwrap_or_default());
         }
         record.upsert_agent_override(entry);
     } else {
@@ -2280,6 +2294,65 @@ agent = "claude"
         assert_eq!(status, StatusCode::OK, "{set}");
         assert_eq!(set["harness"], "laptop");
         assert_eq!(set["model"], "claude-opus-4-5");
+    }
+
+    /// The same edit against a **manifest** teammate, which is the common case
+    /// and the one that silently did nothing.
+    ///
+    /// Both fields were advertised in `editable` and accepted with a 200, but
+    /// the override written for a blueprint agent carried only name, role,
+    /// tools and description — so the values were dropped on the floor and the
+    /// next read returned the blueprint's. Nothing surfaced the loss: the
+    /// response body echoed the request, so it looked saved.
+    ///
+    /// Asserted through a fresh `GET` rather than the `PATCH` response,
+    /// because echoing the request back is precisely what made the bug
+    /// invisible.
+    #[tokio::test]
+    async fn harness_and_model_persist_for_a_manifest_teammate() {
+        let home_dir = home();
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "main"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML).await;
+
+        let (status, set) = patch_agent(
+            &state,
+            "ceo",
+            json!({"harness": "laptop", "model": "claude-opus-4-5"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert_eq!(reread["harness"], "laptop", "{reread}");
+        assert_eq!(reread["model"], "claude-opus-4-5", "{reread}");
+
+        // And clearing returns it to the blueprint rather than sticking.
+        let (status, cleared) =
+            patch_agent(&state, "ceo", json!({"harness": null, "model": null})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        let (_, after) = get_agent(&state, "ceo").await;
+        assert!(after["harness"].is_null(), "{after}");
+        assert!(after["model"].is_null(), "{after}");
     }
 
     /// **Review of #745.** An unknown id answers the same way whether or not

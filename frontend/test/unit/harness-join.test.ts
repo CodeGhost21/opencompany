@@ -100,6 +100,16 @@ describe("joining what the company can bind against what this machine has", () =
     expect(readinessNote(row)).toContain("remote machine");
   });
 
+  it("joins a declared harness by its ACP agent, not its own id", () => {
+    // A manifest names its harnesses whatever it likes; this machine's probe
+    // catalogue only knows `claude` and `codex`. Keying the join on the
+    // harness id makes a perfectly ready CLI read as "Desktop only".
+    const [row] = joinHarnesses([cli({ id: "laptop", agent: "claude" })], [probe()]);
+    expect(row.id).toBe("laptop");
+    expect(row.readiness).toEqual({ state: "ready" });
+    expect(isUsableHere(row)).toBe(true);
+  });
+
   it("falls back to the raw id when this machine has no friendly name", () => {
     const [row] = joinHarnesses([cli()], []);
     expect(row.label).toBe("claude");

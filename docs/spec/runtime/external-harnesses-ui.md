@@ -21,9 +21,9 @@ nothing about the company. The console joins them on the harness **id**.
 
 That the join works is deliberate, not luck: the manifest vocabulary
 (`ACP_AGENTS`) and the discovery catalogue are the same three ids —
-`claude`, `codex`, `goose`.
+`claude`, `codex`.
 
-```
+```text
 GET {scope}/harnesses  ──┐
    declared + detected   ├──▶  joinHarnesses()  ──▶  External harnesses page
 oc_acp_harnesses ────────┘        (lib/harnesses.ts)
@@ -62,7 +62,7 @@ actually being there. The page reports; it does not enrol.
 
 There *is* an Install action, and it is not the same thing. It enrols nothing
 and records no state — it fetches the ACP adapter, then re-runs the same probe
-every other row runs. Afterwards the harness is usable for exactly the reason
+every other row runs. Afterward the harness is usable for exactly the reason
 it always was: something is installed and signed in on this machine.
 
 ---

@@ -242,6 +242,11 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         description: Some(String::new()),
         tools: Some(vec!["docs.*".to_string()]),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
+        // Set rather than defaulted: this fixture exists to prove a store
+        // round-trips the whole override, so every field it gains needs a real
+        // value here or the new ones are covered by nothing.
+        model: Some("claude-opus-4-5".to_string()),
+        harness: Some("laptop".to_string()),
     }]
 }
 

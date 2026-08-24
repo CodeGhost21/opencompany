@@ -72,7 +72,13 @@ export function joinHarnesses(
     // all — reporting either against this machine's PATH would be a category
     // error, so neither gets a readiness.
     const probeable = harness.kind === "acp" && harness.transport === "local";
-    const found = probeable ? byId.get(harness.id) : undefined;
+    // Keyed on the **ACP agent**, not the harness id. They coincide for a
+    // detected row (the host synthesizes it named after the agent) but not for
+    // a declared one: a manifest is free to write
+    // `[[harness]] id = "laptop", agent = "claude"`, and this machine's probe
+    // catalogue only ever knows `claude`. Keying on the id left that row
+    // reading "Desktop only" on a machine where Claude Code was ready.
+    const found = probeable ? byId.get(harness.agent ?? harness.id) : undefined;
     return {
       id: harness.id,
       label: found?.label ?? harness.id,

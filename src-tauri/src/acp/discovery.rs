@@ -238,7 +238,7 @@ pub struct HarnessModel {
 /// |---|---|---|
 /// | option key | `configId` | `id` (not the spec's name) |
 /// | other categories present | no | `mode`, `thought_level` |
-/// | current model | a synthetic `default` entry leads the list | `currentValue` |
+/// | current model | `currentValue`, whose value is a synthetic `default` entry that leads the list | `currentValue` |
 ///
 /// Empty when the adapter advertises no model category at all, which is a
 /// legitimate answer — not every ACP agent lets its model be chosen.

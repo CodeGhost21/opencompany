@@ -458,6 +458,7 @@ mod tests {
             description: None,
             tools: None,
             instructions: None,
+            ..Default::default()
         });
         store.save(&record).await.expect("save");
 
