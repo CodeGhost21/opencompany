@@ -239,6 +239,32 @@ export function resolveAvatarSrc(
   return pending;
 }
 
+/**
+ * Drops one face from the cache and revokes its object URL, so a node deleted
+ * from the workspace stops being drawn on the next render.
+ *
+ * A chosen face references a workspace node (`blob:<nodeId>`); without this
+ * the cache would keep drawing a face whose bytes were just deleted until the
+ * cap evicted it or the tab reloaded. The workspace view calls it for every
+ * node it deletes — including the contents of a deleted folder — and the next
+ * resolve for that node 404s and falls back to the tone tile, which is the
+ * degrade {@link resolveAvatarSrc} documents. A face deleted while still in
+ * flight is handled the same way: the pending entry is dropped, and when its
+ * fetch resolves the guard inside `resolveAvatarSrc` revokes the URL and
+ * returns `null`.
+ */
+export function forgetAvatarNode(
+  client: OpenCompanyClient,
+  company: string | null,
+  nodeId: string,
+): void {
+  const key = `${client.baseUrl}|${company ?? ""}|${nodeId}`;
+  const url = blobUrlValues.get(key);
+  if (url) URL.revokeObjectURL(url);
+  blobUrlValues.delete(key);
+  blobUrls.delete(key);
+}
+
 /** What `POST …/avatars` answers with. */
 export interface UploadedAvatar {
   /** The reference to store — `blob:<nodeId>`. */
