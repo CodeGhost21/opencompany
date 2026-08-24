@@ -122,7 +122,7 @@ async fn archived_traces(company: ScopedCompany) -> Result<Json<Vec<TraceEntry>>
     })?;
     // Newest-first, capped at the same window the archive tier itself keeps.
     // The provider read has no limit argument, so the sort-and-tail happens
-    // here rather than in the facade.
+    // here as well as in the facade.
     traces.sort_by(|a, b| {
         a.at_millis
             .cmp(&b.at_millis)
