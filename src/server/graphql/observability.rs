@@ -247,9 +247,10 @@ impl AgentRunGql {
 /// The scrubbed skeleton is the primary answer, so a failure to read it must
 /// reach the client rather than masquerade as "no steps".
 ///
-/// `may_read_deep` is the principal's [`may_read_deep_trace`] verdict: the deep
-/// half carries unredacted secrets, so a caller who may not read them is not
-/// even given a store read that would be discarded. `None` for that caller is
+/// `may_read_deep` is the principal's [`may_read_deep_trace`] verdict AND the
+/// query's selection: the deep half carries unredacted secrets, so a caller who
+/// may not read them — or who did not select `steps.deep` — is not even given a
+/// store read that would be discarded. `None` for such a caller is
 /// indistinguishable from "no deep trace recorded", which is the honest answer
 /// to a reader who is not entitled to one.
 ///
