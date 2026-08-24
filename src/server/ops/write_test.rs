@@ -4947,7 +4947,7 @@ async fn task_discussion_posts_persist_and_are_scoped_to_their_card() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(posted["text"], "blocked on the API key");
-    assert_eq!(posted["author"], "harness-admin");
+    assert_eq!(posted["author"], "Harness Admin");
 
     for (task, text) in [
         ("t-1", "unblocked, the key was rotated"),
