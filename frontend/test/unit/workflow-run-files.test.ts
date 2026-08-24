@@ -40,6 +40,51 @@ function filesClient(
   } as unknown as OpenCompanyClient;
 }
 
+/** A client whose `get` answers nothing until the test settles it, in order —
+ * so a test can arrange the exact interleaving of two requests and prove the
+ * stale one's late settle is dropped (issue #1693). */
+function deferredFilesClient(deferred: {
+  resolve: (rows: RunArtifactRow[]) => void;
+  reject: (err: unknown) => void;
+}[]): OpenCompanyClient {
+  return {
+    scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+    get: async <T>(path: string): Promise<T> => {
+      return new Promise<T>((resolve, reject) => {
+        deferred.push({
+          resolve: resolve as (rows: RunArtifactRow[]) => void,
+          reject,
+        });
+        void path;
+      });
+    },
+  } as unknown as OpenCompanyClient;
+}
+
+/** Re-renders the same root with a different company/runId but the same
+ * `run.seq` — the exact way `WorkflowsView` reuses a row on a company switch —
+ * passing through the client so the deferred request queue keeps accumulating. */
+async function swapScope(
+  client: OpenCompanyClient,
+  company: string,
+  runId: string,
+): Promise<void> {
+  await act(async () => {
+    root.render(
+      createElement(RunHistoryPanel, {
+        client,
+        company,
+        runs: [completedRun(runId)],
+        graph: null,
+        workflowName: "Launch",
+        onClose: () => {},
+        selectedRunSeq: null,
+        onSelectRun: () => {},
+      }),
+    );
+  });
+}
+
 /** A completed, quiet run — the compact row the files section hangs off. */
 function completedRun(runId: string | undefined): WorkflowRunOutcome {
   return {
@@ -242,5 +287,98 @@ describe("run row — files associated (issue #1684)", () => {
     expect(entries.length).toBe(1);
     expect(entries[0]?.textContent).toContain("Globex launch spec");
     expect(entries[0]?.textContent).not.toContain("Acme");
+  });
+
+  it("drops a late success from a superseded scope (issue #1693)", async () => {
+    // The reset-then-refetch path fixes the cached-row leak, but the OLD
+    // request is still in flight when the new scope's request starts. If the
+    // old one resolves last, its `.then` must not write the previous scope's
+    // files into the reused row.
+    const deferred: {
+      resolve: (rows: RunArtifactRow[]) => void;
+      reject: (err: unknown) => void;
+    }[] = [];
+    const client = deferredFilesClient(deferred);
+    const acmeFile: RunArtifactRow = { ...FILE, title: "Acme launch spec" };
+    const globexFile: RunArtifactRow = {
+      ...FILE,
+      taskId: "t-b",
+      artifactId: "art-b1",
+      title: "Globex launch spec",
+    };
+
+    await renderPanel(completedRun("acme-run-1"), client);
+    await expandFiles();
+    // Request 1 (acme) is in flight, unresolved.
+    expect(deferred.length).toBe(1);
+
+    // Same seq, different company + runId: the reset effect starts request 2
+    // (globex) while request 1 is still pending.
+    await swapScope(client, "globex", "globex-run-1");
+    expect(deferred.length).toBe(2);
+
+    // The OLD request settles LAST — the race. Its rows are dropped: the row
+    // is still waiting on the globex request, so the acme file must not
+    // appear.
+    await act(async () => {
+      deferred[0].resolve([acmeFile]);
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-run-file"]'),
+    ).toBeNull();
+
+    // The current request settles normally and its files render.
+    await act(async () => {
+      deferred[1].resolve([globexFile]);
+    });
+    const entries = container.querySelectorAll(
+      '[data-testid="workflow-run-file"]',
+    );
+    expect(entries.length).toBe(1);
+    expect(entries[0]?.textContent).toContain("Globex launch spec");
+    expect(entries[0]?.textContent).not.toContain("Acme");
+  });
+
+  it("drops a late failure from a superseded scope (issue #1693)", async () => {
+    const deferred: {
+      resolve: (rows: RunArtifactRow[]) => void;
+      reject: (err: unknown) => void;
+    }[] = [];
+    const client = deferredFilesClient(deferred);
+    const globexFile: RunArtifactRow = {
+      ...FILE,
+      taskId: "t-b",
+      artifactId: "art-b1",
+      title: "Globex launch spec",
+    };
+
+    await renderPanel(completedRun("acme-run-1"), client);
+    await expandFiles();
+    await swapScope(client, "globex", "globex-run-1");
+    expect(deferred.length).toBe(2);
+
+    // The current (globex) request succeeds first…
+    await act(async () => {
+      deferred[1].resolve([globexFile]);
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-run-file"]')
+        ?.textContent,
+    ).toContain("Globex launch spec");
+
+    // …then the superseded (acme) request FAILS late. Without the scope guard
+    // its `.catch` flips the row to the error state over an already-successful
+    // render; the guard must drop it, leaving the error line absent and the
+    // globex files in place.
+    await act(async () => {
+      deferred[0].reject(new Error("late acme failure"));
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-run-files-error"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-run-file"]')
+        ?.textContent,
+    ).toContain("Globex launch spec");
   });
 });

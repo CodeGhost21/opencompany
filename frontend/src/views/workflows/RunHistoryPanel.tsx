@@ -844,19 +844,36 @@ function RunFilesSection({
   // a reopen can retry.
   const requested = useRef(false);
   const detailsRef = useRef<HTMLDetailsElement>(null);
+  // The scope the most recent request was made for, kept current on every
+  // render. A response that settles after a company/runId change can compare
+  // the scope it was fired for against this and recognise itself as stale —
+  // the race in issue #1693 where the previous request's `.then`/`.catch`
+  // would otherwise overwrite the new scope's state.
+  const scopeRef = useRef({ company, runId });
+  scopeRef.current = { company, runId };
 
   const load = useCallback(() => {
     if (requested.current) return;
     requested.current = true;
     setLoading(true);
     setError(false);
+    const scope = { company, runId };
+    const stale = () =>
+      scopeRef.current.company !== scope.company ||
+      scopeRef.current.runId !== scope.runId;
     fetchRunArtifacts(client, company, runId)
-      .then((rows) => setFiles(rows))
+      .then((rows) => {
+        if (stale()) return;
+        setFiles(rows);
+      })
       .catch(() => {
+        if (stale()) return;
         requested.current = false;
         setError(true);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!stale()) setLoading(false);
+      });
   }, [client, company, runId]);
 
   // `RunHistoryPanel` keys each row only by `run.seq` (not by company), and
