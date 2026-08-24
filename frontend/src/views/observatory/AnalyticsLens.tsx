@@ -66,7 +66,8 @@ export function AnalyticsLens({ runs }: { runs: ObservatoryRun[] }) {
         <CardHeader>
           <CardTitle className="text-base">Tokens per agent</CardTitle>
           <CardDescription>
-            Input, output and cached, summed across every attempt.
+            Input and output are additive; cached input is shown separately because it is
+            already included in input.
           </CardDescription>
         </CardHeader>
         <CardContent>
