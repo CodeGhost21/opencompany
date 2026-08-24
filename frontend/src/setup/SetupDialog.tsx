@@ -501,7 +501,18 @@ export function SetupDialog({
         }
       }
       await new Promise((resolve) => setTimeout(resolve, REVEAL_MS * 1.5));
-      if (!cancelled) setPhase({ kind: "done", agents, fallback });
+      if (cancelled) return;
+      if (replacing) {
+        // The persisted redesign debt still names the team this run replaced —
+        // rows the sweep above just deleted. Settle it before the completion
+        // screen is visible: a designed replacement pays the debt, while a
+        // replacement that fell back again is still owed but now names the new
+        // fallback's rows. A reload on the completion screen must not reopen
+        // redesign against a boundary that no longer exists, or the next pass
+        // would create a roster and sweep nothing — a duplicate team.
+        onReplacementComplete?.(fallback ? createdIds.current : null);
+      }
+      setPhase({ kind: "done", agents, fallback });
     })();
 
     return () => {
