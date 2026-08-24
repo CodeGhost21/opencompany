@@ -380,16 +380,27 @@ export function ChatView({
    * showing an operator a control they cannot use is the only thing this
    * prevents.
    */
+  // Only the newest load may write, exactly as `loadDesks` guards its own runs.
+  // `fetchMe` and `listPeople` can overlap — a scope change while a request is
+  // merely slow — and a stale answer landing last would wear the previous
+  // company's face on your own lines. The face is cleared *before* the fetch so
+  // a slow request can never pin an old avatar across a scope change; the
+  // timeline falls back to the name-seeded mascot meanwhile.
+  const viewerRun = useRef(0);
   const loadViewer = useCallback(async () => {
+    const run = ++viewerRun.current;
+    setYouAvatar(undefined);
     let admin = false;
     try {
       const who = await fetchMe(client, company);
+      if (run !== viewerRun.current) return;
       admin = who.role === "admin";
       // Your own face, so your lines in a busy channel are yours at a glance.
       // Read from the same call that resolves your role — there is no second
       // round trip for it, and no way for the two to disagree about who you are.
       setYouAvatar(personAvatar(who));
     } catch {
+      if (run !== viewerRun.current) return;
       // No user plane on this host, or not signed in — treat as non-admin, and
       // leave the composer's own lines on the name-seeded fallback.
     }
@@ -399,8 +410,11 @@ export function ChatView({
       return;
     }
     try {
-      setPeople(await listPeople(client, company));
+      const people = await listPeople(client, company);
+      if (run !== viewerRun.current) return;
+      setPeople(people);
     } catch {
+      if (run !== viewerRun.current) return;
       // Attribution falls back to "an admin"; not worth a toast.
       setPeople([]);
     }
