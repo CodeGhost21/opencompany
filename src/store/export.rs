@@ -725,10 +725,23 @@ pub async fn import_bundle(
     context: Arc<dyn ContextStore>,
     facts: Option<Arc<dyn FactStore>>,
 ) -> Result<CompanyId> {
+    import_bundle_with_scopes(src, store, events, memory, context, facts, None).await
+}
+
+/// Imports a bundle while restoring its optional provider archive tier.
+pub async fn import_bundle_with_scopes(
+    src: &Path,
+    store: Arc<dyn CompanyStore>,
+    events: Arc<dyn EventLog>,
+    memory: Arc<dyn MemoryStore>,
+    context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
+    scopes: Option<Arc<dyn MemoryScopes>>,
+) -> Result<CompanyId> {
     let contents = BundleContents::read_from_dir(src).await?;
     let id = contents.id.clone();
     contents
-        .write_via_ports(store, events, memory, context, facts)
+        .write_via_ports(store, events, memory, context, facts, scopes)
         .await?;
     Ok(id)
 }
