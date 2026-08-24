@@ -734,6 +734,20 @@ export function ChatView({
         // below reads the response's shape and never this argument.
         true,
       );
+      // A company switch while the POST was in flight invalidates the
+      // result: the reply belongs to the old company and must not
+      // repopulate the new company's (just-cleared) transcript. Skip the
+      // transcript writes; route the shell's send bracket by the answer's
+      // own shape so a detached turn keeps its held frame — the reply is
+      // durably journaled in the old company's history and rehydrates when
+      // the operator returns.
+      if (companyRef.current !== company) {
+        if (isDetachedChat(answer)) {
+          outcome = "detached";
+          if (chatId) onSendDetached?.(chatId, answer.turnId);
+        }
+        return;
+      }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
       // journaled at accept time, so its durable id is a fact within
