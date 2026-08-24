@@ -421,19 +421,6 @@ fn approved_ids(trigger_input: &Value) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// The namespaced prefix that turns a node id inside a child into the id the
-/// parent run's approval list carries — `sub::` for `sub::work`, `sub::nested::`
-/// for `sub::nested::work`.
-fn namespaced_prefix(node_id: &str) -> String {
-    format!(
-        "{}::",
-        node_id
-            .rsplit_once(GATE_NAMESPACE)
-            .map(|(prefix, _)| prefix)
-            .unwrap_or("")
-    )
-}
-
 /// The outward calls in `child` that run before `gate` and are not themselves
 /// gated.
 ///
