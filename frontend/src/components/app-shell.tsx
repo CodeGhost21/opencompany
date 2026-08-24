@@ -1291,7 +1291,11 @@ export function AppShell({
       // simply waits rather than dropping the clear.
       const clearing = historyPending
         ? []
-        : mentionsToClear(mentionFeedRef.current, channelId);
+        : mentionsToClear(
+            mentionFeedRef.current,
+            channelId,
+            chatChannelByThread.main,
+          );
       if (clearing.length > 0) {
         // Optimistic, so the badge goes at once; the next poll reconciles.
         setMentionFeed((current) =>
