@@ -2120,6 +2120,7 @@ export function AppShell({
               onSendEnd={onSendEnd}
               onSendDetached={onSendDetached}
               onSendFailed={onSendFailed}
+              onSendStale={onSendStale}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
               unread={unread}
