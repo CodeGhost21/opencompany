@@ -92,6 +92,15 @@ export function mentionsToClear(
   replyParents: ReadonlyMap<string, string> = new Map(),
   /** The thread panel currently open, or `null` when none is. */
   openThreadId: string | null = null,
+  /**
+   * The set of all message ids (`h<seq>`) in the currently loaded transcript
+   * for this channel. When provided, a mention whose subject message is absent
+   * from this set — outside the history window, or history hydration failed —
+   * is not cleared, because the person was never shown the text that mentioned
+   * them. Without this, the function cannot distinguish "a top-level message
+   * rendered on screen" from "a message that was never loaded" (Codex P1).
+   */
+  loadedMessageIds: ReadonlySet<string> | undefined = undefined,
 ): string[] {
   return notifications
     .filter((n) => {
@@ -122,11 +131,15 @@ export function mentionsToClear(
       // channel is open — clearing it would lose the summons without the
       // person ever seeing it. The notification names the message by its host
       // sequence (`subjectId`); the loaded transcript's reply map keys by the
-      // console's `h<seq>` id, so the two meet through `hostMessageId`. A
-      // message absent from the map is either top-level or outside the loaded
-      // window, and clears as it always did.
-      const replyParent = replyParents.get(hostMessageId(n.subjectId));
+      // console's `h<seq>` id, so the two meet through `hostMessageId`.
+      const consoleId = hostMessageId(n.subjectId);
+      const replyParent = replyParents.get(consoleId);
       if (replyParent !== undefined && replyParent !== openThreadId) return false;
+      // When the loaded transcript's message set is known, require the subject
+      // to be present — a message outside the history window (or one that
+      // hydration failed to fetch) was never displayed, and clearing its
+      // mention would lose the summons with nothing left to notice it by.
+      if (loadedMessageIds !== undefined && !loadedMessageIds.has(consoleId)) return false;
       return true;
     })
     .map((n) => n.id);
