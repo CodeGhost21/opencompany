@@ -185,32 +185,19 @@ pub fn directory(record: &CompanyRecord, users: &[UserRecord]) -> Vec<MentionAli
 
 /// How a person is named to other members of their company.
 ///
-/// Display name, else the local part of their login identity, else `"someone"`
+/// Display name, else one derived from their login identity, else `"someone"`
 /// — the same ladder [`author_labels`](crate::server::chat_history) walks, and
 /// deliberately the same one: a mention chip that read differently from the
 /// author line above it on the very same message would look like two people.
+/// It is also the same rule `UserRecord::display_label` uses everywhere else a
+/// person is named, so the identity a member sees in the profile pane is the
+/// one they see on a mention chip.
 ///
 /// Never the full identity. An email address is not a handle, and handing one
 /// to every member of a company so they can @ each other would leak it.
 pub fn user_label(user: &UserRecord) -> String {
-    if let Some(name) = user.display_name.as_deref() {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    let local = user
-        .email
-        .split('@')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if local.is_empty() {
-        "someone".to_string()
-    } else {
-        local
-    }
+    user.display_label()
+        .unwrap_or_else(|| "someone".to_string())
 }
 
 /// A typable alias for each user, in the order given, disambiguated so no two
