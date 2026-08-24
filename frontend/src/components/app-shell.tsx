@@ -2406,8 +2406,8 @@ export function AppShell({
               // sub-page is: only the view knows which run ids exist.
               runId={sub}
               // One tick for both signals a re-read should follow: a workflow
-              // run moved, or a background turn emitted a frame that belongs to
-              // no chat (which is every workflow node's turn).
+              // run moved, or a workflow node started or settled (a node's turn
+              // streams no frames of its own, so the boundary is the signal).
               eventTick={workflowRunTick + backgroundTurnTick}
             />
           </Suspense>
