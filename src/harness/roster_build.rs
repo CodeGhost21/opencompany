@@ -403,11 +403,15 @@ struct Attempt {
 impl Attempt {
     /// No roster, because the call never landed — a timeout, or a provider that
     /// could not be reached.
+    ///
+    /// This is [`FallbackReason::ModelUnreachable`], not [`NoModel`](FallbackReason::NoModel):
+    /// a builder exists (that is why the call was made), so the operator's
+    /// credential is not the thing to fix.
     fn unreachable() -> Self {
         Self {
             roster: None,
             usage: TokenUsage::default(),
-            reason: FallbackReason::NoModel,
+            reason: FallbackReason::ModelUnreachable,
         }
     }
 }
