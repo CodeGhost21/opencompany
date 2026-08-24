@@ -260,6 +260,12 @@ export function SetupDialog({
   useEffect(() => {
     let cancelled = false;
     setInference("checking");
+    // A new check starts from the neutral default. The status answers the
+    // *addressed* company, so the value a previous host returned must not bleed
+    // into this company's notice — if this check degrades to "unknown" (below),
+    // the CTA is offered as before rather than hidden by a reachability answer
+    // that belonged to the company this effect used to render.
+    setHarnessReachable(true);
     const settle = (value: InferenceReadiness) => {
       if (cancelled) return;
       cancelled = true;
@@ -274,6 +280,12 @@ export function SetupDialog({
     try {
       void getInferenceStatus(client, company).then(
         (status) => {
+          // The effect may have been cleaned up (company or connection switched)
+          // while this request was in flight; a response from the previous host
+          // must not overwrite the current company's reachability. `settle`
+          // guards its own update below, but this setter runs first — hence the
+          // check here rather than relying on it.
+          if (cancelled) return;
           setHarnessReachable(status.harnessReachable !== false);
           settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable");
         },
