@@ -1406,7 +1406,7 @@ export function AppShell({
     // The lib drops those rows when there is no rendered main channel.
     return mentionCountsByChannel(
       mentionFeed,
-      chatChannelByThread.main,
+      firstDeskChannelId ?? undefined,
       new Set(Object.values(chatChannelByThread)),
     );
   }, [mentionFeed, chatChannelByThread]);
