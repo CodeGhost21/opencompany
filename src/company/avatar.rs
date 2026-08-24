@@ -759,6 +759,32 @@ mod test {
         );
     }
 
+    /// The VP8L (lossless) height is 14 bits; a parse that fails to mask out
+    /// the alpha_is_used and version bits reads a 192×192 lossless image with
+    /// alpha as 192×16576 and refuses the upload.
+    #[test]
+    fn vp8l_height_masks_alpha_and_version_bits() {
+        // The flag is a non-normative hint; a real lossless file may have it
+        // set, and version must be 0 for valid files.
+        assert_eq!(
+            image_dimensions(&webp_vp8l(192, 192, true)).unwrap(),
+            (192, 192)
+        );
+        assert!(
+            check_image_dimensions(&webp_vp8l(192, 192, true)).is_ok(),
+            "a 192×192 lossless VP8L with alpha_is_used=1 must be accepted"
+        );
+        // A small VP8L with all version bits set (version = 7) must still
+        // decode to the correct size — the spec requires version=0 but the
+        // dimension parser must not read those bits as height.
+        let bad_version = b"RIFF\x19\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2F\x00\x00\xE0\x00";
+        assert_eq!(
+            image_dimensions(bad_version).unwrap(),
+            (1, 1),
+            "version bits must not corrupt the height"
+        );
+    }
+
     #[test]
     fn size_check_accepts_a_reasonable_image() {
         for ok in [
