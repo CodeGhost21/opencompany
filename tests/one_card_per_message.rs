@@ -124,6 +124,31 @@ fn persona_line(system_prompt: &str) -> String {
         .to_string()
 }
 
+/// The persona opening line is found past the tool-policy block for both the
+/// unnamed form ("You are the {role} …") and the named form ("You are {name},
+/// the {role} …"). An agent whose name differs from its role opens with the
+/// named form; if that line were read as empty, no rule would fire for it.
+#[test]
+fn persona_line_skips_the_tool_policy_boundary_for_both_persona_forms() {
+    let base = "\
+## Tool Policy Boundary
+
+- The agent may call any tool.
+- Tool use is governed by the operator.
+
+";
+    let unnamed = format!("{base}You are the Chief Executive at Acme. Speak in the first person as this role.");
+    assert_eq!(
+        persona_line(&unnamed),
+        "You are the Chief Executive at Acme. Speak in the first person as this role."
+    );
+    let named = format!("{base}You are Alex, the Content Writer at Acme. Speak in the first person as this role.");
+    assert_eq!(
+        persona_line(&named),
+        "You are Alex, the Content Writer at Acme. Speak in the first person as this role."
+    );
+}
+
 impl Ctx {
     fn of(body: &Value) -> Self {
         let msgs = body["messages"].as_array().cloned().unwrap_or_default();
