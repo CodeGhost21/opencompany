@@ -2067,7 +2067,10 @@ impl CompanyRuntime {
                         crate::runtime::assignee::AssigneeResolution::Agent(agent) => {
                             return format!("dm:{agent}");
                         }
-                        crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. }
+                        crate::runtime::assignee::AssigneeResolution::Desk {
+                            desk: desk_id,
+                            ..
+                        }
                         | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => {
                             return desk_id;
                         }

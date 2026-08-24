@@ -9936,7 +9936,9 @@ mode = "full"
         );
         // A genuine DM still re-keys onto the rail's DM channel.
         assert_eq!(
-            runtime.mention_context(&id, &[], "dm:backend_engineer").await,
+            runtime
+                .mention_context(&id, &[], "dm:backend_engineer")
+                .await,
             "dm:backend_engineer",
             "a real DM channel is unaffected by the literal dm: desk"
         );
