@@ -45,7 +45,7 @@ async function tourKey(page: Page): Promise<string> {
   return key!;
 }
 
-test("a legacy hash callback lands on Connections with its cancellation message", async ({ page }) => {
+test("a legacy hash callback lands on the OAuth page with its cancellation message", async ({ page }) => {
   // This is the query the former callback used after an operator cancelled at
   // the provider consent screen. Before the original fix it answered with
   // `{"error":"provider returned: access_denied"}` as the document body.
@@ -57,7 +57,7 @@ test("a legacy hash callback lands on Connections with its cancellation message"
 
   // The console renders — the operator is not stranded on raw JSON.
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "Connections", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "OAuth", level: 1 })).toBeVisible();
 
   // The fragment query is stripped, so a refresh doesn't re-fire the toast.
   await expect
@@ -88,10 +88,10 @@ test("an unknown failure code still produces a usable message", async ({ page })
   await page.goto("/connections?connect_error=something_new_2099");
   await expect(page.getByText(/couldn't connect/i)).toBeVisible();
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "Connections", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "OAuth", level: 1 })).toBeVisible();
 });
 
-test("the tour resumes on the Connections stop after a redirect", async ({ page }) => {
+test("the tour resumes on the accounts stop after a redirect", async ({ page }) => {
   await page.goto("/#/overview");
 
   // First run offers the tour. Skipping writes the per-company key, which is
@@ -101,14 +101,14 @@ test("the tour resumes on the Connections stop after a redirect", async ({ page 
   await skip.click();
   const key = await tourKey(page);
 
-  // Seed exactly what `armTourResume` writes just before ConnectionsView hands
-  // the browser to the provider: mid-tour, on the Connections stop, no
+  // Seed exactly what `armTourResume` writes just before the OAuth page hands
+  // the browser to the provider: mid-tour, on the accounts stop, no
   // completed/skipped flag (the tour never finished).
   //
   // `"settings"`, NOT `"connections"`. The marker stores the stop's `view`
   // (`TourController`'s `before` hook publishes `stop.view` through
-  // `setActiveTourStop`), and Connections became a *page of the Settings
-  // section* — the stop is `{ view: "settings", sub: "connections" }`. This
+  // `setActiveTourStop`), and the accounts page is a *page of the Settings
+  // section* — the stop is `{ view: "settings", sub: "oauth" }`. This
   // spec seeded the pre-move value, which no `TOUR` stop matches, so the
   // controller's `findIndex` returned -1 and the resume was correctly skipped.
   // The spec had gone stale against a deliberate product change; it was not

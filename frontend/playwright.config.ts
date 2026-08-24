@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,7 @@ import {
   LIVE_LLM_BIND,
   MCP_FIXTURE_BIND,
   MOCK_BRAIN_BIND,
+  VISUAL,
 } from "./test/e2e/capabilities";
 
 // `package.json` is `"type": "module"`, so this file is ESM and `__dirname`
@@ -101,12 +103,55 @@ const LIVE_LLM_SPEC = /orchestration-live\.spec\.ts$/;
  */
 const EULER_SPEC = /euler-live\.spec\.ts$/;
 
+/**
+ * The one spec that compares **pixels** rather than named quantities, and which
+ * therefore runs on its own so a page still settling cannot be attributed to it
+ * — and so it never sits in the way of a merge. Same default-feature host as an
+ * ordinary run; the separation is about the kind of verdict, not the kind of
+ * host. See `VISUAL` in `test/e2e/capabilities.ts`.
+ */
+const VISUAL_SPEC = /visual\.spec\.ts$/;
+
 const providedBaseURL = process.env.PW_BASE_URL;
 
 /** Whether this config is responsible for the host, as opposed to driving yours. */
 const managesHost = !providedBaseURL;
 
-const baseURL = providedBaseURL || "http://127.0.0.1:8080";
+/**
+ * Where a host *we* manage listens.
+ *
+ * The default is derived from this checkout's own path. A fixed default
+ * collides across worktrees, and it collides SILENTLY: `reuseExistingServer`
+ * below is on outside CI, so a second run does not fail with "port in use" —
+ * it adopts the host the first run started and reports on that binary, that
+ * console bundle and that data directory. Hashing the checkout path gives
+ * every worktree its own port, stable across runs (so a host you left up is
+ * still reused by the next run in the SAME worktree, which is what
+ * `reuseExistingServer` is for) and distinct from every other worktree's.
+ * `test/e2e/host.sh` derives the identical default from the same path, so
+ * running it directly agrees with running it through Playwright.
+ *
+ * 8100-16899 avoids 8080 itself and stays below the ephemeral range
+ * (net.ipv4.ip_local_port_range starts at 32768), so the kernel cannot hand a
+ * derived port to something else first. The width matters: this repository has
+ * ~200 worktrees, and birthday collisions over 800 ports put ~23 of them on a
+ * shared number. Over 8800 it is closer to two, and two worktrees that do
+ * collide are still only as broken as every worktree is today.
+ *
+ * `PW_HOST_BIND` names the bind explicitly when the derived default is not the
+ * one you want — `PW_HOST_BIND=127.0.0.1:8123 npm run e2e` is a run that
+ * cannot collide with anyone. (`PW_BASE_URL` moves the port too, but by
+ * handing the host over to you entirely.)
+ */
+const repoRoot = resolve(here, "..");
+const derivedPort =
+  8100 +
+  (parseInt(createHash("sha256").update(repoRoot).digest("hex").slice(0, 8), 16) %
+    8800);
+
+const managedBind = process.env.PW_HOST_BIND || `127.0.0.1:${derivedPort}`;
+
+const baseURL = providedBaseURL || `http://${managedBind}`;
 
 /**
  * Where the shared signed-in session lands. Defaulted only when we manage the
@@ -312,23 +357,51 @@ export default defineConfig({
   // Four disjoint selections now: the Project Euler lane is a live-LLM run
   // against a different company, so it is checked *before* `LIVE_LLM` — both
   // flags are set for it, and the more specific lane wins.
+  //
+  // Five now: the visual lane is the fifth, and it is selected the same way for
+  // a different reason — its host is an ordinary one, but a run that mixed
+  // pixel comparison in with the rest would attribute a page still settling to
+  // whichever spec happened to be next.
   ...(FIRST_RUN
     ? { testMatch: FIRST_RUN_SPEC }
     : EULER
       ? { testMatch: EULER_SPEC }
       : LIVE_LLM
         ? { testMatch: LIVE_LLM_SPEC }
-        : { testIgnore: [FIRST_RUN_SPEC, LIVE_LLM_SPEC, EULER_SPEC] }),
+        : VISUAL
+          ? { testMatch: VISUAL_SPEC }
+          : { testIgnore: [FIRST_RUN_SPEC, LIVE_LLM_SPEC, EULER_SPEC, VISUAL_SPEC] }),
   globalSetup: storageState ? "./test/e2e/global-setup.ts" : undefined,
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,
+  // The visual lane compares pixels of a d3 physics sim in headless Chromium,
+  // whose frame clock can occasionally stall (`requestAnimationFrame` stops
+  // firing and the graph never ticks — `settleKnowledgeGraph` in visual.spec.ts
+  // now fails loudly on that). One retry absorbs the stall on a fresh page
+  // while still failing on a real diff, which survives two consecutive stalls
+  // only 1-in-80 times. Every other lane keeps Playwright's default of zero.
+  retries: VISUAL ? 1 : 0,
   reporter: [["list"]],
   use: {
     baseURL,
     storageState,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
+    // The visual lane's baselines are only meaningful at the size and density
+    // they were recorded at, so both are pinned here rather than inherited.
+    // Playwright's own defaults are the same two values today; naming them
+    // means a future change to them is a decision about this lane instead of a
+    // silent invalidation of every committed PNG.
+    // `reducedMotion` is not belt-and-braces on top of `animations: "disabled"`
+    // — that option freezes CSS animations at their end state, and Overview's
+    // knowledge graph is a d3 simulation driven from `requestAnimationFrame`,
+    // which no CSS switch reaches. The graph reads the media query itself
+    // (`KnowledgeGraph.tsx` has a `prefers-reduced-motion` block) so this is the
+    // lever it was built to respond to.
+    ...(VISUAL
+      ? { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, reducedMotion: "reduce" as const }
+      : {}),
   },
   webServer: managesHost
     ? [

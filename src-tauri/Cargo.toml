@@ -108,4 +108,3 @@ tinycortex-api = { path = "../vendor/openhuman/vendor/tinycortex/api" }
 tinychannels = { path = "../vendor/openhuman/vendor/tinychannels" }
 tinyplace = { path = "../vendor/openhuman/vendor/tinyplace/sdk/rust" }
 motosan-ai-oauth = { path = "../vendor/openhuman/vendor/motosan-ai-oauth" }
-whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", branch = "main" }
