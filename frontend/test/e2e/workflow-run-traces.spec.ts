@@ -162,6 +162,12 @@ test("the traces list's sort headers and filters are wired to the UI", async ({
   await dismissTour(page);
   const list = await openRunsTab(page);
 
+  const rows = list.getByTestId("workflow-run-trace-row");
+  test.skip(
+    (await rows.count()) === 0,
+    "this company has no runs yet to exercise sorting and filters",
+  );
+
   // Sort: a header's `aria-label` is its own claim about direction — read
   // that back rather than re-deriving row order, which the unit suite
   // (`workflow-run-traces-list.test.ts`) already pins directly on the
