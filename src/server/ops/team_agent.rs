@@ -11,13 +11,16 @@
 //!
 //! ## Effective, not declared
 //!
-//! [`AgentToolsDto`] carries three lists rather than one, because the
+//! [`AgentToolsDto`] carries the three levels rather than one, because the
 //! interesting number is the one nobody could see. `requested` is what the
 //! `[[agent]].tools` line asks for, `companyAllow` is the `[tools].allow`
 //! ceiling it is intersected with, and `effective` is what the agent actually
 //! ends up holding. An agent that requests `workspace.read` under a company
 //! that allows only `composio` requests one tool and holds none, and a surface
 //! that printed the request alone would report the opposite of the truth.
+//! A `deskCeilingActive` flag sits alongside the desk level so a reader can
+//! tell "no desk narrows anything" from "a desk narrows everything away" —
+//! the narrowed `deskAllow` list can be empty in both cases.
 //!
 //! `effective` is computed by
 //! [`agent_effective_grants`](crate::runtime::builder::agent_effective_grants)
