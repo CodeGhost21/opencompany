@@ -2065,10 +2065,7 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let responses = report
-        .responses
-        .into_iter()
-        .collect();
+    let responses = report.responses.clone();
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
