@@ -50,6 +50,7 @@ const REWRITE = (
   sub: string | null,
 ): [string, string | null] | null => {
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", "tasks"];
+  if (head === "memory") return ["settings", "brain"];
   if (head === "connections") return ["settings", "connections"];
   if (head === "mcp") return ["settings", "mcp"];
   if (head === "people") return ["settings", "people"];
@@ -135,5 +136,45 @@ describe("the retired #/tasks address", () => {
     await visit(`#/${retired}`);
     expect(seen).toEqual(["settings", settingsPage]);
     expect(window.location.hash).toBe(`#/settings/${settingsPage}`);
+  });
+});
+
+describe("the legacy #/memory address", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let seen: [string, string | null];
+
+  function Probe() {
+    const [view, sub] = useHashView<string>(
+      VIEWS as unknown as readonly string[],
+      "overview",
+      REWRITE,
+    );
+    seen = [view, sub];
+    return null;
+  }
+
+  beforeEach(() => {
+    (
+      globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("lands on Settings → Brain", async () => {
+    window.history.replaceState(null, "", "#/memory");
+    await act(async () => {
+      root.render(createElement(Probe));
+    });
+
+    expect(seen).toEqual(["settings", "brain"]);
+    expect(window.location.hash).toBe("#/settings/brain");
   });
 });
