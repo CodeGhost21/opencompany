@@ -615,17 +615,42 @@ async fn company_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let company = scope.id().clone();
     tracing::debug!(company = %company, "operator SSE stream opening");
-    let guard = SseStreamGuard(company.clone());
     let viewer = scope
         .actor
         .as_ref()
         .map(|actor| Viewer::User(actor.id.clone()))
         .unwrap_or(Viewer::Operator);
     let subscription = scope.runtime.events().subscribe(&company);
-    let authors = author_labels(&scope.runtime).await.unwrap_or_default();
+    // Roster display labels for mention chips. Held in a shared lock rather
+    // than captured once: the stream outlives membership changes that can add
+    // or rename a user, and a transiently failed initial read must not fix the
+    // map empty for the rest of the connection. A background task refreshes it
+    // on an interval, and the guard above aborts that task when the stream
+    // closes.
+    let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
+        Arc::new(std::sync::RwLock::new(
+            author_labels(&scope.runtime).await.unwrap_or_default(),
+        ));
+    let label_refresh = {
+        let runtime = scope.runtime.clone();
+        let shared = Arc::clone(&authors);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(LABEL_REFRESH_EVERY).await;
+                if let Ok(fresh) = author_labels(&runtime).await {
+                    *shared.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+                }
+            }
+        })
+    };
+    let guard = SseStreamGuard {
+        company: company.clone(),
+        label_refresh: Some(label_refresh),
+    };
     let durable = subscription.filter_map(move |item| {
         // Keep the teardown guard alive for the life of the stream.
         let _ = &guard;
+        let authors = authors.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let event = project_stream_item_for_viewer(&item, &authors, &viewer)
             .map(|value| Ok(Event::default().data(value.to_string())));
         std::future::ready(event)
