@@ -824,7 +824,11 @@ export function ChatView({
         // below reads the response's shape and never this argument.
         true,
       );
-      if (scopeCompany !== scopeCompanyRef.current) {
+      const latestScope = scopeRef.current;
+      if (
+        scopeAtSend.company !== latestScope.company ||
+        scopeAtSend.connection !== latestScope.connection
+      ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
         return;
@@ -864,7 +868,11 @@ export function ChatView({
       onReply?.();
     } catch (err) {
       outcome = "failed";
-      if (scopeCompany !== scopeCompanyRef.current) {
+      const latestScope = scopeRef.current;
+      if (
+        scopeAtSend.company !== latestScope.company ||
+        scopeAtSend.connection !== latestScope.connection
+      ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
         return;
