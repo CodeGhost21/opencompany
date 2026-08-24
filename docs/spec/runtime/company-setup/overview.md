@@ -363,9 +363,12 @@ credential that had just worked.
 
 **Decision D3c: redesign replaces the fallback team rather than stacking on it.**
 When an operator follows "Add a model in Settings" after receiving a fallback,
-the controller records a redesign debt. On return, setup reopens over the staffed
-company, removes only its operator-authored teammates, and creates the newly
-designed roster. The global baseline is preserved.
+the controller records a redesign debt that names the fallback team's rows. On
+return, setup reopens over the staffed company, removes only **those** rows, and
+creates the newly designed roster. The global baseline is preserved, and so are
+teammates other operators staffed while model settings were open — the debt
+names what the first pass created, rather than re-reading the roster on return
+and treating everyone else's work as part of the team being replaced.
 
 ## How we know it is someone's first time
 
