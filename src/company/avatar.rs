@@ -1027,6 +1027,87 @@ mod test {
         v
     }
 
+    /// An animated WebP with the given VP8X canvas and one ANMF frame per entry
+    /// in `frames` — enough of the chunk stream for the frame walker to count
+    /// decoded pixels. Each ANMF carries its own `(width−1, height−1)` at the
+    /// fixed 24-bit offsets the walker reads, and a throwaway VP8 sub-chunk the
+    /// walker never looks inside.
+    fn webp_animated(canvas: (u32, u32), frames: &[(u32, u32)]) -> Vec<u8> {
+        let (cw, ch) = canvas;
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&0u32.to_le_bytes()); // size, fixed below
+        v.extend_from_slice(b"WEBP");
+        // VP8X canvas with the animation flag (bit 1) set.
+        v.extend_from_slice(b"VP8X");
+        v.extend_from_slice(&10u32.to_le_bytes());
+        v.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]);
+        v.extend_from_slice(&(cw - 1).to_le_bytes()[..3]);
+        v.extend_from_slice(&(ch - 1).to_le_bytes()[..3]);
+        // ANIM chunk: background(3) + loop count(2).
+        v.extend_from_slice(b"ANIM");
+        v.extend_from_slice(&6u32.to_le_bytes());
+        v.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        for &(fw, fh) in frames {
+            let (fw1, fh1) = (fw - 1, fh - 1);
+            // Frame header X(3) Y(3) W−1(3) H−1(3) duration(3) flags(1) — 16
+            // bytes — then the frame's own VP8 sub-chunk (8 + 10).
+            v.extend_from_slice(b"ANMF");
+            v.extend_from_slice(&(16 + 8 + 10)u32.to_le_bytes());
+            v.extend_from_slice(&[0x00, 0x00, 0x00]); // X
+            v.extend_from_slice(&[0x00, 0x00, 0x00]); // Y
+            v.extend_from_slice(&fw1.to_le_bytes()[..3]);
+            v.extend_from_slice(&fh1.to_le_bytes()[..3]);
+            v.extend_from_slice(&[0x0A, 0x00, 0x00]); // 10 ms
+            v.push(0x00);
+            v.extend_from_slice(b"VP8 ");
+            v.extend_from_slice(&10u32.to_le_bytes());
+            v.extend_from_slice(&[0x9D, 0x01, 0x2A, 0x9D, 0x01, 0x2A]);
+            v.push((fw1 & 0xFF) as u8);
+            v.push(((fw1 >> 8) & 0x3F) as u8);
+            v.push((fh1 & 0xFF) as u8);
+            v.push(((fh1 >> 8) & 0x3F) as u8);
+        }
+        let riff_size = (v.len() - 8) as u32;
+        v[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        v
+    }
+
+    /// An APNG with the given IHDR canvas and one fcTL frame per entry in
+    /// `frames` — enough of the chunk stream for the frame walker to count
+    /// decoded pixels, with CRCs the walker ignores.
+    fn apng_animated(canvas: (u32, u32), frames: &[(u32, u32)]) -> Vec<u8> {
+        let mut v = PNG_SIGNATURE.to_vec();
+        // IHDR: the canvas.
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&canvas.0.to_be_bytes());
+        v.extend_from_slice(&canvas.1.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v.extend_from_slice(&[0, 0, 0, 0]); // CRC (ignored)
+        // acTL: frame count + plays.
+        v.extend_from_slice(&8u32.to_be_bytes());
+        v.extend_from_slice(b"acTL");
+        v.extend_from_slice(&(frames.len() as u32).to_be_bytes());
+        v.extend_from_slice(&0u32.to_be_bytes());
+        v.extend_from_slice(&[0, 0, 0, 0]); // CRC
+        // One fcTL per frame: sequence, width, height, offsets, delays, ops.
+        for (seq, &(fw, fh)) in frames.iter().enumerate() {
+            v.extend_from_slice(&26u32.to_be_bytes());
+            v.extend_from_slice(b"fcTL");
+            v.extend_from_slice(&(seq as u32).to_be_bytes());
+            v.extend_from_slice(&fw.to_be_bytes());
+            v.extend_from_slice(&fh.to_be_bytes());
+            v.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // x, y, delays
+            v.extend_from_slice(&[0, 0]); // dispose, blend
+            v.extend_from_slice(&[0, 0, 0, 0]); // CRC
+        }
+        // An IDAT so the file reads as a complete PNG; the walker never reaches it.
+        v.extend_from_slice(&0u32.to_be_bytes());
+        v.extend_from_slice(b"IDAT");
+        v.extend_from_slice(&[0, 0, 0, 0]); // CRC
+        v
+    }
+
     #[test]
     fn reads_the_size_each_format_announces() {
         assert_eq!(image_dimensions(&png(1, 1)).unwrap(), (1, 1));
