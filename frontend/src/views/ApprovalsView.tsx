@@ -236,7 +236,16 @@ export function ApprovalsView({
    * focus-narrowed view cannot count the position over a subset and the total
    * over the whole.
    */
-  const batchPos = useMemo(() => batchPositions(approvals), [approvals]);
+  const batchPosLive = useMemo(() => batchPositions(approvals), [approvals]);
+  // The queue hold freezes `rows`, so a poll that expires or decides one card
+  // of a batch must not renumber the cards the operator is looking at: without
+  // the freeze a removed frozen card falls back to "1 of 1" (the line vanishes)
+  // and its surviving siblings get shorter counts — either can rewrap a card
+  // above the targeted control. Snapshot the map with the hold, reconcile the
+  // moment it releases (#1593).
+  const batchPosHeld = useRef(batchPosLive);
+  if (!holding) batchPosHeld.current = batchPosLive;
+  const batchPos = holding ? batchPosHeld.current : batchPosLive;
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
