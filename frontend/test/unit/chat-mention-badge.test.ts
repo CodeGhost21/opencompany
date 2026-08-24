@@ -5,6 +5,7 @@ import {
   mentionCountsByChannel,
   mentionsToClear,
   renderedChannelIdForContext,
+  threadViewAdvancesChannel,
   threadsToReReadForMentions,
 } from "@/lib/mention-badge";
 
