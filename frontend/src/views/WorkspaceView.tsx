@@ -531,6 +531,11 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       try {
         const tree = await fetchTree(client, company);
         if (mine !== treeGen.current) return null;
+        const nextIds = new Set(tree.map((node) => node.id));
+        for (const previous of nodesRef.current) {
+          if (!nextIds.has(previous.id)) forgetAvatarNode(client, company, previous.id);
+        }
+        nodesRef.current = tree;
         setNodes(tree);
         setError(null);
         if (!expandedSeeded.current) {
