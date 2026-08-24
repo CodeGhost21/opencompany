@@ -1242,7 +1242,7 @@ async fn edit_me(
                         &value,
                     )
                     .await
-                    .map_err(|e| ApiError(e).into_response())?,
+                    .map_err(|e| ApiError(e).into_response().into())?,
                 ),
                 None => None,
             },
