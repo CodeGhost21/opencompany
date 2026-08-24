@@ -3808,11 +3808,11 @@ mod test {
             values.iter().map(|v| v.to_string()).collect()
         }
 
-    /// A catch-all company grant must not satisfy opt-in namespaces that
-            /// carry billing, tenant credentials, third-party source access, or
-            /// workspace writes. Workspace writes protect operator-owned
-            /// guidance and therefore require an explicit `workspace` or
-            /// `workspace.write` grant, just like the special namespaces below.
+        /// A catch-all company grant must not satisfy opt-in namespaces that
+        /// carry billing, tenant credentials, third-party source access, or
+        /// workspace writes. Workspace writes protect operator-owned
+        /// guidance and therefore require an explicit `workspace` or
+        /// `workspace.write` grant, just like the special namespaces below.
         #[test]
         fn wildcard_does_not_cover_special_namespaces() {
             let allow = strings(&["*"]);
