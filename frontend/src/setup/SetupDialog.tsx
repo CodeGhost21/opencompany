@@ -570,7 +570,7 @@ function fallbackExplanation(fallback: NonNullable<Fallback>): string {
     case "no_model":
       return "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Company page.";
     case "model_unreachable":
-      return "A general starting team for your industry — a model is connected, but we couldn't reach it just now to tailor one to your answers. Rename, retire, or add anyone from the Company page, or try again.";
+      return "A general starting team for your industry — a model is connected, but we couldn't reach it just now to tailor one to your answers. Rename, retire, or add anyone from the Company page, try again, or check the connection in Settings.";
     case "not_designable":
       return "A general starting team for your industry — we reached a model, but there wasn't enough in your answers to tailor one to them. Rename, retire, or add anyone from the Company page, or run setup again from the Company page with more about what your business does.";
     case "unspecified":
