@@ -3666,6 +3666,40 @@ mode = "full"
         .unwrap()
     }
 
+    /// [`roster_manifest`] plus a desk **literally named** `dm:engineering`,
+    /// beside the ordinary `engineering` desk — the shape `mention_context`
+    /// must resolve **as sent** instead of stripping the `dm:` prefix away.
+    fn dm_prefixed_desk_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend_engineer"]
+
+[[group_chat]]
+id = "dm:engineering"
+name = "Dm Engineering"
+members = ["backend_engineer"]
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap()
+    }
+
     /// [`state_with_roster`] over [`memberless_desk_manifest`].
     async fn state_with_memberless_desk(home: &std::path::Path) -> AppState {
         let store = FsCompanyStore::new(home.to_path_buf());
