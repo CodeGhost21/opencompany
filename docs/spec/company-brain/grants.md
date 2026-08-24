@@ -166,7 +166,11 @@ reading the table — so the shared note tree stays non-grantable (above) howeve
 themselves allow: `workspace_delete` parks on a folder that still holds
 anything (the tool refuses those anyway), and `workspace_rename` of a folder
 parks unless every node inside it is the agent's own, because the rename
-re-renders all of their paths.
+re-renders all of their paths. A `workspace_rename` that *moves* a node is
+bound by the same landing-zone rule `workspace_create` applies to a nested
+parent: the destination folder must also be the agent's own (the home root
+excepted), so an operator-authored folder inside the home cannot become an
+unreviewed collection point.
 
 Three tools answer the reach question from their **arguments** rather than from
 their name, because the name is too coarse to be the answer. `composio_execute`
