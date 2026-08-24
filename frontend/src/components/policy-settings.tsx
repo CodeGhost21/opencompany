@@ -338,6 +338,13 @@ export function PolicySettings({ client, company }: Props) {
       (entry) => !gatedBy(status.manifestAlwaysApprove, entry),
     ) ?? [];
 
+  const spendCapWidens = status
+    ? widensSpendCap(
+        status.autoApproveUnderUsd,
+        status.manifestAutoApproveUnderUsd,
+      )
+    : false;
+
   const requestReset = () => {
     if (!status || saving) return;
     // The manifest's tier can be MORE autonomous than the override an operator
