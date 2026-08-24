@@ -19,6 +19,12 @@ test("a list row leads with its title and shows one readable status", async ({
   page,
   request,
 }) => {
+  // The row renders correctly but the whole job slows to a crawl when the CI
+  // runner pool is saturated — page load alone can eat the suite's 60s default
+  // before the assertions run. The assertions below are exact; the budget is
+  // the only thing under-tuned, so it is stated rather than inherited.
+  test.setTimeout(120_000);
+
   const marker = Date.now();
   const slug = `e2e-list-row-${marker}`;
   const title = `E2E list row ${marker}`;
