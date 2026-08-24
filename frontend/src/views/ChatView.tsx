@@ -742,10 +742,28 @@ export function ChatView({
   // Whoever owns the unread counts needs to know what is actually being looked
   // at. Re-runs as the open channel's transcript grows, not only on a switch:
   // a reply that lands while you are reading the channel is read, and should
-  // not leave a badge on the channel you are sitting in.
+  // not leave a badge on the channel you are sitting in. It also re-runs when
+  // a thread opens or closes: opening a thread renders its replies, so the
+  // replies' mentions — which the channel-open alone must not clear — clear
+  // the moment the thread makes them visible.
   useEffect(() => {
-    if (channel) onChannelViewed?.(channel.id, historyPending, mentionFeedRevision);
-  }, [channel?.id, messages.length, historyPending, mentionFeedRevision, onChannelViewed]);
+    if (channel)
+      onChannelViewed?.(
+        channel.id,
+        historyPending,
+        mentionFeedRevision,
+        replyParents,
+        openThreadId,
+      );
+  }, [
+    channel?.id,
+    messages.length,
+    historyPending,
+    mentionFeedRevision,
+    onChannelViewed,
+    replyParents,
+    openThreadId,
+  ]);
 
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
