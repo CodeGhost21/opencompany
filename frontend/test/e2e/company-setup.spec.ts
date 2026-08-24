@@ -204,10 +204,10 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   await expect(page.getByTestId("setup-buildout-title")).toContainText("standard team", {
     timeout: 60_000,
   });
-  await expect(page.getByTestId("setup-add-model")).toHaveAttribute(
-    "href",
-    "#/settings/connections",
-  );
+  // Same no-CTA rule on completion: this binary cannot run the design pass, so
+  // "Add a model in Settings" would send the operator round a loop that cannot
+  // end — there is no model setting that helps.
+  await expect(page.getByTestId("setup-add-model")).toHaveCount(0);
   const names = await created.allInnerTexts();
   expect(names.length, `build-out listed ${names.length} agents`).toBeGreaterThanOrEqual(4);
 
