@@ -397,7 +397,9 @@ export function PolicySettings({ client, company }: Props) {
     setSaving(true);
     try {
       // An empty box means an empty list, not "leave it alone" — the host keeps
-      // those apart and so must this.
+      // those apart and so must this. Saving the list resyncs the list; a
+      // half-typed cap or deadline in the other fields is the operator's, not
+      // the server's, so it stays.
       const kinds = draftAlways
         .split(",")
         .map((kind) => kind.trim())
@@ -405,6 +407,7 @@ export function PolicySettings({ client, company }: Props) {
       apply(
         await setPolicy(client, company, { alwaysApprove: kinds }),
         "Always-ask list updated",
+        { spendCap: false, deadline: false },
       );
     } catch (error) {
       toast.error(
