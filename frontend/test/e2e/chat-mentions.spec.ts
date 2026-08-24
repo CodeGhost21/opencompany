@@ -203,7 +203,7 @@ test("backspacing through a chip un-mentions it", async ({ page }) => {
 
   await composer(page).click();
   await composer(page).pressSequentially("hey @eng");
-  await composer(page).press("Enter"); // picks `@engineer `
+  await composer(page).press("Enter"); // picks `@Ada `
   // Delete the trailing space and one character of the handle.
   await composer(page).press("Backspace");
   await composer(page).press("Backspace");
