@@ -9740,6 +9740,45 @@ mode = "full"
         );
     }
 
+    /// [`mention_context`] canonicalizes a **`dm:`-prefixed** noncanonical key
+    /// too. An API client can address a DM with the console's channel shape but
+    /// a noncanonical payload — `dm:BACKEND_ENGINEER` for the teammate whose id
+    /// is `backend_engineer`. The routing resolves that case-insensitively, so
+    /// the stored context has to carry the canonical agent id: filing the raw
+    /// key under `dm:BACKEND_ENGINEER` badges a rail channel that does not
+    /// exist, and opening the actual DM can never clear it. Pre-fix, the
+    /// `dm:`-prefixed branch returned the key verbatim and bypassed
+    /// `assignee::resolve` entirely.
+    #[tokio::test]
+    async fn mention_context_canonicalizes_prefixed_dm_keys() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A case-variant of the teammate's id, carrying the `dm:` prefix the
+        // console mints.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:BACKEND_ENGINEER").await,
+            "dm:backend_engineer",
+            "a `dm:`-prefixed noncanonical teammate key has to store dm:<agent-id>"
+        );
+        // The already-canonical shape stays unchanged — the resolution must
+        // not move a key that was already right.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:backend_engineer").await,
+            "dm:backend_engineer",
+            "a canonical dm:<teammate-id> key is kept as-is"
+        );
+        // A `dm:` key whose bare half names a desk (the desk-first ordering the
+        // routing uses) files under the desk id, not a nonexistent `dm:<desk>`.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:Engineering").await,
+            "engineering",
+            "a `dm:` key that resolves to a desk has to store the desk id"
+        );
+    }
+
     /// [`mention_context`] stores the **canonical** id for a key typed in a
     /// noncanonical shape — a desk by its display name, a teammate by a
     /// case-variant of their id. `assignee::resolve` already returns canonical
