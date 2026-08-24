@@ -115,8 +115,27 @@ export function ChannelRail({
         className,
       )}
     >
-      <div className="px-3 py-3">
+      <div className="flex items-center justify-between px-3 py-3">
         <h2 className="truncate text-sm font-semibold tracking-tight">Chat</h2>
+        {onStartDirectMessage && (
+          <NewMessageDialog
+            directMessages={directMessages}
+            onSelect={onStartDirectMessage}
+            trigger={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                aria-label="New message"
+                disabled={directMessages.length === 0}
+                title="New message"
+              >
+                <SquarePen className="size-4" />
+              </Button>
+            }
+          />
+        )}
       </div>
 
       {sections.map((section) => (
