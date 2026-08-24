@@ -85,6 +85,7 @@ import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
+import { drainReReadQueue } from "@/lib/re-read-queue";
 import { OperatorOverview } from "@/views/OperatorOverview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
@@ -825,6 +826,11 @@ export function AppShell({
     // channels that no longer exist, and start the unread floor again so the
     // incoming company's rehydrated history isn't counted as news.
     setChatChannelByThread({});
+    // Drop the deferred re-read queue with the channel map it was keyed against
+    // (issue #1701). A thread parked under the old company must not replay when
+    // the new company's map lands — channel ids like `general` collide across
+    // companies, so a stale id would fold the wrong thread's history in.
+    pendingReReadRef.current.clear();
     // Another company's channels are another namespace here too, and a status
     // carried over would let the incoming company's channels claim to be
     // settled before anything has asked about them.
@@ -1020,6 +1026,25 @@ export function AppShell({
    * that effect. {@link reReadSettledThread} is that case; see its doc.
    */
   const mountedRef = useRef(true);
+  // Thread ids whose turn settled before `chatChannelByThread` knew their
+  // channel, parked for replay once it does (issue #1701). A ref, not state:
+  // it must survive renders without itself provoking one, and the drain that
+  // reads it is triggered by the channel map landing, not by this set changing.
+  const pendingReReadRef = useRef<Set<string>>(new Set());
+  // Mirrors `chatChannelByThread` so `reReadSettledThread`'s `.then()` always
+  // reads the map's current value instead of the one closed over when the
+  // request started (issue #1701 follow-up). `reReadSettledThread` is
+  // recreated whenever `chatChannelByThread` changes — if a `getChatHistory`
+  // response lands *after* the map-populating render but its callback closure
+  // predates that render (the request started while the map was still
+  // empty), reading state directly would see the stale empty map even though
+  // the drain effect below already ran with the fresh one — parking the
+  // thread with nothing left to trigger its replay. Reading this ref instead
+  // means the response always sees whatever the map holds *now*.
+  const chatChannelByThreadRef = useRef(chatChannelByThread);
+  useEffect(() => {
+    chatChannelByThreadRef.current = chatChannelByThread;
+  }, [chatChannelByThread]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1098,8 +1123,16 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = chatChannelByThread[threadId];
-          if (!channelId) return;
+          const channelId = chatChannelByThreadRef.current[threadId];
+          // The thread settled before the desks/roster effect populated its
+          // channel id — on a cold load, or the moment after a company switch
+          // (issue #1701). The `threads` fold above still ran; park the id so
+          // the drain effect replays the transcript fold once the map lands,
+          // rather than dropping it and leaving the Chat panel stale.
+          if (!channelId) {
+            pendingReReadRef.current.add(threadId);
+            return;
+          }
           setTranscripts((t) => {
             const known = new Set((t[channelId] ?? []).map((m) => m.id));
             const fresh = hydrated.filter((m) => !known.has(m.id));
@@ -1112,8 +1145,21 @@ export function AppShell({
           /* offline — the next hydration pass still rebuilds it */
         });
     },
-    [client, company, chatChannelByThread],
+    // Deliberately excludes `chatChannelByThread`: the callback reads the map
+    // through `chatChannelByThreadRef` (always current) instead, so its
+    // identity no longer churns on every map update — see the ref's doc above.
+    [client, company],
   );
+
+  // Replay any thread parked by the branch above once its channel becomes
+  // known (issue #1701). Fires when the desks/roster effect populates
+  // `chatChannelByThread` — the exact edge that a cold-load or post-switch
+  // settle was waiting on. Deliberately keyed on the channel map and the
+  // callback only: `transcripts`/`threads` are written by the replay itself,
+  // so depending on them would loop.
+  useEffect(() => {
+    drainReReadQueue(pendingReReadRef.current, chatChannelByThread, reReadSettledThread);
+  }, [chatChannelByThread, reReadSettledThread]);
 
   /**
    * Watch each open turn to its end, and rebuild the transcript from the
