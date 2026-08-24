@@ -254,6 +254,24 @@ describe("insertMention", () => {
     );
   });
 
+  /**
+   * A display name with NO word characters at all — `🙂`, `!!!` — slugs to an
+   * empty string, so the server's `user_slugs` now falls back to the email
+   * local part to keep such a person mentionable. The picker row therefore
+   * carries a real, typable alias, and the inserted spelling must be that
+   * alias rather than the unusable symbol label.
+   */
+  it("inserts the fallback slug when a symbol-only name has no word characters", () => {
+    const symbolOnly: Mentionable = {
+      target: { kind: "user", id: "u1" },
+      label: "🙂",
+      aliases: ["🙂", "smiley"],
+    };
+    const { text, mention } = insertMention("hey @", { start: 4, end: 5 }, symbolOnly);
+    expect(text).toBe("hey @smiley ");
+    expect(mention.text).toBe("@smiley");
+  });
+
   /** A name the host *can* open keeps its friendly label as the inserted text. */
   it("keeps the display label when it opens a mention", () => {
     const { text } = insertMention("hey @", { start: 4, end: 5 }, jane);
