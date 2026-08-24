@@ -51,8 +51,8 @@ PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
 POST   …/setup/roster                       propose a starting team from three answers (company-setup.md)
-GET    …/policy                              the autonomy tier + always-ask list
-PUT    …/policy                              set the tier and/or the always-ask list
+GET    …/policy                              the autonomy tier + spend cap + deadline + always-ask list
+PUT    …/policy                              set the tier, spend cap, deadline, and/or always-ask list
 DELETE …/policy                              reset the policy to the manifest's
 POST   …/inboxes/{key}/read                  mark inbox messages read
 POST   …/inboxes/ingest                     HMAC-signed inbound email → inbox
