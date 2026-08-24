@@ -358,6 +358,46 @@ mod tests {
         assert_eq!(sink.step_count(), 1);
     }
 
+    /// The EOF path end-to-end: a thought whose stream closes without a
+    /// `TextDelta` or tool call still lands in the deep store when the sink is
+    /// flushed. The tail below the interim flush threshold is exactly what an
+    /// aborted turn leaves behind, and it must not vanish.
+    #[tokio::test]
+    async fn flush_persists_an_aborted_thoughts_tail() {
+        let home = tempfile::Builder::new()
+            .prefix("opencompany-run-trace-deep-")
+            .tempdir()
+            .expect("tempdir");
+        let company = CompanyId::new("acme");
+        let runs: Arc<dyn RunStore> = Arc::new(FsOps::new(home.path().to_path_buf()));
+        let run = runs
+            .create_run(&company, NewRun::for_task("run-1", "t-1", "ceo"))
+            .await
+            .expect("mint");
+        let deep: Arc<dyn crate::ports::deep_trace::DeepTraceStore> =
+            Arc::new(FsOps::new(home.path().to_path_buf()));
+        let sink = RunTraceSink::new(company.clone(), run.id, Arc::clone(&runs))
+            .with_deep(Some(Arc::clone(&deep)));
+
+        sink.record(&thinking("first ")).await;
+        sink.record(&thinking("second")).await; // under DEEP_THINK_FLUSH_BYTES
+        // No text, no tool call — the turn just ends.
+        sink.flush().await;
+
+        let details = deep
+            .list_step_details(&company, "run-1")
+            .await
+            .expect("list step details");
+        let reasoning: String = details
+            .iter()
+            .filter_map(|d| d.detail.reasoning.clone())
+            .collect();
+        assert_eq!(
+            reasoning, "first second",
+            "the tail of an aborted thought was dropped: {reasoning:?}"
+        );
+    }
+
     /// Cost folds across every turn of the attempt, and tokens are recorded even
     /// at zero USD (the managed passthrough bills off the wire).
     #[test]
