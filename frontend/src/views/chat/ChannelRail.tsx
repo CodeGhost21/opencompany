@@ -187,7 +187,10 @@ function CompactChannelRow({
       {hasUnread && (
         <span
           title={UNREAD_IS_LOCAL}
-          className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary"
+          className={cn(
+            "absolute -right-0.5 size-2 rounded-full bg-primary",
+            hasMentions ? "-bottom-0.5" : "-top-0.5",
+          )}
         />
       )}
     </button>
