@@ -746,8 +746,15 @@ export function PolicySettings({ client, company }: Props) {
                 tierAwaitingConfirmation !== null || resetAwaitingConfirmation
               }
               onOpenChange={(open) => {
-                console.log("DEBUG onOpenChange", open, "saving", saving);
                 if (!open) {
+                  // A PUT/DELETE is in flight — keep the dialog up. The confirm
+                  // action already stops the primitive's own Close, but Escape
+                  // and outside-click still reach here; dismissing now would
+                  // let the request finish (or fail) under a cancelled dialog
+                  // instead of the promised retry UI. The close after a save
+                  // is a state change from the `.then`, not a close request,
+                  // so it is unaffected.
+                  if (saving) return;
                   setTierAwaitingConfirmation(null);
                   setResetAwaitingConfirmation(false);
                 }
