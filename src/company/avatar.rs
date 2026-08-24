@@ -687,6 +687,25 @@ mod test {
         v
     }
 
+    /// A WebP whose VP8L (lossless) chunk announces the given size, with no
+    /// alpha (alpha_is_used = 0, version = 0).
+    ///
+    /// Setting `alpha` toggles the alpha_is_used hint, so a regression test can
+    /// verify that the alpha and version bits are excluded from the height.
+    fn webp_vp8l(w: u32, h: u32, alpha: bool) -> Vec<u8> {
+        let (wm1, hm1) = (w - 1, h - 1);
+        let mut v = b"RIFF".to_vec();
+        // 12 (container) + 8 (chunk header) + 5 (header) = 25.
+        v.extend_from_slice(&25u32.to_le_bytes());
+        v.extend_from_slice(b"WEBPVP8L");
+        v.extend_from_slice(&5u32.to_le_bytes());
+        // Signature (0x2F) + 14-bit (w−1) + 14-bit (h−1) + alpha + version(3).
+        let payload = wm1 | (hm1 << 14) | ((alpha as u32) << 28);
+        v.push(0x2F);
+        v.extend_from_slice(&payload.to_le_bytes()[..4]);
+        v
+    }
+
     #[test]
     fn reads_the_size_each_format_announces() {
         assert_eq!(image_dimensions(&png(1, 1)).unwrap(), (1, 1));
@@ -701,6 +720,8 @@ mod test {
         extended.extend_from_slice(&0u32.to_le_bytes());
         assert_eq!(image_dimensions(&extended).unwrap(), (192, 192));
         assert_eq!(image_dimensions(&webp_vp8(192, 192)).unwrap(), (192, 192));
+        assert_eq!(image_dimensions(&webp_vp8l(192, 192, false)).unwrap(), (192, 192));
+        assert_eq!(image_dimensions(&webp_vp8l(192, 192, true)).unwrap(), (192, 192));
     }
 
     /// The VP8 height is a full 14 bits, not 10: the high six bits live in the
