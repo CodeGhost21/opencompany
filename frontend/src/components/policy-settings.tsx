@@ -684,7 +684,8 @@ export function PolicySettings({ client, company }: Props) {
             <div className="space-y-2">
               <Label htmlFor="spend-cap">Spend without asking, under</Label>
               <p className="text-xs text-muted-foreground">
-                Payments below this never appear in Approvals.
+                Spend under this passes without asking — always-ask entries and
+                the daily budget still stop it.
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <Input
