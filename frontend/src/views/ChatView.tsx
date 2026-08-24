@@ -771,6 +771,7 @@ export function ChatView({
         mentionFeedRevision,
         replyParents,
         openThreadId,
+        loadedMessageIds,
       );
   }, [
     channel?.id,
