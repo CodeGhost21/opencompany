@@ -26,6 +26,16 @@ interface Props {
 type RunLoad = "loading" | "ready" | "error";
 
 /**
+ * How many failed attempts the since-visit panel reads, and therefore what
+ * "read through the boundary" can cover. The host clamps `?limit=` to
+ * [`MAX_RUN_LIMIT`](server) (200), so this is the widest exhaustive window a
+ * single creation-ordered page can give the `finishedAtMillis` boundary below.
+ * The panel is honest about the ceiling: when a read comes back exactly full,
+ * the empty state says so instead of claiming no failure was recorded.
+ */
+const FAILED_READ_LIMIT = 200;
+
+/**
  * The operator's landing page (issue #1321).
  *
  * A graph remains available at `#/company/graph`; this page concentrates on
