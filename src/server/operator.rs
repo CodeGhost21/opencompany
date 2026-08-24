@@ -2055,8 +2055,12 @@ async fn notify_mentioned(
 ///
 /// The roster check goes through [`crate::runtime::assignee::resolve`] for its
 /// desk-first ordering: the same one `responder_for` uses, so a desk whose id
-/// happens to match a teammate id still stores the desk id. A `dm:`-addressed
-/// thread is already in the console's channel-id space and is kept as-is.
+/// happens to match a teammate id still stores the desk id. The resolution
+/// carries the **canonical** id (issue #214), so a key typed as a display name
+/// — `chat: "Engineering"` for a desk whose id is `engineering` — stores the
+/// canonical id, which is what the rail's channel ids are built from. A
+/// `dm:`-addressed thread is already in the console's channel-id space and is
+/// kept as-is.
 async fn mention_context(
     runtime: &CompanyRuntime,
     id: &CompanyId,
@@ -2074,13 +2078,13 @@ async fn mention_context(
         // not fail the message, and the bare id still renders a chip.
         return desk.to_string();
     };
-    if matches!(
-        crate::runtime::assignee::resolve(&record, desk),
-        crate::runtime::assignee::AssigneeResolution::Agent(_)
-    ) {
-        return format!("dm:{desk}");
+    match crate::runtime::assignee::resolve(&record, desk) {
+        crate::runtime::assignee::AssigneeResolution::Agent(agent) => format!("dm:{agent}"),
+        crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. } => desk_id,
+        // Unassigned, empty, unknown, or ambiguous: nothing canonical to badge,
+        // so the string as written is the honest context.
+        _ => desk.to_string(),
     }
-    desk.to_string()
 }
 
 /// Runs a chat cycle and emits any implied webhooks, rendering the responses.
