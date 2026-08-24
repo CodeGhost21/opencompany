@@ -46,7 +46,7 @@ use crate::ports::RunStore;
 use crate::ports::deep_trace::TurnStepDetail;
 use crate::ports::now_millis;
 use crate::ports::runs::RunStepRecord;
-use crate::ports::types::{CompanyId, TokenUsage};
+use crate::ports::types::{CompanyId, TokenUsage, TurnStep};
 
 /// The most steps one attempt persists.
 ///
