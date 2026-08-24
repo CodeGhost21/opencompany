@@ -93,7 +93,14 @@ export function mentionCountsByChannel(
 export function mentionsToClear(
   notifications: readonly NotificationDto[],
   channelId: string,
-  mainChannelId = MAIN_THREAD_ID,
+  /**
+   * Same semantics as [`mentionCountsByChannel`]'s param: the rendered main
+   * channel, or `undefined` when none exists yet. A general-chat mention can
+   * then never match — `channelId === mainChannelId` is false for every real
+   * channel — which is exactly right, because the count arm never badged it
+   * in the first place.
+   */
+  mainChannelId: string | undefined = MAIN_THREAD_ID,
   visibleThreadIds: ReadonlySet<string> = new Set([channelId]),
   renderedChannelIds: ReadonlySet<string> = new Set(),
   /**
