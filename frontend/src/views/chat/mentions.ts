@@ -554,7 +554,10 @@ export function mentionablesFor(
     .filter((a) => a.id !== selfId)
     .map((a) => ({
       target: { kind: "agent", id: a.id },
-      label: a.id,
+      // The display name is what an operator who has never read the manifest
+      // will type; the host resolves agents by name and by id alike. Company
+      // agents carry a `name`; the global defaults do not, so fall back to the id.
+      label: a.name ?? a.id,
       aliases: [...new Set([a.id.toLowerCase(), a.name.toLowerCase()])],
       hint: a.role,
       inChannel: inChannel.has(a.id),
