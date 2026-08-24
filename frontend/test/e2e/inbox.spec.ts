@@ -75,6 +75,14 @@ test("Inbox is reachable, explains that it is parked, and reads the host's per-a
     "Inbox is not in the console navigation right now",
   );
   await expect(page.getByTestId("inbox-select")).toBeVisible({ timeout: 30_000 });
+  // The message pane is terminal only once the host's messages have rendered —
+  // either the real empty state or an actual row. Synchronize on that before
+  // asserting fixture absence, or the assertions below would pass against the
+  // loading skeletons and finish before a reintroduced fixture got a chance to
+  // appear.
+  await expect(
+    page.getByTestId("inbox-empty").or(page.getByTestId("inbox-message")),
+  ).toBeVisible({ timeout: 30_000 });
   for (const invented of [...FIXTURE_SENDERS, ...FIXTURE_SUBJECTS]) {
     await expect(page.getByText(invented, { exact: false })).toHaveCount(0);
   }
