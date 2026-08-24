@@ -620,6 +620,12 @@ fn apng_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
         // counted in `len`, so the next chunk starts 12 bytes past this header.
         i += 12 + len;
     }
+    // A trailing partial chunk header or payload is malformed. Once animation
+    // has started, silently ignoring it would turn a truncated animation into
+    // a still result and bypass the frame-cost check.
+    if animated && i != bytes.len() {
+        return Err(truncated_animation());
+    }
     Ok(animated.then_some(cost))
 }
 
