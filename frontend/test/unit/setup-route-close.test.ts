@@ -85,7 +85,20 @@ describe("leaving the #/setup route", () => {
     expect(dialog()).toBeNull();
   });
 
-  it("does not close a Team-prompt dialog just because the route is absent", async () => {
+  it("navigates away when the route is dismissed", async () => {
+    const onRouteDismiss = vi.fn();
+    await show({ force: true, routeOpen: true, onRouteDismiss });
+    expect(dialog()).toBeTruthy();
+
+    const skip = document.body.querySelector('[data-testid="setup-skip"]');
+    expect(skip).toBeTruthy();
+    await act(async () => {
+      (skip as HTMLButtonElement).click();
+    });
+
+    expect(onRouteDismiss).toHaveBeenCalledOnce();
+  });
+
     // The Team page's prompt opens setup with no `#/setup` involved; `force`
     // is the only opener, exactly as in the first-run-gate-adjacent flow.
     await show({ force: true, routeOpen: false });
