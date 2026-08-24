@@ -163,6 +163,7 @@ mod tests {
             workflow_run_id: None,
             workflow_id: None,
             broadly_grantable: false,
+            broadly_deniable: false,
             contents_hidden: false,
             batch: Some("turn-1".to_string()),
         }

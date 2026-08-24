@@ -296,6 +296,10 @@ pub struct ApprovalSummary {
     /// approve-once behaviour by construction.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub broadly_grantable: bool,
+    /// Whether this tool may be denied standing. Unlike a grant, a refusal is
+    /// safe for every agent or workflow tool because it can only narrow access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub broadly_deniable: bool,
     /// Whether [`payload`](Self::payload) and [`amount_usd`](Self::amount_usd)
     /// were withheld from *this reader* because of their role (issue #618).
     ///

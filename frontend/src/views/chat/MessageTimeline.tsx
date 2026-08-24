@@ -290,6 +290,12 @@ export function MessageTimeline({
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
               chatChannelByThread={chatChannelByThread}
+              compact
+              thread={
+                item.approvals[0]?.thread
+                  ? { channelId: channel.id, label: channelTitle(channel) }
+                  : null
+              }
               /* Narrowed to this card's own items (#842): a decision in flight
                  on another turn's batch is not this card's business, which is
                  the same rule #373 established one level down. */

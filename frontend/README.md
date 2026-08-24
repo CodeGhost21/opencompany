@@ -27,7 +27,7 @@ and survives a refresh.
 | **Tasks** | A built-in Kanban board (drag cards between columns) |
 | **Approvals** | The inbox of things parked for your decision, with approve/decline |
 | **Workflows** | A read-only [React Flow](https://reactflow.dev) canvas of how work is routed (lazy-loaded) |
-| **Settings** | A section with its own nav: General (connection, lifecycle, domain, mail), People, Connections, MCP Servers |
+| **Settings** | A section with its own nav: General (connection, lifecycle, domain, mail), People, OAuth, MCP Servers, Inference |
 | **Feedback** | The scrub-then-preview feedback flow, plus a Join-our-Discord nudge |
 
 ## Run it
@@ -83,9 +83,9 @@ The same build works against any host/company. Resolution order (first wins):
   primitive ramps → semantic names → Tailwind utilities. Components may only
   use the third. Light lives in `:root`, dark in `.dark`; theming is driven by
   `next-themes`.
-- **Living reference:** open **`#/styleguide`** — every token and component
-  state, rendered by this stylesheet. It reads the variables at runtime, so it
-  cannot drift, and it needs no host, company, or sign-in.
+- **Living reference:** open **`#/styleguide`** — every token and shipped UI
+  primitive, rendered by this stylesheet. It reads the variables at runtime,
+  so it cannot drift, and it needs no host, company, or sign-in.
 - **Primitives** are shadcn/ui on **Base UI** under
   [`src/components/ui/`](src/components/ui/) — owned in-tree, add more with
   `npx shadcn@latest add <component>`.
@@ -356,6 +356,51 @@ It uses the same real-model proxy and the same environment variables as the lane
 above, on a company and a data root of its own, and **CI does not run it** for
 the same reasons plus one more: it takes tens of minutes.
 
+### The lane that compares pixels
+
+```sh
+cargo build --locked --bin opencompany   # the ordinary default-feature host
+npm run e2e:visual                       # compare against the committed baselines
+npm run e2e:visual:update                # re-record them
+```
+
+`visual.spec.ts` renders each top-level surface — Overview, Tasks, Workflows,
+Company, Memory, Inbox, Approvals, Settings — full-page in both themes and
+compares it against a PNG in
+[`test/e2e/visual.spec.ts-snapshots/`](test/e2e/visual.spec.ts-snapshots/).
+
+It is the only spec here that judges a page by how it looks, and that is the
+point of keeping it apart. Every other spec asserts a named quantity, and
+[`shell-two-layer.spec.ts`](test/e2e/shell-two-layer.spec.ts) says why at
+length: an inset of one pixel over a flat tint is structurally a two-layer
+shell and visually nothing, and only "eight pixels on all four sides, a fill
+measurably different from the chrome" fails that. None of those assertions
+should become "it looks like it did last week".
+
+What a baseline catches is the complement — the regression nobody had a
+quantity for, because nobody knew to write one. A token that shifted lightness
+across every surface. A web font that stopped loading and fell back. Padding
+lost on one view out of eight. A reviewer spots all three in a screenshot in a
+second and in a diff not at all.
+
+**CI does not run it.** Baselines are per-platform — Playwright suffixes each
+file with the platform name, and the ones committed here were recorded on
+`linux`. A required check that is red for everyone not on the recording
+platform teaches people to reach for `--update-snapshots` without looking,
+which is how a baseline suite stops meaning anything. Run it either side of a
+styling change and read the diff Playwright writes into `playwright-report/`.
+
+The false-positive rate is what makes this worth having, so the spec leaves the
+page on the real clock — the console paints time-derived labels *relative to
+now*, and a frozen page clock against a host that keeps real time would make
+those labels less stable, not more — and masks the labels that would otherwise
+drift. It also disables animations, waits on `document.fonts.ready`, hides the
+fading overlay scrollbar, and masks regions whose *value* legitimately changes
+between runs. To exempt something new, put `data-visual-volatile` on it at the
+call site rather than adding a CSS path to the mask list — a path stops masking
+anything the day it changes, and a mask that matches nothing looks exactly like
+a mask that was not needed.
+
 Some specs skip **the other way**, in the live lane only, and say so where they
 sit: three in `chat-live-events.spec.ts`, which find the reply to their own turn
 by the offline brain's `You said: <text>` (precisely how they prove an SSE frame
@@ -372,6 +417,16 @@ strand the suite in bootstrap. Name anything else it should receive, such as a
 feature-gated build's inference credentials, in `PW_HOST_PASSTHROUGH` (a
 space-separated list of variable names).
 
+The managed host's default port is derived from this checkout's path, so every
+worktree gets one of its own and no run can silently adopt another's host — a
+fixed default collides SILENTLY, because `reuseExistingServer` is on outside CI
+and a second run on the busy port does not fail: it drives the *other*
+worktree's host and reports on code that is not its own. `PW_HOST_BIND` names
+the bind explicitly when the derived default is not the one you want —
+`PW_HOST_BIND=127.0.0.1:8123 npm run e2e` is a run that cannot collide with
+anyone. `PW_BASE_URL` moves the port too, but by handing the host over to you
+entirely.
+
 `PW_HOST_DATA_DIR` is wiped at the start of each run, so a run only ever deletes
 inside `../target/e2e`. Point it anywhere else and it is reused as it stands,
 with a line saying so — a mistyped or inherited value cannot take a directory
@@ -379,6 +434,38 @@ you care about with it.
 
 The `dist/` can be served as static files by any web server (or mounted by the
 OpenCompany host); use `window.OPENCOMPANY_CONFIG` to point it at the API.
+
+## Driving the console from an agent
+
+[`.mcp.json`](../.mcp.json) at the repository root registers two browser MCP
+servers, so an agent working in this checkout can open the console and look at
+it rather than reasoning about the markup:
+
+| Server | Good for |
+|--------|----------|
+| `chrome-devtools` | CDP: computed styles, console, network, performance traces, Lighthouse |
+| `playwright` | accessibility-tree snapshots, clicking through a flow, screenshots |
+
+Both are headless and use a throwaway profile. They need the same browser the
+suite does:
+
+```sh
+npm install
+npx playwright install chromium                          # for the suite and chrome-devtools
+npx @playwright/mcp@0.0.79 install-browser chrome-for-testing   # for the playwright server
+```
+
+The two are separate downloads because the MCP server pins its own Playwright,
+whose browser revision is usually a step ahead of the one in `package.json`.
+
+`chrome-devtools` is launched through
+[`test/tools/chrome-devtools-mcp.sh`](test/tools/chrome-devtools-mcp.sh) rather
+than directly. The wrapper resolves the browser from `@playwright/test` at
+launch — the revision directory is versioned, so a literal path in `.mcp.json`
+would break at the next pin bump with a `Target closed` error that says nothing
+about paths — and, on a host where AppArmor denies unprivileged user namespaces
+(Ubuntu 24.04+), drops the Chromium sandbox, which the downloaded build cannot
+start without a distribution profile.
 
 > This is a Vite/TypeScript app, not a Cargo package — it lives outside the Rust
 > crate, so `cargo build` ignores it. Business definitions live one level up in

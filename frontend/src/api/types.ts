@@ -147,7 +147,7 @@ export interface OutboundMessage {
    * from a tool-backed one.
    */
   steps?: TurnStep[];
-  /** Channel-specific reply addressing (Telegram). Absent on operator messages. */
+  /** Channel-specific reply addressing. Absent on operator messages. */
   replyTo?: ReplyTo;
   /**
    * The board card this turn opened, when it opened one (issue #246). Drives
@@ -172,18 +172,6 @@ export interface OutboundMessage {
 export interface ReplyTo {
   /** The chat/thread id to deliver back to. */
   chatId: string;
-}
-
-/** Telegram channel configuration status (no secrets). */
-export interface TelegramChannelStatus {
-  /** Whether the channel is fully configured (both token + secret stored). */
-  configured: boolean;
-  /** Whether a bot token is stored (never the token itself). */
-  tokenSet: boolean;
-  /** Whether a webhook secret is stored (never the secret itself). */
-  secretSet: boolean;
-  /** The public webhook URL to register with setWebhook. */
-  webhookUrl: string;
 }
 
 /**
@@ -425,6 +413,8 @@ export interface ApprovalSummary {
    * field, no control, approve-once exactly as before.
    */
   broadly_grantable?: boolean;
+  /** Whether a time-bounded standing refusal can be created for this tool. */
+  broadly_deniable?: boolean;
   /**
    * What the effect will actually do — the tool call's arguments (#372).
    *
@@ -604,6 +594,7 @@ export interface StandingGrant {
   agent: string;
   /** The tool it admits, with any arguments. */
   tool: string;
+  verdict: Verdict;
   /** Who granted it: a signed-in user, or the platform credential. */
   granted_by: { kind: string; id: string };
   at_millis: number;
@@ -646,6 +637,8 @@ export interface FeedbackInput {
   note: string;
   work_ref?: string;
   preview?: boolean;
+  /** Confirm the previewed item by id (Send after Preview). */
+  item_id?: string;
 }
 
 /**
@@ -758,24 +751,6 @@ export interface BoardQuery {
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
-/** The bound memory engine, as `/spec` reports it. No endpoint, no credential. */
-export interface MemorySpec {
-  /** `store` | `embedded` | `remote` | `null`. */
-  backend: string;
-  /** The bound engine's own name, absent when the base store serves memory. */
-  driver_id?: string;
-  /** Capability families negotiated at bind time; empty = not negotiated. */
-  capabilities: string[];
-  /**
-   * Whether the boot-time reachability probe found the engine usable — ready
-   * or degraded (reachable, possibly reduced); only a down engine is `false`.
-   * A boot-time snapshot, not a live gauge: the provider can recover or fail
-   * after boot without this moving. Absent = not probed (base store, direct
-   * engine, or an older host) — treat as unknown, not unhealthy.
-   */
-  healthy?: boolean;
-}
-
 export interface AppSpec {
   name: string;
   version: string;
@@ -786,13 +761,6 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
-  /**
-   * The bound memory engine: mode, driver id, and the capability families it
-   * negotiated at bind time. Optional — a host predating the field omits it.
-   * The console shows this so an operator can see what a hosted engine does
-   * NOT support before a cycle discovers it.
-   */
-  memory?: MemorySpec;
   /**
    * Whether the first-run setup flow has been completed on this instance.
    *
@@ -1088,7 +1056,7 @@ export interface InboxDto {
   name: string;
   /** The full address (`{key}@{domain}` when a domain is configured). */
   address: string;
-  /** Whether the inbox is enabled on the Team page. */
+  /** Whether the inbox is enabled on this teammate's detail page. */
   enabled: boolean;
   /** The number of unread received (inbound) messages. */
   unread: number;
@@ -1188,7 +1156,7 @@ export interface McpHealth {
 
 /**
  * One roster agent named on a console coverage line — {@link
- * McpServer.reachableBy} ("Reachable by") and the repositories card's
+ * McpServer.reachableBy} ("Reachable by") and the console's other coverage lines'
  * `grantedAgents` ("Readable by"), both computed from one roster walk on the
  * host.
  *
@@ -1427,18 +1395,6 @@ export interface CapabilityStatusDto {
    */
   searchInBuild?: boolean;
   /** Whether a managed search credential is configured on this build (env-only). */
-  /**
-   * Which Smithery key the company's MCP **directory** browsing presents
-   * (issue #1287): `company` (its own), `environment` (one key set for the
-   * whole host and shared by every company on it), or `none` (Smithery is not
-   * queried, so the directory shows only the open registry's few hosted
-   * entries).
-   *
-   * Absent when the host could not determine it — an unknown answer is not
-   * `none`, and reporting a confident "no key" on a transient store failure
-   * would send an admin to paste one they already have.
-   */
-  mcpDirectoryCredential?: "company" | "environment" | "none";
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
@@ -1453,16 +1409,6 @@ export interface CapabilityStatusDto {
    * provider without finishing it is still on `managed`.
    */
   searchProvider?: string;
-  /**
-   * Bound repositories (issue #245, agent half): whether the company
-   * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
-   *
-   * The grant is only half the setup — the other half is whether anything is
-   * bound — so the repositories card reads this alongside the bindings list and
-   * names whichever half is missing. `undefined` is an older host that does not
-   * send the field, and must not be rendered as "not granted".
-   */
-  repoGranted?: boolean;
   /**
    * Publishing (issue #244, panel half #1192): whether the company's grants
    * confer `publish_artifact` — the only way a file an agent wrote becomes a
@@ -1588,7 +1534,11 @@ export interface TransactionDto {
  */
 export interface FinancesDto {
   balanceUsd: number;
-  budgetUsd: number;
+  /**
+   * The monthly budget cap. `null` when the manifest sets no `[budget]`;
+   * `0` when it is explicitly capped at zero — a hard cap, not an absence.
+   */
+  budgetUsd: number | null;
   spentUsd: number;
   revenueUsd: number;
   netUsd: number;
@@ -1751,4 +1701,38 @@ export interface ReadMarker {
 /** Response of `GET {scope}/chat/read-state`. */
 export interface ReadStateResponse {
   markers: ReadMarker[];
+}
+
+/** Response of `GET {scope}/presence`. */
+export interface PresenceListResponse {
+  /**
+   * Present people, most recently seen first.
+   *
+   * **This replica's view.** A second host serving the same tenant keeps its
+   * own map, so somebody connected there is simply absent here — which is why
+   * an absence reads as "no live signal" and never as a grey "offline" dot.
+   */
+  people: PresenceDto[];
+}
+
+/** One person's live presence. */
+export interface PresenceDto {
+  /** The user id, as `GET {scope}/chat/mentionables` already names them. */
+  userId: string;
+  status: "online" | "away" | "offline";
+  /** When their lease was last renewed, epoch millis. */
+  atMillis: number;
+}
+
+/**
+ * Response of `GET {scope}/chat/mentionables` — everything an `@` can name.
+ *
+ * Presence reads only `people` from it, for the user-id → label map the
+ * `presence` and `typing` frames deliberately do not carry.
+ */
+export interface MentionablesResponse {
+  agents: Array<{ id: string; name: string; role: string }>;
+  people: Array<{ id: string; label: string; slug: string }>;
+  desks: Array<{ id: string; name: string; memberIds: string[] }>;
+  everyone: { label: string; aliases: string[] };
 }
