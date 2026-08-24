@@ -1896,8 +1896,9 @@ async fn run_artifacts(
     // Newest first, then cap defensively — the newest rows are the ones an
     // operator opening a run reaches for, so they are the ones the cap keeps.
     rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at_millis));
+    let truncated = rows.len() > MAX_RUN_ARTIFACTS;
     rows.truncate(MAX_RUN_ARTIFACTS);
-    Ok(Json(rows))
+    Ok(Json(RunArtifactsResponse { files: rows, truncated }))
 }
 
 // ---------------------------------------------------------------------------
