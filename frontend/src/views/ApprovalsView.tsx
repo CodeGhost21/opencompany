@@ -5,7 +5,6 @@ import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { getPolicy } from "@/api/policy";
 import {
   ApiError,
   type ApprovalSummary,
