@@ -73,6 +73,15 @@ describe("UsageView load failures", () => {
     expect(at("usage-capabilities-load-error")?.textContent).toContain(
       "Couldn't check capability status",
     );
+    expect(container.textContent).not.toContain("No token plan configured.");
     expect(container.textContent).not.toContain("Not granted");
+  });
+
+  it("renders a successful empty usage and unconfigured plan distinctly", async () => {
+    await show(clientWith({}));
+
+    expect(at("usage-load-error")).toBeNull();
+    expect(container.textContent).toContain("Total tokens30");
+    expect(container.textContent).toContain("No token plan configured.");
   });
 });

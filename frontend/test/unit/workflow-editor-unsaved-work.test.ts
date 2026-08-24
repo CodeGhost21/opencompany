@@ -60,6 +60,12 @@ function stubClient(): OpenCompanyClient & { puts: unknown[] } {
     listTeam: async () => [],
     get: async (path: string) =>
       path.endsWith("/wired-channels") ? { channels: [] } : [],
+    // The dialog debounces a `/workflows/validate` preflight while mounted and
+    // the callback can fire after a test body has already returned — the same
+    // stray-callback class as the `scrollIntoView` shim above. `savedGraph` is
+    // valid, so answering the preflight with `valid: true` is what a real host
+    // would say, and no assertion in this file reads preflight state.
+    post: async () => ({ valid: true }),
     put: async (_path: string, body: unknown) => {
       puts.push(body);
       return savedGraph();

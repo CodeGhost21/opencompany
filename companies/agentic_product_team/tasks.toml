@@ -1,0 +1,53 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a product team is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-bug-triage-flow"
+title = "Set up the bug triage flow"
+priority = "high"
+note = """
+Decide what happens to a bug between arriving and being worked: who looks, \
+how fast, and what makes one urgent rather than merely annoying. Open \
+`bugs` rows for what is already known.
+
+An untriaged queue is not a backlog, it is a pile — and the cost of the \
+pile is that the urgent one is in it somewhere.
+
+Done when the triage rule is a `decisions` row and every known bug has a \
+row with a severity.\
+"""
+
+[[task]]
+id = "set-up-the-competitive-picture"
+title = "Set up the competitive picture"
+priority = "medium"
+note = """
+Open a `competitors` row for each product this one is genuinely chosen \
+against, with what it does better and what it does worse — stated plainly \
+enough to lose an argument to.
+
+A competitive picture kept in someone's head is one the roadmap cannot be \
+defended against.
+
+Done when the three real alternatives each have a row.\
+"""
+
+[[task]]
+id = "set-up-the-roadmap-defence"
+title = "Set up the roadmap defence"
+priority = "medium"
+note = """
+For each thing on the roadmap, record on `decisions` why it is there and \
+what was dropped for it. A roadmap is mostly the list of things being said \
+no to.
+
+Done when every roadmap item has a decision row naming its trade-off.\
+"""

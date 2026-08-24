@@ -151,7 +151,7 @@ export function UsageView({ client, company }: Props) {
             </p>
           </div>
           <Select value={range} onValueChange={(v) => v && setRange(v)} items={RANGE_LABELS}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-40" aria-label="Usage date range">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -313,7 +313,7 @@ export function UsageView({ client, company }: Props) {
                   <CapabilityRow key={tier.namespace} tier={tier} />
                 ))}
               </div>
-            ) : capsLoaded && caps?.configured && caps.total ? null : (
+            ) : capsLoaded && caps?.configured && caps.total ? null : capsFailed ? null : (
               <p className="py-2 text-sm text-muted-foreground">
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
@@ -331,10 +331,6 @@ export function UsageView({ client, company }: Props) {
                 like the three above, but with no credential and no store toggle
                 — so two rungs rather than three. */}
             {capsLoaded && caps ? <PublishStatusRow caps={caps} /> : null}
-            {/* The MCP directory's Smithery key (issue #1287): not metered and
-                not opt-in, but it decides whether browsing finds anything, and
-                this panel is where an operator checks what is configured. */}
-            {capsLoaded && caps ? <McpDirectoryStatusRow caps={caps} /> : null}
           </CardContent>
         </Card>
       </div>
@@ -480,55 +476,6 @@ function SearchStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   );
 }
 
-/**
- * The MCP directory's credential tier (issue #1287).
- *
- * Three states, not two. The shared-host tier is a *working* directory, so
- * badging it "Awaiting credential" would be false; badging it "Active" would
- * hide that every company on the instance browses through one Smithery account.
- * It gets its own word.
- */
-function McpDirectoryStatusRow({ caps }: { caps: CapabilityStatusDto }) {
-  const { label, variant } = mcpDirectoryStatus(caps);
-  return (
-    <div
-      className="flex items-center justify-between gap-3 border-t pt-4 text-sm"
-      data-testid="usage-mcp-directory"
-    >
-      <div className="space-y-0.5">
-        <span className="font-medium">MCP directory</span>
-        <p className="text-xs text-muted-foreground">
-          Browsing and installing MCP servers from Smithery. Without a key only the open registry
-          is searched, and nearly everything in it runs as a local subprocess this host cannot
-          launch. Servers already installed keep their own credentials and are unaffected.
-        </p>
-      </div>
-      <Badge variant={variant} className="shrink-0">
-        {label}
-      </Badge>
-    </div>
-  );
-}
-
-export function mcpDirectoryStatus(caps: CapabilityStatusDto): {
-  label: string;
-  variant: BadgeVariant;
-} {
-  switch (caps.mcpDirectoryCredential) {
-    case "company":
-      return { label: "Active", variant: "default" };
-    case "environment":
-      return { label: "Shared host key", variant: "secondary" };
-    case "none":
-      return { label: "Awaiting credential", variant: "destructive" };
-    default:
-      // Absent: the host could not determine it. "Unknown" is the only honest
-      // badge — claiming "Awaiting credential" would send an admin to paste a
-      // key they may already have.
-      return { label: "Unknown", variant: "outline" };
-  }
-}
-
 export function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
   if (caps.searchInBuild === false) return { label: "Not in this build", variant: "outline" };
   if (caps.searchGranted === undefined) return { label: "Couldn't check", variant: "outline" };
@@ -583,9 +530,11 @@ function PublishStatusRow({ caps }: { caps: CapabilityStatusDto }) {
 /**
  * The publishing row's four states, in order (issue #1192).
  *
- * The `undefined` rung takes the same stricter shape as {@link composioStatus}
- * and {@link mediaStatus}: an unanswered host is unknown, and unknown is shown
- * as unknown rather than as a definite "Not granted".
+ * The `undefined` rung takes {@link composioStatus}'s stricter shape and NOT
+ * {@link mediaStatus}'s: media collapses "absent" into `!granted` and paints an
+ * older host — or one that did not answer — as a definite "Not granted", which
+ * is the #886 lie in miniature. An unanswered host is unknown, and unknown is
+ * shown as unknown.
  *
  * There is no credential rung below these. Publishing has no credential and no
  * store toggle, so `granted && inBuild` is the whole of the verdict.
