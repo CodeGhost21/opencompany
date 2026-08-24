@@ -579,6 +579,9 @@ export function PolicySettings({ client, company }: Props) {
                             {status.manifestAlwaysApprove.length > 0
                               ? status.manifestAlwaysApprove.join(", ")
                               : "none"}
+                            {removedAlwaysAsk.length > 0 && (
+                              <>; {removedAlwaysAsk.join(", ")} {removedAlwaysAsk.length === 1 ? "stops" : "stop"} always asking for approval</>
+                            )}
                             {spendCapWidens && (
                               <>
                                 {removedAlwaysAsk.length > 0 ||
