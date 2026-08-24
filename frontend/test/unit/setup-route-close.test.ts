@@ -28,16 +28,21 @@ function clientWith(): OpenCompanyClient {
 
 let container: HTMLDivElement;
 let root: Root;
+// Stable across re-renders: the roster gate effect depends on `client` and the
+// scope, and a fresh identity on either would re-run it — which resets `open`
+// — and look like a route-driven close.
+const client = clientWith();
+const scope = { connection: "conn-test", company: "acme" as string | null };
 
 async function show(props: { force?: boolean; routeOpen?: boolean } = {}) {
   await act(async () => {
     root.render(
       createElement(
         ConnectionScopeProvider,
-        { scope: { connection: "conn-test", company: "acme" } },
+        { scope },
         createElement(SetupController, {
-          client: clientWith(),
-          company: "acme",
+          client,
+          company: scope.company,
           // The automatic first-run gate is a different concern from the route;
           // deep-linking suppresses it so `force` is the only thing that opens.
           deepLinked: true,
