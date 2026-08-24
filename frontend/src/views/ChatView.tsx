@@ -800,7 +800,8 @@ export function ChatView({
     if (sending) return;
     const scopeAtSend = {
       connection: scope.connection,
-      company: scopeCompany,
+      company: scope.company,
+      client,
     };
     const target = active.id;
     const chatId = activeThreadId;
