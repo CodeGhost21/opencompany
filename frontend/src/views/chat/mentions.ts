@@ -517,11 +517,22 @@ export function resolvableMentions(
       i += 1;
       continue;
     }
-    const after = i + 1;
+    // `@#desk` is the desk-only spelling the host's fallback extraction also
+    // accepts: the `#` is consumed and the match is narrowed to desk targets,
+    // so no alias has to carry a `#` twin. Without the consume here, a desk
+    // address typed by hand never enters the supplied list — and a loaded
+    // directory sends that list explicitly, suppressing the fallback that
+    // would have resolved it.
+    const deskSpelling = masked[i + 1] === "#";
+    const after = i + 1 + (deskSpelling ? 1 : 0);
     let best: { end: number; target: MentionTarget } | undefined;
     let ambiguous = false;
     for (const entry of mentionables) {
-      for (const alias of entry.aliases) {
+      if (deskSpelling && entry.target.kind !== "desk") continue;
+      // The label is a spelling too — it is what the picker inserts, so a
+      // hand-typed `@Jane Doe` must resolve even when no alias repeats it
+      // (`aliasSet` already counts the label for the query-close rule).
+      for (const alias of [entry.label.toLowerCase(), ...entry.aliases]) {
         const end = after + alias.length;
         if (end > masked.length) continue;
         if (masked.slice(after, end).toLowerCase() !== alias) continue;
