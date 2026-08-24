@@ -1170,6 +1170,29 @@ mod test {
     /// SCRATCH: proves the callsite-poisoning race behind the CI flake.
     #[test]
     fn scratch_proves_callsite_poisoning() {
+        use std::io::Write;
+        use std::sync::Barrier;
+        use std::thread;
+
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("sink").extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Writer;
+            fn make_writer(&'a self) -> Self::Writer {
+                Writer(Arc::clone(&self.0))
+            }
+        }
+
         let namespace = Namespace::company_root(&CompanyId::new("acme"));
         let entry = |content: &str| MemoryEntry {
             id: "id".into(),
@@ -1183,24 +1206,41 @@ mod test {
             taint: MemoryTaint::Internal,
         };
 
-        // 1. A sink raises the GLOBAL max level to WARN (what `Dispatch::new`
-        //    inside `warnings_from` does via `rebuild_interest`).
-        warnings_from(|| {
-            assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
-        });
+        let barrier = Arc::new(Barrier::new(2));
+        let captured = Arc::new(Mutex::new(String::new()));
 
-        // 2. NOW a bare-thread corrupt decode is *level-enabled* (MAX_LEVEL is
-        //    WARN), so it proceeds to register the corrupt callsite. On this
-        //    thread there is no subscriber, so `get_default` returns the global
-        //    NoSubscriber, whose `register_callsite` is `Interest::never()` —
-        //    and that caches the callsite as NEVER for the whole process.
+        // Thread 1 is the `decode_classifies` shape: a WARN sink is live (which
+        // raises the GLOBAL max level), then it captures the corrupt decode.
+        let t1 = {
+            let barrier = Arc::clone(&barrier);
+            let captured = Arc::clone(&captured);
+            thread::spawn(move || {
+                let sink = Arc::new(Mutex::new(Vec::new()));
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(Sink(Arc::clone(&sink)))
+                    .with_max_level(tracing::Level::WARN)
+                    .with_ansi(false)
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || {
+                    barrier.wait(); // sink live, C unregistered, MAX_LEVEL=WARN
+                    barrier.wait(); // poisoner has run
+                    let bytes = sink.lock().expect("sink").clone();
+                    *captured.lock().expect("captured") =
+                        String::from_utf8(bytes).expect("utf8");
+                });
+            })
+        };
+
+        // Main thread is `unreadable_content`: a bare corrupt decode whose
+        // `level_enabled!(WARN)` now passes (MAX_LEVEL is WARN from t1's sink),
+        // so it registers the corrupt callsite — via the thread's default
+        // dispatcher, which is the global NoSubscriber -> `Interest::never()`.
+        barrier.wait();
         assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
+        barrier.wait();
 
-        // 3. A fresh `warnings_from` capture of the SAME callsite now sees
-        //    `interest().is_never()` and silently disables the event.
-        let warnings = warnings_from(|| {
-            assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
-        });
+        t1.join().unwrap();
+        let warnings = captured.lock().expect("captured").clone();
         assert!(
             warnings.contains("memory entry in our namespace failed to decode"),
             "POISONED: {warnings:?}"
