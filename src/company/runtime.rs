@@ -2032,10 +2032,10 @@ impl CompanyRuntime {
             if users.iter().any(|u| u.id == desk) {
                 return format!("dm:{desk}");
             }
-            if let Some(bare) = crate::runtime::assignee::dm_key(desk) {
-                if users.iter().any(|u| u.id == bare) {
-                    return format!("dm:{bare}");
-                }
+            if let Some(bare) = crate::runtime::assignee::dm_key(desk)
+                && users.iter().any(|u| u.id == bare)
+            {
+                return format!("dm:{bare}");
             }
             return desk.to_string();
         };
