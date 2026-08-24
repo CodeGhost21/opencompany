@@ -1185,9 +1185,10 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     // Exclusive, same as `serve`: an import into stores a running host has
     // open is the single-writer violation the lock module exists to prevent.
     let _home_lock = opencompany::store::lock::acquire(&home)?;
-    let ((store, events, memory, context), facts, storage_kind) =
+    let ((store, events, memory, context), facts, scopes, storage_kind) =
         live_ports(&home, home_was_flagged).await?;
-    let id = import_bundle(&root, store, events, memory, context, facts).await?;
+    let id =
+        import_bundle_with_scopes(&root, store, events, memory, context, facts, scopes).await?;
     restore_fs_artifacts(&root, Bundle::new(home.clone(), &id).dir()).await?;
     // On a non-fs base backend the records above went to the live backend
     // while these artifacts (secrets/, keys/) are fs-only by design and land
