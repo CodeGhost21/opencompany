@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { PolicyStatus } from "@/api/policy";
-import { widensAutonomy, gatedBy } from "@/components/policy-settings";
+import { widensAutonomy, widensSpendCap, gatedBy } from "@/components/policy-settings";
 
 const toasts = vi.hoisted(() => ({
   base: vi.fn(),
