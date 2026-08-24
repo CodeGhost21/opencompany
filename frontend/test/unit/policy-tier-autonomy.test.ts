@@ -496,6 +496,9 @@ describe("changing the spend cap", () => {
     expect(document.body.textContent).toContain("Give teammates more autonomy?");
     expect(document.body.textContent).toContain("Today spend under $5 asks nothing.");
     expect(document.body.textContent).toContain("Raising the cap to 100");
+    expect(document.body.textContent).toContain(
+      "the daily budget still stops spending after its limit",
+    );
 
     await act(async () => {
       document
