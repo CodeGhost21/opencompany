@@ -535,6 +535,11 @@ export function MessageComposer({
               const lead = at > 0 && !/[\s([{]/.test(draft[at - 1] ?? " ") ? " " : "";
               const next = `${draft.slice(0, at)}${lead}@${draft.slice(at)}`;
               const caret = at + lead.length + 1;
+              // The insertion shifts every recorded mention at/after it and
+              // breaks the literal of one it lands inside. Reconcile now, as
+              // `onChange` does for a keystroke, so the stale span cannot
+              // re-anchor onto a same-text duplicate at send time.
+              setMentions((current) => reconcileMentions(next, current, draft, caret));
               setDraft(next);
               requestAnimationFrame(() => {
                 el.focus();
