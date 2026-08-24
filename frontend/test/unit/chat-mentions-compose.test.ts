@@ -436,15 +436,15 @@ describe("mentionablesFor", () => {
   it("marks only the teammates on this channel", () => {
     const rows = mentionablesFor(directory, ["engineer"]);
     const byLabel = Object.fromEntries(rows.map((r) => [r.label, r]));
-    expect(byLabel.engineer.inChannel).toBe(true);
-    expect(byLabel.ceo.inChannel).toBe(false);
+    expect(byLabel.Ada.inChannel).toBe(true);
+    expect(byLabel.Rae.inChannel).toBe(false);
     // Everyone can see every desk, so a person is never "outside" one.
     expect(byLabel["Jane Doe"].inChannel).toBeUndefined();
   });
 
   it("reaches a teammate by id or by display name", () => {
     const rows = mentionablesFor(directory, []);
-    expect(rankMentionables(rows, "ada")[0].label).toBe("engineer");
+    expect(rankMentionables(rows, "ada")[0].label).toBe("Ada");
   });
 
   /**
