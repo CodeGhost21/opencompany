@@ -1476,6 +1476,13 @@ export function AppShell({
           refreshMentions();
         });
       }
+      // A Conversation thread view that aliases `main` onto a real desk shows
+      // the legacy General transcript, not the desk's own (see `onThreadViewed`).
+      // The mention clear above is still owed — the thread's loaded ids prove
+      // the summoning message is on screen — but the channel-read side effects
+      // are not: advancing the desk's floor here would permanently un-badge
+      // unread lines the operator never saw.
+      if (!advanceChannelRead) return;
       const at = Date.now();
       setLastViewedChannel((v) => ({ ...v, [channelId]: at }));
       // The durable half (issue #755). Fire-and-forget on purpose: the local
