@@ -376,14 +376,21 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<
         id: id.to_string(),
         name: names.get(id).cloned().unwrap_or_else(|| id.to_string()),
     };
+    // Three-level narrowing, exactly as `build_roster` builds the roster (issue
+    // #1674): company `allow` → the desks this teammate sits on → the teammate's
+    // own `tools`. `agent_desk_tools` resolves through the record's *effective*
+    // desk membership, so a console-seated member is scoped by its desk as a
+    // manifest one is. Without this level a teammate on a desk whose ceiling
+    // omits `mcp:*` still read back here as reaching every server the company
+    // grants, while the harness gives it no such tools.
+    let desk_narrowed = |id: &str, tools: &[String]| {
+        let desk_tools = record.agent_desk_tools(id);
+        let desk_refs: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        agent_scoped_grants(allow, &desk_refs, tools)
+    };
     let mut grants: Vec<(RosterAgentDto, Vec<String>)> = effective
         .iter()
-        .map(|agent| {
-            (
-                roster_agent(&agent.id),
-                agent_effective_grants(allow, &agent.tools),
-            )
-        })
+        .map(|agent| (roster_agent(&agent.id), desk_narrowed(&agent.id, &agent.tools)))
         .collect();
     let manifest_ids: std::collections::HashSet<&str> = record
         .manifest
