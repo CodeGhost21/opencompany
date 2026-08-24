@@ -473,24 +473,28 @@ function CompactApprovalRow({
         data-approval-inline="compact"
         className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-muted/50"
       >
-        <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <div
+          className={cn(
+            "flex size-7 shrink-0 items-center justify-center rounded-md",
+            uniform?.iconClass ?? "bg-muted text-muted-foreground",
+          )}
+        >
           <Icon className="size-3.5" aria-hidden />
         </div>
         <div className="min-w-0 flex-1">
-          className="flex flex-wrap items-center gap-x-2 gap-y-1"
-      >
-        <CompactLabel approvals={approvals} />
-        {consequences.map((c) => (
-          <span
-            key={c.label}
-            data-approval-consequence={c.label}
-            className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
-          >
-            {c.label}
-          </span>
-        ))}
-      </p>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <CompactLabel approvals={approvals} />
+            {consequences.map((c) => (
+              <span
+                key={c.label}
+                data-approval-consequence={c.label}
+                className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+              >
+                {c.label}
+              </span>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <ApprovalMeta
               approval={lead}
               now={now}
