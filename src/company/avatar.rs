@@ -415,6 +415,93 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
+/// The total decoded area an animated WebP repaints in one full cycle.
+///
+/// The canvas size alone understates what a decoder does for the same reason
+/// the GIF walker above exists: an animation repaints some rectangle per frame,
+/// so the cost of one cycle is the sum of every frame's rectangle. An animated
+/// WebP carries one ANMF chunk per frame, and each announces its own
+/// `(width−1, height−1)` in 24-bit little-endian fields at a fixed offset in
+/// the chunk payload — so this walks RIFF chunks, never touching the encoded
+/// frame bytes, in the same spirit as [`image_dimensions`].
+///
+/// Returns `None` when the bytes are not a WebP, or a WebP with no ANMF chunks
+/// (nothing to count).
+fn webp_animation_cost(bytes: &[u8]) -> Option<u64> {
+    if !(bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP") {
+        return None;
+    }
+    let mut cost: u64 = 0;
+    let mut saw_frame = false;
+    let mut i = 12;
+    while i + 8 <= bytes.len() {
+        let fourcc = bytes.get(i..i + 4)?;
+        let size = u32::from_le_bytes(bytes.get(i + 4..i + 8)?.try_into().ok()?) as usize;
+        let data = bytes.get(i + 8..i + 8 + size)?;
+        if fourcc == b"ANMF" {
+            // A frame whose payload opens with X(3) + Y(3), then the 24-bit
+            // `width−1` and `height−1` at 6..9 and 9..12. A shorter ANMF cannot
+            // name its rectangle; refuse rather than misread it.
+            if data.len() < 12 {
+                return None;
+            }
+            saw_frame = true;
+            let frame_w = 1
+                + ((data[6] as u32) | ((data[7] as u32) << 8) | ((data[8] as u32) << 16));
+            let frame_h = 1
+                + ((data[9] as u32) | ((data[10] as u32) << 8) | ((data[11] as u32) << 16));
+            cost = cost.saturating_add((frame_w as u64) * (frame_h as u64));
+        }
+        i += 8 + size + (size & 1);
+    }
+    saw_frame.then_some(cost)
+}
+
+/// The total decoded area an APNG repaints in one full cycle.
+///
+/// An APNG is an ordinary PNG carrying two extra chunks: an `acTL` announces
+/// the frame count, and an `fcTL` precedes each frame carrying its rectangle in
+/// big-endian width and height. The default image is frame 0 of the cycle and
+/// covers the canvas, so it is paid for like the first GIF descriptor; every
+/// `fcTL` adds its own rectangle. The walk reads chunk headers only — the same
+/// promise as [`image_dimensions`], never a decode.
+///
+/// Returns `None` when the bytes are not a PNG, or a PNG with no `acTL` (a
+/// still image — nothing animated to count).
+fn apng_animation_cost(bytes: &[u8]) -> Option<u64> {
+    if !bytes.starts_with(PNG_SIGNATURE) {
+        return None;
+    }
+    // The canvas the default image covers — the same bytes `image_dimensions`
+    // reads, re-read here so the cost is computed in one place.
+    let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?) as u64;
+    let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?) as u64;
+    let mut cost: u64 = 0;
+    let mut animated = false;
+    let mut i = 8;
+    while i + 8 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes.get(i..i + 4)?.try_into().ok()?) as usize;
+        let chunk_type = bytes.get(i + 4..i + 8)?;
+        let data = bytes.get(i + 8..i + 8 + len)?;
+        if chunk_type == b"acTL" {
+            animated = true;
+            cost = cost.saturating_add(w * h);
+        } else if chunk_type == b"fcTL" {
+            // Sequence(4), then big-endian width and height at 4..12.
+            if data.len() < 12 {
+                return None;
+            }
+            let frame_w = u32::from_be_bytes(data[4..8].try_into().ok()?) as u64;
+            let frame_h = u32::from_be_bytes(data[8..12].try_into().ok()?) as u64;
+            cost = cost.saturating_add(frame_w * frame_h);
+        }
+        // A PNG chunk is length(4) + type(4) + data + CRC(4); the CRC is not
+        // counted in `len`, so the next chunk starts 12 bytes past this header.
+        i += 12 + len;
+    }
+    animated.then_some(cost)
+}
+
 /// Refuses an image whose decoded size is a decompression bomb.
 ///
 /// [`sniff_image`] proves the leading bytes *name* one of the four formats;
