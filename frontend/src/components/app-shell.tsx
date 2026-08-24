@@ -1324,6 +1324,10 @@ export function AppShell({
   const [mentionFeed, setMentionFeed] = useState<NotificationDto[]>([]);
   const mentionFeedRevision = useRef(0);
   const mentionFeedVersion = mentionFeedRevision.current;
+  // Mention subject ids this session has already asked the shell to re-read a
+  // thread for. One re-read per mention, not one per poll: a re-read that
+  // fails (offline) is retried by the next reload rather than hammered.
+  const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
   const refreshMentions = useCallback(() => {
     const requestCompany = company;
     const revision = ++mentionFeedRevision.current;
@@ -1341,14 +1345,43 @@ export function AppShell({
           requestCompany !== scopeRef.current.company
         )
           return;
-        setMentionFeed(Array.isArray(feed?.notifications) ? feed.notifications : []);
+        const next = Array.isArray(feed?.notifications) ? feed.notifications : [];
+        setMentionFeed(next);
+        // A mention posted by another operator never reaches this tab through
+        // SSE (`OperatorMessage` is dropped from the projection), and the
+        // transcripts are otherwise re-read only when a turn this tab is
+        // *watching* settles — a turn another operator's message opened is not
+        // one it watches. So a newly polled mention whose message is absent
+        // from the loaded transcript would leave its badged channel with
+        // nothing to show and the `loadedMessageIds` gate unable to clear it
+        // (Codex). Re-read the host thread so the mentioned message lands.
+        const loadedByChannel: Record<string, ReadonlySet<string>> = {};
+        for (const [channelId, rows] of Object.entries(transcriptsRef.current)) {
+          loadedByChannel[channelId] = new Set(rows.map((m) => m.id));
+        }
+        const threadIds = threadsToReReadForMentions(
+          next,
+          loadedByChannel,
+          chatChannelByThreadRef.current,
+          chatChannelByThreadRef.current.main,
+          mentionReReadSubjectsRef.current,
+        );
+        if (threadIds.length > 0) {
+          const subjects = new Set(
+            next
+              .filter((n) => n.kind === "mention" && n.readAt === undefined)
+              .map((n) => hostMessageId(n.subjectId)),
+          );
+          subjects.forEach((s) => mentionReReadSubjectsRef.current.add(s));
+          threadIds.forEach((threadId) => reReadSettledThread(threadId));
+        }
       })
       .catch(() => {
         // A transient refresh failure must not erase the last successful feed:
         // keeping it is safer than making durable unread mentions disappear.
         // The next successful refresh reconciles the optimistic snapshot.
       });
-  }, [client, company]);
+  }, [client, company, reReadSettledThread]);
 
   useEffect(() => {
     mentionFeedRevision.current++;
