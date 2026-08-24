@@ -933,6 +933,14 @@ function RunFilesSection({
             No files from this run.
           </p>
         )}
+        {truncated && (
+          <p
+            className="text-2xs text-muted-foreground"
+            data-testid="workflow-run-files-truncated"
+          >
+            Showing this run's newest files only.
+          </p>
+        )}
         {files?.map((file) => (
           <div
             key={`${file.taskId}-${file.artifactId}`}
