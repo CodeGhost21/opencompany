@@ -835,7 +835,12 @@ export function ChatView({
     try {
       await client.reactToMessage(seq, emoji, on, company);
     } catch (error) {
-      setTranscripts((t) => ({ ...t, [active.id]: apply(t[active.id] ?? []) }));
+      // Roll the chip back only if the scope is unchanged: after a company
+      // switch the optimistic chip belongs to the old company's transcript,
+      // and rolling it back there would write into the new company's.
+      if (companyRef.current === company) {
+        setTranscripts((t) => ({ ...t, [active.id]: apply(t[active.id] ?? []) }));
+      }
       toast.error(
         error instanceof ApiError && error.status === 404
           ? "This host doesn't keep reactions yet."
