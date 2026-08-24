@@ -1295,6 +1295,65 @@ mod test {
         check_image_dimensions(&calm).expect("60 frames at 128×128 must pass");
     }
 
+    /// The animated-WebP walker sums every ANMF rectangle, not the canvas size.
+    #[test]
+    fn webp_animation_cost_counts_every_anmf_frame() {
+        assert_eq!(
+            webp_animation_cost(&webp_animated((100, 100), &[(100, 100), (50, 50)])),
+            Some(12_500)
+        );
+        // Frames may be sub-rectangles of the canvas; each one is still paid for.
+        assert_eq!(
+            webp_animation_cost(&webp_animated((4096, 4096), &[(128, 128)])),
+            Some(16_384)
+        );
+        // Not a WebP, and a WebP with no ANMF chunks: nothing to count.
+        assert_eq!(webp_animation_cost(PNG_SIGNATURE), None);
+        assert_eq!(webp_animation_cost(&webp_vp8x(16, 16)), None);
+    }
+
+    /// The APNG walker pays for the default image (the canvas, frame 0 of the
+    /// cycle) plus every fcTL rectangle.
+    #[test]
+    fn apng_animation_cost_counts_the_canvas_and_every_fctl_frame() {
+        assert_eq!(
+            apng_animation_cost(&apng_animated((100, 100), &[(100, 100), (50, 50)])),
+            Some(22_500)
+        );
+        // A still PNG carries no acTL, so there is nothing animated to count.
+        assert_eq!(apng_animation_cost(&png(16, 16)), None);
+    }
+
+    /// An animated WebP can hide a flood of full-canvas frames under the byte
+    /// ceiling exactly like a GIF can; the per-cycle walk must refuse it too.
+    #[test]
+    fn size_check_refuses_an_animated_webp_beyond_the_cost_cap() {
+        let busy = webp_animated((4096, 4096), &[(4096, 4096); 10]);
+        let err = check_image_dimensions(&busy).unwrap_err().to_string();
+        assert!(
+            err.contains("animates") && err.contains("per cycle"),
+            "an animated WebP far over the decoded-pixel cap must be refused by name: {err}"
+        );
+
+        let calm = webp_animated((128, 128), &[(128, 128); 60]);
+        check_image_dimensions(&calm).expect("60 frames at 128×128 must pass");
+    }
+
+    /// The same flood through an APNG: the default image plus every fcTL frame
+    /// is the per-cycle cost, and it is bounded like the other two formats.
+    #[test]
+    fn size_check_refuses_an_animated_apng_beyond_the_cost_cap() {
+        let busy = apng_animated((4096, 4096), &[(4096, 4096); 8]);
+        let err = check_image_dimensions(&busy).unwrap_err().to_string();
+        assert!(
+            err.contains("animates") && err.contains("per cycle"),
+            "an animated APNG far over the decoded-pixel cap must be refused by name: {err}"
+        );
+
+        let calm = apng_animated((128, 128), &[(128, 128); 60]);
+        check_image_dimensions(&calm).expect("60 frames at 128×128 must pass");
+    }
+
     /// A payload too short to announce a size is not an image: a truncated
     /// avatar would not decode anywhere either.
     #[test]
