@@ -132,8 +132,34 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
     }
   }, [client, company, runId]);
 
+  // The unredacted half is never fetched for a list; it loads per attempt, when
+  // a reader opens its card. Each open re-reads, so a live attempt's deep panes
+  // stay fresh alongside the polled skeleton. A response is discarded if the
+  // route changed while it was in flight — see `deepGeneration` — and a failed
+  // read degrades to "no deep half" for that open, exactly as the server-side
+  // read degrades: the scrubbed trace is still the answer.
+  const loadDeep = useCallback(
+    async (id: string) => {
+      if (!company) return;
+      const generation = deepGeneration.current;
+      try {
+        const deepRun = await fetchRun(client, company, id);
+        if (!deepRun) return;
+        if (generation !== deepGeneration.current) return;
+        setDeepByRun((prev) => ({ ...prev, [id]: deepRun }));
+      } catch {
+        // The scrubbed trace renders regardless; nothing else to do.
+      }
+    },
+    [client, company],
+  );
+
   useEffect(() => {
     setLoad({ phase: "loading" });
+    // A route change (company or runId) invalidates the deep cache and bumps
+    // the generation that in-flight deep reads check before landing.
+    setDeepByRun({});
+    deepGeneration.current += 1;
     void reload();
   }, [reload]);
 
