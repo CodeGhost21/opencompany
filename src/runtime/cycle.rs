@@ -3102,6 +3102,7 @@ mod test {
                         reply_to: Some(ReplyTo {
                             chat_id: "strategy".into(),
                         }),
+                        mentions: Vec::new(),
                     },
                 ],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "delegating cycle")],
