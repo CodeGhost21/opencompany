@@ -78,6 +78,16 @@ pub const TINY_FLAVOURS: [&str; 11] = [
 /// cannot be pushed into a record through a field nobody thought to bound.
 const MAX_LEN: usize = 128;
 
+/// The workspace folder every avatar's bytes live under.
+///
+/// The upload route mints faces here, and [`resolve`] copies a validated
+/// `blob:` referent that lives anywhere else into here, so the node a stored
+/// reference names is always one this host created for the purpose — never a
+/// published/generated binary that a later republish could rewrite underneath
+/// the face. One folder also lets an operator see — and delete — what the
+/// company holds without hunting through the tree.
+pub const AVATARS_FOLDER: &str = "avatars";
+
 /// A parsed avatar reference — where the face actually comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AvatarRef<'a> {
