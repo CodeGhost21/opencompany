@@ -65,6 +65,15 @@ describe("toolGlobsDiffer", () => {
     expect(toolGlobsDiffer(["a", "b"], ["a"])).toBe(true);
     expect(toolGlobsDiffer(["a"], [])).toBe(true);
   });
+
+  it("treats a duplicate stored entry as the same grant as its single entry", () => {
+    // The stored list is never re-parsed, so a manifest may hold `["search",
+    // "search"]` while the editor's parsed view collapses it to `["search"]`.
+    // Comparing raw lengths would make the card claim a change and rewrite the
+    // stored list even though the grant set is identical.
+    expect(toolGlobsDiffer(["search", "search"], ["search"])).toBe(false);
+    expect(toolGlobsDiffer(["search", "docs.*", "search"], ["search", "docs.*"])).toBe(false);
+  });
 });
 
 describe("companyCovers", () => {
