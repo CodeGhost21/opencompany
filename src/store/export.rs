@@ -31,12 +31,12 @@ use crate::ports::events::EventLog;
 use crate::ports::facts::{FactRecord, FactStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
-use crate::store::select::MemoryScopes;
 use crate::ports::types::{
     AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
     ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
     OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
 };
+use crate::store::select::MemoryScopes;
 
 /// Canonical bundle file and directory names, matching the fs
 /// [`Bundle`](crate::store::paths::Bundle) layout.
@@ -676,10 +676,7 @@ pub async fn export_bundle(
     facts: Option<Arc<dyn FactStore>>,
     opts: ExportOpts,
 ) -> Result<()> {
-    export_bundle_with_scopes(
-        id, dest, store, events, memory, context, facts, None, opts,
-    )
-    .await
+    export_bundle_with_scopes(id, dest, store, events, memory, context, facts, None, opts).await
 }
 
 /// Exports a bundle while preserving an optional provider archive tier.
@@ -695,10 +692,8 @@ pub async fn export_bundle_with_scopes(
     scopes: Option<Arc<dyn MemoryScopes>>,
     opts: ExportOpts,
 ) -> Result<()> {
-    let contents = BundleContents::read_via_ports(
-        id, store, events, memory, context, facts, scopes,
-    )
-    .await?;
+    let contents =
+        BundleContents::read_via_ports(id, store, events, memory, context, facts, scopes).await?;
     contents.write_to_dir(dest).await?;
 
     if opts.include_secrets
