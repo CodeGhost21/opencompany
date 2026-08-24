@@ -1095,3 +1095,44 @@ fn scoped_context_cache_stays_bounded() {
         super::SCOPED_CONTEXT_CACHE_CAPACITY
     );
 }
+
+#[test]
+fn scoped_context_keeps_facades_still_held() {
+    // A facade handed to a caller must not be evicted to make room for a new
+    // scope. Evicting one whose `Arc` is still live would let a later request
+    // build a SECOND facade for the same scope with its own `label_lock`, and
+    // two concurrent read-merge-writes through the pair could lose a label
+    // claim (#1300). Only entries the cache alone holds (`strong_count == 1`)
+    // are evictable; when every entry is still held the cache grows past the
+    // cap rather than drop a live lock.
+    let mem = engine();
+    let cache = mem
+        .context_stores
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+
+    let cap = super::SCOPED_CONTEXT_CACHE_CAPACITY;
+    // Fill the cache to capacity while KEEPING every facade alive, so every
+    // entry has an external holder.
+    let held: Vec<_> = (0..cap)
+        .map(|i| mem.agent_context(&format!("agent-{i}")))
+        .collect();
+    assert_eq!(cache.lock().unwrap().len(), cap);
+
+    // A new scope at capacity must not evict a held facade: the cache grows
+    // past the cap by one rather than drop a live `label_lock`.
+    let _new = mem.agent_context(&format!("agent-{cap}"));
+    assert_eq!(
+        cache.lock().unwrap().len(),
+        cap + 1,
+        "held facades must not be evicted to make room"
+    );
+
+    // Once callers drop their `Arc`s, the entries become evictable again: a
+    // further new scope evicts one and the cache stops growing.
+    drop(held);
+    let _another = mem.agent_context("agent-next");
+    assert!(
+        cache.lock().unwrap().len() <= cap + 1,
+        "the cache should stop growing once held facades drain"
+    );
+}
