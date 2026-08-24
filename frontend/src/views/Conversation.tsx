@@ -19,6 +19,7 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import type { OpenCompanyClient } from "@/api/client";
 import type { TurnStep } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { useIsMobile } from "@/hooks/use-mobile";
 import type { ChatMessage } from "@/lib/chat";
 import type { OpenTurn } from "@/lib/live-reply";
 import type { Thread } from "@/lib/threads";
