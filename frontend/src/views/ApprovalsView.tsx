@@ -318,6 +318,41 @@ export function ApprovalsView({
     }
   }
 
+  // Bulk decisions for the whole visible queue.
+  //
+  // Client-side and sequential on purpose, rather than a new batch route: each
+  // call goes through the existing, validated resolve path, and the host already
+  // serialises decisions behind its per-company lock. Sending them one at a time
+  // respects that lock, reuses the per-row drop-safety, and keeps the view honest
+  // if one fails partway - the rows that landed drop out, the rest stay.
+  //
+  // Scope is always `once`: a bulk action never mints a standing grant - that
+  // stays a deliberate per-tool choice.
+  //
+  // Approve is not terminal: each approval resumes the agent, so approving many
+  // at once starts several follow-up turns. Hence the confirm copy. Decline is
+  // terminal and lighter.
+  const [bulkInFlight, setBulkInFlight] = useState(false);
+
+  async function decideAll(verdict: Verdict) {
+    if (bulkInFlight || rows.length === 0) return;
+    const n = rows.length;
+    const question =
+      verdict === "approve"
+        ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the teammate, so this may start several tasks at once.`
+        : `Decline ${n} ${n === 1 ? "request" : "requests"}? This is final; the work behind them moves on without them.`;
+    if (!window.confirm(question)) return;
+    setBulkInFlight(true);
+    try {
+      for (const a of [...rows]) {
+        if (inFlight.has(a.id)) continue;
+        await decide(a, verdict, { kind: "once" });
+      }
+    } finally {
+      setBulkInFlight(false);
+    }
+  }
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
@@ -361,12 +396,41 @@ export function ApprovalsView({
           )
         ) : (
           <>
-            <div className="mb-4 flex items-baseline justify-between">
+            <div className="mb-4 flex items-baseline justify-between gap-3">
               <h2 className="text-sm font-medium text-muted-foreground">
                 {rows.length === 1
                   ? "1 thing needs your approval"
                   : `${rows.length} things need your approval`}
               </h2>
+              {rows.length > 1 && (
+                <div className="flex shrink-0 items-center gap-2 self-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={bulkInFlight || inFlight.size > 0}
+                    onClick={() => void decideAll("deny")}
+                  >
+                    {bulkInFlight ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <X className="size-4" />
+                    )}
+                    Decline all
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={bulkInFlight || inFlight.size > 0}
+                    onClick={() => void decideAll("approve")}
+                  >
+                    {bulkInFlight ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Check className="size-4" />
+                    )}
+                    Approve all
+                  </Button>
+                </div>
+              )}
             </div>
             {/* #971: nothing may vanish unannounced. Requests now age out on
                 their own, so the queue says so once, up front — mirroring the
