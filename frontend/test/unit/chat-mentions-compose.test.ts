@@ -291,6 +291,44 @@ describe("insertMention", () => {
     expect(text).toBe("hey @#support ");
     expect(mention.text).toBe("@#support");
   });
+
+  /**
+   * A display label carrying inline Markdown delimiters — `Ada *Ops*` — would
+   * be inserted verbatim as `@Ada *Ops*`. The host routes that mention fine,
+   * but react-markdown splits the raw span across text and formatting nodes,
+   * so `chipMentions` can never match the full mention text against one node
+   * and no notification chip renders. The typable slug falls back instead.
+   */
+  it("falls back to a slug when the label contains Markdown delimiters", () => {
+    const star: Mentionable = {
+      target: { kind: "user", id: "u1" },
+      label: "Ada *Ops*",
+      aliases: ["ada *ops*", "ada-ops"],
+    };
+    const { text, mention } = insertMention("hey @", { start: 4, end: 5 }, star);
+    expect(text).toBe("hey @ada-ops ");
+    expect(mention.text).toBe("@ada-ops");
+    expect(
+      text.slice(mention.offset, mention.offset + mention.text.length),
+    ).toBe("@ada-ops");
+  });
+
+  /**
+   * An intraword underscore is not emphasis in CommonMark — `@Jane_Smith`
+   * renders as one literal text node — so a `_` in the label does not stop
+   * the friendly spelling from winning. Only delimiters that change the
+   * rendered text do.
+   */
+  it("keeps a label whose underscore is intraword", () => {
+    const underscore: Mentionable = {
+      target: { kind: "user", id: "u1" },
+      label: "Jane_Smith",
+      aliases: ["jane_smith", "jane-smith"],
+    };
+    const { text, mention } = insertMention("hey @", { start: 4, end: 5 }, underscore);
+    expect(text).toBe("hey @Jane_Smith ");
+    expect(mention.text).toBe("@Jane_Smith");
+  });
 });
 
 describe("mentionsOutsideRange", () => {
