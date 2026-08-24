@@ -537,6 +537,8 @@ function BuildOut({
   finished,
   fallback,
   onDone,
+  onRedesign,
+  onTryAgain,
 }: {
   agents: ProposedAgent[];
   created: number;
@@ -547,6 +549,14 @@ function BuildOut({
    */
   fallback: Fallback;
   onDone: () => void;
+  /**
+   * The completion screen's "Add a model in Settings" action: close and send the
+   * operator to wire a model, recording that the shipped team is to be
+   * redesigned on their return rather than stacked over.
+   */
+  onRedesign: () => void;
+  /** "Try again" for a fallback that a retry could fix — `model_unreachable`. */
+  onTryAgain: () => void;
 }) {
   return (
     <>
