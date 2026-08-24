@@ -248,10 +248,16 @@ type Company {
 	`workflowRunId` is the join that had no answer before agent nodes minted
 	rows: a node's turn has neither a card nor a conversation, so nothing
 	could ask what a workflow run's agents did.
+	
+	The unredacted half of each step is **role-gated**: a member sees the
+	scrubbed trace, and only a principal who may read sensitive contents sees
+	the raw reasoning, arguments and output (`approval_visibility`).
 	"""
 	agentRuns(taskId: ID, workflowRunId: ID, limit: Int! = 50): [AgentRun!]!
 	"""
 	One attempt by id, with its step trace; null when absent.
+	
+	The unredacted half is role-gated exactly as on [`agent_runs`](Self::agent_runs).
 	"""
 	agentRun(id: ID!): AgentRun
 	"""
