@@ -2014,51 +2014,81 @@ impl CompanyRuntime {
         users: &[crate::ports::users::UserRecord],
         desk: &str,
     ) -> String {
-        // A `dm:`-prefixed key is the console's channel-id space for a DM — but
-        // only when the key is *canonical*. An API client can address a DM with
-        // the teammate's display name or a case-variant of their id
-        // (`dm:BACKEND_ENGINEER`), and the routing resolves that
-        // case-insensitively, so the stored context has to carry the canonical
-        // agent id the rail's channel ids are keyed by. Storing the raw key
-        // files the badge under a channel that does not exist, and opening the
-        // actual DM can never clear it. Split the prefix off and run the bare
-        // key through the same resolution as an un-prefixed desk, re-applying
-        // the prefix only when it names a teammate.
-        let bare = crate::runtime::assignee::dm_key(desk).unwrap_or(desk);
+        // The key is tried **as sent** first, exactly as the routing does: a
+        // desk or teammate literally named `dm:x` resolves today, and an
+        // unconditional prefix-strip would let `dm:x` claim it
+        // ([`crate::runtime::assignee::dm_key`] documents that ordering). The
+        // stripped retry below is only for a `dm:`-prefixed key that names
+        // nothing as sent.
         let Ok(Some(record)) = self.store().load(id).await else {
             // Store will not answer; best-effort, same as the callers. A
-            // canonical `dm:<teammate-id>` still badges through the raw key
-            // (the fallthrough below), but a *noncanonical* roster key needs
-            // the directory to be re-keyed. This runs only on the store-down
-            // path, never ahead of `assignee::resolve`: a desk id that happens
-            // to match a human id must still file under the desk when the store
-            // answers, or a mention aimed at that desk would badge a
-            // nonexistent `dm:<id>` channel.
-            if users.iter().any(|u| u.id == bare) {
-                return format!("dm:{bare}");
+            // canonical `dm:<teammate-id>` still badges through the raw key,
+            // and a *noncanonical* roster key is re-keyed through the
+            // directory. This runs only on the store-down path, never ahead of
+            // `assignee::resolve`: a desk id that happens to match a human id
+            // must still file under the desk when the store answers, or a
+            // mention aimed at that desk would badge a nonexistent `dm:<id>`
+            // channel.
+            if users.iter().any(|u| u.id == desk) {
+                return format!("dm:{desk}");
+            }
+            if let Some(bare) = crate::runtime::assignee::dm_key(desk) {
+                if users.iter().any(|u| u.id == bare) {
+                    return format!("dm:{bare}");
+                }
             }
             return desk.to_string();
         };
-        match crate::runtime::assignee::resolve(&record, bare) {
+        let bare = crate::runtime::assignee::dm_key(desk);
+        match crate::runtime::assignee::resolve(&record, desk) {
+            // A bare teammate key files under the console's DM channel id,
+            // canonicalized (issue #214) — as does a teammate literally named
+            // `dm:<…>`, whose DM channel id is `dm:dm:<…>` in the same space.
             crate::runtime::assignee::AssigneeResolution::Agent(agent) => format!("dm:{agent}"),
             // A desk with no member to work it is still a real desk with a real
             // rail channel, so it files under the same canonical id as one with
             // a lead — a memberless `"Sales"` still has to badge `#sales`.
             crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. }
             | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => desk_id,
-            // Unassigned, unknown, or ambiguous: nothing canonical to
-            // badge. A general-chat spelling — `"General"` (the default for an
-            // unaddressed message), `"main"`, or `""` — still names the General
-            // desk, the console's default thread, so it has to file under the
-            // console's canonical main-thread id, which the rail aliases onto
-            // its first rendered desk channel
-            // ([`crate::server::chat_history::is_general_chat`], issue #65).
-            // Anything else is honestly the string as written: it may badge
-            // nowhere, but it is not a lie.
-            _ if crate::server::chat_history::is_general_chat(Some(bare)) => {
-                crate::server::chat_history::MAIN_THREAD_ID.to_string()
+            // Unassigned, unknown, or ambiguous. A `dm:`-prefixed key that
+            // names nothing as sent can still be the console's DM channel for a
+            // *noncanonical* address — `dm:BACKEND_ENGINEER`,
+            // `dm:<display name>` — which the routing resolves
+            // case-insensitively, so the stored context has to carry the
+            // canonical agent id the rail's channel ids are keyed by. Storing
+            // the raw key files the badge under a channel that does not exist,
+            // and opening the actual DM can never clear it. Split the prefix
+            // off and run the bare half through the same resolution as an
+            // un-prefixed desk, re-applying the prefix only when it names a
+            // teammate.
+            _ => {
+                if let Some(bare) = bare {
+                    match crate::runtime::assignee::resolve(&record, bare) {
+                        crate::runtime::assignee::AssigneeResolution::Agent(agent) => {
+                            return format!("dm:{agent}");
+                        }
+                        crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. }
+                        | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => {
+                            return desk_id;
+                        }
+                        _ => {}
+                    }
+                }
+                // A general-chat spelling — `"General"` (the default for an
+                // unaddressed message), `"main"`, or `""` — still names the
+                // General desk, the console's default thread, so it has to file
+                // under the console's canonical main-thread id, which the rail
+                // aliases onto its first rendered desk channel
+                // ([`crate::server::chat_history::is_general_chat`], issue #65).
+                // Anything else is honestly the string as written: it may badge
+                // nowhere, but it is not a lie.
+                let probe = bare.unwrap_or(desk);
+                if crate::server::chat_history::is_general_chat(Some(probe)) {
+                    crate::server::chat_history::MAIN_THREAD_ID.to_string()
+                } else {
+                    desk.to_string()
+                }
             }
-            _ => desk.to_string(),
         }
     }
 
