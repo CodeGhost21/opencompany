@@ -1113,7 +1113,7 @@ async fn an_admin_cannot_set_an_over_long_display_name() {
                 .uri(format!("/api/v1/companies/acme/users/{bob_id}"))
                 .header("content-type", "application/json")
                 .header("cookie", &admin)
-                .body(Body::from(serde_json::json!({ "displayName": long }).to_string()))
+                .body(Body::from(serde_json::json!({ "display_name": long }).to_string()))
                 .unwrap(),
         )
         .await
