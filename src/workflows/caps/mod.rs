@@ -2975,7 +2975,7 @@ mod tests {
     // ---- the transcript fold (the record a workflow node now leaves) -------
 
     mod transcript_fold {
-        use super::super::{failure_word, transcript_from_steps};
+        use super::super::transcript_from_steps;
         use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
 
         fn step(kind: TurnStepKind, status: TurnStepStatus, label: &str) -> TurnStep {
