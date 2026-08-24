@@ -1191,8 +1191,10 @@ export function KnowledgeGraph({
 
   // "/" focuses the vault search whenever the Notes core is open — works
   // in both the inline view and fullscreen (registered independently of the
-  // mode-specific handlers above)
+  // mode-specific handlers above). Skipped while an outage overlay covers the
+  // graph (issue #1314): `inert` cannot silence a `window` listener.
   useEffect(() => {
+    if (covered) return;
     const onSlash = (e: KeyboardEvent) => {
       if (e.key !== '/') return;
       const tag = (e.target as HTMLElement | null)?.tagName;
