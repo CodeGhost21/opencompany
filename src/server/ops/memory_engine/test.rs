@@ -185,9 +185,18 @@ fn catalog_matches_driver_registry() {
 #[test]
 fn the_hosted_memory_engines_ship_in_the_default_build() {
     let hosted = ["supermemory", "mem0", "cognee", "null"];
-    let disabled: Vec<String> = catalog()
+    let entries: Vec<_> = catalog()
         .into_iter()
-        .filter(|option| hosted.contains(&option.id) && !option.available)
+        .filter(|option| hosted.contains(&option.id))
+        .collect();
+    // Assert that the catalog still offers every required ID, so a regression
+    // that drops one of them fails here rather than passing silently because
+    // the entry never reached the disabled list.
+    let offered: Vec<_> = entries.iter().map(|option| option.id).collect();
+    assert_eq!(offered, hosted);
+    let disabled: Vec<String> = entries
+        .into_iter()
+        .filter(|option| !option.available)
         .map(|option| {
             format!(
                 "{}: {}",
