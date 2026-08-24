@@ -344,7 +344,10 @@ async fn set_policy(
     };
     let approval_ttl_hours = match body.approval_ttl_hours {
         Some(Some(value)) => Some(value),
-        Some(None) => held.as_ref().and_then(|o| o.approval_ttl_hours),
+        // An explicit `null` clears this one override — restoring the
+        // manifest/default deadline — while an omitted field keeps the held
+        // value. `mode: null` and `alwaysApprove` already work this way.
+        Some(None) => None,
         None => held.as_ref().and_then(|o| o.approval_ttl_hours),
     };
 
