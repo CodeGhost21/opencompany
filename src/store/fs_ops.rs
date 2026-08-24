@@ -898,13 +898,29 @@ impl DeepTraceStore for FsOps {
         let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut all = read_jsonl::<RunStepDetailRecord>(&path).await?;
-        let before = all.len();
-        match run_id {
-            Some(id) => all.retain(|r| r.run_id != id),
-            None => all.clear(),
+        // `removed` is the number of *records* the reader would have seen —
+        // distinct `(run_id, step_seq)` pairs — not physical lines. A completion
+        // row for an ordinal the start row already covered is one record, folded
+        // exactly as the read side folds it, so the count agrees with a backend
+        // that stores one row per ordinal.
+        let mut doomed: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
+        for record in all.iter() {
+            match run_id {
+                Some(id) if record.run_id == id => {
+                    doomed.insert((record.run_id.clone(), record.step_seq));
+                }
+                None => {
+                    doomed.insert((record.run_id.clone(), record.step_seq));
+                }
+                _ => {}
+            }
         }
-        let removed = before - all.len();
+        let removed = doomed.len() as u64;
         if removed > 0 {
+            match run_id {
+                Some(id) => all.retain(|r| r.run_id != id),
+                None => all.clear(),
+            }
             rewrite_jsonl(&path, &all).await?;
         }
         // Keep the in-memory run set in step: a purged run is gone, so a later
