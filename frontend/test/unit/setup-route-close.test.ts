@@ -61,7 +61,9 @@ afterEach(() => {
   container.remove();
 });
 
-const dialog = () => container.querySelector('[data-testid="setup-dialog"]');
+// The dialog renders through a portal, so it lives under `document.body`, not
+// the mount container.
+const dialog = () => document.body.querySelector('[data-testid="setup-dialog"]');
 
 describe("leaving the #/setup route", () => {
   it("closes the dialog the route opened", async () => {
