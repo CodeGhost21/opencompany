@@ -173,6 +173,18 @@ function useAvatarSrc(ref: string): string | null {
   const [fetched, setFetched] = useState<{ ref: string; src: string | null } | null>(null);
   const src = fetched?.ref === ref ? fetched.src : immediate;
 
+  // Revoking a face's object URL does not unpaint a tile that already decoded
+  // it, so a delete from the workspace cannot redraw a mounted tile on its own.
+  // Subscribing for the node makes `forgetAvatarNode` reach this tile: it bumps
+  // `forgot`, which re-runs the resolve below — the deleted bytes 404 and the
+  // tile falls back to the tone tile it was already drawing underneath.
+  const [forgot, setForgot] = useState(0);
+  useEffect(() => {
+    const node = blobNodeId(ref);
+    if (!node || !client) return;
+    return subscribeAvatarNode(client, company, node, () => setForgot((n) => n + 1));
+  }, [client, company, ref]);
+
   useEffect(() => {
     const node = blobNodeId(ref);
     if (!node || !client) return;
