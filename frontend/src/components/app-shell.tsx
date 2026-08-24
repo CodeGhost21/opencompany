@@ -1325,7 +1325,7 @@ export function AppShell({
       // exactly one of the trips that has to survive.
       writeLastChannel(scope, channelId);
     },
-    [scope, client, company],
+    [scope, client, company, chatChannelByThread.main],
   );
 
   const setThreadMessages = (
