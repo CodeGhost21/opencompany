@@ -45,7 +45,9 @@ function clientByUrl(
 ): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/company/acme",
-    get: (url) => answer(String(url)),
+    // The `as unknown` cast above drops the contextual type for the object
+    // literal's methods, so the parameter would otherwise be implicitly `any`.
+    get: (url: string) => answer(url),
   } as unknown as OpenCompanyClient;
 }
 
