@@ -851,7 +851,20 @@ export function AppShell({
     setDecidingApprovals(new Map());
     setFailedApprovals({});
 
+    // Which threads/channels this effect has already hydrated once, so the
+    // 5-second poll below (`rehydrateAll` reused as both the mount-time call
+    // and the recurring one) can tell a cold load from a recovery tick: a
+    // cold load's `fresh` rows are the whole history and belong in front of
+    // whatever local/optimistic messages beat the response back; a poll's
+    // `fresh` rows are new tail rows `chat/history` just grew and belong
+    // after everything already shown, the same rule `reReadSettledThread`
+    // uses for its own re-read.
+    const hydratedThreads = new Set<string>();
+    const hydratedChannels = new Set<string>();
+
     const hydrate = (threadId: string) => {
+      const isPoll = hydratedThreads.has(threadId);
+      hydratedThreads.add(threadId);
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -862,7 +875,11 @@ export function AppShell({
               if (t.id !== threadId) return t;
               const known = new Set(t.messages.map((m) => m.id));
               const fresh = hydrated.filter((m) => !known.has(m.id));
-              return fresh.length === 0 ? t : { ...t, messages: [...fresh, ...t.messages] };
+              if (fresh.length === 0) return t;
+              return {
+                ...t,
+                messages: isPoll ? [...t.messages, ...fresh] : [...fresh, ...t.messages],
+              };
             }),
           );
         })
@@ -881,10 +898,17 @@ export function AppShell({
       setHydration((h) => ({ ...h, byChannel: { ...h.byChannel, [channelId]: status } }));
 
     const hydrateChannel = (channelId: string, threadId: string) => {
+      const isPoll = hydratedChannels.has(channelId);
+      hydratedChannels.add(channelId);
       // Marked before the request, not after: the gap between "this channel
       // exists" and "its history is in flight" is precisely the window the
-      // timeline used to fill with the empty-channel copy.
-      markHistory(channelId, "loading");
+      // timeline used to fill with the empty-channel copy. Skipped on a poll
+      // tick — the channel is already `"ready"`, and cycling it back through
+      // `"loading"` every five seconds is what forced `MessageTimeline` to
+      // re-anchor to the bottom on the same cadence (its scroll-to-bottom
+      // effect is keyed on `historyPending`), yanking an operator reading
+      // scrollback back down every poll even though nothing new arrived.
+      if (!isPoll) markHistory(channelId, "loading");
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -899,7 +923,13 @@ export function AppShell({
           setTranscripts((t) => {
             const known = new Set((t[channelId] ?? []).map((m) => m.id));
             const fresh = hydrated.filter((m) => !known.has(m.id));
-            return fresh.length === 0 ? t : { ...t, [channelId]: [...fresh, ...(t[channelId] ?? [])] };
+            if (fresh.length === 0) return t;
+            return {
+              ...t,
+              [channelId]: isPoll
+                ? [...(t[channelId] ?? []), ...fresh]
+                : [...fresh, ...(t[channelId] ?? [])],
+            };
           });
           markHistory(channelId, "ready");
         })
