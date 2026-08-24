@@ -670,7 +670,10 @@ function BuildOut({
             that answered and was not designable already had a working key, and
             sending that operator to Settings is an instruction that cannot help
             them — what they need is to say more about the business, which the
-            description above asks for instead.
+            description above asks for instead. A wired but unreachable model is
+            both at once: the blip may have passed (retry) or the credential may
+            have been rejected (Settings), so the route is offered alongside the
+            retry rather than instead of it.
           */}
           {fallback === "no_model" && (
             <a
@@ -683,14 +686,24 @@ function BuildOut({
             </a>
           )}
           {fallback === "model_unreachable" && (
-            <Button
-              variant="outline"
-              onClick={onTryAgain}
-              data-testid="setup-try-redesign"
-            >
-              <RotateCcw className="size-4" />
-              Try again
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                onClick={onTryAgain}
+                data-testid="setup-try-redesign"
+              >
+                <RotateCcw className="size-4" />
+                Try again
+              </Button>
+              <a
+                href="#/settings/connections"
+                onClick={onRedesign}
+                data-testid="setup-check-connection"
+                className={buttonVariants({ variant: "outline" })}
+              >
+                Check connection in Settings
+              </a>
+            </>
           )}
           <Button onClick={onDone} data-testid="setup-finish">
             <Sparkles className="size-4" />
