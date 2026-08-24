@@ -277,6 +277,15 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
             .filter(|grant| grant.as_str() != "*")
             .any(|grant| grant_matches(grant, literal));
     }
+    // A delimiter-free MCP spelling (`mcp`, `mcp*`, `mcpfoo`) is not a form the
+    // MCP wiring can honour, so it must not fall through to the generic matcher
+    // below: under a wildcard-only allow-list that generic match would accept
+    // it, and the saved `mcp*` glob reads in `grants_cover_server` as covering
+    // every configured server — the explicit opt-in defeated. Only the colon
+    // forms wire; reject the rest of the family here.
+    if literal.starts_with("mcp") {
+        return false;
+    }
 
     allow.iter().any(|grant| grant_matches(grant, literal))
 }
