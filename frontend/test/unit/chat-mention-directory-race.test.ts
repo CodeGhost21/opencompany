@@ -60,8 +60,11 @@ describe("mention-directory reloads discard stale completions", () => {
   it("clears the directory synchronously when a company switch starts a fetch", () => {
     // The mount effect still nulls the directory before the request, so the
     // picker never shows the old company's rows while the new directory is on
-    // the wire.
-    const effect = chatView.indexOf("useEffect(() => {");
+    // the wire. Anchored after `reloadDirectory` to find *this* effect, not an
+    // unrelated `useEffect` earlier in the view.
+    const reload = chatView.indexOf("const reloadDirectory = useCallback");
+    const reloadEnd = chatView.indexOf("}, [client, company]);", reload);
+    const effect = chatView.indexOf("useEffect(() => {", reloadEnd);
     expect(effect).toBeGreaterThan(-1);
     expect(chatView.slice(effect, effect + 200)).toContain("setDirectory(null);");
   });
