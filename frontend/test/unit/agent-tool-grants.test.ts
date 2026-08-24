@@ -94,8 +94,12 @@ describe("companyCovers", () => {
     expect(companyCovers(["*"], "media.image")).toBe(false);
     expect(companyCovers(["*"], "composio")).toBe(false);
     expect(companyCovers(["*"], "composio.gmail")).toBe(false);
-    expect(companyCovers(["*"], "repo")).toBe(false);
-    expect(companyCovers(["*"], "repo.read")).toBe(false);
+    expect(companyCovers(["*"], "chargebee")).toBe(false);
+    expect(companyCovers(["*"], "chargebee.read")).toBe(false);
+    expect(companyCovers(["*"], "hosting")).toBe(false);
+    expect(companyCovers(["*"], "hosting.deploy")).toBe(false);
+    expect(companyCovers(["*"], "paypal")).toBe(false);
+    expect(companyCovers(["*"], "paypal.wallet")).toBe(false);
     expect(companyCovers(["*"], "mcp:*")).toBe(false);
     expect(companyCovers(["*"], "mcp:notion")).toBe(false);
   });
@@ -106,7 +110,9 @@ describe("companyCovers", () => {
     expect(companyCovers(["media"], "media")).toBe(true);
     expect(companyCovers(["media.*"], "media")).toBe(true);
     expect(companyCovers(["composio"], "composio")).toBe(true);
-    expect(companyCovers(["repo.read"], "repo")).toBe(true);
+    expect(companyCovers(["chargebee"], "chargebee.read")).toBe(true);
+    expect(companyCovers(["hosting"], "hosting.deploy")).toBe(true);
+    expect(companyCovers(["paypal.wallet"], "paypal")).toBe(true);
     expect(companyCovers(["mcp:*"], "mcp:notion")).toBe(true);
     expect(companyCovers(["mcp:notion"], "mcp:notion")).toBe(true);
     // …but a *different* namespace does not confer it.
@@ -120,6 +126,9 @@ describe("companyCovers", () => {
     expect(companyCovers(["search"], "search.web")).toBe(true);
     expect(companyCovers(["media"], "media.image")).toBe(true);
     expect(companyCovers(["composio"], "composio.gmail")).toBe(true);
+    expect(companyCovers(["chargebee"], "chargebee.read")).toBe(true);
+    expect(companyCovers(["hosting.*"], "hosting.deploy")).toBe(true);
+    expect(companyCovers(["paypal"], "paypal.wallet")).toBe(true);
   });
 
   it("covers a sub-grant from a starred namespace", () => {
