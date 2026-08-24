@@ -49,6 +49,7 @@ import {
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
+import { arrivedViaSetupHandoff, clearSetupHandoff } from "@/setup/state";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -523,6 +524,22 @@ export function AppShell({
    * the read, and a flag that was already `true` would not.
    */
   const [teamBuilt, setTeamBuilt] = useState(0);
+  /**
+   * Setup has already introduced the console while it builds the team, so do
+   * not immediately cover the roster it leads to with the tour welcome.
+   */
+  const [setupCompleted, setSetupCompleted] = useState(false);
+  // A setup that had to sign in hands off with a full-page navigation
+  // (`window.location.href`), so `onCompleted` never fires in this mount. The
+  // link carries a one-shot marker (`#/company?from=setup`); consume it here so
+  // this fresh mount applies the same welcome suppression a same-mount
+  // completion gets, and so a reload cannot re-apply it.
+  const setupScope = { connection: scope.connection, company };
+  useEffect(() => {
+    if (!arrivedViaSetupHandoff(setupScope)) return;
+    setSetupCompleted(true);
+    clearSetupHandoff();
+  }, [scope.connection, company]);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
@@ -2401,10 +2418,21 @@ export function AppShell({
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
-        onCompleted={() => setTeamBuilt((n) => n + 1)}
+        onCompleted={() => {
+          // Keep these together: Company mounts with the new refresh key, and
+          // setup's payoff is the roster rather than the Overview graph.
+          setTeamBuilt((n) => n + 1);
+          setSetupCompleted(true);
+          setView("company");
+        }}
       />
 
-      <TourController company={company} setView={setView} hold={setupOpen} />
+      <TourController
+        company={company}
+        setView={setView}
+        hold={setupOpen}
+        suppressWelcome={setupCompleted}
+      />
     </SidebarProvider>
   );
 }
