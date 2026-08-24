@@ -491,6 +491,11 @@ export function PolicySettings({ client, company }: Props) {
         // An unsaved always-ask edit and a half-typed cap are the operator's;
         // the PUT only touched the deadline.
         { alwaysAsk: !dirty, spendCap: false },
+        // A deadline change is not "on the next turn": the live gate enforces
+        // the new TTL as soon as the save lands, and already-parked approvals
+        // are judged against it on the next sweep — so shortening the deadline
+        // can expire an approval sitting in the queue before any new turn.
+        "takes effect immediately — parked approvals are re-checked against the new deadline",
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save the deadline.");
