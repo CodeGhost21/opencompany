@@ -3975,7 +3975,10 @@ mod test {
             .build()
             .await
             .unwrap();
-        assert!(first.scratch_context().is_none(), "engine A has no decorator");
+        assert!(
+            first.scratch_context().is_none(),
+            "engine A has no decorator"
+        );
 
         // Engine B: adds scratch and scope partitions, so the swap is
         // observable — the successor must carry B's, not A's (none).
@@ -4041,7 +4044,10 @@ mod test {
             .build()
             .await
             .unwrap();
-        assert!(first.scratch_context().is_some(), "engine A has a decorator");
+        assert!(
+            first.scratch_context().is_some(),
+            "engine A has a decorator"
+        );
 
         let cleared = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
             .with_memory_overlay_cleared()
