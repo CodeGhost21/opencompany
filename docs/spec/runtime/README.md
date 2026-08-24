@@ -62,7 +62,7 @@ Supporting docs:
   (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
   "inherit" rather than "nothing", the four namespaces `*` never confers, the
   unified tool catalog, and the seed-wins rule for console desk overrides
-- [lifecycle.md](lifecycle.md) — company state machine and durability
+- [company-setup/overview.md](company-setup/overview.md) — first-run company setup, roster design, fallback behavior, and resume flows
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
   call per card, the host-gathered evidence pack, the prerequisite verdict
   taxonomy, and the no-run/no-lock concurrency argument
