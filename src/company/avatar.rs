@@ -537,6 +537,9 @@ fn webp_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
         }
         i += 8 + size + (size & 1);
     }
+    if saw_frame && i != bytes.len() {
+        return Err(truncated_animation());
+    }
     Ok(saw_frame.then_some(cost))
 }
 
