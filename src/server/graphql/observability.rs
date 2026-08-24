@@ -284,7 +284,7 @@ pub(crate) async fn resolve_runs(
     let rows = runtime.runs().list_runs(runtime.id(), &filter).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        out.push(load(runtime, row).await);
+        out.push(load(runtime, row).await?);
     }
     Ok(out)
 }
