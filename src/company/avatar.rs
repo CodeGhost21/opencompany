@@ -483,6 +483,7 @@ fn apng_animation_cost(bytes: &[u8]) -> Option<u64> {
         let len = u32::from_be_bytes(bytes.get(i..i + 4)?.try_into().ok()?) as usize;
         let chunk_type = bytes.get(i + 4..i + 8)?;
         let data = bytes.get(i + 8..i + 8 + len)?;
+        eprintln!("apng walk: len={} i={i} chunklen={len} type={:?} data.len={}", bytes.len(), String::from_utf8_lossy(chunk_type), data.len());
         if chunk_type == b"acTL" {
             animated = true;
             cost = cost.saturating_add(w * h);
