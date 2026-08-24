@@ -106,8 +106,20 @@ export function useHashView<T extends string>(
   const navigate = useCallback((next: T, nextSub?: string, query?: Readonly<Record<string, string | null>>) => {
     const path = nextSub ? `${next}/${nextSub}` : next;
     const nextHash = withHostParam(path, query);
-    if (window.location.hash !== nextHash) {
-      window.location.hash = nextHash;
+    // A navigation without an explicit query changes only the route. Preserve
+    // query state when the destination path is unchanged so durable link state
+    // (for example, a focused workflow run) remains represented by the URL.
+    const currentPath = window.location.hash.split("?")[0];
+    const nextPath = nextHash.split("?")[0];
+    const currentQuery = window.location.hash.includes("?")
+      ? window.location.hash.slice(window.location.hash.indexOf("?") + 1)
+      : "";
+    const destinationHash =
+      query === undefined && currentPath === nextPath && currentQuery
+        ? `${nextPath}?${currentQuery}`
+        : nextHash;
+    if (window.location.hash !== destinationHash) {
+      window.location.hash = destinationHash;
     }
     setRoute([next, nextSub ?? null]);
   }, []);
