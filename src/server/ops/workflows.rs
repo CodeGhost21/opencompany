@@ -1828,13 +1828,19 @@ struct RunArtifactsResponse {
 /// same choice `list_runs` makes for the same reason, and correct here because
 /// this is a lazy per-run read, not a per-history-GET cost.
 ///
-/// # `200 []`, never `404`
+/// # `200 { files, truncated }`, never `404`
 ///
 /// The one contract difference from [`get_run_output`]: a run that opened no
 /// cards, or whose cards published no files, is the common case, not an error —
-/// it answers `200 []`, mirroring [`ArtifactStore::list`] returning `[]` for a
-/// card with no artifacts. An unknown run id is indistinguishable from a run
-/// that produced nothing, and means the same thing to the operator: no files.
+/// it answers `200` with `files: []`, mirroring [`ArtifactStore::list`]
+/// returning `[]` for a card with no artifacts. An unknown run id is
+/// indistinguishable from a run that produced nothing, and means the same thing
+/// to the operator: no files.
+///
+/// `truncated` is `true` only when [`MAX_RUN_ARTIFACTS`] cut older rows — a
+/// defensive ceiling for a run that opened an unusually large number of files,
+/// not a page size. The console reads it and labels the list "newest 500
+/// shown" rather than presenting an incomplete list as exhaustive.
 ///
 /// # Provenance is the OPENING run
 ///
