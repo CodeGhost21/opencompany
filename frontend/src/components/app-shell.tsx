@@ -2176,6 +2176,7 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
+              mentionFeedRevision={mentionFeedVersion}
               mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
