@@ -9458,7 +9458,7 @@ mode = "full"
 
     /// **The Codex P1 finding:** `journal_chat_replies` resolved an agent
     /// reply's mentions and stored them on `CompanyEvent::AgentReply`, but never
-    /// called `notify_mentioned` — so an `@user` an agent typed *back* rendered
+    /// called `notify_mentions` — so an `@user` an agent typed *back* rendered
     /// as a chip and left the named person with no durable notification and no
     /// rail badge, unlike the operator's own message a few lines above it in
     /// the very same function. Missing it worst for exactly the person it is
