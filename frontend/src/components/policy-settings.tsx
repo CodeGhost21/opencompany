@@ -653,8 +653,12 @@ export function PolicySettings({ client, company }: Props) {
                   variant={noSpendCap ? "secondary" : "outline"}
                   disabled={saving}
                   onClick={() => {
-                    if (noSpendCap) setDraftSpend("");
+                    if (!noSpendCap && draftSpend.trim() === "") {
+                      toast.error("Enter a non-negative amount, or choose no cap.");
+                      return;
+                    }
                     setNoSpendCap((current) => !current);
+                    if (noSpendCap) setDraftSpend("");
                   }}
                 >
                   {noSpendCap ? "No cap" : "Set no cap"}
