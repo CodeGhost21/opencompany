@@ -260,6 +260,23 @@ describe("mentionsOutsideRange", () => {
     const out = mentionsOutsideRange([a, b], { start: 0, end: 4 });
     expect(out).toEqual([b]);
   });
+
+  /**
+   * The composer's whole pick path: `insertMention` over an existing picked
+   * `@Sam`, with the replaced mention dropped before reconcile. Sam's identity
+   * must not survive onto the second, hand-typed `@Sam` — the message pings
+   * engineer for the replacement and nobody for the raw literal.
+   */
+  it("does not re-anchor a replaced mention onto a same-text duplicate", () => {
+    const draft = "@Sam then @Sam";
+    const range = { start: 0, end: 4 };
+    const result = insertMention(draft, range, engineer);
+    const survivors = mentionsOutsideRange([a], range);
+    const out = reconcileMentions(result.text, [...survivors, result.mention]);
+    expect(out).toEqual([
+      { target: { kind: "agent", id: "engineer" }, text: "@engineer", offset: 0 },
+    ]);
+  });
 });
 
 describe("reconcileMentions", () => {
