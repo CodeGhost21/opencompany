@@ -87,7 +87,11 @@ function seedFeed(): Note[] {
 async function mockApi(
   page: Page,
   feed: Note[],
-  options: { historyGates?: Record<string, Promise<void>> } = {},
+  options: {
+    historyGates?: Record<string, Promise<void>>;
+    /** Per-desk transcripts to serve; a desk with no entry gets `[]`. */
+    history?: Record<string, unknown[]>;
+  } = {},
 ) {
   // The first-run tour renders a modal over the console and swallows clicks.
   await page.addInitScript(() => {
