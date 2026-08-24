@@ -63,7 +63,12 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
-import { mentionCountsByChannel, mentionsToClear, threadsToReReadForMentions } from "@/lib/mention-badge";
+import {
+  mentionCountsByChannel,
+  mentionsToClear,
+  threadViewAdvancesChannel,
+  threadsToReReadForMentions,
+} from "@/lib/mention-badge";
 import { usePresence } from "@/hooks/use-presence";
 import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
