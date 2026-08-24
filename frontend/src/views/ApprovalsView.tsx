@@ -837,7 +837,9 @@ export function ApprovalCard({
                     a.workflow_id ? "workflow" : "teammate"
                   } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
                 : "just this once"
-            } — request ${a.at_millis}${
+            }${
+              a.contents_hidden ? "" : ` — request ${a.at_millis}`
+            }${
               batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
             }`}
             disabled={deciding !== null}
