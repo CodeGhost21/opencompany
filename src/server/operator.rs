@@ -578,13 +578,26 @@ async fn delete_desk(
 
 /// Logs SSE stream teardown when the subscriber disconnects. Held inside the
 /// projection closure so it drops exactly when the response body is dropped.
-struct SseStreamGuard(CompanyId);
+///
+/// Also owns the label-refresh task's handle, so the periodic roster re-read
+/// dies with its connection instead of leaking for the process's lifetime.
+struct SseStreamGuard {
+    company: CompanyId,
+    label_refresh: Option<JoinHandle<()>>,
+}
 
 impl Drop for SseStreamGuard {
     fn drop(&mut self) {
-        tracing::debug!(company = %self.0, "operator SSE stream closed");
+        if let Some(handle) = self.label_refresh.take() {
+            handle.abort();
+        }
+        tracing::debug!(company = %self.company, "operator SSE stream closed");
     }
 }
+
+/// How often an open SSE stream re-reads the roster, so a mention chip for a
+/// user added or renamed after the stream opened picks up the new label.
+const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 /// `GET {scope}/events` — the company → operator attention feed (issue #66).
 ///
