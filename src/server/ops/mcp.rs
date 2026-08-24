@@ -1160,6 +1160,48 @@ role = "Chief Executive"
         );
     }
 
+    /// Issue #1674: a teammate seated on a desk whose `tools` ceiling omits
+    /// `mcp:*` must not read back as reaching every server the company grants.
+    /// `roster_grants` is what every MCP server row's `reachableBy` is computed
+    /// from, and the harness scopes the same agent by its desk (`build_roster`'s
+    /// three-level narrowing) — so a company that grants `mcp:*` while a desk
+    /// omits MCP would otherwise list that desk's teammates as reaching servers
+    /// they cannot call.
+    #[test]
+    fn a_desk_ceiling_that_omits_mcp_narrows_reachability() {
+        let mut scoped = record(vec![teammate("jamie", Vec::new())]);
+        scoped.overlay_desks.push(OverlayDesk {
+            id: "creative".to_string(),
+            name: "Creative".to_string(),
+            description: None,
+            members: vec!["jamie".to_string()],
+        });
+        scoped
+            .overlay_desk_tools
+            .insert("creative".to_string(), vec!["mcp:notion".to_string()]);
+        let grants = roster_grants(&scoped);
+        let jamie = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "jamie")
+            .expect("the overlay teammate is on the roster");
+        assert_eq!(
+            jamie.1,
+            vec!["mcp:notion".to_string()],
+            "the desk ceiling narrows reachability below the company grant"
+        );
+
+        // The manifest agent on no desk still inherits the whole company grant,
+        // so the narrowing above is the desk's and not a company change.
+        let ceo = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
     /// An operator's `tools` edit to a **manifest** teammate is the grant the
     /// harness reads: `PATCH …/team/{id}` stores the edit as an override, and
     /// `roster_grants` derives reachability from the effective roster just like
