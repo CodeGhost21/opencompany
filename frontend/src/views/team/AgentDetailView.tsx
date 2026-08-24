@@ -1119,12 +1119,15 @@ function AvatarDialog({
   client,
   company,
   agent,
+  busy,
   onOpenChange,
   onPick,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   agent: AgentDetailDto | null;
+  /** An avatar save is in flight — the picker is inert until it settles. */
+  busy: boolean;
   onOpenChange: (open: boolean) => void;
   onPick: (avatar: string | undefined) => void;
 }) {
