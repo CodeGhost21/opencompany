@@ -500,7 +500,7 @@ export function SetupDialog({
             finished={phase.kind === "done"}
             fallback={phase.fallback}
             onDone={onDone}
-            onRedesign={onRedesign}
+            onRedesign={() => onRedesign(createdIds.current)}
             onTryAgain={tryRedesign}
           />
         )}
