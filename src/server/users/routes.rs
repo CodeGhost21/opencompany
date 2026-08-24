@@ -1149,6 +1149,35 @@ async fn edit_me(
         )
             .into_response());
     }
+    // The avatar resolve is the one slow part of this handler — a workspace
+    // read of an uploaded image — and `upsert_user` below replaces the *entire*
+    // record with whatever `get_user` returned. Resolving the face before that
+    // read keeps the record we persist from being loaded ahead of a long await:
+    // a `status`, `role` or `password_hash` an admin changed while the image was
+    // being looked up is read, not resurrected. (The residual read-to-write gap
+    // is systemic — every user write in this store replaces the whole record —
+    // and closing it for good is a store-level partial update, not something a
+    // route can do alone.)
+    let avatar = match body.avatar {
+        // Field absent — leave the face alone. `Some` here means "the body spoke
+        // about the avatar"; the inner value is the stored reference (`None`
+        // clears back to the hashed default).
+        None => None,
+        Some(inner) => Some(match inner
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            // Validated against what this host holds before it is stored — the
+            // value ends up in an `src=` on every surface that draws this
+            // person's face. See `crate::company::avatar`.
+            Some(value) => Some(
+                crate::company::avatar::resolve(runtime.workspace().as_ref(), runtime.id(), &value)
+                    .await
+                    .map_err(|e| ApiError(e).into_response())?,
+            ),
+            None => None,
+        }),
+    };
     let mut user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
@@ -1164,21 +1193,8 @@ async fn edit_me(
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty());
     }
-    // Validated against what this host holds before it is stored — the value
-    // ends up in an `src=` on every surface that draws this person's face. See
-    // `crate::company::avatar`.
-    if let Some(avatar) = body.avatar {
-        user.avatar = match avatar
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            Some(value) => Some(
-                crate::company::avatar::resolve(runtime.workspace().as_ref(), runtime.id(), &value)
-                    .await
-                    .map_err(|e| ApiError(e).into_response())?,
-            ),
-            None => None,
-        };
+    if let Some(avatar) = avatar {
+        user.avatar = avatar;
     }
     user.updated_at_millis = now_millis();
     runtime
