@@ -245,6 +245,8 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         search: None,
         tenant_search: None,
         workspace: None,
+        workflow_runs: None,
+        deep_trace: None,
     }
 }
 
@@ -280,6 +282,7 @@ async fn company_agent(
         classes: Vec::new(),
         ledgers: None,
         can_declare_ledgers: true,
+        model: None,
     };
     // The manifest default. `file_read` reaches nothing outside the sandbox, so
     // it is auto-approved here — the point is that the turn is gated by the real

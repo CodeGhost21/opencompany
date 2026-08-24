@@ -11,7 +11,7 @@ use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::TaskRecord;
-use crate::ports::types::{CompanyId, CompanyRecord, ContextChunk};
+use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
@@ -870,6 +870,41 @@ async fn memory_create_and_delete_journals_event() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn memory_traces_are_inspectable_newest_last() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    for (cycle_id, summary, at_millis) in [
+        ("cycle-1", "first completed cycle", 1_000),
+        ("cycle-2", "second completed cycle", 2_000),
+    ] {
+        runtime
+            .memory
+            .save_trace(
+                runtime.id(),
+                CompressedTrace {
+                    cycle_id: cycle_id.into(),
+                    summary: summary.into(),
+                    at_millis,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, traces) = send(&state, "GET", "/api/v1/company/memory/traces", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let traces = traces.as_array().unwrap();
+    assert_eq!(traces.len(), 2);
+    assert_eq!(traces[0]["cycleId"], "cycle-1");
+    assert_eq!(traces[0]["summary"], "first completed cycle");
+    assert_eq!(traces[0]["atMillis"], 1_000);
+    assert_eq!(traces[1]["cycleId"], "cycle-2");
 }
 
 #[tokio::test]
@@ -3543,14 +3578,14 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
 
 /// Issue #568: each listed server carries the agents whose *effective* grants
 /// reach it — over the full runtime roster, manifest agents plus overlay
-/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
-/// (and every overlay teammate, which has no tools row) inherits the wildcard and
-/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
-/// that server.
+/// teammates. With a company `allow = ["*", "mcp:*"]`, an agent that declares
+/// no `tools` (and every overlay teammate, which has no tools row) inherits the
+/// wildcard and explicit MCP grant and reaches every server; an agent that
+/// narrows itself to `mcp:notion` reaches only that server.
 #[tokio::test]
 async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
          [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
@@ -3567,6 +3602,8 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         role: "Assistant".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     };
     let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
 
@@ -3670,7 +3707,7 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
 #[tokio::test]
 async fn mcp_reachability_is_empty_for_a_disabled_server() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
     )

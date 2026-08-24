@@ -1,5 +1,6 @@
-//! Memory-fact reads + writes: `GET /memory`, `GET /memory/stats`,
-//! `POST /memory`, `DELETE /memory/{fact_id}` under both scope forms.
+//! Memory-fact reads + writes: `GET /memory`, `GET /memory/traces`,
+//! `GET /memory/stats`, `POST /memory`, `DELETE /memory/{fact_id}` under both
+//! scope forms.
 //!
 //! Bodies mirror the console's `MemoryEntry` (`frontend/src/api/memory.ts`).
 //! Facts land in the [`FactStore`](crate::ports::FactStore) — the console's
@@ -30,8 +31,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::facts::{FactKind, FactRecord};
-use crate::ports::types::{ChunkAddr, ChunkMeta, CompanyEvent, ContextChunk};
+use crate::ports::types::{ChunkAddr, ChunkMeta, CompanyEvent, CompressedTrace, ContextChunk};
 use crate::ports::{generate_id, now_millis};
+use crate::runtime::maintenance::TRACE_RETENTION_LIMIT;
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -77,6 +79,7 @@ const OUTCOME_LABEL_PREFIX: &str = "task-outcome";
 /// Builds the memory route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/memory", post(create_fact).get(list_facts))
+        .merge(scoped("/memory/traces", get(list_traces)))
         .merge(scoped("/memory/stats", get(memory_stats)))
         .merge(scoped("/memory/{fact_id}", delete(delete_fact)))
 }
@@ -89,6 +92,29 @@ const MAX_CONTEXT_ENTRIES: usize = 500;
 
 /// Max characters kept for a context entry's synthesised title (its first line).
 const CONTEXT_TITLE_MAX: usize = 120;
+
+/// A persisted cycle trace as exposed to an operator.
+///
+/// The route returns the full live retention window: maintenance retains at
+/// most [`TRACE_RETENTION_LIMIT`] traces, so this materialises no unbounded
+/// store read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceEntry {
+    cycle_id: String,
+    summary: String,
+    at_millis: u64,
+}
+
+impl From<CompressedTrace> for TraceEntry {
+    fn from(trace: CompressedTrace) -> Self {
+        Self {
+            cycle_id: trace.cycle_id,
+            summary: trace.summary,
+            at_millis: trace.at_millis,
+        }
+    }
+}
 
 /// Where a rendered [`MemoryEntry`] came from. The console keys "editable vs
 /// read-only" and the source label off this: only [`Fact`](MemoryOrigin::Fact)
@@ -483,6 +509,21 @@ async fn list_facts(
         total_context,
         context_truncated: total_context > MAX_CONTEXT_ENTRIES,
     }))
+}
+
+/// `GET /memory/traces` — the retained, newest-last cycle trace window.
+///
+/// Trace summaries are intentionally not injected into a cycle: current
+/// producers emit placeholders, and real compression/consumption needs its
+/// own design. This inspection surface makes the durable record visible while
+/// retention keeps the read bounded.
+async fn list_traces(company: ScopedCompany) -> Result<Json<Vec<TraceEntry>>, ApiError> {
+    let traces = company
+        .runtime
+        .memory
+        .recent_traces(company.id(), TRACE_RETENTION_LIMIT)
+        .await?;
+    Ok(Json(traces.into_iter().map(TraceEntry::from).collect()))
 }
 
 /// Drops the operator-fact mirrors, then keeps the newest `cap` chunks.

@@ -1022,12 +1022,20 @@ async fn run_export(
 /// "the query ran and found three" is a success, not a failure. The findings
 /// are on stdout for a human and behind `--json` for anything else.
 async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
+    run_orphans_from(home, json, &ProcessEnv).await
+}
+
+async fn run_orphans_from(
+    home: Option<PathBuf>,
+    json: bool,
+    env: &dyn opencompany::app::config::EnvSource,
+) -> Result<()> {
     // Gate on OPENCOMPANY_TENANT_ID: the same condition that gates the
     // durable owner-row write at register_company. Without a tenant
     // namespace no owner rows are ever persisted, and reading zero owners
     // against N companies would report every company as orphaned.
-    let tenant_id = std::env::var("OPENCOMPANY_TENANT_ID")
-        .ok()
+    let tenant_id = env
+        .get("OPENCOMPANY_TENANT_ID")
         .filter(|v| !v.trim().is_empty());
     if let Some(tenant) = &tenant_id {
         // A namespace containing the `--` id delimiter would make the
@@ -1048,7 +1056,7 @@ async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
     }
 
     let home = resolve_home_migrated(home)?;
-    let settings = opencompany::store::StorageSettings::from_env()?;
+    let settings = opencompany::store::StorageSettings::from_env_source(env)?;
     let Some(handles) = opencompany::store::open_storage(&settings, &home).await? else {
         // `StorageKind::Fs` yields no handles at all, so there is no `owners`
         // collection and this condition cannot arise. Say that plainly rather
@@ -2508,15 +2516,9 @@ mod test {
     /// reviewer's false-positive case, with no database needed to hit it.
     #[tokio::test]
     async fn orphans_refuses_to_run_without_a_tenant_namespace() {
-        // Save and restore so a box configured for shared-single-DB (or a
-        // parallel test) is unaffected.
-        let previous = std::env::var("OPENCOMPANY_TENANT_ID").ok();
-        unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") };
-        let err = run_orphans(None, false).await.unwrap_err();
-        match previous {
-            Some(value) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", value) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
-        }
+        let err = run_orphans_from(None, false, &opencompany::app::config::MapEnv::default())
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(&err, opencompany::error::OpenCompanyError::Config(_)),

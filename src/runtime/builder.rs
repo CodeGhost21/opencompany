@@ -202,8 +202,91 @@ pub(crate) fn agent_scoped_grants(
 /// uses. A catalog doing its own matching would be free to advertise a grant the
 /// gate does not honour — precisely the disagreement between what the console
 /// shows and what an agent can actually do that the catalog exists to end.
+///
+/// The metered, credentialed, and third-party namespaces are explicit opt-ins;
+/// a catch-all `*` never covers them here, even though [`grant_matches`] treats
+/// `*` as a generic match. MCP uses the same rule for `mcp:*`, so an agent belt
+/// cannot reintroduce a capability the company intentionally omitted.
 pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
+
+    // These capabilities are intentionally opt-in: the generic matcher treats
+    // `*` as covering every literal, but these grants reach metered services,
+    // tenant credentials, third-party source, or operator-owned workspace
+    // guidance. Keep narrowing consistent with the wiring predicates so an
+    // agent cannot ask for one of them through a catch-all company grant.
+    //
+    // The request must also be a spelling the wiring predicate accepts when
+    // stored *verbatim*: the write path keeps the request intact in `effective`,
+    // so a glued-star request like `search*` or `workspace.write*` reaches the
+    // belt as `search*`/`workspace.write*` — which `grants_search_explicit` and
+    // `grants_workspace_write_explicit` both reject, even though their stripped
+    // forms would pass. Only the bare namespace, a separator-broken descendant
+    // (`search.*`, `search.web`), and the colon forms (`mcp:*`) are spellings
+    // the wiring can honour; anything else would render in the card as granted
+    // while the tools stay unwired. Each branch therefore asks the predicate on
+    // the allow-list *and* on the single request glob.
+    //
+    // Workspace writes are explicit-only in both spellings
+    // [`grants_workspace_write_explicit`](crate::company::grants_workspace_write_explicit)
+    // accepts: the bare `workspace` grant as well as `workspace.write`. A bare
+    // `workspace` *request* must be gated the same way, or an agent asking for
+    // it under a `["*"]` allow-list would hold the exact token the wiring
+    // predicate accepts and gain write tools the company withheld.
+    if literal == "workspace" || literal == "workspace.write" {
+        return crate::company::grants_workspace_write_explicit(allow)
+            && crate::company::grants_workspace_write_explicit(&[tool.to_string()]);
+    }
+
+    // The namespace predicates accept the bare namespace or any dotted
+    // descendant (`search` and `search.*` both satisfy them), so the request
+    // check must too — `search.*` or `media.image` is as much an opt-in ask as
+    // the bare namespace, and letting it fall through to the generic match
+    // below would hand a wildcard-only company the whole namespace on a
+    // sub-grant request.
+    if literal == "media" || literal.starts_with("media.") {
+        return crate::company::grants_media_explicit(allow)
+            && crate::company::grants_media_explicit(&[tool.to_string()]);
+    }
+    if literal == "composio" || literal.starts_with("composio.") {
+        return crate::company::grants_composio_explicit(allow)
+            && crate::company::grants_composio_explicit(&[tool.to_string()]);
+    }
+    if literal == "chargebee" || literal.starts_with("chargebee.") {
+        return crate::company::grants_chargebee_explicit(allow)
+            && crate::company::grants_chargebee_explicit(&[tool.to_string()]);
+    }
+    if literal == "hosting" || literal.starts_with("hosting.") {
+        return crate::company::grants_hosting_explicit(allow)
+            && crate::company::grants_hosting_explicit(&[tool.to_string()]);
+    }
+    if literal == "paypal" || literal.starts_with("paypal.") {
+        return crate::company::grants_paypal_explicit(allow)
+            && crate::company::grants_paypal_explicit(&[tool.to_string()]);
+    }
+    if literal == "search" || literal.starts_with("search.") {
+        return crate::company::grants_search_explicit(allow)
+            && crate::company::grants_search_explicit(&[tool.to_string()]);
+    }
+
+    // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
+    // an agent asking for all company servers. A bare `*` must not confer it.
+    if literal == "mcp:" || literal.starts_with("mcp:") {
+        return allow
+            .iter()
+            .filter(|grant| grant.as_str() != "*")
+            .any(|grant| grant_matches(grant, literal));
+    }
+    // A delimiter-free MCP spelling (`mcp`, `mcp*`, `mcpfoo`) is not a form the
+    // MCP wiring can honour, so it must not fall through to the generic matcher
+    // below: under a wildcard-only allow-list that generic match would accept
+    // it, and the saved `mcp*` glob reads in `grants_cover_server` as covering
+    // every configured server — the explicit opt-in defeated. Only the colon
+    // forms wire; reject the rest of the family here.
+    if literal.starts_with("mcp") {
+        return false;
+    }
+
     allow.iter().any(|grant| grant_matches(grant, literal))
 }
 
@@ -426,6 +509,7 @@ pub struct RuntimeBuilder {
     workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
     run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
+    deep_trace: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
@@ -559,6 +643,7 @@ impl RuntimeBuilder {
             workflow_revisions: None,
             schedule_fires: None,
             run_output_store: None,
+            deep_trace: None,
             usage: None,
             skills: None,
             read_state: None,
@@ -691,6 +776,7 @@ impl RuntimeBuilder {
         self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.schedule_fires = Some(handles.schedule_fires.clone());
         self.run_output_store = Some(handles.run_outputs.clone());
+        self.deep_trace = Some(handles.deep_trace.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.read_state = Some(handles.read_state.clone());
@@ -749,6 +835,19 @@ impl RuntimeBuilder {
         store: Arc<dyn crate::ports::journal::JournalStore>,
     ) -> Self {
         self.journal_store = Some(store);
+        self
+    }
+
+    /// Swaps the deep-trace store (default: fs-backed).
+    ///
+    /// The default is what every production host runs; a test swaps it for a
+    /// counting or in-memory store to observe whether the unredacted half was
+    /// actually read.
+    pub fn with_deep_trace(
+        mut self,
+        store: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
+    ) -> Self {
+        self.deep_trace = Some(store);
         self
     }
 
@@ -1290,6 +1389,7 @@ impl RuntimeBuilder {
                     self.runs.unwrap_or_else(|| fs_ops.clone()),
                     events.clone(),
                 )),
+                deep_trace: self.deep_trace.unwrap_or_else(|| fs_ops.clone()),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 workflow_run_outputs: self
@@ -2451,7 +2551,14 @@ impl RuntimeBuilder {
                                 serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
-                                meter: Some(fs_ops.clone()),
+                                // The harness must write usage to the SELECTED
+                                // backend, not always the filesystem. The read
+                                // side (`company.usage`) reads `ops.usage` — the
+                                // selected backend — so on a non-fs store the
+                                // samples were written to disk while the console
+                                // read an empty table. Same handle the read side
+                                // resolves to (see the `usage:` field below).
+                                meter: Some(ops.usage.clone()),
                                 workspace_root: home.join("harness"),
                                 // The company's own MCP store, so the
                                 // registry tools on the belt read the same
@@ -2518,6 +2625,13 @@ impl RuntimeBuilder {
                                 // here so a past run is readable from the console.
                                 // `None` degrades to no-persist, like `events`.
                                 run_output_store: self.run_output_store.clone(),
+                                // The SAME run store the dispatch path uses
+                                // (`HarnessBrain::with_runs` below), so a
+                                // workflow node's attempt and a card's
+                                // attempt land in one place by construction
+                                // rather than by two call sites agreeing.
+                                workflow_runs: Some(ops.runs.clone()),
+                                deep_trace: Some(ops.deep_trace.clone()),
                                 // Issue #661 (M7): the SAME revision store the
                                 // console's workflow PUT/DELETE routes use, so
                                 // an agent edit snapshots the prior body and an
@@ -2769,13 +2883,21 @@ impl RuntimeBuilder {
                                 (Some(engine), true, true) => engine.clone(),
                                 _ => {
                                     let default_harness = record.manifest.default_harness_id();
+                                    // Effective agents plus the overlay
+                                    // roster, matching `lanes::agents_on`.
+                                    // Reading the raw manifest here left the
+                                    // router treating a console-bound teammate
+                                    // as default-bound while the lane it was
+                                    // moved to had already excluded it — so
+                                    // the saved harness was ignored even after
+                                    // a restart.
                                     let bindings: HashMap<String, String> = record
-                                        .manifest
-                                        .agents
-                                        .iter()
-                                        .filter_map(|a| {
+                                        .effective_agents()
+                                        .into_iter()
+                                        .filter_map(|a| a.harness.clone().map(|h| (a.id, h)))
+                                        .chain(record.overlay_agents.iter().filter_map(|a| {
                                             a.harness.clone().map(|h| (a.id.clone(), h))
-                                        })
+                                        }))
                                         .collect();
                                     Arc::new(HarnessRouter::from_lanes(
                                         &default_harness,
@@ -3002,7 +3124,7 @@ impl RuntimeBuilder {
         // against a snapshot predating the other. Adopting them is also what
         // makes the quiesce drain mean something after the swap.
         if let Some(h) = handover.as_ref() {
-            runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
+            runtime.adopt_locks(h.serial.clone(), h.per_agent.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
         runtime.adopt_workflow_gates(workflow_gates);
@@ -3757,6 +3879,187 @@ mod test {
 
         fn strings(values: &[&str]) -> Vec<String> {
             values.iter().map(|v| v.to_string()).collect()
+        }
+
+        /// A catch-all company grant must not satisfy opt-in namespaces that
+        /// carry billing, tenant credentials, third-party source access, or
+        /// workspace writes. Workspace writes protect operator-owned
+        /// guidance and therefore require an explicit `workspace` or
+        /// `workspace.write` grant, just like the special namespaces below.
+        #[test]
+        fn wildcard_does_not_cover_special_namespaces() {
+            let allow = strings(&["*"]);
+            for grant in [
+                "media",
+                "media.*",
+                "media.image",
+                "composio",
+                "composio.*",
+                "composio.gmail",
+                "chargebee",
+                "chargebee.*",
+                "chargebee.read",
+                "hosting",
+                "hosting.*",
+                "hosting.deploy",
+                "paypal",
+                "paypal.*",
+                "paypal.wallet",
+                "search",
+                "search.*",
+                "search.web",
+                "mcp:*",
+                "mcp*",
+            ] {
+                assert!(
+                    !allow_covers(&allow, grant),
+                    "catch-all must not cover opt-in grant `{grant}`"
+                );
+            }
+            assert!(!allow_covers(&allow, "workspace.write"));
+            assert!(
+                !allow_covers(&allow, "workspace"),
+                "the bare `workspace` grant is a write grant to the wiring predicate, \
+                 so a catch-all must not cover it"
+            );
+            assert!(allow_covers(&allow, "workspace.read"));
+            assert!(allow_covers(&allow, "docs.read"));
+        }
+
+        /// Explicit special grants still cover the corresponding setup belt —
+        /// bare namespaces and sub-grant requests alike, matching the `_explicit`
+        /// wiring predicates that accept both shapes.
+        #[test]
+        fn explicit_special_grants_cover_their_namespaces() {
+            let allow = strings(&[
+                "media",
+                "composio",
+                "chargebee",
+                "hosting",
+                "paypal",
+                "search",
+                "mcp:*",
+                "workspace",
+            ]);
+            for grant in [
+                "media",
+                "media.*",
+                "media.image",
+                "composio",
+                "composio.*",
+                "composio.gmail",
+                "chargebee",
+                "chargebee.*",
+                "chargebee.read",
+                "hosting",
+                "hosting.*",
+                "hosting.deploy",
+                "paypal",
+                "paypal.*",
+                "paypal.wallet",
+                "search",
+                "search.*",
+                "search.web",
+                "mcp:*",
+                "workspace",
+                "workspace.write",
+            ] {
+                assert!(
+                    allow_covers(&allow, grant),
+                    "explicit grant must cover `{grant}`"
+                );
+            }
+        }
+
+        /// The workspace write grant does not cover a read-glob request, in
+        /// either direction of the asymmetry the manifest pair documents.
+        ///
+        /// `workspace` is a *write* grant to the wiring predicate
+        /// ([`grants_workspace_write_explicit`]), while a `workspace.*` request
+        /// strips to `workspace.` and falls to the generic matcher, where an
+        /// unstarred grant matches only itself — so `allow_covers` answers
+        /// false, and `agent_effective_grants` drops the request from the
+        /// belt. The console's `companyCovers` mirror pins the same pair.
+        #[test]
+        fn a_write_grant_does_not_cover_a_read_glob_request() {
+            assert!(!allow_covers(&strings(&["workspace"]), "workspace.*"));
+            assert!(allow_covers(
+                &strings(&["workspace", "workspace.*"]),
+                "workspace.*"
+            ));
+            assert!(!allow_covers(&strings(&["*"]), "workspace.write"));
+        }
+
+        /// A bare opt-in namespace grant covers its sub-grant requests, again
+        /// matching the wiring predicate: `search.web` in the effective grants
+        /// satisfies `grants_search_explicit` exactly as `search` does, so the
+        /// request must not be dropped at the allow-list. The ordinary namespaces
+        /// keep the exact-match rule, which is why this test sits beside the two
+        /// opt-in ones rather than being folded into the generic matcher.
+        #[test]
+        fn a_bare_opt_in_grant_covers_its_sub_grants() {
+            assert!(allow_covers(&strings(&["search"]), "search.*"));
+            assert!(allow_covers(&strings(&["search"]), "search.web"));
+            assert!(allow_covers(&strings(&["media"]), "media.image"));
+            assert!(allow_covers(&strings(&["chargebee"]), "chargebee.read"));
+            assert!(
+                !allow_covers(&strings(&["docs"]), "docs.read"),
+                "ordinary namespaces keep the unstarred-grant exact-match rule"
+            );
+        }
+
+        /// A request glob whose `*` is glued to an explicit opt-in namespace
+        /// (`search*`, `workspace.write*`) is stored *verbatim* by the write
+        /// path, and the wiring predicates reject the glued spelling —
+        /// `grants_search_explicit` wants `search` or a `search.`-descendant,
+        /// `grants_workspace_write_explicit` wants the two exact tokens. So even
+        /// a company that holds the namespace must not have `allow_covers`
+        /// promise a grant that will silently fail to wire; the console's
+        /// `companyCovers` mirror pins the same rule.
+        #[test]
+        fn a_glued_star_opt_in_request_is_not_covered() {
+            let allow = strings(&[
+                "search",
+                "workspace",
+                "media",
+                "composio",
+                "chargebee",
+                "hosting",
+                "paypal",
+                "mcp:*",
+            ]);
+            for grant in [
+                "search*",
+                "workspace*",
+                "workspace.write*",
+                "media*",
+                "composio*",
+                "chargebee*",
+                "hosting*",
+                "paypal*",
+                "mcp*",
+            ] {
+                assert!(
+                    !allow_covers(&allow, grant),
+                    "glued-star `{grant}` must not be covered"
+                );
+            }
+        }
+
+        /// The separator-broken opt-in spellings — the ones the wiring
+        /// predicates actually accept — stay covered even when they end in a
+        /// `*`: `search.web*` strips to a `search.`-descendant that
+        /// `grants_search_explicit` accepts verbatim, `workspace.write` is an
+        /// exact write token, and `mcp:notion*` is a colon-scoped prefix.
+        #[test]
+        fn a_separator_broken_opt_in_request_stays_covered() {
+            let allow = strings(&["search", "workspace", "media", "mcp:*"]);
+            assert!(allow_covers(&allow, "search.*"));
+            assert!(allow_covers(&allow, "search.web*"));
+            assert!(allow_covers(&allow, "workspace.write"));
+            assert!(allow_covers(&allow, "media.*"));
+            assert!(allow_covers(&allow, "media.image*"));
+            assert!(allow_covers(&allow, "mcp:notion*"));
         }
 
         /// Runs the three-level narrowing over `&str` slices, so each case below
@@ -6558,6 +6861,7 @@ needs_reason = true
             description: None,
             tools: None,
             instructions: None,
+            ..Default::default()
         });
         record.retire_agent("cto");
         store.save(&record).await.unwrap();

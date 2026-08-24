@@ -89,6 +89,7 @@ use oh::agent::progress::AgentProgress;
 use oh::tools::status::{ClassifiedFailure, ToolFailureClass};
 
 use crate::harness::policy::POLICY_NAME;
+use crate::ports::deep_trace::TurnStepDetail;
 use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
 use crate::runtime::approval_display;
 use crate::turn_stream::TurnStreamEvent;
@@ -254,6 +255,14 @@ pub fn fold_steps(events: Vec<AgentProgress>) -> Vec<TurnStep> {
 ///
 /// **Run-scoped, not turn-scoped.** One instance spans every turn of an
 /// attempt — the redirect re-runs and a delegate's turn — so ordinals stay
+/// Bytes of accumulated reasoning that trigger an interim flush.
+///
+/// A thinking run is re-emitted under its own ordinal whenever it crosses this,
+/// and once more when it closes. Per-delta would be one store write per token;
+/// close-only would lose the whole thought if the host died mid-run, which is
+/// the failure the incremental trace exists to prevent.
+const DEEP_THINK_FLUSH_BYTES: usize = 2 * 1024;
+
 /// dense and unique across the run rather than restarting per turn and
 /// overwriting earlier rows.
 #[derive(Debug, Default)]
@@ -261,28 +270,90 @@ pub(crate) struct StepTrace {
     /// The next ordinal to hand out. Also the number of steps yielded so far.
     next: u32,
     /// `call_id` → the ordinal and label its start claimed, so the completion
-    /// finalizes that row keeping the richer start-time label.
-    running: std::collections::HashMap<String, (u32, String)>,
+    /// finalizes that row keeping the richer start-time label. In deep mode it
+    /// also carries the start event's detail, whose `display_detail` and
+    /// `iteration` the store would otherwise discard when the completion
+    /// replaces the row at the same ordinal.
+    running: std::collections::HashMap<String, (u32, String, Option<TurnStepDetail>)>,
     /// Whether the most recent step is an open "Thinking" run.
     thinking_open: bool,
+    /// Whether to yield the unredacted companion alongside each step.
+    ///
+    /// A flag rather than a separate type because the two projections must share
+    /// ONE state machine: the ordinals, the `running` map and the thinking
+    /// coalescing all have to agree, and two machines reading the same event
+    /// stream would eventually disagree about which ordinal a step got.
+    deep: bool,
+    /// The ordinal of the open thinking run, and the reasoning text accumulated
+    /// into it so far.
+    ///
+    /// A thinking run is many `ThinkingDelta` events that fold to ONE step, so
+    /// the text has to accumulate somewhere and be re-emitted under the same
+    /// ordinal. The store replaces on `(run_id, step_seq)`, so re-emitting
+    /// finalizes in place rather than duplicating.
+    thinking_buf: Option<(u32, String)>,
+    /// Number of reasoning bytes added since the last interim flush.
+    thinking_pending_bytes: usize,
 }
 
 impl StepTrace {
-    /// Feeds one progress event, yielding the ordinal + step to persist when the
-    /// event maps to one.
-    pub(crate) fn push(&mut self, event: &AgentProgress) -> Option<(u32, TurnStep)> {
+    /// A trace that also yields the unredacted companion of each step.
+    ///
+    /// Off by default (`StepTrace::default()`), so a caller that never asks for
+    /// deep detail cannot accidentally accumulate reasoning text.
+    pub(crate) fn deep() -> Self {
+        Self {
+            deep: true,
+            ..Self::default()
+        }
+    }
+
+    /// Feeds one progress event, yielding the ordinal, the scrubbed step, and —
+    /// when this trace is [`deep`](Self::deep) — its unredacted companion.
+    ///
+    /// All three come from ONE call on purpose. The alternative, a second pass
+    /// over the same events, would be a second state machine that has to agree
+    /// with this one about ordinals and about where a thinking run starts and
+    /// ends; when it eventually disagreed, a detail would be filed against the
+    /// wrong step. Returning them together makes the alignment structural.
+    /// Usually zero or one record; **two** when a tool call closes an open
+    /// thinking run, because the run's accumulated reasoning has to be
+    /// finalized under its own ordinal before the tool's step is emitted.
+    /// Dropping that tail would lose the reasoning immediately preceding a tool
+    /// call, which is the part worth reading.
+    pub(crate) fn push(
+        &mut self,
+        event: &AgentProgress,
+    ) -> Vec<(u32, TurnStep, Option<TurnStepDetail>)> {
         match event {
             AgentProgress::ToolCallStarted {
                 call_id,
                 tool_name,
                 display_label,
+                display_detail,
+                iteration,
                 ..
             } => {
+                let closing = self.close_thinking();
                 self.thinking_open = false;
                 let label = label_for(display_label.clone(), tool_name);
                 let seq = self.claim();
-                self.running.insert(call_id.clone(), (seq, label.clone()));
-                Some((
+                // NOTE: `arguments` is `Null` here on the tinyagents path —
+                // the crate emits real arguments on the *completed* event —
+                // so a started step has nothing unredacted to add beyond the
+                // harness's own label.
+                let start_detail = self.deep.then(|| {
+                    crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                        display_detail: display_detail.clone(),
+                        iteration: Some(*iteration),
+                        ..TurnStepDetail::default()
+                    })
+                });
+                self.running
+                    .insert(call_id.clone(), (seq, label.clone(), start_detail.clone()));
+                let mut out = Vec::new();
+                out.extend(closing);
+                out.push((
                     seq,
                     TurnStep {
                         kind: TurnStepKind::ToolCall,
@@ -290,7 +361,9 @@ impl StepTrace {
                         label,
                         ..TurnStep::default()
                     },
-                ))
+                    start_detail,
+                ));
+                out
             }
             AgentProgress::ToolCallCompleted {
                 call_id,
@@ -310,11 +383,11 @@ impl StepTrace {
                     arguments.as_ref(),
                     failure.as_ref(),
                 );
-                let (seq, label) = match self.running.remove(call_id) {
+                let (seq, label, start_detail) = match self.running.remove(call_id) {
                     Some(found) => found,
                     // No observed start — surface it standalone, exactly as the
                     // fold does.
-                    None => (self.claim(), humanize(tool_name)),
+                    None => (self.claim(), humanize(tool_name), None),
                 };
                 let mut step = TurnStep {
                     kind: TurnStepKind::ToolCall,
@@ -323,29 +396,152 @@ impl StepTrace {
                     ..TurnStep::default()
                 };
                 done.apply(&mut step);
-                Some((seq, step))
+                // The whole point of the deep store: `output` and `arguments`
+                // here are what the tool actually received and returned, before
+                // `complete` reduced them to a shape and a redacted summary.
+                let detail = self.deep.then(|| {
+                    let mut detail = TurnStepDetail {
+                        arguments: arguments
+                            .as_ref()
+                            .filter(|a| !a.is_null())
+                            .map(|a| a.to_string()),
+                        output: (!output.is_empty()).then(|| output.clone()),
+                        ..TurnStepDetail::default()
+                    };
+                    // The store replaces the whole row on completion, so fold in
+                    // the start-only metadata (label detail, iteration) before
+                    // persisting — otherwise a finalized call loses them.
+                    if let Some(start) = &start_detail {
+                        detail.display_detail = start.display_detail.clone();
+                        detail.iteration = start.iteration;
+                    }
+                    crate::ports::deep_trace::bound_detail(detail)
+                });
+                vec![(seq, step, detail.filter(|d| !d.is_empty()))]
             }
-            AgentProgress::ThinkingDelta { .. } if !self.thinking_open => {
+            AgentProgress::ThinkingDelta { delta, .. } if !self.thinking_open => {
                 self.thinking_open = true;
-                Some((
-                    self.claim(),
+                let seq = self.claim();
+                if self.deep {
+                    // The first delta is emitted in its own detail below, so it
+                    // must NOT also enter `thinking_buf`: later threshold flushes
+                    // and `close_thinking` re-emit that buffer, and the sink
+                    // appends each emission to the stored prefix. Counting it
+                    // twice is what used to turn `"first second"` into
+                    // `"firstfirst second"`.
+                    self.thinking_pending_bytes = 0;
+                    self.thinking_buf = Some((seq, String::new()));
+                }
+                vec![(
+                    seq,
                     TurnStep {
                         kind: TurnStepKind::Thinking,
                         status: TurnStepStatus::Ok,
                         label: "Thinking".to_string(),
                         ..TurnStep::default()
                     },
-                ))
+                    self.deep.then(|| {
+                        crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                            reasoning: Some(delta.clone()),
+                            ..TurnStepDetail::default()
+                        })
+                    }),
+                )]
+            }
+            // Every delta after the first in a run. It yields no NEW step — the
+            // run already claimed one — but it does carry text, so in deep mode
+            // it re-emits the SAME ordinal with the bytes accumulated since the
+            // previous flush. The first delta already left as its own emission,
+            // and the sink appends each flush to the stored prefix, so the row
+            // converges rather than duplicating.
+            //
+            // Re-emitting per delta would be one store write per token. Flushing
+            // only when the run closes would lose the reasoning entirely if the
+            // host died mid-thought, which is the failure the incremental trace
+            // exists to prevent. So it flushes on a threshold and again at close.
+            AgentProgress::ThinkingDelta { delta, .. } => {
+                if !self.deep {
+                    return Vec::new();
+                }
+                let Some((seq, buf)) = self.thinking_buf.as_mut() else {
+                    return Vec::new();
+                };
+                let seq = *seq;
+                buf.push_str(delta);
+                self.thinking_pending_bytes =
+                    self.thinking_pending_bytes.saturating_add(delta.len());
+                if self.thinking_pending_bytes < DEEP_THINK_FLUSH_BYTES {
+                    return Vec::new();
+                }
+                self.thinking_pending_bytes = 0;
+                let reasoning = std::mem::take(buf);
+                vec![(
+                    seq,
+                    TurnStep {
+                        kind: TurnStepKind::Thinking,
+                        status: TurnStepStatus::Ok,
+                        label: "Thinking".to_string(),
+                        ..TurnStep::default()
+                    },
+                    Some(crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                        reasoning: Some(reasoning),
+                        ..TurnStepDetail::default()
+                    })),
+                )]
             }
             // Visible assistant text closes a thinking run without a step of its
             // own; everything else contributes nothing and does not break the
             // coalescing. Both match `fold_steps`.
             AgentProgress::TextDelta { .. } => {
+                let closing = self.close_thinking();
                 self.thinking_open = false;
-                None
+                closing.into_iter().collect()
             }
-            _ => None,
+            _ => Vec::new(),
         }
+    }
+
+    /// Finalizes an open thinking run, yielding its accumulated reasoning under
+    /// the ordinal the run already claimed.
+    ///
+    /// Called wherever a run ends — visible text, or the next tool call. Returns
+    /// `None` when nothing is open, when this trace is not deep, or when the run
+    /// accumulated no text.
+    fn close_thinking(&mut self) -> Option<(u32, TurnStep, Option<TurnStepDetail>)> {
+        let (seq, buf) = self.thinking_buf.take()?;
+        self.thinking_pending_bytes = 0;
+        if buf.is_empty() {
+            return None;
+        }
+        Some((
+            seq,
+            TurnStep {
+                kind: TurnStepKind::Thinking,
+                status: TurnStepStatus::Ok,
+                label: "Thinking".to_string(),
+                ..TurnStep::default()
+            },
+            Some(crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                reasoning: Some(buf),
+                ..TurnStepDetail::default()
+            })),
+        ))
+    }
+
+    /// Flushes a thinking run that has no event left to close it.
+    ///
+    /// [`close_thinking`](Self::close_thinking) is driven by the stream —
+    /// visible text or a tool call. A turn that *ends* mid-thought — a reply,
+    /// an abort, an error — has neither, so the tail accumulated below
+    /// [`DEEP_THINK_FLUSH_BYTES`] would sit in `thinking_buf` forever and the
+    /// stored deep trace would record only the first delta plus any full
+    /// threshold chunks. The collector calls this when the stream drains, so
+    /// precisely the failed/interrupted turns worth diagnosing keep their
+    /// closing reasoning. No-op when nothing is open or the run said nothing.
+    pub(crate) fn finish(&mut self) -> Vec<(u32, TurnStep, Option<TurnStepDetail>)> {
+        let closing = self.close_thinking();
+        self.thinking_open = false;
+        closing.into_iter().collect()
     }
 
     /// How many ordinals have been handed out. Test-only: the sink tracks what
@@ -1939,7 +2135,7 @@ mod tests {
         let mut trace = StepTrace::default();
         let mut rows: Vec<Option<TurnStep>> = Vec::new();
         for event in events {
-            if let Some((seq, step)) = trace.push(event) {
+            for (seq, step, _) in trace.push(event) {
                 let idx = seq as usize;
                 if rows.len() <= idx {
                     rows.resize(idx + 1, None);
@@ -2034,14 +2230,12 @@ mod tests {
     #[test]
     fn ordinals_continue_across_turns_of_one_run() {
         let mut trace = StepTrace::default();
-        let first = trace
-            .push(&started("c1", "spawn_task", None))
-            .expect("turn 1 step");
-        assert_eq!(first.0, 0);
-        let second = trace
-            .push(&started("c9", "spawn_task", None))
-            .expect("turn 2 step");
-        assert_eq!(second.0, 1, "turn 2 must not reuse turn 1's ordinals");
+        let first = trace.push(&started("c1", "spawn_task", None));
+        assert_eq!(first.len(), 1, "turn 1 step");
+        assert_eq!(first[0].0, 0);
+        let second = trace.push(&started("c9", "spawn_task", None));
+        assert_eq!(second.len(), 1, "turn 2 step");
+        assert_eq!(second[0].0, 1, "turn 2 must not reuse turn 1's ordinals");
         assert_eq!(trace.emitted(), 2);
     }
 
@@ -2156,5 +2350,303 @@ mod tests {
             !json.contains(FAKE_SECRET),
             "a planted secret leaked into a live turn-stream frame: {json}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Deep trace: the unredacted companion
+    // -----------------------------------------------------------------------
+
+    mod deep {
+        use super::*;
+
+        /// Drains a trace over `events`, returning every (ordinal, step, detail).
+        fn run(
+            deep: bool,
+            events: &[AgentProgress],
+        ) -> Vec<(u32, TurnStep, Option<TurnStepDetail>)> {
+            let mut trace = if deep {
+                StepTrace::deep()
+            } else {
+                StepTrace::default()
+            };
+            events.iter().flat_map(|e| trace.push(e)).collect()
+        }
+
+        /// THE guarantee, and the mirror of
+        /// `planted_secret_never_reaches_serialized_steps`: with deep trace on
+        /// the raw output DOES reach the detail, and STILL never reaches a
+        /// serialized step. If the second half ever fails, the scrubbed
+        /// timeline has started disclosing raw output.
+        ///
+        /// Note this is about **output**, which is dropped unconditionally.
+        /// Arguments are a weaker contract — `approval_display` redacts by KEY
+        /// NAME, and its own module doc says "an unlisted key holding a secret
+        /// is not" safe — so the argument half is asserted separately below
+        /// against a denylisted key.
+        #[test]
+        fn raw_output_reaches_the_detail_and_never_the_step() {
+            let emitted = run(
+                true,
+                &[
+                    started("c1", "shell", None),
+                    completed(
+                        "c1",
+                        "shell",
+                        true,
+                        &format!("printed {FAKE_SECRET}"),
+                        Some(serde_json::json!({ "command": "run" })),
+                        None,
+                    ),
+                ],
+            );
+
+            let details = serde_json::to_string(
+                &emitted
+                    .iter()
+                    .filter_map(|(_, _, d)| d.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(
+                details.contains(FAKE_SECRET),
+                "the deep store is the whole point: {details}"
+            );
+
+            let steps = serde_json::to_string(
+                &emitted
+                    .iter()
+                    .map(|(_, s, _)| s.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(
+                !steps.contains(FAKE_SECRET),
+                "raw output must never reach the scrubbed timeline: {steps}"
+            );
+        }
+
+        /// A denylisted argument key is masked on the step and intact in the
+        /// detail — the two halves of the split, on one call.
+        #[test]
+        fn a_denylisted_argument_is_masked_on_the_step_and_kept_in_the_detail() {
+            let emitted = run(
+                true,
+                &[completed(
+                    "c1",
+                    "shell",
+                    true,
+                    "ok",
+                    Some(serde_json::json!({ "token": FAKE_SECRET })),
+                    None,
+                )],
+            );
+
+            let steps = serde_json::to_string(
+                &emitted
+                    .iter()
+                    .map(|(_, s, _)| s.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(
+                !steps.contains(FAKE_SECRET),
+                "a denylisted key must be redacted on the step: {steps}"
+            );
+
+            let detail = emitted
+                .iter()
+                .find_map(|(_, _, d)| d.clone())
+                .expect("a completed call has detail");
+            assert!(
+                detail.arguments.as_deref().unwrap().contains(FAKE_SECRET),
+                "the deep half keeps what the operator view masks"
+            );
+        }
+
+        /// With deep trace OFF, the scrubbed projection is byte-identical to
+        /// what deep mode produces — deep adds detail, it never changes steps.
+        #[test]
+        fn deep_off_changes_nothing_about_the_steps() {
+            /// The rows a store would hold: last write per ordinal wins, exactly
+            /// as `append_run_step` replaces on `(run_id, step_seq)`.
+            fn settled(
+                emitted: &[(u32, TurnStep, Option<TurnStepDetail>)],
+            ) -> Vec<(u32, TurnStep)> {
+                let mut rows: Vec<(u32, TurnStep)> = Vec::new();
+                for (seq, step, _) in emitted {
+                    match rows.iter_mut().find(|(s, _)| s == seq) {
+                        Some(slot) => slot.1 = step.clone(),
+                        None => rows.push((*seq, step.clone())),
+                    }
+                }
+                rows
+            }
+
+            let events = [
+                thinking("pondering"),
+                started("c1", "shell", None),
+                completed("c1", "shell", true, "done", None, None),
+                text("here you go"),
+            ];
+            let shallow = run(false, &events);
+            let deep = run(true, &events);
+
+            assert!(
+                shallow.iter().all(|(_, _, d)| d.is_none()),
+                "a shallow trace yields no details at all"
+            );
+            assert_eq!(
+                settled(&shallow),
+                settled(&deep),
+                "deep mode must not change the scrubbed projection"
+            );
+        }
+
+        #[test]
+        fn reasoning_is_captured_and_coalesced_under_one_ordinal() {
+            let emitted = run(
+                true,
+                &[
+                    thinking("first "),
+                    thinking("second "),
+                    thinking("third"),
+                    text("answer"),
+                ],
+            );
+            // One thinking step, however many deltas fed it.
+            let ordinals: std::collections::BTreeSet<u32> =
+                emitted.iter().map(|(seq, _, _)| *seq).collect();
+            assert_eq!(ordinals.len(), 1, "a thinking run is ONE step");
+
+            // `push` emits the first delta once and later flushes only the NEW
+            // bytes; the sink concatenates the per-flush chunks, so the stored
+            // reasoning is the whole thought without the first chunk repeating.
+            let reasoning: String = emitted
+                .iter()
+                .filter_map(|(_, _, d)| d.as_ref())
+                .filter_map(|d| d.reasoning.clone())
+                .collect();
+            assert_eq!(reasoning, "first second third");
+        }
+
+        /// The bug the vec return exists to prevent: a tool call closing a
+        /// thinking run must finalize that run's reasoning, not drop it.
+        #[test]
+        fn reasoning_survives_a_tool_call_closing_the_run() {
+            let emitted = run(
+                true,
+                &[
+                    thinking("I should "),
+                    thinking("run the program"),
+                    started("c1", "shell", None),
+                ],
+            );
+            let reasoning: Vec<String> = emitted
+                .iter()
+                .filter_map(|(_, _, d)| d.as_ref())
+                .filter_map(|d| d.reasoning.clone())
+                .collect();
+            assert_eq!(
+                reasoning.concat(),
+                "I should run the program",
+                "the tail before a tool call was lost: {reasoning:?}"
+            );
+        }
+
+        #[test]
+        fn a_thinking_run_that_said_nothing_writes_no_detail() {
+            // An empty delta must not mint a row saying the agent thought
+            // nothing.
+            let emitted = run(true, &[thinking(""), text("hi")]);
+            assert!(
+                emitted.iter().all(|(_, _, d)| d
+                    .as_ref()
+                    .is_none_or(|d| d.reasoning.is_none() || d.reasoning.as_deref() == Some(""))),
+                "an empty thought produced a reasoning row"
+            );
+        }
+
+        /// The EOF path: a turn that ends mid-thought has no `TextDelta` or tool
+        /// call to close the run, so the tail below the interim flush threshold
+        /// survives only because the collector calls [`StepTrace::finish`] when
+        /// the stream drains.
+        #[test]
+        fn an_aborted_thought_is_flushed_when_the_trace_finishes() {
+            let mut trace = StepTrace::deep();
+            let mut emitted = Vec::new();
+            emitted.extend(trace.push(&thinking("first ")));
+            emitted.extend(trace.push(&thinking("second"))); // under DEEP_THINK_FLUSH_BYTES
+            // No text, no tool call — the turn just ends.
+            emitted.extend(trace.finish());
+
+            let reasoning: String = emitted
+                .iter()
+                .filter_map(|(_, _, d)| d.as_ref())
+                .filter_map(|d| d.reasoning.clone())
+                .collect();
+            assert_eq!(
+                reasoning, "first second",
+                "the tail of an aborted thought was dropped: {reasoning:?}"
+            );
+        }
+
+        /// A flush on a trace with nothing open is a no-op — in particular it
+        /// must not claim an ordinal or mint a step.
+        #[test]
+        fn finish_with_nothing_open_yields_nothing() {
+            let mut trace = StepTrace::deep();
+            assert!(
+                trace.finish().is_empty(),
+                "an idle trace must not emit on finish"
+            );
+            assert_eq!(trace.emitted(), 0);
+            // A thought already closed by text has nothing left to flush.
+            let mut closed = StepTrace::deep();
+            closed.push(&thinking("done"));
+            closed.push(&text("answer"));
+            assert!(
+                closed.finish().is_empty(),
+                "a closed thinking run must not re-emit on finish"
+            );
+        }
+
+        #[test]
+        fn a_completed_call_carries_raw_arguments_and_output() {
+            let emitted = run(
+                true,
+                &[completed(
+                    "c1",
+                    "shell",
+                    true,
+                    "837799\n",
+                    Some(serde_json::json!({ "command": "python3 solve.py" })),
+                    None,
+                )],
+            );
+            let detail = emitted
+                .iter()
+                .find_map(|(_, _, d)| d.clone())
+                .expect("a completed call has detail");
+            assert_eq!(detail.output.as_deref(), Some("837799\n"));
+            assert!(
+                detail.arguments.as_deref().unwrap().contains("solve.py"),
+                "{:?}",
+                detail.arguments
+            );
+        }
+
+        #[test]
+        fn a_started_call_carries_no_arguments() {
+            // Documented upstream: the tinyagents path sends `Null` on the
+            // started event and real arguments only on completion. Pinning it
+            // so a future change upstream shows up here rather than as a
+            // mysteriously empty argument pane.
+            let emitted = run(true, &[started("c1", "shell", None)]);
+            let detail = emitted.iter().find_map(|(_, _, d)| d.clone());
+            assert!(
+                detail.is_none_or(|d| d.arguments.is_none()),
+                "a started call should carry no unredacted arguments"
+            );
+        }
     }
 }

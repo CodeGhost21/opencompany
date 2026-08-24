@@ -29,6 +29,14 @@ describe("Settings navigation (issue #1468)", () => {
     expect(SETTINGS_PAGES.find((page) => page.id === "general")?.hint).toContain("Approvals");
   });
 
+  it("puts the memory browser in the capability section", () => {
+    expect(SETTINGS_PAGES.find((page) => page.id === "brain")).toMatchObject({
+      label: "Brain",
+      hint: "What your company remembers",
+      group: "capability",
+    });
+  });
+
   it("distinguishes Settings page ids from unknown sub-hashes", () => {
     expect(isSettingsPage("general")).toBe(true);
     expect(isSettingsPage("nonsense")).toBe(false);
@@ -55,6 +63,7 @@ describe("Settings navigation (issue #1468)", () => {
     expect(section.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
     expect(section).toContain("title={item.hint}");
     expect(section).toContain("{activePage.hint}");
+    expect(section).toContain('{page === "brain" && <MemoryView client={client} company={company} />}');
     for (const page of settingsPages) {
       expect(page).toContain("text-2xl font-semibold tracking-tight");
     }
