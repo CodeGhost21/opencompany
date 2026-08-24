@@ -1271,7 +1271,7 @@ async fn edit_me(
         .users()
         .upsert_user(runtime.id(), &user)
         .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .map_err(crate::server::Rejection::from)?;
     Ok(Json(me_result(runtime.id(), &user)))
 }
 
