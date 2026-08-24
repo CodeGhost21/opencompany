@@ -170,11 +170,17 @@ impl RunTraceSink {
             // never meet a detail whose step does not exist. Best-effort like
             // the step above: a full disk must degrade the record, never fail
             // the turn.
-            let (Some(deep), Some(detail)) = (self.deep.as_ref(), detail) else {
+            let (Some(deep), Some(mut detail)) = (self.deep.as_ref(), detail) else {
                 continue;
             };
             if detail.is_empty() {
                 continue;
+            }
+            if let Some(reasoning) = detail.reasoning.take() {
+                let mut buffers = self.deep_reasoning.lock().expect("deep reasoning");
+                let buffer = buffers.entry(step_seq).or_default();
+                buffer.push_str(&reasoning);
+                detail.reasoning = Some(buffer.clone());
             }
             let record = crate::ports::deep_trace::RunStepDetailRecord {
                 run_id: self.run_id.clone(),
