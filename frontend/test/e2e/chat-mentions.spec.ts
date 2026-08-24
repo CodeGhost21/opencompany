@@ -127,7 +127,7 @@ test("Enter picks the highlighted row and does not send", async ({ page }) => {
   await composer(page).press("Enter");
 
   // Picked: the draft now holds the full handle, and the picker is shut.
-  await expect(composer(page)).toHaveValue(/@engineer\s$/);
+  await expect(composer(page)).toHaveValue(/@Ada\s$/);
   await expect(picker(page)).toHaveCount(0);
   // And crucially, nothing was sent. Poll briefly so an in-flight request
   // cannot make this negative assertion pass by timing alone.
