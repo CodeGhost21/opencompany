@@ -273,8 +273,15 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
                 return Some((w, h));
             }
             b"VP8L" => {
-                // Lossless: `0x2F` signature, then 14-bit (width−1) and 14-bit
-                // (height−1).
+                // Lossless: `0x2F` signature, then packed as (little-endian):
+                //
+                //   bits  0–13: (width−1), 14 bits
+                //   bits 14–27: (height−1), 14 bits
+                //   bit     28: alpha_is_used (1 bit, non-normative hint)
+                //   bits 29–31: version (3 bits, must be 0)
+                //
+                // Only the 14 height bits belong to height; alpha and version
+                // must be masked out (RFC 9649 §4, WebP Lossless Bitstream).
                 if data.len() < 5 || data[0] != 0x2F {
                     return None;
                 }
@@ -282,7 +289,7 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
                 let h = 1
                     + ((((data[2] & 0xC0) as u32) >> 6)
                         | ((data[3] as u32) << 2)
-                        | ((data[4] as u32) << 10));
+                        | (((data[4] & 0x0F) as u32) << 10));
                 return Some((w, h));
             }
             b"VP8X" => {
