@@ -441,11 +441,11 @@ function InferenceNotice({ unavailable, onLeave }: { unavailable: boolean; onLea
 function fallbackExplanation(fallback: NonNullable<Fallback>): string {
   switch (fallback) {
     case "no_model":
-      return "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Team page.";
+      return "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Company page.";
     case "not_designable":
-      return "A general starting team for your industry — we reached a model, but there wasn't enough in your answers to tailor one to them. Rename, retire, or add anyone from the Team page, or run setup again from the Team page with more about what your business does.";
+      return "A general starting team for your industry — we reached a model, but there wasn't enough in your answers to tailor one to them. Rename, retire, or add anyone from the Company page, or run setup again from the Company page with more about what your business does.";
     case "unspecified":
-      return "A general starting team for your industry, rather than one tailored to your answers. Rename, retire, or add anyone from the Team page.";
+      return "A general starting team for your industry, rather than one tailored to your answers. Rename, retire, or add anyone from the Company page.";
   }
 }
 
@@ -484,7 +484,7 @@ function BuildOut({
           {finished
             ? fallback
               ? fallbackExplanation(fallback)
-              : "Built from your answers. A starting point — rename, retire, or add anyone from the Team page."
+              : "Built from your answers. A starting point — rename, retire, or add anyone from the Company page."
             : buildOutLabel(created, agents.length)}
         </DialogDescription>
       </DialogHeader>

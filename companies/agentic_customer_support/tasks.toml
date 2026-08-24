@@ -1,0 +1,52 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a support desk is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-escalation-path"
+title = "Set up the escalation path"
+priority = "high"
+note = """
+Decide what makes a ticket an `escalations` row, who receives it, and how \
+fast — then write it into the workspace where an agent will actually read \
+it.
+
+An escalation path invented per ticket means the urgent one waits behind \
+the routine one.
+
+Done when the path is written and its trigger is a `decisions` row.\
+"""
+
+[[task]]
+id = "set-up-the-known-issues-list"
+title = "Set up the known-issues list"
+priority = "high"
+note = """
+Open a `known-issues` row for everything currently being reported, each \
+with the answer to give and whether a fix is coming.
+
+Without it every agent re-diagnoses the same problem and customers get \
+three different answers on the same day.
+
+Done when everything currently reported has a row with a customer-facing \
+answer.\
+"""
+
+[[task]]
+id = "set-up-the-policy-call-record"
+title = "Set up the policy call record"
+priority = "medium"
+note = """
+Record on `policy-calls` the judgement calls this desk has already made — \
+refunds, exceptions, goodwill — so the next one is consistent with the \
+last.
+
+Done when the standing calls have rows.\
+"""

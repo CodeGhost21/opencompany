@@ -161,8 +161,7 @@ drain completes. It is the local escape hatch from a long drain, deliberately a
 one-way action once the host has been told to stop twice.
 
 1. **Stop intake.** Every registered company is quiesced, so a new cycle is
-   refused with `503 Quiescing`. The schedulers, mailbox pollers and Telegram
-   pollers stop on the same signal, so nothing starts a fresh turn either.
+   refused with `503 Quiescing`. The schedulers and mailbox pollers stop on the same signal, so nothing starts a fresh turn either.
 2. **Drain the in-flight cycles**, bounded by `OPENCOMPANY_SHUTDOWN_GRACE_SECONDS`
    (default 25s). The wait is `CompanyRuntime::quiesce` — acquiring the
    per-company `serial` lock every cycle holds for its whole duration — and it

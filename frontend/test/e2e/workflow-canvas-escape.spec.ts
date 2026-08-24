@@ -87,3 +87,26 @@ test("Escape closes the copilot and does nothing once canvas overlays are gone",
   await expect(workflowDetailName(page)).toHaveText(FIXTURE);
   await expect(page.getByTestId("workflow-node-detail")).toBeHidden();
 });
+
+test("the copilot leads with its purpose and mutes the unavailable composer", async ({ page }) => {
+  await openCanvas(page);
+
+  await page.getByTestId("workflow-copilot-toggle").click();
+  const copilot = page.getByTestId("workflow-copilot");
+  await expect(copilot).toBeVisible();
+  await expect(page.getByTestId("workflow-copilot-introduction")).toContainText(
+    "Ask what Committed flow does, why a run failed, or what to change.",
+  );
+
+  const boundaries = copilot.getByText("How this copilot works", { exact: true });
+  await expect(copilot.getByText("Answers are grounded in", { exact: false })).toBeHidden();
+  await boundaries.click();
+  await expect(copilot.getByText("Answers are grounded in", { exact: false })).toBeVisible();
+
+  // The default e2e host runs the echo brain. The unavailable affordances must
+  // be disabled, and the Ask button must opt out of primary-button paint.
+  const send = page.getByTestId("workflow-copilot-send");
+  await expect(send).toBeDisabled();
+  await expect(send).toHaveClass(/disabled:bg-muted/);
+  await expect(send).toHaveClass(/disabled:opacity-100/);
+});
