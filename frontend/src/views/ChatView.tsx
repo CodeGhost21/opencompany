@@ -793,7 +793,9 @@ export function ChatView({
       const row = mentionables?.find((e) => sameTarget(e.target, m.target));
       return {
         text: m.text,
-        offset: m.offset,
+        // Incoming/rendered mention offsets use the host's UTF-8 byte contract;
+        // the composer keeps UTF-16 offsets only while editing.
+        offset: utf8ByteLength(text.slice(0, m.offset)),
         label: row?.label ?? m.text,
         // `@everyone` addresses the room, the author included; a pick of a
         // teammate or person names somebody else.
