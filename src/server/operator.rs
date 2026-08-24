@@ -9402,7 +9402,7 @@ mode = "full"
                 let notes = c
                     .runtime
                     .notifications()
-                    .list(&c.runtime.id(), &admin.id)
+                    .list(&CompanyId::new("acme"), &admin.id)
                     .await
                     .unwrap();
                 if notes.iter().any(|n| n.notification.kind == "mention") {
