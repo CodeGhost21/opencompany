@@ -53,16 +53,8 @@ import {
 } from "@/lib/language";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
-<<<<<<< HEAD
-import {
-  channelIdForThread,
-  deskFromDto,
-  dmChannelId,
-} from "@/views/chat/model";
-=======
 import { workflowHref } from "@/lib/task-output";
 import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
->>>>>>> refs/remotes/upstream/main
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
