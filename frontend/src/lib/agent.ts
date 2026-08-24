@@ -307,17 +307,21 @@ export function summarizeGrants(tools: AgentToolsDto): ToolGrantSummary {
  * the host drops.
  *
  * `deskAllow` is the host's desk ceiling already intersected with the company
- * grant, and **empty means no desk states a ceiling**, the same empty-is-not-
- * nothing trap `requested` carries. So a non-empty `deskAllow` IS the gate a
- * draft glob has to clear, and when it is empty the company allow-list is.
- * Checking a draft against this list is the exact predicate the host applies
- * when it re-derives `effective`, so a warning drawn from it cannot disagree
- * with the saved result the way one drawn from `companyAllow` alone can — the
- * marketing agency's creative desk omits `media`, while the company allows it,
- * so a draft adding `media` would warn here and then land struck through.
+ * grant. **Empty means the narrowed ceiling grants nothing**, which is *not*
+ * the same as "no desk narrows anything" — a desk ceiling can resolve to an
+ * empty list while still being active (its only grant is an explicit opt-in
+ * the company's `*` does not confer). `deskCeilingActive` is the sentinel that
+ * tells those apart: when it is true the desk level is the gate, however
+ * narrow — even if that means nothing the operator types will apply — and when
+ * it is false the company allow-list is. Checking a draft against this list is
+ * the exact predicate the host applies when it re-derives `effective`, so a
+ * warning drawn from it cannot disagree with the saved result the way one
+ * drawn from `companyAllow` alone can — the marketing agency's creative desk
+ * omits `media`, while the company allows it, so a draft adding `media` would
+ * warn here and then land struck through.
  */
 export function grantCeiling(tools: AgentToolsDto): string[] {
-  return tools.deskAllow.length > 0 ? tools.deskAllow : tools.companyAllow;
+  return tools.deskCeilingActive ? tools.deskAllow : tools.companyAllow;
 }
 
 /**
