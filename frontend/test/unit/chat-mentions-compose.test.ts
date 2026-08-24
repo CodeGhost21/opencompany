@@ -659,8 +659,8 @@ describe("resolvableMentions", () => {
     // `opens_mention`/`closes_mention` accept only ASCII whitespace. A pasted
     // non-breaking space must neither open nor close a mention here, or the
     // picker would offer a span the host then drops.
-    expect(resolvableMentions("hey @engineer", directory)).toEqual([]);
-    expect(resolvableMentions("@engineer next", directory)).toEqual([]);
+    expect(resolvableMentions("hey\u00A0@engineer", directory)).toEqual([]);
+    expect(resolvableMentions("@engineer\u00A0next", directory)).toEqual([]);
   });
 
   it("prefers the longest alias when one name prefixes another", () => {
