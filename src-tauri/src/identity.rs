@@ -136,10 +136,14 @@ fn picture(username: Option<&str>) -> Option<String> {
     if let Some(username) = username {
         candidates.push(PathBuf::from("/var/lib/AccountsService/icons").join(username));
     }
+    // The first *usable* candidate wins, not the first that exists: `~/.face`
+    // can be a stale or corrupt first-choice file — unreadable, over the
+    // ceiling, or not one of the accepted images — and the fallbacks after it
+    // are only ever tried if encoding the earlier ones actually succeeds.
     candidates
         .into_iter()
-        .find(|path| path.is_file())
-        .and_then(|path| encode_picture(&path))
+        .filter_map(|path| encode_picture(&path))
+        .next()
 }
 
 /// macOS keeps the picture in the local directory record rather than in a file,
