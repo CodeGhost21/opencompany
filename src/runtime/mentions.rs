@@ -1181,14 +1181,15 @@ members = ["engineer", "ceo"]
 
     /// A longer closing run cannot close a shorter opener: CommonMark only lets
     /// a *whole* run of exactly the opening length close a span, so
-    /// `` `code @engineer`` `` (one opener, two trailing) is not code and the
-    /// mention — which follows a space, so it opens — must resolve. The
-    /// console's mask has to agree with this or it would suppress a mention
-    /// the renderer still shows. (`` `@engineer`` `` does *not* resolve either
-    /// side: an `@` right after a backtick is not a mention-opening position.)
+    /// `` `code @engineer here`` `` (one opener, two trailing) is not code and
+    /// the mention — which opens after a space and closes before one — must
+    /// resolve. The console's mask has to agree with this or it would suppress
+    /// a mention the renderer still shows. (`` `@engineer`` `` does *not*
+    /// resolve either side: an `@` right after a backtick is not a
+    /// mention-opening position.)
     #[test]
     fn a_longer_backtick_run_does_not_close_a_shorter_opener() {
-        let found = resolve_text("`code @engineer``");
+        let found = resolve_text("`code @engineer here``");
         assert_eq!(targets(&found), vec![&agent("engineer")]);
     }
 
