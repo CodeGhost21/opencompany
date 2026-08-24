@@ -1101,6 +1101,7 @@ async fn an_admin_cannot_set_an_over_long_display_name() {
     ))
     .await
     .unwrap();
+    login_via_link(&state, &sender, "bob@example.com").await;
     let bob_id = user_id(&state, &admin, "bob@example.com").await;
 
     let long = "A".repeat(crate::server::users::MAX_DISPLAY_NAME_CHARS + 1);
