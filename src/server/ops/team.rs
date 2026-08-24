@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::dns::DomainStatus;
+use crate::company::setup::AgentFocus;
 use crate::error::OpenCompanyError;
 use crate::ports::inbox::InboxMeta;
 use crate::ports::now_millis;
