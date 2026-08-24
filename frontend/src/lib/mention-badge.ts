@@ -37,6 +37,7 @@ function isGeneralChat(context: string | null | undefined): boolean {
 export function mentionCountsByChannel(
   notifications: readonly NotificationDto[],
   mainChannelId = MAIN_THREAD_ID,
+  renderedChannelIds: ReadonlySet<string> = new Set(),
 ): Record<string, number> {
   const out: Record<string, number> = {};
   // Defensive against a caller handing us something that is not a list. The
@@ -54,10 +55,16 @@ export function mentionCountsByChannel(
     // A row with no channel cannot be placed on the rail. Counted nowhere
     // rather than counted somewhere arbitrary.
     if (n.context === undefined || n.context === null) continue;
-    // Every spelling of the General desk is the console's default thread, so
-    // it badges the first rendered desk channel; anything else is a channel id
-    // verbatim.
-    const channelId = isGeneralChat(n.context) ? mainChannelId : n.context;
+    // An exact rendered channel-id match wins outright: a real desk whose id
+    // happens to be `general` (or `main`, or — impossibly — `""`) is *that*
+    // channel, so a mention stored under the canonical id has to badge that
+    // desk, not the default thread the legacy spellings alias to (issue #65).
+    // Only a context that names no rendered channel falls back to the alias.
+    const channelId = renderedChannelIds.has(n.context)
+      ? n.context
+      : isGeneralChat(n.context)
+        ? mainChannelId
+        : n.context;
     out[channelId] = (out[channelId] ?? 0) + 1;
   }
   return out;
@@ -75,11 +82,19 @@ export function mentionsToClear(
   channelId: string,
   mainChannelId = MAIN_THREAD_ID,
   visibleThreadIds: ReadonlySet<string> = new Set([channelId]),
+  renderedChannelIds: ReadonlySet<string> = new Set(),
 ): string[] {
   return notifications
     .filter((n) => {
       if (n.readAt !== undefined || n.kind !== "mention" || n.context === undefined) {
         return false;
+      }
+      if (renderedChannelIds.has(n.context)) {
+        // A real desk or DM channel id: only opening that exact channel clears
+        // it. `isGeneralChat` must not reroute a real desk named `general` onto
+        // the default thread — that is how a mention for the real General desk
+        // ends up silently cleared by opening a different channel.
+        return n.context === channelId;
       }
       if (n.context === channelId) {
         // Clear only once the main channel's history is actually on screen —
