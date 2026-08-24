@@ -58,6 +58,28 @@ function host() {
 let container: HTMLDivElement;
 let root: Root;
 
+/**
+ * jsdom ships no `matchMedia`, and `useIsMobile` — which `SidebarProvider`
+ * calls — reaches for it unguarded. Same stub `sidebar-collapse-button`
+ * installs, always reporting "not matching", which is the desktop case.
+ */
+function stubMatchMedia() {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+      onchange: null,
+    }),
+  });
+}
+
 async function show(client: OpenCompanyClient, company: string | null) {
   await act(async () => {
     root.render(
@@ -76,6 +98,7 @@ function text(): string {
 
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  stubMatchMedia();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
