@@ -80,6 +80,8 @@ pub fn standing_admins(manifest_admins: &[String], bootstrap_admin: Option<&str>
 /// holder are different people.
 pub async fn issue_password(
     users: &Arc<dyn UserStore>,
+    sessions: &Arc<dyn crate::ports::sessions::SessionStore>,
+    login_codes: &Arc<dyn crate::ports::login_codes::LoginCodeStore>,
     company: &CompanyId,
     manifest_admins: &[String],
     bootstrap_admin: Option<&str>,
