@@ -169,7 +169,7 @@ pub enum ResolveOutcome {
 /// The default [`ApprovalGate`]: evaluates effects against a company's
 /// `[policy]` and holds the in-memory approval queue.
 pub struct ManifestApprovalGate {
-    policy: Policy,
+    policy: RwLock<Policy>,
     ttl_millis: AtomicU64,
     parked: Mutex<HashMap<ApprovalId, ParkedEffect>>,
     /// The governance kill switch (issue #86).
