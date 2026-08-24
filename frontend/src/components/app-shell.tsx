@@ -1350,7 +1350,7 @@ export function AppShell({
     () =>
       mentionCountsByChannel(
         mentionFeed,
-        chatChannelByThread.main,
+        chatChannelByThread.main ?? "",
         new Set(Object.values(chatChannelByThread)),
       ),
     [mentionFeed, chatChannelByThread],
