@@ -411,6 +411,43 @@ describe("renderedChannelIdForContext", () => {
   });
 });
 
+describe("threadViewAdvancesChannel", () => {
+  /**
+   * Conversation reports every thread view through the same channel-id path as
+   * `onChannelViewed`. For a desk or DM thread that is accurate — the thread's
+   * transcript IS the channel's — so the full channel-view side effects
+   * (advancing the unread floor and persisted read marker) are correct there.
+   */
+  it("advances a desk thread's own channel", () => {
+    expect(threadViewAdvancesChannel("engineering", "engineering")).toBe(true);
+  });
+
+  it("advances a DM thread's channel (same transcript, different id)", () => {
+    expect(threadViewAdvancesChannel("ada", "dm:ada")).toBe(true);
+  });
+
+  /**
+   * A company with no configured desks runs on the fallback `main` desk, whose
+   * channel id is also `main` — the thread and the channel are the same store,
+   * so reading the thread is reading the channel.
+   */
+  it("advances the main thread when it is its own channel", () => {
+    expect(threadViewAdvancesChannel("main", "main")).toBe(true);
+  });
+
+  /**
+   * The hazard that makes the gate worth having (Codex P1): with real desks the
+   * rail has no `General` row, so `main` aliases the first desk's channel for
+   * *badging*, but the main thread's transcript is the legacy General
+   * conversation — a different store from the desk's own. Advancing the desk's
+   * read state here would permanently un-badge unread lines the operator never
+   * saw. The mention clear still applies; this only withholds the read advance.
+   */
+  it("withholds the read advance when the main thread aliases a real desk", () => {
+    expect(threadViewAdvancesChannel("main", "engineering")).toBe(false);
+  });
+});
+
 describe("threadsToReReadForMentions", () => {
   // The console's thread → channel map: `main` aliases the first desk, desks
   // keep their own id as channel, DMs are `dm:<member>`.
