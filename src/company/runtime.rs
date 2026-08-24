@@ -2593,13 +2593,64 @@ impl CompanyRuntime {
     /// previews the exact final issue body or files it (per consent). The
     /// scrubber fails closed, so a report that cannot be safely scrubbed is
     /// blocked rather than risked.
+    ///
+    /// `item_id` carries the previewed item on the confirm (Send-after-Preview)
+    /// path: the same item is finalized — never a second capture — so the report
+    /// appears once in the feedback family and the posted body is the exact
+    /// previewed bytes (see [`crate::feedback::service::finalize`]).
+    ///
+    /// A confirm closes two gaps a bare `finalize` call would leave open:
+    ///
+    /// * **Idempotent** — an item that already left this machine (its
+    ///   `issue_status` is recorded) returns the recorded result instead of
+    ///   filing or forwarding again, so a retried or double-submitted Send does
+    ///   not file a second issue or add a duplicate comment. A per-item lock
+    ///   held across the whole confirm serialises concurrent confirms of the
+    ///   same item, so the loser re-reads the winner's recorded result instead
+    ///   of both sending.
+    /// * **Preview-first** — an item captured by the feedback tool or the chat
+    ///   intent was never previewed and its words are hidden from the reports
+    ///   list, so confirming it by id would send a body nobody inspected.
+    ///   Confirms of such items are refused; the operator must preview first.
     pub async fn submit_feedback(
         &self,
         input: FeedbackInput,
         preview: bool,
+        item_id: Option<String>,
     ) -> Result<FeedbackResponse> {
-        let item = self.capture_feedback(input).await?;
         let manifest = self.store.load(&self.id).await?.map(|r| r.manifest);
+        // Held until the end of the call for a confirm, so the check below and
+        // the finalize that records the status are one critical section.
+        let mut _confirm_guard = None;
+        let item = match item_id {
+            Some(id) => {
+                // A nonexistent `item_id` is caller-supplied, so it must not
+                // mint an entry in the process-wide confirm-lock registry,
+                // which is never evicted. Validate existence before taking the
+                // lock; the feedback family is append-only, so an id that
+                // exists here still exists at the locked re-read below.
+                if self.feedback.get(&id).await?.is_none() {
+                    return Err(OpenCompanyError::NotFound(format!("feedback item {id}")));
+                }
+                _confirm_guard = Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
+                let item = self.feedback.get(&id).await?.expect(
+                    "feedback item exists: existence checked before taking the confirm lock",
+                );
+                if !preview {
+                    if item.issue_status.is_some() {
+                        return Ok(FeedbackResponse::recorded(&item));
+                    }
+                    if item.scrubbed_body.is_none() {
+                        return Ok(FeedbackResponse::blocked(
+                            &id,
+                            "this report was not previewed; preview it before sending".to_string(),
+                        ));
+                    }
+                }
+                item
+            }
+            None => self.capture_feedback(input).await?,
+        };
         crate::feedback::service::finalize(
             &self.feedback,
             self.secrets.as_ref(),
