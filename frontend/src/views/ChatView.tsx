@@ -171,6 +171,7 @@ interface Props {
    * `ChannelRail`'s prop docs for why merging them would be a loss.
    */
   mentions?: Record<string, number>;
+  mentionFeedRevision?: number;
   /**
    * Reports the channel actually on screen — which the hash need not name,
    * since it may have been resolved by the first-channel fallback. The shell
