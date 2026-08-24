@@ -7564,12 +7564,8 @@ mode = "full"
             steps: Vec::new(),
         });
         let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
-        let value = super::project_event_for_viewer(
-            &stored,
-            &authors,
-            &Viewer::User("u-1".into()),
-        )
-        .expect("agent_reply is an attention signal");
+        let value = super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()))
+            .expect("agent_reply is an attention signal");
         assert_eq!(
             value["mentions"],
             serde_json::json!([
