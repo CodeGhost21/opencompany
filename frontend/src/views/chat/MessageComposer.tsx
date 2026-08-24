@@ -450,9 +450,21 @@ export function MessageComposer({
                   // happening, and a control you press to prevent an action
                   // belongs before the ones that cause it. None is pre-pressed:
                   // an operator has to state which outcome they want.
-                  { value: "chat", label: "Just chatting" },
-                  { value: "once", label: "Do it once" },
-                  { value: "workflow", label: "Build me the workflow" },
+                  {
+                    value: "chat",
+                    label: "Just chatting",
+                    title: "Chat without automatically creating a task.",
+                  },
+                  {
+                    value: "once",
+                    label: "Do it once",
+                    title: "Ask the team to do this once.",
+                  },
+                  {
+                    value: "workflow",
+                    label: "Build me the workflow",
+                    title: "Turn this into a repeating workflow.",
+                  },
                 ] as const
               ).map((option) => (
                 <button
@@ -461,6 +473,7 @@ export function MessageComposer({
                   aria-pressed={intent === option.value}
                   onClick={() => setIntent(option.value)}
                   data-testid={`composer-deliverable-${option.value}`}
+                  title={option.title}
                   className={cn(
                     "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
                     intent === option.value
