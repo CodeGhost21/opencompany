@@ -254,9 +254,10 @@ export function SetupDialog({
 
   // The actions the notice offers are an admin's, and only the host knows the
   // operator's role — ask it, rather than have the controller thread a guess
-  // down. A host with no user plane (auth mode "none") or a role read that
-  // fails transiently leaves `canManage` at its default, which keeps the CTA
-  // as before rather than withdrawing it from an operator we could not ask.
+  // down. Until the read answers, `canManage` stays `null` and the admin
+  // actions stay withheld: the risk worth guarding is a member misdirected by
+  // an optimistic default, not an admin briefly missing a link they can reach
+  // from the Connections page anyway.
   useEffect(() => {
     let live = true;
     void (async () => {
@@ -264,7 +265,8 @@ export function SetupDialog({
         const who = await me(client, company);
         if (live) setCanManage(who.role === "admin");
       } catch {
-        // Unreadable — keep the default (see the state's doc comment).
+        // Unreadable — stay `null`: the admin actions stay withheld rather
+        // than defaulting to a guess that could misdirect a member.
       }
     })();
     return () => {
