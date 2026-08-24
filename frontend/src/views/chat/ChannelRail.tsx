@@ -263,7 +263,7 @@ function Section({
             {hiddenMentions > 0 && (
               <span
                 data-testid="section-mentions"
-                title={`${hiddenMentions} mentions of you in this section`}
+                title={`${hiddenMentions} ${hiddenMentions === 1 ? "mention" : "mentions"} of you in this section`}
                 className="rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
               >
                 @{hiddenMentions > 99 ? "99+" : hiddenMentions}
