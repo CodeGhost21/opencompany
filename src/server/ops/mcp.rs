@@ -1152,4 +1152,67 @@ role = "Chief Executive"
             vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
         );
     }
+
+    /// An operator's `tools` edit to a **manifest** teammate is the grant the
+    /// harness reads: `PATCH …/team/{id}` stores the edit as an override, and
+    /// `roster_grants` derives reachability from the effective roster just like
+    /// `build_roster` does — so granting or revoking `mcp:*` on the Tools card
+    /// moves the Connections surface rather than leaving it pinned to the
+    /// blueprint's `[[agent]].tools` line.
+    #[test]
+    fn a_manifest_teammates_tools_edit_reaches_the_roster() {
+        let mut scoped = record(vec![]);
+        scoped
+            .overlay_agent_edits
+            .push(crate::ports::types::AgentOverride {
+                agent_id: "ceo".to_string(),
+                tools: Some(vec!["mcp:notion".to_string()]),
+                ..Default::default()
+            });
+        let grants = roster_grants(&scoped);
+        let ceo = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string()],
+            "an override `tools` line replaces the manifest's, narrowed by allow"
+        );
+
+        // Clearing the override (`tools: []` means "the company's standard
+        // grant", the same empty-means-inherit rule as the manifest field)
+        // restores the blueprint-wide reachability.
+        let mut inherited = record(vec![]);
+        inherited
+            .overlay_agent_edits
+            .push(crate::ports::types::AgentOverride {
+                agent_id: "ceo".to_string(),
+                tools: Some(Vec::new()),
+                ..Default::default()
+            });
+        let grants = roster_grants(&inherited);
+        let ceo = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// A retired manifest teammate is not on the effective roster, so it cannot
+    /// be listed as reaching a server — the same roster `build_roster` builds,
+    /// where a removed teammate is not built at all.
+    #[test]
+    fn a_retired_manifest_teammate_is_not_a_reacher() {
+        let mut retired = record(vec![]);
+        retired.overlay_retired_agents.push("ceo".to_string());
+        let grants = roster_grants(&retired);
+        assert!(
+            !grants.iter().any(|(agent, _)| agent.id == "ceo"),
+            "a retired teammate is off the effective roster"
+        );
+    }
 }
