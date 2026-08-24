@@ -286,21 +286,32 @@ export function PolicySettings({ client, company }: Props) {
   /**
    * Applies a server response.
    *
-   * `resyncDraft` is false when the operator has unsaved always-ask edits: the
-   * server's list is authoritative for what the gate is enforcing, but
-   * overwriting the box would silently discard what they were part-way through
-   * typing. The tier request does not touch the list, so leaving the draft
-   * alone keeps the two independent — the same separation the `PUT` body has.
+   * Only the draft for the field that was just saved is resynchronised: the
+   * server's value is authoritative for what the gate is enforcing, but
+   * overwriting a box the operator was part-way through typing silently
+   * discards their edit. `saveAlways` keeps a half-typed cap or deadline, and
+   * `saveSpendCap`/`saveDeadline` keep an unsaved always-ask list — the same
+   * separation the `PUT` bodies have. A reset replaces the whole override, so
+   * it resynchronises everything.
    */
-  const apply = (next: PolicyStatus, message: string, resyncDraft = true) => {
+  const apply = (
+    next: PolicyStatus,
+    message: string,
+    resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
+  ) => {
     setStatus(next);
-    if (resyncDraft) {
+    const { alwaysAsk = true, spendCap = true, deadline = true } = resync;
+    if (alwaysAsk) {
       setDraftAlways(next.alwaysApprove.join(", "));
       setDirty(false);
     }
-    setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
-    setNoSpendCap(next.autoApproveUnderUsd === null);
-    setDraftDeadline((next.approvalTtlHours ?? 24).toString());
+    if (spendCap) {
+      setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
+      setNoSpendCap(next.autoApproveUnderUsd === null);
+    }
+    if (deadline) {
+      setDraftDeadline((next.approvalTtlHours ?? 24).toString());
+    }
     toast.success(message, { description: next.takesEffect });
   };
 
