@@ -1022,7 +1022,7 @@ export function PolicySettings({ client, company }: Props) {
                         {status.autoApproveUnderUsd === null
                           ? "Today every spend asks first."
                           : `Today spend under $${status.autoApproveUnderUsd} asks nothing.`}{" "}
-                        {`Raising the cap to ${pendingCapRaise} lets everything under the new cap pass without asking.`}
+                        {`Raising the cap to ${pendingCapRaise} lets qualifying spends under the new cap pass without asking; the daily budget still stops spending after its limit.`}
                       </>
                     ) : resetAwaitingConfirmation ? (
                       <>
