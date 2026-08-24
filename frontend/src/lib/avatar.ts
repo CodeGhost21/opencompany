@@ -355,6 +355,28 @@ export function forgetAvatarNode(
 }
 
 /**
+ * Every workspace node id the cache holds a face for, within one scope.
+ *
+ * The hook that lets a mount revalidate the cache against an authoritative
+ * tree. A view that deletes a node calls {@link forgetAvatarNode} directly,
+ * and a mounted view diffs its previous tree against the new one — but a node
+ * deleted while the view was unmounted is invisible to both, because the
+ * view's own state started empty. Its face is still sitting in this cache,
+ * though, so this is how a fresh mount finds and forgets it again.
+ */
+export function cachedAvatarNodeIds(
+  client: OpenCompanyClient,
+  company: string | null,
+): string[] {
+  const prefix = `${client.baseUrl}|${company ?? ""}|`;
+  const ids: string[] = [];
+  for (const key of blobUrls.keys()) {
+    if (key.startsWith(prefix)) ids.push(key.slice(prefix.length));
+  }
+  return ids;
+}
+
+/**
  * Subscribes to a node's face being forgotten, for a tile that already drew it.
  *
  * Revoking an object URL does not unpaint an `<img>` that has decoded it, so a
