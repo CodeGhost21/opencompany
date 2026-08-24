@@ -409,7 +409,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
 
     expect(
       container.querySelector(
-        'button[aria-label="Revoke the deploy workflow\'s permission: Fetch a web page — https://docs.rs only — expires in 1h"]',
+        'button[aria-label="Revoke the deploy workflow\'s permission: Fetch a web page — https://docs.rs only — expires in 1h — grant 1 of 1"]',
       ),
     ).not.toBeNull();
   });
