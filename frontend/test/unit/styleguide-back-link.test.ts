@@ -18,7 +18,34 @@ import { StyleguideView } from "@/views/StyleguideView";
 let container: HTMLDivElement;
 let root: Root;
 
+/**
+ * The styleguide's component section renders a `SidebarProvider` preview,
+ * which reaches for `window.matchMedia` unguarded in `useIsMobile`. jsdom
+ * ships no `matchMedia`, so without a stub the whole view fails to mount —
+ * same stub `sidebar-collapse-button.test.ts` and `working-indicator.test.ts`
+ * install. The back-link assertions do not care about the mobile flag; the
+ * stub reports "not matching" (the desktop case, where the sidebar is the
+ * inline column rather than a sheet).
+ */
+function stubMatchMedia() {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+      onchange: null,
+    }),
+  });
+}
+
 beforeEach(() => {
+  stubMatchMedia();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
