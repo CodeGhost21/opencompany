@@ -197,7 +197,9 @@ fn picture(username: Option<&str>) -> Option<String> {
     // it. The current account's SID is resolved rather than every SID being
     // scanned, because the largest file across the whole directory on a shared
     // machine is another local user's picture — offered here as this person's.
-    let dir = PathBuf::from(public).join("AccountPictures").join(current_sid()?);
+    let dir = PathBuf::from(public)
+        .join("AccountPictures")
+        .join(current_sid()?);
     // Sizes sit directly in the SID folder, so one level of walk reaches them.
     let mut best: Option<(u64, PathBuf)> = None;
     for entry in walk(&dir, 1) {
@@ -221,7 +223,10 @@ fn picture(username: Option<&str>) -> Option<String> {
 /// and the caller offers no picture suggestion at all.
 #[cfg(target_os = "windows")]
 fn current_sid() -> Option<String> {
-    let out = std::process::Command::new("whoami").arg("/user").output().ok()?;
+    let out = std::process::Command::new("whoami")
+        .arg("/user")
+        .output()
+        .ok()?;
     parse_whoami_user(&String::from_utf8_lossy(&out.stdout))
 }
 
