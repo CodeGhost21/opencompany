@@ -168,7 +168,7 @@ const BASE_BELT: [&str; 6] = [
 /// So each shape now asks for the belt its work actually needs, spend
 /// namespaces included, and the **company** is the place that narrows: an
 /// agent's `tools` line is intersected with `[tools].allow`, so a company that
-/// does not want `search`, `media`, `composio`, `shell`/`code` or `repo` drops
+/// does not want `search`, `media`, `composio` or `shell`/`code` drops
 /// it from that one list and every teammate loses it at once. The narrowing is
 /// still real — no shape asks for everything, and a belt can only ever be a
 /// subset of what the company allows.
