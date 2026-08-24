@@ -215,6 +215,52 @@ describe("readiness is the addressed company's, not the host's", () => {
     expect(linkNamed("Set up a model")).toBeUndefined();
   });
 
+  it("names the restart a configured company is waiting on instead of offering to set up a model again", async () => {
+    // A company that booted with no inference source and had a credential saved
+    // afterwards is *configured* — offering "Set up a model" again would send
+    // the operator round a loop only a restart can close.
+    await show(
+      clientWith({
+        status: async () => ({ ...ECHO, restartRequired: true, harnessReachable: true }),
+      }),
+    );
+    const notice = find("setup-inference-notice");
+    expect(notice?.textContent).toContain("needs a restart");
+    expect(notice?.textContent).not.toContain("can't reach a model");
+    const restartLink = linkNamed("Restart the company");
+    expect(restartLink).toBeTruthy();
+    expect(restartLink).toHaveProperty("hash", "#/settings/connections");
+
+    // Following it is starting setup, not declining it — same as "Set up a
+    // model", so the return reopens the dialog.
+    await click(restartLink!);
+    expect(left, "should close for the navigation").toBe(1);
+    expect(skipped, 'must not persist "I\'ll do this later"').toBe(0);
+  });
+
+  it("does not offer the model CTA to a member who cannot land it", async () => {
+    // The Connections inference form is an admin's; a member is told to ask
+    // rather than handed a link that can only 403.
+    await show(clientWith({ status: async () => ECHO, role: "member" }));
+    expect(find("setup-inference-notice")?.textContent).toContain(
+      "Ask an admin to set up a model",
+    );
+    expect(linkNamed("Set up a model")).toBeUndefined();
+  });
+
+  it("tells a member on a restart-pending company to ask an admin to restart", async () => {
+    await show(
+      clientWith({
+        status: async () => ({ ...ECHO, restartRequired: true, harnessReachable: true }),
+        role: "member",
+      }),
+    );
+    expect(find("setup-inference-notice")?.textContent).toContain(
+      "Ask an admin to restart the company",
+    );
+    expect(linkNamed("Restart the company")).toBeUndefined();
+  });
+
   it("ignores a delayed status from the company the dialog was on before", async () => {
     // The readiness check answers the *addressed* company. Switching companies
     // cleans up the old check, but a response already in flight still resolves —
