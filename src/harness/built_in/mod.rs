@@ -2974,11 +2974,19 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
 /// instructions text is hashed as an `Option` discriminant plus its bytes, so a
 /// stored `Some("")` stays distinct from `None` — the same distinction the
 /// resolver's reset-to-blueprint contract depends on.
+///
+/// Avatar-only rows ([`is_avatar_only`]) are excluded here exactly as in
+/// [`overlay_fingerprint`]: a face is resolved at render time, never part of the
+/// persona the harness builds, so choosing or clearing one must not rebuild the
+/// roster.
 fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let mut ordered: Vec<&AgentOverride> = overrides.iter().collect();
+    let mut ordered: Vec<&AgentOverride> = overrides
+        .iter()
+        .filter(|entry| !is_avatar_only(entry))
+        .collect();
     ordered.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
 
     let mut hasher = DefaultHasher::new();
