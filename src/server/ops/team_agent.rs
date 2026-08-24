@@ -3146,7 +3146,7 @@ agent = "claude"
             vec!["name", "role", "description", "instructions", "avatar"],
             "a member is not offered a field they cannot save — but a face is not \
              one of those: picking a colleague's icon is no privilege boundary, \
-             and `tools` stays the only admin-gated field: {as_member}"
+             and `tools`, `model` and `harness` stay admin-gated: {as_member}"
         );
     }
 
