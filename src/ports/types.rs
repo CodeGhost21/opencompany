@@ -3107,6 +3107,9 @@ impl AgentOverride {
             && self.description.is_none()
             && self.tools.is_none()
             && self.instructions.is_none()
+            && self.avatar.is_none()
+            && self.model.is_none()
+            && self.harness.is_none()
     }
 }
 
