@@ -1,12 +1,28 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronRight, Mail, Pencil, Sparkles, Users, Wallet, Wrench } from "lucide-react";
+import {
+  ChevronRight,
+  Cpu,
+  Mail,
+  Pencil,
+  Server,
+  Sparkles,
+  Users,
+  Wallet,
+  Wrench,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks, type Task } from "@/api/tasks";
-import { ApiError, type AgentDetailDto } from "@/api/types";
+import { isDesktopRuntime } from "@/api/transport";
+import {
+  cachedAcpModels,
+  ensureAcpModels,
+  type AcpHarnessModel,
+} from "@/api/transport/desktop";
+import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +37,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useHashFlag } from "@/hooks/use-hash-flag";
@@ -29,7 +52,11 @@ import {
   draftFrom,
   draftIsValid,
   emptyDraft,
+  harnessEdit,
+  harnessOptionLabel,
   isEditable,
+  modelEdit,
+  resolvedHarnessKind,
   summarizeGrants,
   tierLabel,
   type AgentDraft,
@@ -43,6 +70,25 @@ import { AgentFields } from "@/views/team/AgentFields";
 import { AgentRuns } from "@/views/team/AgentRuns";
 
 type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
+
+/**
+ * The Harness select's value for "use the company default" (issue #1245's
+ * harness-picker follow-up). Not `""`: an empty string is Base UI Select's own
+ * placeholder/unset sentinel, so a real option needs a value of its own — the
+ * boundary to `harnessEdit`'s `""`-means-default contract is translated at
+ * the two points that cross it, `onEdit` and `saveHarnessAndModel`.
+ */
+const HARNESS_DEFAULT = "__default__";
+
+/**
+ * The model select's value for "leave it to the harness".
+ *
+ * A sentinel for the same reason [`HARNESS_DEFAULT`] is: `""` is Base UI
+ * Select's own unset marker, so a real option needs a value of its own. It is
+ * translated back to `""` — which `modelEdit` reads as "clear the override" —
+ * at the single point that crosses the boundary, the select's `onValueChange`.
+ */
+const MODEL_HARNESS_DEFAULT = "__harness_default__";
 
 /**
  * Why a detail read failed, in the operator's terms rather than the wire's.
@@ -157,6 +203,25 @@ export function AgentDetailView({
   /** An inbox write is in flight; the switch is held until the host answers. */
   const [inboxSaving, setInboxSaving] = useState(false);
   /**
+   * The Harness & Model editor (issue #1245's harness-picker follow-up). Its
+   * own small state, separate from `draft`/`editing`: both fields are
+   * admin-only, and neither is part of the name/role/description group the
+   * Instructions card edits together. One toggle covers both — they're saved
+   * together, since a model override is only ever meaningful relative to
+   * whichever harness this same save leaves the teammate on.
+   */
+  const [editingHarness, setEditingHarness] = useState(false);
+  const [harnessDraft, setHarnessDraft] = useState(HARNESS_DEFAULT);
+  const [modelDraft, setModelDraft] = useState("");
+  const [savingHarness, setSavingHarness] = useState(false);
+  /**
+   * The company's declared harnesses, for the picker's options. Best-effort
+   * and silent on failure, like `PolicySettings`' own `wiredTools`: an older
+   * host without `GET {scope}/harnesses` still opens a teammate, the picker
+   * just has nothing to offer beyond the free-text model field it already had.
+   */
+  const [harnesses, setHarnesses] = useState<HarnessDto[]>([]);
+  /**
    * Whether this viewer may edit the daily budget (issue #1206, ported from
    * `TeamView.tsx`). Courtesy, not enforcement — the host refuses the write
    * with a 403 regardless; hiding the control from a non-admin only spares
@@ -224,6 +289,25 @@ export function AgentDetailView({
     void boot();
   }, [boot]);
 
+  // Close the harness editor whenever the displayed teammate changes.
+  //
+  // This view stays mounted across teammates, and these three are the only
+  // pieces of state `boot` does not re-derive — it refreshes `agent` and
+  // `draft` and leaves the harness editor exactly as it was. So an editor left
+  // open on A stayed open on B still holding A's harness and model, and Save
+  // then PATCHed A's binding onto B. The host accepts it, because the id is
+  // valid for the company: nothing downstream can tell that the operator was
+  // looking at someone else when they picked it.
+  //
+  // Reset rather than repopulated: `onEdit` seeds the drafts from whichever
+  // teammate is on screen when it opens, so closing is enough and there is one
+  // seeding path rather than two that can disagree.
+  useEffect(() => {
+    setEditingHarness(false);
+    setHarnessDraft(HARNESS_DEFAULT);
+    setModelDraft("");
+  }, [agentId]);
+
   /**
    * The board, read for this one teammate — the same derivation the Company
    * cards use, from the same two reads (`lib/team-workload.ts`).
@@ -263,6 +347,26 @@ export function AgentDetailView({
       live = false;
     };
   }, [client, company, agentId]);
+
+  /**
+   * The Harness picker's options (issue #1245's harness-picker follow-up).
+   * Read once per (client, company) rather than per edit, so opening the
+   * editor is instant. Silent on failure — see the state's own docs.
+   */
+  useEffect(() => {
+    let live = true;
+    void client
+      .listHarnesses(company)
+      .then((next) => {
+        if (live) setHarnesses(next);
+      })
+      .catch(() => {
+        if (live) setHarnesses([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
 
   /**
    * Give this teammate an inbox, or take it away (issue #1190).
@@ -388,6 +492,51 @@ export function AgentDetailView({
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Save the harness binding, the model override, or both (issue #1245's
+   * harness-picker follow-up) — one `PATCH`, so the host's cross-field check
+   * (a model only means anything on the harness this same save leaves the
+   * teammate on) validates against the *new* binding, not a stale one from
+   * before this edit. Either field left unchanged is simply omitted, the same
+   * partial-save contract `agentEdits`/`save` follow above; a blank model
+   * draft still clears with `null` rather than being refused.
+   */
+  async function saveHarnessAndModel() {
+    if (!agent) return;
+    const harness = harnessEdit(agent.harness, harnessDraft === HARNESS_DEFAULT ? "" : harnessDraft);
+    const model = modelEdit(agent.model, modelDraft);
+    if (harness === undefined && model === undefined) {
+      setEditingHarness(false);
+      return;
+    }
+    const edits: EditAgentInput = {};
+    if (harness !== undefined) edits.harness = harness;
+    if (model !== undefined) edits.model = model;
+
+    setSavingHarness(true);
+    try {
+      const updated = await client.updateAgent(agentId, edits, company);
+      // The same guard the ordinary save, reset, budget and inbox writes use,
+      // and missing here: this view stays mounted across teammates, so a slow
+      // harness save for A landing after a click through to B would fold A's
+      // response into B's card and show the wrong binding until a reload.
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+      setEditingHarness(false);
+      toast.success("Harness updated.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError && (error.status === 403 || error.status === 400)
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Couldn't save this teammate's harness.",
+      );
+    } finally {
+      setSavingHarness(false);
     }
   }
 
@@ -624,6 +773,62 @@ export function AgentDetailView({
             </Section>
 
             <Tools agent={agent} />
+            <HarnessAndModel
+              agent={agent}
+              harnesses={harnesses}
+              editing={editingHarness}
+              harnessDraft={harnessDraft}
+              modelDraft={modelDraft}
+              saving={savingHarness}
+              onEdit={() => {
+                setHarnessDraft(agent.harness ?? HARNESS_DEFAULT);
+                setModelDraft(agent.model ?? "");
+                setEditingHarness(true);
+              }}
+              onHarnessChange={(next) => {
+                setHarnessDraft(next);
+                // A model override only means anything against a harness that
+                // can be told which model to run. Switching to a `built_in`
+                // one — the host's own engine, whose model is the host's to
+                // choose — must drop the override rather than save a value
+                // that will silently never apply. Leaving it also made the
+                // form claim a binding it was not going to honour.
+                // The sentinel has to be resolved first, not excluded. "Company
+                // default" is a *binding*, not a kind — when the company
+                // default is `built_in`, picking it lands the teammate on a
+                // managed harness exactly as naming one explicitly would. The
+                // earlier version skipped the sentinel, so that route kept the
+                // model, hid the control, and then sent the model anyway: the
+                // host refused with a 400 against a field the operator could
+                // no longer see or clear.
+                const resolve = (id: string) =>
+                  id === HARNESS_DEFAULT
+                    ? harnesses.find((h) => h.default)
+                    : harnesses.find((h) => h.id === id);
+                const before = resolve(harnessDraft);
+                const bound = resolve(next);
+
+                // Two ways a model stops meaning anything, and both have to
+                // clear it:
+                //
+                //   - the target is managed, whose model is the host's choice;
+                //   - the target is a *different* ACP agent. Model ids are the
+                //     agent's own vocabulary, so a Claude model handed to
+                //     Codex is not refused — `model_config_id` simply fails to
+                //     find it and the session stays on its default, while the
+                //     page goes on claiming an override that is not applied.
+                //
+                // Compared on `agent` rather than harness id, since two
+                // harnesses can drive the same CLI and a model is valid across
+                // those.
+                if (!bound || bound.kind !== "acp" || bound.agent !== before?.agent) {
+                  setModelDraft("");
+                }
+              }}
+              onModelChange={setModelDraft}
+              onCancel={() => setEditingHarness(false)}
+              onSave={() => void saveHarnessAndModel()}
+            />
             <Inbox
               agent={agent}
               busy={inboxSaving}
@@ -862,6 +1067,254 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
         <p className="text-xs text-muted-foreground">
           Company tool list: {agent.tools.companyAllow.join(", ") || "nothing allowed"}
         </p>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * This teammate's harness binding and its own model override (issue #1245's
+ * harness-picker follow-up).
+ *
+ * One section, one edit control, for both: they are saved together (see
+ * `saveHarnessAndModel`'s own docs on why), and the model field's very
+ * relevance depends on which harness is selected — showing it in a card of
+ * its own would let an operator set a model with no harness in view to judge
+ * whether it does anything.
+ *
+ * Admin-only, same as `tools` (the "cost/scope decision" reasoning), and
+ * `agent.editable` says so per actor — a member sees the values with no edit
+ * affordance, the same shape `agent.editable.length === 0` already gives a
+ * manifest teammate above.
+ */
+function HarnessAndModel({
+  agent,
+  harnesses,
+  editing,
+  harnessDraft,
+  modelDraft,
+  saving,
+  onEdit,
+  onHarnessChange,
+  onModelChange,
+  onCancel,
+  onSave,
+}: {
+  agent: AgentDetailDto;
+  harnesses: HarnessDto[];
+  editing: boolean;
+  harnessDraft: string;
+  modelDraft: string;
+  saving: boolean;
+  onEdit: () => void;
+  onHarnessChange: (value: string) => void;
+  onModelChange: (value: string) => void;
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  const editable = agent.editable.includes("harness") || agent.editable.includes("model");
+  const declaredKind = resolvedHarnessKind(harnesses, agent.harness);
+  const draftKind = resolvedHarnessKind(
+    harnesses,
+    harnessDraft === HARNESS_DEFAULT ? undefined : harnessDraft,
+  );
+  const defaultHarness = harnesses.find((h) => h.default);
+
+  /**
+   * The models the drafted harness advertises.
+   *
+   * Fetched when the editor opens on an ACP harness, and again whenever the
+   * operator picks a different one — the lists are per harness and share no
+   * ids, so carrying claude's over to codex would offer models it will
+   * silently refuse. Cached in the transport, so switching back and forth
+   * spawns nothing after the first look.
+   */
+  const [models, setModels] = useState<AcpHarnessModel[]>([]);
+  const draftHarnessId = harnessDraft === HARNESS_DEFAULT ? defaultHarness?.id : harnessDraft;
+  // What the *desktop* calls this harness. A manifest binding and the shell's
+  // catalogue key are different things — `id = "laptop", agent = "claude"` is
+  // a supported shape — and asking the shell about `laptop` returns no models
+  // at all rather than claude's.
+  const draftAgentId = harnesses.find((h) => h.id === draftHarnessId)?.agent ?? draftHarnessId;
+
+  useEffect(() => {
+    if (!editing || draftKind !== "acp" || !draftAgentId) {
+      setModels([]);
+      return;
+    }
+    let live = true;
+    setModels(cachedAcpModels(draftAgentId));
+    void ensureAcpModels(draftAgentId).then((found) => {
+      if (live) setModels(found);
+    });
+    return () => {
+      live = false;
+    };
+  }, [editing, draftKind, draftAgentId]);
+
+  const unlistedModel =
+    modelDraft && !models.some((m) => m.value === modelDraft) ? modelDraft : undefined;
+  /**
+   * What the harness would use if this teammate pins nothing — the entry the
+   * adapter itself reports as current, not a guess. Absent when the adapter
+   * names none (`claude-agent-acp` leads its list with a synthetic `default`
+   * instead), in which case the option stays unqualified rather than
+   * inventing an answer.
+   */
+  const currentModel = models.find((m) => m.current);
+  const modelLabel = () => {
+    if (!modelDraft) return "Whatever the harness defaults to";
+    const found = models.find((m) => m.value === modelDraft);
+    return found ? (found.name ?? found.value) : modelDraft;
+  };
+
+  // `Select.Value` cannot read a label off its matching `SelectItem` here —
+  // `SelectContent` (and every item in it) is portal-rendered only while the
+  // popup is open, so a trigger that has never been opened has nothing to
+  // read from and falls back to the raw value (issue #1245's harness-picker
+  // follow-up shipped with exactly that: the trigger read the literal
+  // `__default__` sentinel until this closed-form label was added). Passing
+  // the render-function form sidesteps the mount-order dependency entirely.
+  const harnessLabel = (value: string) =>
+    value === HARNESS_DEFAULT
+      ? `Company default${defaultHarness ? ` (${harnessOptionLabel(defaultHarness)})` : ""}`
+      : (() => {
+          const found = harnesses.find((h) => h.id === value);
+          return found ? harnessOptionLabel(found) : value;
+        })();
+
+  return (
+    <Section
+      title="Harness & model"
+      subtitle="Which coding engine this teammate runs on, and — on an ACP harness (an operator's own coding CLI) — which model to pin it to."
+      action={
+        editable && !editing ? (
+          <Button variant="ghost" size="sm" onClick={onEdit} data-testid="agent-harness-edit">
+            <Pencil className="size-4" />
+          </Button>
+        ) : undefined
+      }
+    >
+      {editing ? (
+        <div className="space-y-3">
+          <Select value={harnessDraft} onValueChange={(value) => onHarnessChange(value ?? HARNESS_DEFAULT)}>
+            <SelectTrigger className="w-full" data-testid="agent-harness-select">
+              <SelectValue>{harnessLabel}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={HARNESS_DEFAULT}>
+                Company default{defaultHarness ? ` (${harnessOptionLabel(defaultHarness)})` : ""}
+              </SelectItem>
+              {harnesses.map((harness) => (
+                <SelectItem key={harness.id} value={harness.id}>
+                  {harnessOptionLabel(harness)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {draftKind === "acp" ? (
+            models.length > 0 ? (
+              <>
+                <Select
+                  value={modelDraft === "" ? MODEL_HARNESS_DEFAULT : modelDraft}
+                  onValueChange={(value) =>
+                    onModelChange(!value || value === MODEL_HARNESS_DEFAULT ? "" : value)
+                  }
+                >
+                  <SelectTrigger className="w-full" data-testid="agent-model-select">
+                    <SelectValue>{modelLabel}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={MODEL_HARNESS_DEFAULT}>
+                      Whatever the harness defaults to
+                      {/* Named rather than left abstract: leaving this alone
+                          is the common choice, and an operator should not
+                          have to guess what they are choosing. The adapter
+                          reports which entry is current, so this tracks the
+                          CLI's own default instead of asserting one. */}
+                      {currentModel && (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          — {currentModel.name ?? currentModel.value}
+                        </span>
+                      )}
+                    </SelectItem>
+                    {models.map((model) => (
+                      <SelectItem key={model.value} value={model.value}>
+                        {model.name ?? model.value}
+                        {model.description && (
+                          <span className="text-muted-foreground"> — {model.description}</span>
+                        )}
+                      </SelectItem>
+                    ))}
+                    {/* A value the harness no longer advertises is still
+                        offered, so opening the editor cannot silently drop a
+                        pin somebody set deliberately. The list moves when the
+                        CLI updates; the teammate's setting should not. */}
+                    {unlistedModel && (
+                      <SelectItem value={unlistedModel}>
+                        {unlistedModel}
+                        <span className="text-muted-foreground"> — no longer offered</span>
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Read from the harness itself, so these are the models it will actually
+                  accept.
+                </p>
+              </>
+            ) : (
+              // No list to offer. Free text rather than an empty dropdown:
+              // "nothing cached yet" (a browser, or a harness never probed)
+              // is not the same as "this harness has no models", and an empty
+              // picker would assert the second.
+              <>
+                <Input
+                  value={modelDraft}
+                  onChange={(event) => onModelChange(event.target.value)}
+                  placeholder="Leave blank to use the harness's own default"
+                  data-testid="agent-model-input"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {isDesktopRuntime()
+                    ? "This harness hasn't reported its models yet — open Settings › External harnesses to check it."
+                    : "Open the desktop app to pick from the models this harness offers."}
+                </p>
+              </>
+            )
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              A model override only applies on an ACP harness — pick one above to set one.
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={onCancel} disabled={saving}>
+              Cancel
+            </Button>
+            <Button onClick={onSave} disabled={saving} data-testid="agent-harness-save">
+              Save
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-harness">
+            <Server className="size-3" />
+            {agent.harness ?? (defaultHarness ? `${defaultHarness.id} (default)` : "default harness")}
+          </Badge>
+          {agent.model ? (
+            <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-model">
+              <Cpu className="size-3" /> {agent.model}
+            </Badge>
+          ) : (
+            <span className="text-sm text-muted-foreground" data-testid="agent-model-empty">
+              {declaredKind === "acp"
+                ? "No model override set — uses the harness's own default."
+                : "No model override (this harness has no ACP transport to steer)."}
+            </span>
+          )}
+        </div>
       )}
     </Section>
   );

@@ -1749,6 +1749,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         }
     }
 
@@ -1969,6 +1970,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2020,6 +2022,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2067,6 +2070,7 @@ mod tests {
             description: None,
             tier: None,
             harness: None,
+            model: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
             context: None,
@@ -2175,6 +2179,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2220,6 +2225,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2631,6 +2637,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let agent = build_agent(
             &CompanyId::new("acme"),
@@ -2890,6 +2897,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         // `full` so the sandboxed write executes without a supervised prompt.
         let policy = ApprovalPolicy::new(

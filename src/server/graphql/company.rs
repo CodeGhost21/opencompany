@@ -413,6 +413,14 @@ pub struct ApprovalGql {
     /// every park with no workflow behind it (a chat turn, a scheduler tick, a
     /// board task's attempt), which is the majority.
     pub workflow_run_id: Option<String>,
+    /// Which workflow a parked `workflow.approve` gate is asking about
+    /// (issue #1418), when the effect is one.
+    ///
+    /// Carried for the same reason it is on the REST summary: it is the second
+    /// half of the run address, and it must survive role redaction or a Member
+    /// holding up a stalled workflow would see `workflow_run_id` and still have
+    /// nowhere to click.
+    pub workflow_id: Option<String>,
 }
 
 impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
@@ -425,6 +433,7 @@ impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
             expires_at_millis: summary.expires_at_millis.map(|ms| ms as f64),
             contents_hidden: summary.contents_hidden,
             workflow_run_id: summary.workflow_run_id,
+            workflow_id: summary.workflow_id,
         }
     }
 }

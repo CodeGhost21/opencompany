@@ -2834,6 +2834,20 @@ pub struct OverlayAgent {
     /// JSON so a standard-grant teammate serializes exactly as it did before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// A per-agent model override, carried the same way as
+    /// [`Agent::model`](crate::company::types::Agent) — see that field's docs.
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means this teammate takes its harness's own
+    /// model, unchanged from today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Which `[[harness]]` this teammate runs its turns on, by id — carried
+    /// the same way as [`Agent::harness`](crate::company::types::Agent::harness).
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means the harness marked `default = true`,
+    /// unchanged from today's hardcoded behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 /// An operator's runtime edit of a **manifest-declared** teammate.
@@ -2884,6 +2898,18 @@ pub struct AgentOverride {
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// The model this teammate runs, as an overlay on the blueprint.
+    ///
+    /// `Some("")` is the stored form of "cleared", matching `description`:
+    /// the write path already treats a blank and an absent value as one state,
+    /// and a distinct `None` here would mean "never edited" instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The harness this teammate is bound to, as an overlay on the blueprint.
+    ///
+    /// Cleared the same way as [`Self::model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -4005,6 +4031,12 @@ impl CompanyRecord {
             if entry.instructions.is_some() {
                 held.instructions = entry.instructions;
             }
+            if entry.model.is_some() {
+                held.model = entry.model;
+            }
+            if entry.harness.is_some() {
+                held.harness = entry.harness;
+            }
             return;
         }
         self.overlay_agent_edits.push(entry);
@@ -4060,6 +4092,16 @@ impl CompanyRecord {
         }
         if let Some(instructions) = entry.instructions.as_ref() {
             merged.prompt = Some(instructions.clone());
+        }
+        // Issue #1245. Empty means cleared, as for `description`: an operator
+        // moving a teammate back to the company default stores a blank rather
+        // than deleting the row, so the field stops tracking the blueprint
+        // only while an override actually exists.
+        if let Some(model) = entry.model.as_ref() {
+            merged.model = Some(model.clone()).filter(|text| !text.is_empty());
+        }
+        if let Some(harness) = entry.harness.as_ref() {
+            merged.harness = Some(harness.clone()).filter(|text| !text.is_empty());
         }
         std::borrow::Cow::Owned(merged)
     }
@@ -4193,12 +4235,19 @@ impl CompanyRecord {
         {
             entry.instructions = None;
         }
+        // Every field the override can carry, not just the ones it carried
+        // when this was written. A predicate that names a subset deletes rows
+        // that are still holding the fields it forgot — here, resetting a
+        // teammate's instructions would take their harness and model with it,
+        // silently reverting both to the blueprint.
         self.overlay_agent_edits.retain(|entry| {
             entry.name.is_some()
                 || entry.role.is_some()
                 || entry.description.is_some()
                 || entry.tools.is_some()
                 || entry.instructions.is_some()
+                || entry.model.is_some()
+                || entry.harness.is_some()
         });
     }
 
@@ -5766,6 +5815,8 @@ mod test {
             role: "Growth".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert!(record.is_roster_agent("ceo"));
         assert!(record.is_roster_agent("nova"));
@@ -5798,6 +5849,8 @@ mod test {
             role: "r".into(),
             description: None,
             tools: vec!["docs.*".into(), "email".into()],
+            model: None,
+            harness: None,
         };
         let round: OverlayAgent =
             serde_json::from_str(&serde_json::to_string(&scoped).unwrap()).unwrap();
@@ -5820,6 +5873,8 @@ mod test {
             role: "Worker".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
     }
 
@@ -5960,6 +6015,8 @@ mod test {
             role: "Designer".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         assert_eq!(
@@ -6003,6 +6060,8 @@ mod test {
             role: "Growth".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert_eq!(
             record.resolve_teammate_key("ceo"),
@@ -6023,6 +6082,8 @@ mod test {
                 role: "Designer".into(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             });
         }
         assert_eq!(
@@ -6523,6 +6584,8 @@ mod test {
             role: "Growth".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert_eq!(record.effective_budget("shane"), None);
 
