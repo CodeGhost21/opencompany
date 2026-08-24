@@ -1078,14 +1078,20 @@ async fn run_issue_password(
 
     let home = resolve_home_migrated(home)?;
     let settings = opencompany::store::StorageSettings::from_env()?;
-    let handles = opencompany::store::open_storage(&settings, &home)
-        .await?
-        .unwrap_or_else(|| {
-            // The filesystem backend is the default and its ports are selected
-            // by the runtime builder when `open_storage` returns `None`.
-            let fs_ops = Arc::new(opencompany::store::FsOps::new(home.clone()));
-            opencompany::store::StorageHandles::from_fs(fs_ops)
-        });
+    let fs_ops = Arc::new(opencompany::store::FsOps::new(home.clone()));
+    let handles = opencompany::store::open_storage(&settings, &home).await?;
+    let users: Arc<dyn opencompany::ports::users::UserStore> = handles
+        .as_ref()
+        .map(|handles| handles.users.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+    let sessions: Arc<dyn opencompany::ports::sessions::SessionStore> = handles
+        .as_ref()
+        .map(|handles| handles.sessions.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+    let login_codes: Arc<dyn opencompany::ports::login_codes::LoginCodeStore> = handles
+        .as_ref()
+        .map(|handles| handles.login_codes.clone())
+        .unwrap_or_else(|| fs_ops.clone());
 
     let id = CompanyId::new(company);
     // The manifest is the other source of a standing grant, so a company that
