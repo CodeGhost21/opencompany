@@ -66,9 +66,13 @@ export function AttemptCard({ run, nowMs, turn, focusStep, onOpen }: Props) {
   }, [state]);
   // `onOpen` rides an effect rather than the click handler so the cards that
   // start open and the cards that auto-open on trouble announce themselves too.
+  // The step length is a dependency on purpose: while a live attempt's trace
+  // grows between polls, an open card must re-read the unredacted half or the
+  // new steps would keep empty deep panes until it is closed and reopened. The
+  // length is the cheap signal — a step status transition alone does not re-read.
   useEffect(() => {
     if (open) onOpen?.(run.id);
-  }, [open, run.id, onOpen]);
+  }, [open, run.id, run.steps.length, onOpen]);
   const elapsed =
     (run.finishedAtMillis ?? nowMs) - (run.startedAtMillis ?? run.createdAtMillis);
   // `cachedInput` is a subset of `input` (prompt_tokens_details.cached_tokens),
