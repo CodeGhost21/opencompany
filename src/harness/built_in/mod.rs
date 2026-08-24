@@ -2773,6 +2773,15 @@ fn overlay_fingerprint(
         edit.role.hash(&mut hasher);
         edit.description.hash(&mut hasher);
         edit.tools.hash(&mut hasher);
+        // A routing override changes the harness binding the roster must build,
+        // so it has to move this fingerprint too — otherwise re-binding one
+        // teammate to another model/harness would persist and be silently
+        // ignored until the next process restart (issue #1676 review note).
+        // Hashed as `Option`s, so the stored `Some("")` "cleared" form stays
+        // distinct from `None` ("never edited"), the same discriminant the
+        // resolver's reset-to-blueprint contract depends on.
+        edit.model.hash(&mut hasher);
+        edit.harness.hash(&mut hasher);
     }
     agents.len().hash(&mut hasher);
     for agent in agents {
@@ -2787,6 +2796,12 @@ fn overlay_fingerprint(
         // order (an operator's own list), length folded in first via the slice
         // length above so `["a","b"]` cannot collide with `["ab"]`.
         agent.tools.hash(&mut hasher);
+        // The overlay's own routing binding (`overlay_agent_to_manifest` carries
+        // both straight through), so a model/harness change on an overlay
+        // teammate invalidates the cached roster exactly as an edit of a
+        // manifest one does.
+        agent.model.hash(&mut hasher);
+        agent.harness.hash(&mut hasher);
     }
     hasher.finish()
 }
