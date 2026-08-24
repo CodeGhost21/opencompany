@@ -1210,7 +1210,8 @@ async fn edit_me(
                 "code": "password_change_required",
             })),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
     // The avatar resolve is the one slow part of this handler — a workspace
     // read of an uploaded image — and `upsert_user` below replaces the *entire*
