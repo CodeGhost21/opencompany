@@ -1819,8 +1819,9 @@ impl RuntimeBuilder {
         // `with_approvals` is a test seam: an injected gate carries its own
         // policy/TTL on purpose, so the effective-policy application below must
         // not clobber one. Record whether the gate came from `self.approvals`
-        // before the option is moved out.
-        let gate_injected = self.approvals.is_some();
+        // before the option is moved out. A handover gate is inherited runtime
+        // state, not an explicitly injected test gate.
+        let gate_injected = self.approvals.is_some() && handover.is_none();
         let gate = match handover.as_ref() {
             Some(h) => h.approval_gate.clone(),
             None => {
