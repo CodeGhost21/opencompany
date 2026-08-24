@@ -355,6 +355,8 @@ export function resolvableMentions(
         if (!closesMention(masked, end)) continue;
         if (!best || end > best.end) {
           best = { end, target: entry.target };
+          // A strictly longer alias supersedes any ambiguity among shorter
+          // candidates; only equal-length candidates can remain ambiguous.
           ambiguous = false;
         } else if (end === best.end && !sameTarget(best.target, entry.target)) {
           // Two targets claiming the same span: nobody gets pinged. A shorter

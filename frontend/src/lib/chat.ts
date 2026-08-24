@@ -20,7 +20,7 @@ export interface Reaction {
   mine: boolean;
 }
 
-/** One mention on one line, exactly as the host resolved it. */
+/** One mention on one line, exactly as resolved by the host. */
 export type Mention = ChatMentionDto;
 
 /** One line in the conversation with the company. */
