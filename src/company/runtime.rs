@@ -1999,8 +1999,11 @@ impl CompanyRuntime {
     /// resolution carries the **canonical** id (issue #214), so a key typed as
     /// a display name — `chat: "Engineering"` for a desk whose id is
     /// `engineering` — stores the canonical id, which is what the rail's
-    /// channel ids are built from. A `dm:`-addressed thread is already in the
-    /// console's channel-id space and is kept as-is.
+    /// channel ids are built from. A `dm:`-prefixed key goes through the same
+    /// resolution with the prefix split off, so a noncanonical address —
+    /// `dm:BACKEND_ENGINEER`, `dm:<display name>` — still stores
+    /// `dm:<canonical-agent-id>` and badges the rail's real DM channel rather
+    /// than one that does not exist.
     pub(crate) async fn mention_context(
         &self,
         id: &CompanyId,
