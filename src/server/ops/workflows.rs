@@ -7093,10 +7093,10 @@ mod tests {
                     .unwrap(),
             )
             .await;
-            assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
-            assert_eq!(body[0]["artifactId"], "art-legacy");
+            assert_eq!(body["files"].as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(body["files"][0]["artifactId"], "art-legacy");
             assert!(
-                body[0]["source"].is_null(),
+                body["files"][0]["source"].is_null(),
                 "a legacy record's absent source stays absent on the wire: {body}"
             );
         }
