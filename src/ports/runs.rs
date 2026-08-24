@@ -639,6 +639,28 @@ pub trait RunStore: Send + Sync {
     async fn list_run_steps(&self, company: &CompanyId, run_id: &str)
     -> Result<Vec<RunStepRecord>>;
 
+    /// Reads every run's steps in one call, keyed by run id.
+    ///
+    /// The Observatory index reads the traces of up to `limit` runs at once.
+    /// The provided implementation loops the per-run read, which is the right
+    /// shape for backends where one read is one indexed query (sqlite, MongoDB).
+    /// The filesystem backend overrides this: its per-run read scans and
+    /// deserializes the whole company-wide JSONL before filtering one run, so a
+    /// loop over N runs would rescan the company's unbounded step history N
+    /// times — quadratic in company history on the view operators poll. One
+    /// scan, indexed once, keeps the index cost linear.
+    async fn list_run_steps_for_runs(
+        &self,
+        company: &CompanyId,
+        run_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<RunStepRecord>>> {
+        let mut out = std::collections::HashMap::with_capacity(run_ids.len());
+        for id in run_ids {
+            out.insert(id.clone(), self.list_run_steps(company, id).await?);
+        }
+        Ok(out)
+    }
+
     // -- transitions (provided; legality enforced here) ----------------------
 
     /// `Pending` → `Running`, stamping the driving event's seq and the start
