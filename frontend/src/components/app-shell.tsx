@@ -1391,7 +1391,7 @@ export function AppShell({
         : mentionsToClear(
             mentionFeedRef.current,
             channelId,
-            mainChannelId ?? "",
+            chatChannelByThread.main,
             new Set(
               Object.keys(chatChannelByThread).filter(
                 (threadId) => chatChannelByThread[threadId] === channelId,
