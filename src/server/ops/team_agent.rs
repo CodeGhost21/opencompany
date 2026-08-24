@@ -80,11 +80,12 @@ use axum::routing::{self, MethodRouter};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::company::ACP_AGENTS;
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{AgentOverride, CompanyRecord};
 use crate::runtime::builder::agent_scoped_grants;
-use crate::server::error::{ApiError, Rejection};
+use crate::server::error::ApiError;
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::team::{AgentPath, daily_spend_samples, double_option};
 use crate::server::users::admin::require_admin;
@@ -676,17 +677,29 @@ async fn edit_agent(
         .harness
         .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
 
-    // Resolved through `harness_by_id`, not against the declared list: a
-    // coding CLI this build drives is bindable without any `[[harness]]`
+    // A coding CLI this build drives is bindable without any `[[harness]]`
     // naming it, and `GET {scope}/harnesses` offers exactly those ids in the
-    // picker. Checking the declared list here would refuse a binding the
-    // console had just offered.
-    if let Some(Some(id)) = &harness
-        && record.manifest.harness_by_id(id).is_none()
-    {
-        return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
-            format!("no harness named `{id}` is available for this company."),
-        ))));
+    // picker. But `harness_by_id` resolves an `ACP_AGENTS` id on *any* build
+    // via the implicit-local fallback, which would let a hosted admin bind a
+    // teammate to a CLI the server has nothing to launch — accepted by `PATCH`,
+    // then dead on the next rebuild. So gate that fallback the same way the
+    // picker does: declared harnesses (and the built-in when a manifest
+    // declares none) are always bindable, an undeclared coding CLI only when
+    // this host wires an `AcpAgentFactory`, and anything else is refused.
+    if let Some(Some(id)) = &harness {
+        let declared = record
+            .manifest
+            .effective_harnesses()
+            .iter()
+            .any(|h| h.id == *id);
+        let bindable =
+            declared || (ACP_AGENTS.contains(&id.as_str()) && state.acp_agents().is_some());
+        if !bindable {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "no harness named `{id}` is available for this company."
+            )))
+            .into());
+        }
     }
 
     // A model override only means anything on an `acp` harness — the same
@@ -707,13 +720,12 @@ async fn edit_agent(
             .unwrap_or_else(|| record.manifest.default_harness_id());
         let bound = record.manifest.harness_by_id(&resulting_harness_id);
         if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
-            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
-                format!(
-                    "`{model_value}` names a model, but this teammate's harness has no ACP \
-                     transport to forward it to. Bind it to an ACP harness first, or clear \
-                     the model."
-                ),
-            ))));
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{model_value}` names a model, but this teammate's harness has no ACP \
+                 transport to forward it to. Bind it to an ACP harness first, or clear \
+                 the model."
+            )))
+            .into());
         }
         // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
         // still cannot carry a model, because the runner wire protocol has no
@@ -728,13 +740,12 @@ async fn edit_agent(
             .map(|acp| acp.transport.as_str())
             == Some("runner")
         {
-            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
-                format!(
-                    "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
-                     `transport = \"runner\"`. Model overrides aren't supported for a runner \
-                     yet — the runner wire protocol doesn't carry them."
-                ),
-            ))));
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                 `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                 yet — the runner wire protocol doesn't carry them."
+            )))
+            .into());
         }
     }
 
@@ -2370,6 +2381,55 @@ prompt = "Lead decisively."
         let (status, cleared) = patch_agent(&state, &jamie, json!({"harness": null})).await;
         assert_eq!(status, StatusCode::OK, "{cleared}");
         assert!(cleared["harness"].is_null(), "{cleared}");
+    }
+
+    /// A coding CLI this build drives is bindable without any `[[harness]]`
+    /// naming it — but only where this host can actually run one (issue
+    /// #1245's detected-harness follow-up).
+    ///
+    /// `harness_by_id` resolves an `ACP_AGENTS` id on any build through the
+    /// implicit-local fallback, so without this gate a hosted admin could bind
+    /// a teammate to a CLI the server has nothing to launch — accepted by
+    /// `PATCH`, then dead on the next rebuild. The picker (`GET
+    /// {scope}/harnesses`) already refuses to offer detected CLIs without an
+    /// `AcpAgentFactory`; the write path must agree.
+    #[tokio::test]
+    async fn an_undeclared_coding_cli_is_bindable_only_where_this_host_can_run_one() {
+        struct StubFactory;
+        impl crate::ports::acp::AcpAgentFactory for StubFactory {
+            fn build(
+                &self,
+                _agent: &str,
+                _model: Option<&str>,
+                _agent_models: &std::collections::HashMap<String, String>,
+                _workspace_root: &std::path::Path,
+            ) -> crate::Result<std::sync::Arc<dyn crate::ports::acp::AcpAgent>> {
+                unreachable!("this route never builds an agent")
+            }
+        }
+
+        // Hosted shape (no factory): an undeclared coding CLI is refused, just
+        // as the picker that does not offer it.
+        let hosted_home = home();
+        let hosted = state_with_manifest(hosted_home.path(), ACP_ROSTER).await;
+        let jamie = add_overlay(&hosted, "Jamie", "Growth").await;
+        let (status, refusal) = patch_agent(&hosted, &jamie, json!({"harness": "claude"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        // Desktop shape (factory wired): the same id is bindable.
+        let desktop_home = home();
+        let desktop = state_with_manifest(desktop_home.path(), ACP_ROSTER)
+            .await
+            .with_acp_agents(std::sync::Arc::new(StubFactory));
+        let jamie = add_overlay(&desktop, "Jamie", "Growth").await;
+        let (status, set) = patch_agent(&desktop, &jamie, json!({"harness": "claude"})).await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["harness"], "claude");
+
+        // A factory must not widen the vocabulary beyond the coding CLIs.
+        let (status, refusal) =
+            patch_agent(&desktop, &jamie, json!({"harness": "not-a-cli"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
     }
 
     /// Issue #1245's harness-picker follow-up: switching a teammate onto an
