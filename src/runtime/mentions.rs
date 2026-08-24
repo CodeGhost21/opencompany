@@ -1179,6 +1179,17 @@ members = ["engineer", "ceo"]
         assert_eq!(targets(&found), vec![&agent("engineer")]);
     }
 
+    /// A longer closing run cannot close a shorter opener: CommonMark only lets
+    /// a *whole* run of exactly the opening length close a span. `` `@engineer`` ``
+    /// (one opener, two trailing) is not code, so the mention stays visible —
+    /// the console's mask must agree with this or it would suppress a mention
+    /// the renderer still shows.
+    #[test]
+    fn a_longer_backtick_run_does_not_close_a_shorter_opener() {
+        let found = resolve_text("`@engineer``");
+        assert_eq!(targets(&found), vec![&agent("engineer")]);
+    }
+
     // -----------------------------------------------------------------------
     // Longest-alias-wins, and ambiguity
     // -----------------------------------------------------------------------
