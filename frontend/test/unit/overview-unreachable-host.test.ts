@@ -153,6 +153,8 @@ describe("a host that cannot be reached at all", () => {
     expect(refresh).not.toBeNull();
     expect(refresh?.className).toContain("min-h-6");
     expect(refresh?.className).toContain("md:min-h-0");
+    // A healthy host leaves the graph interactive — nothing covered.
+    expect(lastCovered).toBe(false);
   });
 
   it("covers the empty graph with a centered, actionable outage state", async () => {
