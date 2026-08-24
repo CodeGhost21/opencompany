@@ -289,19 +289,6 @@ impl ManifestApprovalGate {
         self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
     }
 
-    /// Updates the spend threshold used by native evaluation.
-    ///
-    /// The policy overlay is an operator control, so waiting for a process
-    /// restart would make the Settings panel report a cap the live gate does
-    /// not enforce — a spend below the old cap would keep executing without
-    /// approval after the operator tightened it.
-    /// [`apply_effective_policy`](Self::apply_effective_policy) sets this and
-    /// the deadline together; this setter exists for the write route, which
-    /// carries the resolved effective policy and needs to touch only the cap.
-    pub fn set_auto_approve_under_usd(&self, cap: Option<f64>) {
-        self.policy.auto_approve_under_usd = cap;
-    }
-
     /// The ids of every currently-parked approval.
     pub fn parked_ids(&self) -> Vec<ApprovalId> {
         self.parked
