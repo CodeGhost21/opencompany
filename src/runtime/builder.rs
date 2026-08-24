@@ -3858,6 +3858,11 @@ mod test {
                 );
             }
             assert!(!allow_covers(&allow, "workspace.write"));
+            assert!(
+                !allow_covers(&allow, "workspace"),
+                "the bare `workspace` grant is a write grant to the wiring predicate, \
+                 so a catch-all must not cover it"
+            );
             assert!(allow_covers(&allow, "workspace.read"));
             assert!(allow_covers(&allow, "docs.read"));
         }
