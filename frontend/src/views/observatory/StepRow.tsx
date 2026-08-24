@@ -78,8 +78,16 @@ function Pane({
   );
 }
 
-export function StepRow({ step }: { step: ObservatoryStep }) {
-  const [open, setOpen] = useState(false);
+export function StepRow({
+  step,
+  focus,
+}: {
+  step: ObservatoryStep;
+  /** Whether a deep link names this step; scrolls to and opens it. */
+  focus?: boolean;
+}) {
+  const [open, setOpen] = useState(() => focus);
+  const rowRef = useRef<HTMLLIElement>(null);
   const state = stepState(step);
   const deep = step.deep;
   const hasBody =
@@ -89,8 +97,20 @@ export function StepRow({ step }: { step: ObservatoryStep }) {
     present(deep?.arguments) ||
     present(deep?.output);
 
+  useEffect(() => {
+    if (!focus) return;
+    rowRef.current?.scrollIntoView({ block: "nearest" });
+    if (hasBody) setOpen(true);
+  }, [focus, hasBody]);
+
   return (
-    <li className="border-border/60 border-b last:border-b-0">
+    <li
+      ref={rowRef}
+      className={cn(
+        "border-border/60 border-b last:border-b-0",
+        focus && "bg-muted/60",
+      )}
+    >
       <button
         type="button"
         onClick={() => hasBody && setOpen((v) => !v)}
