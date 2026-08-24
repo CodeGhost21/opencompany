@@ -127,13 +127,15 @@ const TIER_TEXT: &[TierDto] = &[
     TierDto {
         value: "supervised",
         label: "Supervised",
-        description: "The agents ask before every change, except payments under the configured spend cap.",
+        description: "The agents ask before every change, except payments under the configured \
+                      spend cap — the always-ask list and daily budget still stop them.",
     },
     TierDto {
         value: "auto",
         label: "Auto",
         description: "The agents work on their own and stop before anything that leaves the \
-                      company or spends money, except payments under the configured spend cap.",
+                      company or spends money, except payments under the configured spend cap — \
+                      the always-ask list and daily budget still stop them.",
     },
     TierDto {
         value: "full",
