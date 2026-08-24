@@ -514,7 +514,7 @@ async fn read(
     authorize(&state, &headers, peer).await?;
     snapshot(&state, &ProcessEnv)
         .map(Json)
-        .map_err(|e| ApiError::from(e).into_response())
+        .map_err(|e| ApiError::from(e).into_response().into())
 }
 
 /// The manifest the resolution pass runs against.
@@ -695,7 +695,7 @@ async fn apply(
     apply_inner(&state, req, &ProcessEnv)
         .await
         .map(Json)
-        .map_err(|e| ApiError::from(e).into_response())
+        .map_err(|e| ApiError::from(e).into_response().into())
 }
 
 /// `+ Sync` so the returned future is `Send`, which axum requires of a handler:
