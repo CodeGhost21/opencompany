@@ -57,14 +57,18 @@ export function mentionsToClear(
   notifications: readonly NotificationDto[],
   channelId: string,
   mainChannelId = MAIN_THREAD_ID,
+  visibleThreadIds: ReadonlySet<string> = new Set([channelId]),
 ): string[] {
   return notifications
     .filter(
       (n) =>
         n.readAt === undefined &&
         n.kind === "mention" &&
-        (n.context === channelId ||
-          (channelId === mainChannelId && n.context === MAIN_THREAD_ID)),
+        n.context !== undefined &&
+        ((n.context === channelId && visibleThreadIds.has(channelId)) ||
+          (channelId === mainChannelId &&
+            n.context === MAIN_THREAD_ID &&
+            visibleThreadIds.has(MAIN_THREAD_ID))),
     )
     .map((n) => n.id);
 }
