@@ -141,6 +141,26 @@ describe("the deadline on an approval card", () => {
     expect(container.textContent).toContain("Origin unavailable");
   });
 
+  it("counts a resolved thread link as an origin while chat hydration is empty", async () => {
+    // The shell hydrates `chatChannelByThread` separately from the card's own
+    // `useApprovalThreadLinks`, so a card can resolve its "Asked in" link
+    // before the shell does — or while the shell's read has failed. The origin
+    // is visibly available either way, so the footer must not say otherwise.
+    await act(async () => {
+      root.render(
+        createElement(ApprovalMeta, {
+          approval: approval({ thread: "engineering" }),
+          now: T0,
+          askerNames: new Map(),
+          thread: { channelId: "engineering", label: "#engineering" },
+        }),
+      );
+    });
+
+    expect(container.textContent).toContain("Asked in #engineering");
+    expect(container.textContent).not.toContain("Origin unavailable");
+  });
+
   it("renders beside how long the request has already waited", async () => {
     await render(approval({ expires_at_millis: T0 + 24 * HOUR }), T0 + 2 * HOUR);
     const text = container.textContent ?? "";
