@@ -99,6 +99,7 @@ describe("leaving the #/setup route", () => {
     expect(onRouteDismiss).toHaveBeenCalledOnce();
   });
 
+  it("does not close a Team-prompt dialog just because the route is absent", async () => {
     // The Team page's prompt opens setup with no `#/setup` involved; `force`
     // is the only opener, exactly as in the first-run-gate-adjacent flow.
     await show({ force: true, routeOpen: false });
