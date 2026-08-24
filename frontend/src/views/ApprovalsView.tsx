@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Loader2, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -32,6 +32,7 @@ import {
   batchPositions,
   staleDecisionLine,
 } from "@/lib/approval-wording";
+import { approvalsByDeadline } from "@/lib/approval-order";
 import {
   approvalSummary,
   decisionLabel,
@@ -175,6 +176,16 @@ export function ApprovalsView({
     [approvals, focusTaskId],
   );
   /**
+   * The queue's priority order, before its pointer-stable snapshot (#1427).
+   *
+   * A deadline is the one ordering signal the host enforces without operator
+   * input, so the earliest one must not be stranded beneath arbitrary response
+   * order. Sorting before `useStableList` keeps #1414's guarantee intact: a
+   * polling response can update the intended order, but cannot rearrange cards
+   * while the operator is pointing at or tabbing through the queue.
+   */
+  const orderedVisible = useMemo(() => approvalsByDeadline(visible), [visible]);
+  /**
    * The same rows, but in a pointer-stable order (#1414).
    *
    * A poll swaps `visible` wholesale every 5s, and mapping that straight to
@@ -186,12 +197,23 @@ export function ApprovalsView({
    * branch below reads `rows` rather than `visible` so the count, the empty
    * state and the list all agree on the one frozen view.
    */
-  const { items: rows, containerProps: queueHold } = useStableList(visible);
-  const askerNames = useAskerNames(client, company, approvals);
-  const threadLinks = useApprovalThreadLinks(client, company, rows);
+  const {
+    items: rows,
+    containerProps: queueHold,
+    holding,
+  } = useStableList(orderedVisible);
+  // Relative timestamps above the queue can wrap at a formatting boundary just
+  // like roster names or grant membership. Keep that clock stable for the whole
+  // interaction region, then let the next render use the current feed time.
+  const heldNow = useRef(now);
+  if (!holding) heldNow.current = now;
+  const regionNow = holding ? heldNow.current : now;
+  const askerNames = useAskerNames(client, company, approvals, holding);
+  const threadLinks = useApprovalThreadLinks(client, company, rows, holding);
   const { grants, granterNames, refreshGrants } = useStandingGrants(
     client,
     company,
+    holding,
   );
   /**
    * How many rows each turn's batch still has waiting (#842).
@@ -214,7 +236,16 @@ export function ApprovalsView({
    * focus-narrowed view cannot count the position over a subset and the total
    * over the whole.
    */
-  const batchPos = useMemo(() => batchPositions(approvals), [approvals]);
+  const batchPosLive = useMemo(() => batchPositions(approvals), [approvals]);
+  // The queue hold freezes `rows`, so a poll that expires or decides one card
+  // of a batch must not renumber the cards the operator is looking at: without
+  // the freeze a removed frozen card falls back to "1 of 1" (the line vanishes)
+  // and its surviving siblings get shorter counts — either can rewrap a card
+  // above the targeted control. Snapshot the map with the hold, reconcile the
+  // moment it releases (#1593).
+  const batchPosHeld = useRef(batchPosLive);
+  if (!holding) batchPosHeld.current = batchPosLive;
+  const batchPos = holding ? batchPosHeld.current : batchPosLive;
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
@@ -405,123 +436,133 @@ export function ApprovalsView({
             </a>
           </div>
         )}
-        {/* Issue #1229: "nothing parked" and "we could not read what is parked"
-            are different facts, and only one of them is an instruction to stop
-            looking. The queue's own load state decides which is on screen —
-            `approvals` being empty cannot, because it is empty in both cases.
-            A queue that has been read once keeps its rows through a later
-            failure, so this branch is only ever the cold path. */}
-        {queue !== "ready" && approvals.length === 0 ? (
-          queue === "loading" ? (
-            <LoadingApprovals />
-          ) : (
-            <UnreadableApprovals onRetry={() => void feed.refresh()} />
-          )
-        ) : rows.length === 0 ? (
-          focusTaskId !== null ? (
-            <ClearedForTask />
-          ) : (
-            <EmptyApprovals onGoToConversation={onGoToConversation} />
-          )
-        ) : (
-          <>
-            <div className="mb-4 flex items-baseline justify-between gap-3">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                {rows.length === 1
-                  ? "1 thing needs your approval"
-                  : `${rows.length} things need your approval`}
-              </h2>
-              {rows.length > 1 && (
-                <div className="flex shrink-0 items-center gap-2 self-center">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={bulkInFlight || inFlight.size > 0}
-                    onClick={() => void decideAll("deny")}
-                  >
-                    {bulkInFlight ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <X className="size-4" />
-                    )}
-                    Decline all
-                  </Button>
-                  <Button
-                    size="sm"
-                    disabled={bulkInFlight || inFlight.size > 0}
-                    onClick={() => void decideAll("approve")}
-                  >
-                    {bulkInFlight ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Check className="size-4" />
-                    )}
-                    Approve all
-                  </Button>
-                </div>
-              )}
-            </div>
-            {/* #971: nothing may vanish unannounced. Requests now age out on
-                their own, so the queue says so once, up front — mirroring the
-                standing-permissions section's "Each one expires on its own"
-                below. Each card carries its own deadline; this is the sentence
-                that stops that deadline being a surprise. */}
-            <p className="mb-3 text-xs text-muted-foreground">
-              Each one has a deadline. Anything still undecided by then is
-              declined on its own, and the work behind it moves on.
-            </p>
-            <div className="flex flex-col gap-3" {...queueHold}>
-              {rows.map((a) => (
-                <ApprovalCard
-                  key={a.id}
-                  approval={a}
-                  now={now}
-                  askerNames={askerNames}
-                  chatChannelByThread={chatChannelByThread}
-                  thread={threadLinks.get(a.id)}
-                  deciding={inFlight.get(a.id) ?? null}
-                  batchIndex={batchPos.get(a.id)?.index ?? 1}
-                  batchTotal={batchPos.get(a.id)?.total ?? 1}
-                  onDecide={(verdict, scope) => void decide(a, verdict, scope)}
-                />
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* Below the queue, and shown even when the queue is empty — a standing
-            permission with nothing currently parked is exactly the state an
-            operator most needs to be able to find and take back. */}
-        <StandingPermissions
-          grants={grants}
-          now={now}
-          askerNames={askerNames}
-          granterNames={granterNames}
-          onRevoke={async (id) => {
-            try {
-              await client.revokeGrant(id, company);
-              toast.success(
-                "Permission revoked — this tool will ask again from its next call.",
-              );
-            } catch (err) {
-              // A 404 means it was already gone (revoked elsewhere, or expired).
-              // The operator's intent is satisfied either way, so this is not an
-              // error to them — only a stale list, which the refresh below fixes.
-              if (err instanceof ApiError && err.status === 404) {
-                toast.info("That permission was already gone.");
-              } else {
-                const msg =
-                  err instanceof ApiError
-                    ? err.message
-                    : "something went wrong";
-                toast.error(`Couldn't revoke it — ${msg}`);
-                throw err;
+        {/* #1427: permissions are a separate operator task, not the last queue
+            row. Keeping them before the pending list makes revocation reachable
+            even when a backlog is several screens long. The queue's hold props
+            wrap the whole region — permissions and rows together — so the
+            section stays still while an operator is acting on it. */}
+        <div {...queueHold}>
+          <StandingPermissions
+            grants={grants}
+            now={regionNow}
+            askerNames={askerNames}
+            granterNames={granterNames}
+            onRevoke={async (id) => {
+              try {
+                await client.revokeGrant(id, company);
+                toast.success(
+                  "Permission revoked — this tool will ask again from its next call.",
+                );
+              } catch (err) {
+                // A 404 means it was already gone (revoked elsewhere, or expired).
+                // The operator's intent is satisfied either way, so this is not an
+                // error to them — only a stale list, which the refresh below fixes.
+                if (err instanceof ApiError && err.status === 404) {
+                  toast.info("That permission was already gone.");
+                } else {
+                  const msg =
+                    err instanceof ApiError
+                      ? err.message
+                      : "something went wrong";
+                  toast.error(`Couldn't revoke it — ${msg}`);
+                  throw err;
+                }
+              } finally {
+                void refreshGrants();
               }
-            } finally {
-              void refreshGrants();
-            }
-          }}
-        />
+            }}
+          />
+
+          {/* Issue #1229: "nothing parked" and "we could not read what is parked"
+              are different facts, and only one of them is an instruction to stop
+              looking. The queue's own load state decides which is on screen —
+              `approvals` being empty cannot, because it is empty in both cases.
+              A queue that has been read once keeps its rows through a later
+              failure, so this branch is only ever the cold path. */}
+          {queue !== "ready" && approvals.length === 0 ? (
+            queue === "loading" ? (
+              <LoadingApprovals />
+            ) : (
+              <UnreadableApprovals onRetry={() => void feed.refresh()} />
+            )
+          ) : rows.length === 0 ? (
+            focusTaskId !== null ? (
+              <ClearedForTask />
+            ) : (
+              <EmptyApprovals onGoToConversation={onGoToConversation} />
+            )
+          ) : (
+            <>
+              {/* #1427: the count and deadline rule orient every viewport, not
+                only the first one. The opaque background makes the header a
+                real reading boundary over cards that scroll beneath it. */}
+              <div className="sticky top-0 z-10 -mx-4 mb-3 border-b bg-background px-4 py-3">
+                <div className="flex items-baseline justify-between gap-3">
+                  <h2 className="text-sm font-medium text-muted-foreground">
+                    {rows.length === 1
+                      ? "1 thing needs your approval"
+                      : `${rows.length} things need your approval`}
+                  </h2>
+                  {rows.length > 1 && (
+                    <div className="flex shrink-0 items-center gap-2 self-center">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={bulkInFlight || inFlight.size > 0}
+                        onClick={() => void decideAll("deny")}
+                      >
+                        {bulkInFlight ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <X className="size-4" />
+                        )}
+                        Decline all
+                      </Button>
+                      <Button
+                        size="sm"
+                        disabled={bulkInFlight || inFlight.size > 0}
+                        onClick={() => void decideAll("approve")}
+                      >
+                        {bulkInFlight ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Check className="size-4" />
+                        )}
+                        Approve all
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {/* #971: nothing may vanish unannounced. Requests now age out on
+                  their own, so the queue says so once, up front. Each card
+                  carries its own deadline; this is the sentence that stops
+                  that deadline being a surprise. */}
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Each one has a deadline. Anything still undecided by then is
+                  declined on its own, and the work behind it moves on.
+                </p>
+              </div>
+              <div className="flex flex-col gap-3">
+                {rows.map((a) => (
+                  <ApprovalCard
+                    key={a.id}
+                    approval={a}
+                    now={regionNow}
+                    askerNames={askerNames}
+                    chatChannelByThread={chatChannelByThread}
+                    thread={threadLinks.get(a.id)}
+                    deciding={inFlight.get(a.id) ?? null}
+                    batchIndex={batchPos.get(a.id)?.index ?? 1}
+                    batchTotal={batchPos.get(a.id)?.total ?? 1}
+                    onDecide={(verdict, scope) =>
+                      void decide(a, verdict, scope)
+                    }
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -535,7 +576,18 @@ export function ApprovalsView({
  * a host that predates the route 404s, which is caught here so the section
  * simply does not appear rather than breaking the page.
  */
-function useStandingGrants(client: OpenCompanyClient, company: string | null) {
+function useStandingGrants(
+  client: OpenCompanyClient,
+  company: string | null,
+  /**
+   * True while the queue is interaction-held (#1593): the section renders above
+   * the queue, so a grants update that changes it would shift every
+   * approve/decline control while the operator is aiming at one. The freshest
+   * grants wait out the hold and land the moment it releases — the same
+   * hold-and-reconcile shape `useStableList` gives the rows below.
+   */
+  holding: boolean,
+) {
   const [grants, setGrants] = useState<StandingGrant[]>([]);
   // Actor id → what to call them. Without this the row reads "granted by
   // 019fd3d1bddf-000000000005", which is a runtime identifier in front of an
@@ -543,13 +595,44 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
   const [granterNames, setGranterNames] = useState<Map<string, string>>(
     new Map(),
   );
+  // The newest grants while the queue is held. `null` means nothing pending; an
+  // empty list is a real answer and must not be mistaken for "nothing arrived".
+  const pending = useRef<StandingGrant[] | null>(null);
+  // Names can change card height too (fallback id/email → display name), so they
+  // use the same hold-and-reconcile path rather than updating above the queue.
+  const pendingNames = useRef<Map<string, string> | null>(null);
+  // Live is read inside `refreshGrants`, which is memoised and must not close
+  // over a stale render — the same ref pattern `useStableList` uses for `live`.
+  const holdingRef = useRef(holding);
+  holdingRef.current = holding;
 
   const refreshGrants = useCallback(async () => {
     const next = await client
       .listGrants(company)
       .catch(() => [] as StandingGrant[]);
+    if (holdingRef.current) {
+      pending.current = next;
+      return;
+    }
     setGrants(next);
   }, [client, company]);
+
+  // Grants that arrived during a hold render the moment it releases. Without
+  // this a grant minted elsewhere — or by the approve that started the hold —
+  // stays invisible until the next poll.
+  useEffect(() => {
+    if (holding) return;
+    if (pending.current !== null) {
+      const next = pending.current;
+      pending.current = null;
+      setGrants(next);
+    }
+    if (pendingNames.current !== null) {
+      const next = pendingNames.current;
+      pendingNames.current = null;
+      setGranterNames(next);
+    }
+  }, [holding]);
 
   useEffect(() => {
     let live = true;
@@ -557,7 +640,10 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
       const next = await client
         .listGrants(company)
         .catch(() => [] as StandingGrant[]);
-      if (live) setGrants(next);
+      if (live) {
+        if (holdingRef.current) pending.current = next;
+        else setGrants(next);
+      }
     })();
     // Who the granter ids belong to. Two reads, both allowed to fail: the
     // roster is admin-only, so a member sees no names and the row falls back to
@@ -581,7 +667,8 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
       // "you" outranks the roster name: an operator reading their own audit
       // trail should not have to recognise their own user id or email.
       if (me) names.set(me.id, "you");
-      setGranterNames(names);
+      if (holdingRef.current) pendingNames.current = names;
+      else setGranterNames(names);
     })();
 
     // Slow on purpose. Mint and revoke from another browser are only
@@ -665,8 +752,8 @@ export function StandingPermissions({
                     {expired
                       ? "expired"
                       : `expires ${untilLabel(g.expires_at_millis, now)}`}{" "}
-                    · grant {index + 1} of {grants.length}{" "}
-                    ·{g.verdict === "deny" ? "declined" : "granted"}{" "}
+                    · grant {index + 1} of {grants.length} ·
+                    {g.verdict === "deny" ? "declined" : "granted"}{" "}
                     {timeAgo(g.at_millis, now)} by{" "}
                     {granterLabel(g, granterNames)}
                   </p>
@@ -750,8 +837,8 @@ function granterLabel(
  */
 function grantDurationLabel(expiresInMillis: number): string {
   return (
-    GRANT_DURATIONS.find((duration) => duration.millis === expiresInMillis)?.label ??
-    `${Math.round(expiresInMillis / 86_400_000)} days`
+    GRANT_DURATIONS.find((duration) => duration.millis === expiresInMillis)
+      ?.label ?? `${Math.round(expiresInMillis / 86_400_000)} days`
   );
 }
 
@@ -904,9 +991,7 @@ export function ApprovalCard({
                     a.workflow_id ? "workflow" : "teammate"
                   } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
                 : "just this once"
-            }${
-              a.contents_hidden ? "" : ` — request ${a.at_millis}`
-            }${
+            }${a.contents_hidden ? "" : ` — request ${a.at_millis}`}${
               batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
             }`}
             disabled={deciding !== null}

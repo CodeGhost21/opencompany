@@ -115,6 +115,21 @@ export function arrivedViaSetupHandoff(scope?: SetupHandoffScope): boolean {
 }
 
 /**
+ * Whether the hand-off marker is scoped to a connection and company.
+ *
+ * `setupHandoffFragment` encodes the scope so a marker addressed to one company
+ * cannot be consumed by another; the setup wizard and magic-link flow leave it
+ * out because their scope may not survive the full-page hand-off. Telling the
+ * two apart is what lets AppShell accept the unscoped form on whatever company
+ * it lands on while still refusing a marker scoped somewhere else.
+ */
+export function setupHandoffHasScope(): boolean {
+  const [, query = ""] = window.location.hash.split("?");
+  const params = new URLSearchParams(query);
+  return params.has("connection") || params.has("company");
+}
+
+/**
  * Whether the current address rode in on a hub sign-in that was asked to land
  * on setup's destination.
  *
