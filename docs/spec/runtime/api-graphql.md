@@ -178,6 +178,14 @@ surface exists for the **joined** read — run → attempts → steps → detail
 request — which over REST would be a round trip per node plus client-side
 assembly.
 
+Deep-trace bodies are deliberately a separate operator write surface. An
+ authenticated administrator (or the hosting platform principal) can destroy
+ them with `DELETE /api/v1/company/deep-trace` (all runs) or
+`DELETE /api/v1/company/deep-trace/{runId}` (one run); the platform-scoped forms
+replace `company` with `companies/{id}`. These routes return `204` and leave
+the redacted run/step skeleton intact. Ordinary members are refused by the
+admin scope guard.
+
 Two shape decisions worth keeping:
 
 - `AgentRun.stepCount` is **nullable on purpose**. `step_count` is written by the
