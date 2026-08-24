@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   // AppWindow,  // re-add with the Pages nav entry below
   FolderClosed,
   LayoutDashboard,
@@ -112,6 +113,13 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
   import("@/views/WorkflowsView").then((m) => ({ default: m.WorkflowsView })),
+);
+// Lazy for the reason the canvas is: it pulls recharts, and an operator who
+// never opens the Observatory should not pay for it.
+const ObservatoryView = lazy(() =>
+  import("@/views/observatory/ObservatoryView").then((m) => ({
+    default: m.ObservatoryView,
+  })),
 );
 // Pulls in the markdown renderer — load on demand.
 const WorkspaceView = lazy(() =>
@@ -230,6 +238,9 @@ const NAV: NavItem[] = [
   // `server::ops::finance`. See docs/spec/runtime/finance-console.md.
   { view: "finances", label: "Finance", icon: Wallet },
   { view: "workflows", label: "Workflows", icon: Workflow },
+  // What the agents actually did, run by run — the read-only companion to
+  // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
+  { view: "observatory", label: "Observatory", icon: Activity },
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
   // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
   // "something an agent built" surfaces, as opposed to the fixed views above.
@@ -582,6 +593,14 @@ export function AppShell({
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
+  /**
+   * Bumped by the events that actually signal a workflow node's agent is
+   * working — `workflow_run_started`, `workflow_node_started` and
+   * `workflow_node_finished`. Node turns stream no live turn frames
+   * (`run_background` publishes nothing), so this tick is fed from the node
+   * boundaries rather than from `onTurnEvent`; see `onWorkflowRunEvent`.
+   */
+  const [backgroundTurnTick, setBackgroundTurnTick] = useState(0);
   // Issue #384: bumped on every `workflow_created` / `workflow_updated` /
   // `workflow_deleted`, and since issue #276 on `workflow_enabled_changed` too,
   // so the Workflows view re-reads its picker while the tab stays open — a graph
@@ -1724,7 +1743,14 @@ export function AppShell({
     // when a frame carries no chatId (older host / background turn).
     const threadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
-    if (!threadId) return; // a background/task turn — not part of a chat.
+    if (!threadId) {
+      // No chat bubble to fold the frame into. Background turns (workflow
+      // nodes, dispatched cards) stream nothing at all — `run_background` runs
+      // with `LiveStream::Off` — so a chat-less frame here is a host emitting a
+      // shape this console does not render, and the Observatory's live re-read
+      // is instead driven by the workflow node events in `onWorkflowRunEvent`.
+      return;
+    }
     setLiveStepsByThread((prev) => {
       const rows = prev[threadId] ? [...prev[threadId]] : [];
       if (event.type === "tool_call") {
@@ -1941,6 +1967,18 @@ export function AppShell({
       // would be N round trips per run for a list that has not changed yet.
       setWorkflowRunEvents((prev) => [...prev, event].slice(-WORKFLOW_EVENT_WINDOW));
       if (event.type === "workflow_run_finished") setWorkflowRunTick((n) => n + 1);
+      // The Observatory's live refresh is a separate tick fed by node
+      // boundaries, not the run-history tick above: a node starting or settling
+      // is exactly when a watching operator's attempt trace changes, and the
+      // Workflows history must not pay a refetch per node. A node's turn
+      // streams no frames of its own, so the boundary events are the signal.
+      if (
+        event.type === "workflow_run_started" ||
+        event.type === "workflow_node_started" ||
+        event.type === "workflow_node_finished"
+      ) {
+        setBackgroundTurnTick((n) => n + 1);
+      }
     }, []),
     // Issue #384. The picker is refreshed from the host rather than patched
     // from the frame: the frame carries no graph body by design, and a console
@@ -2352,7 +2390,29 @@ export function AppShell({
               onDecideStart={(approvalId) => ownApprovalDecisionsRef.current.add(approvalId)}
             />
           )}
-          {view === "workflows" && (
+          {view === "observatory" && (
+          <Suspense
+            fallback={
+              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
+                Loading observatory…
+              </div>
+            }
+          >
+            <ObservatoryView
+              client={client}
+              company={company}
+              // `#/observatory/<workflowRunId>` — the run to inspect, or null
+              // for the index. Unvalidated here for the reason every other
+              // sub-page is: only the view knows which run ids exist.
+              runId={sub}
+              // One tick for both signals a re-read should follow: a workflow
+              // run moved, or a workflow node started or settled (a node's turn
+              // streams no frames of its own, so the boundary is the signal).
+              eventTick={workflowRunTick + backgroundTurnTick}
+            />
+          </Suspense>
+        )}
+        {view === "workflows" && (
             <Suspense
               fallback={
                 <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">

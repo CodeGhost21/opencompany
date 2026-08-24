@@ -163,6 +163,7 @@ pub mod workspace_tools;
 #[cfg(test)]
 mod workspace_turn_test;
 
+use crate::harness::run_trace::RunTraceSink;
 pub use brain::HarnessBrain;
 
 use std::collections::{HashMap, HashSet};
@@ -398,6 +399,17 @@ pub struct HarnessDeps {
     /// every node produced. `None` (the default build, and every unwired test)
     /// degrades the persist to a no-op, exactly like [`Self::events`].
     pub run_output_store: Option<Arc<dyn crate::ports::run_output::WorkflowRunOutputStore>>,
+    /// Where a workflow `agent` node's turn is recorded as a first-class
+    /// attempt.
+    ///
+    /// A node's turn has neither a card nor a conversation, so before this it
+    /// minted no row at all and nothing could ask what its agent did. `None`
+    /// (the default build, and every unwired test) leaves each node behaving
+    /// exactly as it did then — the node still runs, it is simply not recorded.
+    pub workflow_runs: Option<Arc<dyn crate::ports::RunStore>>,
+    /// The unredacted companion of those attempts' steps — reasoning text and
+    /// raw tool I/O. `None` keeps only the scrubbed skeleton.
+    pub deep_trace: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     /// Issue #274's per-workflow snapshot ring, so the orchestrator's
     /// `update_workflow` / `delete_workflow` tools (issue #661, M7) write
     /// through the same undo-and-cascade path the console's `PUT`/`DELETE`
@@ -817,6 +829,13 @@ impl CompanyAgent {
                     sink.record(&event).await;
                 }
                 events.push(event);
+            }
+            // A turn that *ends* mid-thought has no closing `TextDelta` or tool
+            // call, so the reasoning tail below the interim flush threshold
+            // would otherwise sit in the trace unpersisted — exactly the
+            // failed/interrupted turns worth diagnosing. Flush on drain.
+            if let Some(sink) = &run_sink {
+                sink.flush().await;
             }
             events
         });
@@ -2091,7 +2110,12 @@ impl HarnessPool {
         agent_id: &str,
         message: &str,
         deps: &HarnessDeps,
+        run_sink: Option<Arc<RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
+        // `LiveStream::Off` stays: the frames must not reach the console
+        // timeline. The sink is a different channel — a durable per-attempt
+        // trace keyed on its own run id, which cannot misattribute to a chat
+        // thread because it names none.
         self.run_inner(
             company,
             agent_id,
@@ -2099,7 +2123,7 @@ impl HarnessPool {
             deps,
             None,
             LiveStream::Off,
-            None,
+            run_sink,
         )
         .await
     }
@@ -3351,6 +3375,8 @@ pub(crate) fn workflow_wiring_deps(
         workflow_refs: workflow_refs::WorkflowRefQueue::default(),
         run_outputs: orchestrator::RunOutputCache::default(),
         run_output_store: None,
+        workflow_runs: None,
+        deep_trace: None,
         workflow_revisions: None,
         approval_requests: policy::ApprovalRequestQueue::default(),
         secrets: None,
@@ -3940,6 +3966,8 @@ description = "Builds the product."
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
                 run_output_store: None,
+                workflow_runs: None,
+                deep_trace: None,
                 workflow_revisions: None,
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
@@ -4153,6 +4181,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -4925,6 +4955,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -5111,6 +5143,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
@@ -5605,6 +5639,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -5790,6 +5826,8 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -5948,6 +5986,8 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,

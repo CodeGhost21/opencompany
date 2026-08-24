@@ -382,6 +382,8 @@ async fn harness(
         search: None,
         tenant_search: None,
         workspace: None,
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let record = CompanyRecord {
