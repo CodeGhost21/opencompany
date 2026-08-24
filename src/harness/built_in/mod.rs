@@ -2681,20 +2681,24 @@ async fn refresh_oauth_decls(
 
 /// Whether an override row is purely a face — `avatar` set and nothing the
 /// harness reads set. Such a row must not move a fingerprint: the fingerprints
-/// hash what a teammate *is* (name, role, description, toolbelt, persona), and
-/// an avatar is none of those. A row that changed only the face would otherwise
-/// count itself and its `agent_id` into the hash, rebuild the roster, and drop
-/// every live agent session for a cosmetic change — issue #1676's review note.
+/// hash what a teammate *is* (name, role, description, toolbelt, persona,
+/// model, harness), and an avatar is none of those. A row that changed only the
+/// face would otherwise count itself and its `agent_id` into the hash, rebuild
+/// the roster, and drop every live agent session for a cosmetic change — issue
+/// #1676's review note.
 ///
-/// An explicit `Some(vec![])` tool list and `Some("")` instructions stay real
-/// overrides ("the company's standard grant" / "cleared"), so only the
-/// all-`None` row is filtered, not the emptied one.
+/// An explicit `Some(vec![])` tool list, `Some("")` instructions and `Some("")`
+/// model/harness (the stored form of "cleared") stay real overrides ("the
+/// company's standard grant" / "cleared" / "the blueprint's model and harness"),
+/// so only the all-`None` row is filtered, not the emptied one.
 fn is_avatar_only(edit: &crate::ports::types::AgentOverride) -> bool {
     edit.name.is_none()
         && edit.role.is_none()
         && edit.description.is_none()
         && edit.tools.is_none()
         && edit.instructions.is_none()
+        && edit.model.is_none()
+        && edit.harness.is_none()
 }
 
 /// A stable fingerprint of the roster overlay — the operator-added teammates
