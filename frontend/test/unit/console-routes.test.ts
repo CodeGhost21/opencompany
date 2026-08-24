@@ -113,4 +113,11 @@ describe("resolving an address", () => {
     expect(seen).toEqual(["overview", null]);
     expect(window.location.hash).toBe("#/overview");
   });
+
+  it("sends an empty address to the operator overview (#1321)", async () => {
+    await visit("");
+
+    expect(seen).toEqual(["overview", null]);
+    expect(window.location.hash).toBe("#/overview");
+  });
 });

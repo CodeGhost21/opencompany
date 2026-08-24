@@ -82,7 +82,7 @@ import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
-import { Overview } from "@/views/Overview";
+import { OperatorOverview } from "@/views/OperatorOverview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
@@ -2030,7 +2030,17 @@ export function AppShell({
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
           {view === "overview" && (
-            <Overview client={client} company={company} companyName={feed.status.name} />
+            <OperatorOverview
+              client={client}
+              company={company}
+              companyName={feed.status.name}
+              feed={feed}
+              scope={scope}
+              // Issue #1015: re-read the run panels when a run parks or fails
+              // while this page stays open (the same tick TaskDetailView
+              // re-reads on).
+              attemptEventTick={attemptEventTick}
+            />
           )}
           {view === "company" && (
             <CompanyView
@@ -2055,6 +2065,10 @@ export function AppShell({
               onOpenAgent={(agentId) =>
                 agentId ? navigate("team", agentId) : navigate("company")
               }
+              // The graph at `#/company/graph` names its core node after the
+              // company the way the rest of the console does (issue #1219),
+              // not after the slug.
+              companyName={feed.status.name}
               // Setup just staffed the company, so the roster read is stale.
               refreshKey={teamBuilt}
               // Skipping setup must not be a dead end: an unstaffed company keeps
