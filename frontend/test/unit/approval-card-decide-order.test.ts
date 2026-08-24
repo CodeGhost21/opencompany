@@ -428,8 +428,8 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       button.getAttribute("aria-label"),
     );
     expect(labels).toEqual([
-      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h — grant 1 of 2",
-      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 7d — grant 2 of 2",
+      "Remove Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h — grant 1 of 2",
+      "Remove Ops's permission: Fetch a web page — https://docs.rs only — expires in 7d — grant 2 of 2",
     ]);
   });
 
