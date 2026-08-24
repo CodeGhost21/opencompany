@@ -174,6 +174,14 @@ describe("stripCodeRegions", () => {
     const masked = stripCodeRegions(text);
     expect(masked).not.toContain("@engineer");
   });
+
+  it("closes a fence over a CRLF line ending", () => {
+    // A CR is the `\r` of a CRLF ending, not fence text — it must keep
+    // closing the block exactly as it did before the suffix was restricted.
+    const text = "before\n```\n@engineer\n```\r\nafter";
+    const masked = stripCodeRegions(text);
+    expect(masked).not.toContain("@engineer");
+  });
 });
 
 describe("rankMentionables", () => {
