@@ -360,11 +360,16 @@ export function SetupDialog({
       }
       for (let i = 0; i < agents.length; i++) {
         const agent = agents[i];
+        // This run's creations are the boundary of the next redesign's
+        // replacement; the previous run's are moot (replaced above, if this run
+        // is one).
+        createdIds.current = [];
         try {
-          await client.addTeamMember(
+          const created = await client.addTeamMember(
             { name: agent.name, role: agent.role, description: agent.description },
             company,
           );
+          if (created.id) createdIds.current.push(created.id);
         } catch {
           // One refused write must not abandon the rest: a company with five of
           // six teammates is a working company, and the operator can add the
