@@ -750,7 +750,7 @@ function BuildOut({
             have been rejected (Settings), so the route is offered alongside the
             retry rather than instead of it.
           */}
-          {fallback === "no_model" && (
+          {fallback === "no_model" && harnessReachable && (
             <a
               href="#/settings/connections"
               onClick={onRedesign}
