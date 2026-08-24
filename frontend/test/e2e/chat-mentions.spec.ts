@@ -45,7 +45,7 @@ type SentChat = {
 
 let sent: SentChat[] = [];
 
-async function mockApi(page: Page) {
+async function mockApi(page: Page, overrides: { mentionables?: "missing" } = {}) {
   // The first-run tour renders a modal over the console and swallows clicks.
   await page.addInitScript(() => {
     const real = Storage.prototype.getItem;
