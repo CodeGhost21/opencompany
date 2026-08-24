@@ -228,6 +228,34 @@ describe("leaving to wire a model", () => {
     expect(setupResuming(SCOPE), "debt should be dropped").toBe(false);
   });
 
+  it("keeps the debt when the return's roster read fails, so a later return can retry", async () => {
+    // A transient failure must not consume the resume. The dialog stays shut
+    // because the roster is unknown, but the debt survives so the next arrival
+    // or reload can retry — otherwise the flow the operator went to enable is
+    // reachable again only through the Company-page prompt.
+    let failing = true;
+    const roster: TeamMemberDto[] = [...BASELINE];
+    const client = {
+      ...clientWith(roster),
+      listTeam: async () => {
+        if (failing) throw new Error("transient");
+        return roster;
+      },
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+    await leaveForModelSettings();
+
+    await goTo("#/overview");
+    expect(dialog(), "unknown roster — must stay shut").toBeNull();
+    expect(setupResuming(SCOPE), "debt must survive the failed read").toBe(true);
+
+    // The next return reads successfully: the debt pays out and setup reopens.
+    failing = false;
+    await goTo("#/settings/connections");
+    await goTo("#/overview");
+    expect(dialog(), "the retried return should resume setup").toBeTruthy();
+  });
+
   it('drops the debt when the operator then says "I\'ll do this later"', async () => {
     await mount(clientWith(BASELINE));
     await leaveForModelSettings();
