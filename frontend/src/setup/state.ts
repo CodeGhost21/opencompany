@@ -145,8 +145,8 @@ export function arrivedViaHubSetupHandoff(scope?: SetupHandoffScope): boolean {
  * hand-off. A reload after the conversion has neither the query flag nor the
  * hash marker, so it cannot re-apply either.
  */
-export function absorbHubSetupHandoff(): void {
-  if (!arrivedViaHubSetupHandoff()) return;
+export function absorbHubSetupHandoff(scope?: SetupHandoffScope): void {
+  if (!arrivedViaHubSetupHandoff(scope)) return;
   const params = new URLSearchParams(window.location.search);
   params.delete(SETUP_HANDOFF_FLAG);
   const qs = params.toString();
@@ -155,7 +155,7 @@ export function absorbHubSetupHandoff(): void {
     "",
     window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
   );
-  window.location.hash = SETUP_HANDOFF_FRAGMENT;
+  window.location.hash = scope ? setupHandoffFragment(scope) : SETUP_HANDOFF_FRAGMENT;
 }
 
 /**
