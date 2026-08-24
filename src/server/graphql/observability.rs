@@ -259,15 +259,24 @@ async fn load(
         .deep_trace()
         .list_step_details(runtime.id(), &record.id)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|d| (d.step_seq, d.detail))
-        .collect();
-    Ok(AgentRunGql {
+        .unwrap_or_default();
+    Ok(assemble(record, steps, details))
+}
+
+/// Builds the GraphQL attempt from its skeleton, its steps and its deep half.
+fn assemble(
+    record: RunRecord,
+    steps: Vec<RunStepRecord>,
+    details: Vec<crate::ports::deep_trace::RunStepDetailRecord>,
+) -> AgentRunGql {
+    AgentRunGql {
         record,
         steps,
-        details,
-    })
+        details: details
+            .into_iter()
+            .map(|d| (d.step_seq, d.detail))
+            .collect(),
+    }
 }
 
 /// `Company.agentRuns` — attempts, newest first, optionally narrowed.
@@ -285,11 +294,32 @@ pub(crate) async fn resolve_runs(
         limit: Some(limit.clamp(1, 200) as usize),
     };
     let rows = runtime.runs().list_runs(runtime.id(), &filter).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(load(runtime, row).await?);
-    }
-    Ok(out)
+    // The index reads every returned run's trace, so fetch them all in one pass
+    // rather than one store round trip per run. The filesystem backend rescans
+    // the whole company-wide JSONL per per-run read, so a sequential loop would
+    // be quadratic in company history on the view operators poll.
+    let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let steps_by_run = runtime
+        .runs()
+        .list_run_steps_for_runs(runtime.id(), &ids)
+        .await?;
+    // The deep half degrades to "none" per run on any store failure, exactly as
+    // the single-run read does.
+    let details_by_run = runtime
+        .deep_trace()
+        .list_step_details_for_runs(runtime.id(), &ids)
+        .await
+        .unwrap_or_default();
+    Ok(rows
+        .into_iter()
+        .map(|record| {
+            assemble(
+                record,
+                steps_by_run.get(&record.id).cloned().unwrap_or_default(),
+                details_by_run.get(&record.id).cloned().unwrap_or_default(),
+            )
+        })
+        .collect())
 }
 
 /// `Company.agentRun` — one attempt by id, or null.
