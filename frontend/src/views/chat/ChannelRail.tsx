@@ -121,7 +121,7 @@ export function ChannelRail({
           activeId={activeId}
           unread={unread}
           onSelect={onSelect}
-          open={openSections[section.id] ?? true}
+          open={resolvedOpenSections[section.id] ?? true}
           onToggle={() => toggleSection(section.id)}
         />
       ))}
