@@ -35,11 +35,13 @@ let lastLinks: Map<string, ApprovalThreadLink> | null;
 function Probe({
   client,
   approvals,
+  holding = false,
 }: {
   client: OpenCompanyClient;
   approvals: ApprovalSummary[];
+  holding?: boolean;
 }) {
-  lastLinks = useApprovalThreadLinks(client, "acme", approvals);
+  lastLinks = useApprovalThreadLinks(client, "acme", approvals, holding);
   return null;
 }
 
