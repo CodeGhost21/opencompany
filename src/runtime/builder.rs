@@ -1799,6 +1799,11 @@ impl RuntimeBuilder {
         // waiting on a person keeps its id, its parked effect and its TTL across
         // the swap, and rehydrating a fresh gate from the journal would resurrect
         // approvals the live gate has already resolved.
+        // `with_approvals` is a test seam: an injected gate carries its own
+        // policy/TTL on purpose, so the effective-policy application below must
+        // not clobber one. Record whether the gate came from `self.approvals`
+        // before the option is moved out.
+        let gate_injected = self.approvals.is_some();
         let gate = match handover.as_ref() {
             Some(h) => h.approval_gate.clone(),
             None => {
