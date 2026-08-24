@@ -383,9 +383,7 @@ export function decisionLabel(
   // redaction phrases, so the composition time is what tells their buttons
   // apart — the same non-sensitive number the card's meta line already shows.
   if (a.contents_hidden) {
-    parts.push(
-      `composed ${timeAgo(a.at_millis, now)} (${new Date(a.at_millis).toISOString()})`,
-    );
+    parts.push(`composed ${timeAgo(a.at_millis, now)} (${a.at_millis})`);
   }
   const who = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
   if (who != null) parts.push(`asked by ${who}`);
