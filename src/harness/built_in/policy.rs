@@ -134,7 +134,7 @@ use crate::company::Policy;
 use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
 use crate::policy::{CallPath, McpReadSet};
 use crate::ports::UsageMeter;
-use crate::ports::types::{CompanyId, Effect, EffectGroup};
+use crate::ports::types::{CompanyId, Effect, EffectGroup, Verdict};
 use crate::runtime::grants::{GrantSet, GrantSubject, GrantedCall};
 
 /// The name openhuman knows this policy by, and the name it stamps into the
@@ -1117,10 +1117,11 @@ impl ApprovalPolicy {
         // effect's payload — one function, so the two answers cannot drift into
         // a grant that never matches its own tool.
         let scope = crate::policy::consequence::standing_scope_of(tool, args);
-        let Some(grant) = self.requests.grants().match_standing(
+        let Some(grant) = self.requests.grants().match_standing_with_verdict(
             &subject,
             tool,
             scope.as_deref(),
+            Verdict::Approve,
             crate::ports::now_millis(),
         ) else {
             return false;
@@ -1133,6 +1134,30 @@ impl ApprovalPolicy {
             grant.expires_at_millis
         );
         true
+    }
+
+    fn standing_deny_applies(&self, tool: &str, args: &serde_json::Value) -> bool {
+        // Agents only, on purpose: a standing denial is only *enforced* on the
+        // agent turn path, where openhuman treats a `Deny` verdict as
+        // fail-closed. The workflow gate deliberately does not honour `Deny`
+        // (see `src/workflows/gate.rs`), so minting a standing denial for a
+        // workflow would advertise a refusal nothing ever enforces. The mint
+        // side refuses those too; this keeps the check from ever *advertising*
+        // one even if a stale deny were already in the set.
+        let Some(agent) = self.agent.as_deref() else {
+            return false;
+        };
+        let scope = crate::policy::consequence::standing_scope_of(tool, args);
+        self.requests
+            .grants()
+            .match_standing_with_verdict(
+                &GrantSubject::Agent(agent.to_string()),
+                tool,
+                scope.as_deref(),
+                Verdict::Deny,
+                crate::ports::now_millis(),
+            )
+            .is_some()
     }
 
     /// Does this tool call **spend money**? The predicate the daily budget arm
@@ -1437,6 +1462,12 @@ impl ToolPolicy for ApprovalPolicy {
                 grant.agent
             );
             return ToolPolicyDecision::Allow;
+        }
+
+        if self.standing_deny_applies(tool, &request.arguments) {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' is denied by a standing permission; it will ask again when that refusal expires or is revoked"
+            ));
         }
 
         // 2b. A live STANDING grant: the operator opened this tool up for this
@@ -2021,11 +2052,6 @@ mod tests {
             ("mcp_registry_tool_call", serde_json::json!({})),
             ("run_workflow", serde_json::json!({})),
             ("composio_authorize", serde_json::json!({})),
-            // Issue #245: a checkout writes a tree of third-party source into a
-            // sandbox this agent may also hold `shell` over, and both tools
-            // reach the forge under the company's credential.
-            ("repo_checkout", serde_json::json!({})),
-            ("repo_pr", serde_json::json!({})),
             (
                 "composio_execute",
                 serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
@@ -2841,61 +2867,6 @@ mod tests {
                 .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
-    }
-
-    /// The repository pair across all four tiers (issue #245), asserted as a
-    /// line rather than as four independent facts.
-    ///
-    /// `readonly` **denies** rather than parks, and that is the one verdict here
-    /// worth arguing: both names read like reads. `repo_checkout` writes
-    /// thousands of files into the agent's sandbox, which a tier whose whole
-    /// contract is "nothing changes" cannot admit; `repo_pr` reaches a third
-    /// party under the company's credential, which is the other half of the same
-    /// contract. Parking either under `readonly` would be worse than denying,
-    /// because openhuman resolves a `RequireApproval` inline and never
-    /// re-dispatches — the operator would approve a call that then does not run.
-    ///
-    /// The parked request's `kind` is checked too, because the console's plain
-    /// language table is keyed on exactly that string: a `kind` that is not the
-    /// tool name silently falls through to "Use one of its tools".
-    #[tokio::test]
-    async fn the_repository_pair_parks_under_supervision_and_is_denied_read_only() {
-        let args = serde_json::json!({ "repo": "acme/widgets" });
-        for mode in ["supervised", "auto"] {
-            let p = policy(mode, &[], None);
-            for tool in ["repo_checkout", "repo_pr"] {
-                let decision = p.check(&request(tool, args.clone())).await;
-                let ToolPolicyDecision::RequireApproval { .. } = decision else {
-                    panic!("{tool} must park under {mode}, got {decision:?}");
-                };
-                assert_eq!(
-                    p.effect_for(tool, &args).kind,
-                    tool,
-                    "the approval card's kind must be the tool name, or the console \
-                     cannot label it"
-                );
-            }
-        }
-
-        let readonly = policy("readonly", &[], None);
-        for tool in ["repo_checkout", "repo_pr"] {
-            assert!(
-                matches!(
-                    readonly.check(&request(tool, args.clone())).await,
-                    ToolPolicyDecision::Deny { .. }
-                ),
-                "{tool} must be denied under readonly, not parked"
-            );
-        }
-
-        let full = policy("full", &[], None);
-        for tool in ["repo_checkout", "repo_pr"] {
-            assert_eq!(
-                full.check(&request(tool, args.clone())).await,
-                ToolPolicyDecision::Allow,
-                "{tool} under full mode"
-            );
-        }
     }
 
     /// The operator's escape hatch: `always_approve` wins over every tier, so a
@@ -3888,6 +3859,51 @@ mod tests {
         ));
     }
 
+    /// Issue #1458: a standing denial is only **enforced** on the agent turn
+    /// path, where openhuman treats a `Deny` verdict as fail-closed. The
+    /// workflow gate deliberately does not honour `Deny`
+    /// (`src/workflows/gate.rs`), so this policy must not advertise one for a
+    /// workflow subject — even if a stale denial is sitting in the set — or the
+    /// gate would be handed a verdict it is documented to ignore and the
+    /// operator's "don't ask again" would be silently dropped on the next run.
+    #[tokio::test]
+    async fn a_standing_deny_is_not_advertised_for_a_workflow_subject() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("deny-1"),
+            agent: String::new(),
+            workflow: Some("sports_digest".to_string()),
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        });
+
+        let p = policy("full", &["web_fetch"], None)
+            .with_requests(queue)
+            .with_workflow("sports_digest");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a workflow standing denial must not be advertised on the gate path: {decision:?}"
+        );
+    }
+
     // --- The per-agent daily spend cap (issue #304) ---------------------------
 
     use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
@@ -4367,6 +4383,7 @@ mod tests {
             agent: agent.to_string(),
             workflow: None,
             tool: tool.to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,
                 id: "user-1".to_string(),
@@ -4603,8 +4620,6 @@ mod tests {
             "mcp_call_tool",
             // Third-party source and diffs, fetched under the operator's
             // credential (issue #245).
-            "repo_checkout",
-            "repo_pr",
             // Named consequences, unchanged.
             "composio_authorize",
             "pay_invoice",

@@ -65,14 +65,14 @@ env:
   # The feature set the hosted tenant ships with. Changing it changes what
   # every tenant can do, so treat edits here as a product change, not a CI
   # tweak. Full belt: adds mcp/media/composio (the credential/real-money tool
-  # families, fail-closed until their config exists), imap/telegram (channels),
+  # families, fail-closed until their config exists), imap (inbound mail),
   # medulla (hosted brain transport), and sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
   # compiler the slim build image lacks, and it is redundant on a mongodb tenant.
   #
   # `tinymemory` is the hosted-memory contract: `OPENCOMPANY_MEMORY=remote` +
   # `OPENCOMPANY_MEMORY_DRIVER=supermemory|mem0|cognee` (plus `null`), inert
   # until an operator sets those.
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,sidecar,chargebee,paypal,tinymemory
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory
 
 jobs:
   deploy:

@@ -43,10 +43,12 @@ function member(id: string, role = "Analyst"): TeamMemberDto {
 }
 
 /** Every `client.get` path this component reads, keyed by its suffix. */
-const HEALTHY_GET: Record<string, unknown[]> = {
+const HEALTHY_GET: Record<string, unknown> = {
   "/tasks": [],
   "/users": [],
-  "/memory": [],
+  // `GET /memory` answers with `{ items, totalContext, contextTruncated }` —
+  // the truncation metadata rides beside the rows from one read.
+  "/memory": { items: [], totalContext: 0, contextTruncated: false },
   "/workflows": [],
 };
 

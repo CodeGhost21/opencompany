@@ -308,6 +308,7 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
@@ -345,9 +346,6 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
         tenant_search: None,
     };
@@ -360,6 +358,7 @@ fn chat(text: &str) -> CycleRequest {
         cycle_id: "cycle-1".to_string(),
         company_id: company(),
         events: vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: text.to_string(),
             by: None,
             chat: None,

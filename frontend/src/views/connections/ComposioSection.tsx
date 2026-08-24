@@ -125,7 +125,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       setToken("");
       // Clearing an override falls back to whatever tier remains — the status
       // the host just returned says which, and the grid re-probes for itself.
-      toast.success("Composio token cleared.");
+      toast.success(res.note);
       onChanged();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not clear the token.");
