@@ -8,7 +8,9 @@ import {
   arrivedViaSetupHandoff,
   clearSetupHandoff,
   SETUP_HANDOFF_FRAGMENT,
+  setupHandoffHasScope,
 } from "@/setup/state";
+import type { SetupHandoffScope } from "@/setup/state";
 
 /**
  * The one-shot marker a setup hand-off link carries, and how the landing
