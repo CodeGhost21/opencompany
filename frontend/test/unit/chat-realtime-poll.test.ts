@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { ChatHistoryMessageDto } from "@/api/types";
 import { fromHistory, mergeHistoryInOrder, type ChatMessage } from "@/lib/chat";
