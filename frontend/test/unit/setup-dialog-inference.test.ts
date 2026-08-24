@@ -410,4 +410,46 @@ describe("a replacing build-out clears the team it replaces", () => {
     expect(find("setup-failed")).toBeTruthy();
     expect(removed).toEqual([]);
   });
+
+  it("keeps the existing team when a replacing build-out only partially lands", async () => {
+    const removed: string[] = [];
+    const roster = [
+      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+    ];
+    const client = {
+      ...clientWith({ source: "fallback", reason: "model_unreachable" }),
+      post: async () => ({
+        agents: [
+          { name: "Ada", role: "Operations", description: "Runs the desk." },
+          { name: "Bo", role: "Analyst", description: "Covers the numbers." },
+        ],
+        template: "ecommerce",
+        source: "model",
+      }),
+      // The replacement has two agents; the first lands, the second is refused.
+      addTeamMember: async (body: { role?: string }) => {
+        if (body.role === "Analyst") throw new Error("nope");
+        return { id: "n1" };
+      },
+      listTeam: async () => roster,
+      removeTeamMember: async (agentId: string) => {
+        removed.push(agentId);
+      },
+      removed,
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    await show(client, { redesign: true, fallbackIds: ["f1"] });
+    await answer("setup-field-industry", "E-commerce — homeware");
+    await answer("setup-field-teamHint", "");
+    await answer("setup-field-automate", "");
+    for (let i = 0; i < 40 && !find("setup-failed"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+    }
+    // One of two replacements landed, so the redesign is not complete — trading
+    // a complete fallback team for a single new teammate would leave the company
+    // worse off. The old team is kept and the flow fails.
+    expect(find("setup-failed")).toBeTruthy();
+    expect(removed).toEqual([]);
+  });
 });
