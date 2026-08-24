@@ -1,7 +1,7 @@
 # First-run setup: what the host enforces
 
 The product decisions behind first-run setup live in
-[company-setup.md](company-setup.md). This file holds the five things the host
+[company-setup.md](company-setup/overview.md). This file holds the five things the host
 *enforces* rather than requests, and why each is a boundary instead of a line in
 a prompt.
 
