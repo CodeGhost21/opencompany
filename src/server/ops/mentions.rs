@@ -14,11 +14,14 @@
 //! require being an admin.
 //!
 //! The answer is a second, much narrower read rather than a relaxation of the
-//! first. This route hands out **an id and a label**, and nothing else — no
-//! email, no role, no status, no last-seen. That is the same discipline
+//! first. This route hands out **an id, a label, and the person's chosen face**,
+//! and nothing else — no email, no role, no status, no last-seen. The avatar is
+//! already a collaboration-facing identity asset: it is shown beside that
+//! person's messages to the same members. That is the same discipline
 //! [`author_labels`](crate::server::chat_history) already enforces on every
-//! message a member reads, so this widens nothing: a person who has ever posted
-//! is already named to their colleagues by exactly this label.
+//! message a member reads, so this widens nothing sensitive: a person who has
+//! ever posted is already named to their colleagues by exactly this label and
+//! face.
 //!
 //! # Signed-in humans only
 //!
