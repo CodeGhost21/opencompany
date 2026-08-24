@@ -192,10 +192,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     // Same URL, different method — the accessible names must not collide: the
     // method rides after the URL with its label so the two buttons read apart.
     expect(labelled).toContain(
-      "Approve: Make a request to a web address — https://api.example.com/items — method: GET — request 1772445600000 — request ${T0} — asked by Ops",
+      `Approve: Make a request to a web address — https://api.example.com/items — method: GET — request ${T0} — asked by Ops`,
     );
     expect(labelled).toContain(
-      "Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — request 1772445600000 — request ${T0} — asked by Ops",
+      `Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — request ${T0} — asked by Ops`,
     );
   });
 
