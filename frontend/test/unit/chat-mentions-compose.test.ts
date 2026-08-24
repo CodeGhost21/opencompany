@@ -9,6 +9,7 @@ import {
   mentionsOutsideChannel,
   rankMentionables,
   reconcileMentions,
+  reconcileWrap,
   resolvableMentions,
   stripCodeRegions,
   utf8ByteLength,
