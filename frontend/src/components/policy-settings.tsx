@@ -98,9 +98,12 @@ export function widensSpendCap(
   current: number | null,
   manifest: number | null,
 ): boolean {
-  // null represents no cap, which is looser than every finite cap.
-  if (manifest === null) return current !== null;
-  if (current === null) return false;
+  // `null` is the stricter state: with no cap every spend parks, and a finite
+  // cap lets sub-cap payments through on their own (`Some(None)` in
+  // `PolicyOverride` is a real, deliberate "no cap" choice). So loosening is
+  // null → finite, or a finite cap raised to a higher finite cap.
+  if (current === null) return manifest !== null;
+  if (manifest === null) return false;
   return manifest > current;
 }
 
