@@ -99,6 +99,7 @@ async function show(
     redesign?: boolean;
     fallbackIds?: string[];
     onRedesign?: (fallbackIds: string[]) => void;
+    onRetry?: (fallbackIds: string[]) => void;
   } = {},
 ) {
   await act(async () => {
@@ -117,6 +118,7 @@ async function show(
         },
         onDone: () => {},
         onRedesign: over.onRedesign ?? (() => {}),
+        onRetry: over.onRetry,
       }),
     );
   });
@@ -250,9 +252,23 @@ describe("the finished build-out points at what would actually help", () => {
     // The key already worked. Sending this operator to Settings is an
     // instruction that cannot help them.
     expect(find("setup-add-model"), "sent to fix a credential that worked").toBeNull();
+    // The fix is a better answer, and the retry makes it reachable in place —
+    // the Company page's prompt is hidden once the fallback team staffs the
+    // company, so "rerun from the Company page" alone would be an unreachable
+    // instruction.
+    expect(find("setup-try-redesign"), "no way to answer again").toBeTruthy();
     expect(find("setup-buildout-title")?.parentElement?.textContent).toContain(
       "enough in your answers",
     );
+  });
+
+  it('"Try again" on a not-designable fallback restarts the questions so the answers can be richer', async () => {
+    await show(clientWith({ source: "fallback", reason: "not_designable" }));
+    await runFlow();
+    await click(find("setup-try-redesign")!);
+    expect(find("setup-question")).toBeTruthy();
+    // The fallback team was already created, so the next build-out replaces it.
+    expect(find("setup-redesign-notice")).toBeTruthy();
   });
 
   it("withholds the credential CTA when the host did not say why", async () => {
@@ -325,6 +341,20 @@ describe("the finished build-out points at what would actually help", () => {
     await runFlow();
     expect(find("setup-finish")).toBeTruthy();
   });
+
+  it('"Try again" persists the redesign debt the retry is owed', async () => {
+    const retried: string[][] = [];
+    const client = clientWith({ source: "fallback", reason: "model_unreachable" });
+    client.addTeamMember = async () =>
+      ({ id: "fallback-1", role: "Operations" }) as TeamMemberDto;
+    await show(client, { onRetry: (ids) => retried.push(ids) });
+    await runFlow();
+    await click(find("setup-try-redesign")!);
+    // The fallback team is on the roster, so a reload before the replacement
+    // completes must be able to reopen in redesign mode — otherwise the gate
+    // reads staffed and the promised retry is unreachable.
+    expect(retried).toEqual([["fallback-1"]]);
+  });
 });
 
 describe("a replacing build-out clears the team it replaces", () => {
@@ -378,6 +408,43 @@ describe("a replacing build-out clears the team it replaces", () => {
     // The hand-added teammate h2 is not on the first pass's boundary and must
     // survive; without the fallback to createdIds the retry would delete it.
     expect(removed).toEqual(["f1"]);
+  });
+
+  it("a redesign 'Try again' replaces the team the last pass created, not a stale boundary", async () => {
+    const removed: string[] = [];
+    const roster: TeamMemberDto[] = [
+      { id: "old-1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+    ];
+    let created = 0;
+    const client = {
+      ...clientWith({ source: "fallback", reason: "model_unreachable" }),
+      addTeamMember: async () => {
+        const id = created++ === 0 ? "new-1" : "new-2";
+        roster.push({ id, role: "Operations", global: false } as TeamMemberDto);
+        return { id };
+      },
+      listTeam: async () => [...roster],
+      removeTeamMember: async (agentId: string) => {
+        removed.push(agentId);
+        const idx = roster.findIndex((m) => m.id === agentId);
+        if (idx >= 0) roster.splice(idx, 1);
+      },
+      removed,
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    // The dialog reopens in redesign mode with the *original* fallback debt;
+    // that boundary is stale once the first redesign build-out has swept it.
+    await show(client, { redesign: true, fallbackIds: ["old-1"] });
+    await runFlow(); // first redesign: sweeps old-1, creates new-1, but model_unreachable
+    expect(removed, "the original fallback should go first").toEqual(["old-1"]);
+    await click(find("setup-try-redesign")!);
+    await runFlow(); // retry: must sweep the first redesign's own creation
+    // Without the reset in tryRedesign, the retry's boundary stays the stale
+    // old-1 (already gone), so the sweep finds nothing and the first redesign's
+    // fallback team is left stacked beside the second pass's — a duplicate.
+    expect(removed, "the first redesign's fallback should be replaced").toEqual([
+      "old-1",
+      "new-1",
+    ]);
   });
 
   it("keeps the existing team when a replacing build-out creates nothing", async () => {

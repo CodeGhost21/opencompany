@@ -105,6 +105,7 @@ export function SetupDialog({
   onLeave,
   onDone,
   onRedesign,
+  onRetry,
 }: {
   open: boolean;
   client: OpenCompanyClient;
@@ -145,6 +146,13 @@ export function SetupDialog({
    * the rows this run just created — is to be redesigned on their return.
    */
   onRedesign: (fallbackIds: string[]) => void;
+  /**
+   * The completion screen's "Try again" for a fallback a retry could fix:
+   * record that the team the failed pass just created is owed a redesign, so a
+   * reload before the in-place replacement completes can resume it. Unlike
+   * [`onRedesign`] this does not close the dialog — the retry continues here.
+   */
+  onRetry?: (fallbackIds: string[]) => void;
 }) {
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
   const [phase, setPhase] = useState<Phase>({ kind: "asking", step: 0 });
@@ -346,9 +354,21 @@ export function SetupDialog({
     // entering — no teammate is created and no phase follows, so the dialog
     // stalls with no way out.
     building.current = false;
+    // This retry is owed a redesign, not merely an open dialog: the fallback
+    // team is already on the roster, so a reload before the replacement
+    // completes must be able to resume it — the ordinary gate would otherwise
+    // report the company staffed and hide every path back in. Persist the debt,
+    // naming exactly the rows the failed pass created.
+    onRetry?.(createdIds.current);
+    // The boundary captured when the dialog opened is stale: the team it named
+    // was already replaced by the build-out this retry follows. Falling back to
+    // `createdIds.current` — the rows the last build-out created, which are the
+    // team now on the roster — bounds the next replacement to exactly the team
+    // this retry replaces, instead of sweeping nothing (or everything).
+    redesignRoster.current = null;
     setReplacing(true);
     setPhase({ kind: "asking", step: 0 });
-  }, []);
+  }, [onRetry]);
 
   // The build-out: create each proposed agent in turn, revealing as we go.
   useEffect(() => {
@@ -683,7 +703,7 @@ function fallbackExplanation(fallback: NonNullable<Fallback>): string {
     case "model_unreachable":
       return "A general starting team for your industry — a model is connected, but we couldn't reach it just now to tailor one to your answers. Rename, retire, or add anyone from the Company page, try again, or check the connection in Settings.";
     case "not_designable":
-      return "A general starting team for your industry — we reached a model, but there wasn't enough in your answers to tailor one to them. Rename, retire, or add anyone from the Company page, or run setup again from the Company page with more about what your business does.";
+      return "A general starting team for your industry — we reached a model, but there wasn't enough in your answers to tailor one to them. Rename, retire, or add anyone from the Company page, or try again with more about what your business does.";
     case "unspecified":
       return "A general starting team for your industry, rather than one tailored to your answers. Rename, retire, or add anyone from the Company page.";
   }
@@ -785,13 +805,13 @@ function BuildOut({
         <DialogFooter>
           {/*
             Only the reasons a retry or a credential could actually fix. A model
-            that answered and was not designable already had a working key, and
+            that answered and was not designable already had a working key, so
             sending that operator to Settings is an instruction that cannot help
-            them — what they need is to say more about the business, which the
-            description above asks for instead. A wired but unreachable model is
-            both at once: the blip may have passed (retry) or the credential may
-            have been rejected (Settings), so the route is offered alongside the
-            retry rather than instead of it.
+            them — what they need is to say more about the business, and the
+            retry restarts the questions so they can. A wired but unreachable
+            model is both at once: the blip may have passed (retry) or the
+            credential may have been rejected (Settings), so the route is
+            offered alongside the retry rather than instead of it.
           */}
           {fallback === "no_model" && harnessReachable && (
             <a
@@ -802,6 +822,16 @@ function BuildOut({
             >
               Add a model in Settings
             </a>
+          )}
+          {fallback === "not_designable" && (
+            <Button
+              variant="outline"
+              onClick={onTryAgain}
+              data-testid="setup-try-redesign"
+            >
+              <RotateCcw className="size-4" />
+              Try again
+            </Button>
           )}
           {fallback === "model_unreachable" && (
             <>

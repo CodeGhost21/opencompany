@@ -368,6 +368,19 @@ export function SetupController({
     setOpen(false);
   }, [scope]);
 
+  /**
+   * The completion screen's in-place "Try again" for a fallback a retry could
+   * fix. Same debt as [`redesign`] — the fallback team is owed a replacement —
+   * but the dialog stays open: the retry continues here, and the debt only
+   * matters if a reload or crash interrupts it before the replacement lands.
+   */
+  const retry = useCallback(
+    (fallbackIds: string[]) => {
+      markSetupRedesign(scope, fallbackIds);
+    },
+    [scope],
+  );
+
   if (!checked && !force) return null;
   if (!open) return null;
 
@@ -382,6 +395,7 @@ export function SetupController({
       onLeave={leave}
       onDone={done}
       onRedesign={redesign}
+      onRetry={retry}
     />
   );
 }
