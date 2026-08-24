@@ -16,9 +16,8 @@ export function readLedgerViewMode(
   fallback: LedgerViewMode = "board",
 ): LedgerViewMode {
   const [, query = ""] = hash.split("?");
-  return new URLSearchParams(query).get(LEDGER_VIEW_PARAM) === "list"
-    ? "list"
-    : fallback;
+  const view = new URLSearchParams(query).get(LEDGER_VIEW_PARAM);
+  return view === "list" || view === "board" ? view : fallback;
 }
 
 /**
