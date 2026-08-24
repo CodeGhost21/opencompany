@@ -2091,7 +2091,7 @@ async fn chat_and_emit(
         // The operator's own message is the cycle's single input event, so its
         // sequence is the first the cycle journaled (issue #364).
         message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
-        responses: report.responses,
+        responses,
         // A chat turn is nobody's sign-off, so this stays absent here.
         still_awaiting: None,
         turn_id,
