@@ -9810,12 +9810,16 @@ mode = "full"
         };
 
         assert_eq!(
-            runtime.mention_context(&id, &[human.clone()], "engineering").await,
+            runtime
+                .mention_context(&id, std::slice::from_ref(&human), "engineering")
+                .await,
             "engineering",
             "a desk id that matches a human id files under the desk, not dm:<id>"
         );
         assert_eq!(
-            runtime.mention_context(&id, &[human.clone()], "dm:engineering").await,
+            runtime
+                .mention_context(&id, std::slice::from_ref(&human), "dm:engineering")
+                .await,
             "engineering",
             "the same collision through a dm:-prefixed key still files under the desk"
         );
