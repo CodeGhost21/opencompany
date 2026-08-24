@@ -45,6 +45,11 @@ export interface StableList<T> {
    * layout changes of its own for the same reason the rows are frozen: a section
    * that appears above the queue shifts every approve/decline control while the
    * pointer is already aiming at one (#1593).
+   *
+   * The hold is interaction-scoped, not row-scoped: entering over an *empty*
+   * queue still holds (so the above-queue section defers), while the rows
+   * themselves are not frozen — there is nothing to protect, and freezing an
+   * empty snapshot would keep a just-arrived approval invisible.
    */
   holding: boolean;
   /** Handlers (and a `ref`) for the queue container that detect operator interaction. */
@@ -63,6 +68,13 @@ export function useStableList<T>(live: T[]): StableList<T> {
   // screen — in place — until the operator moves away, instead of vanishing and
   // pulling the queue up under the pointer.
   const [frozen, setFrozen] = useState<T[] | null>(null);
+  // The interaction hold itself, independent of whether there was anything to
+  // freeze. Entering the container over a *empty* queue must not freeze an
+  // empty snapshot — a stationary cursor would then hold a just-arrived
+  // approval off screen until it is auto-declined (#1593) — but the hold still
+  // stands, so content rendered above the queue (the standing-permissions
+  // section) keeps deferring its own layout changes for the whole interaction.
+  const [held, setHeld] = useState(false);
 
   // Live is read inside the interaction callbacks, which are memoised and must
   // not close over a stale render. A ref updated every render is the current
@@ -82,6 +94,10 @@ export function useStableList<T>(live: T[]): StableList<T> {
   }, []);
 
   const freeze = useCallback(() => {
+    // Never freeze an empty queue: there is nothing to protect, and a frozen
+    // empty snapshot would keep a just-arrived approval invisible — until its
+    // deadline — for as long as the pointer stays over the empty area.
+    if (liveRef.current.length === 0) return;
     // Capture the list as it is *now* — which equals live, because a frozen
     // list never reaches here twice (the guard `?? liveRef.current` keeps the
     // first snapshot for the whole interaction).
@@ -117,10 +133,12 @@ export function useStableList<T>(live: T[]): StableList<T> {
     if (focusInsideNow()) return;
     focusInside.current = false;
     setFrozen(null);
+    setHeld(false);
   }, [focusInsideNow]);
 
   const onPointerEnter = useCallback(() => {
     pointerInside.current = true;
+    setHeld(true);
     freeze();
   }, [freeze]);
 
@@ -131,6 +149,7 @@ export function useStableList<T>(live: T[]): StableList<T> {
 
   const onFocusCapture = useCallback(() => {
     focusInside.current = true;
+    setHeld(true);
     freeze();
   }, [freeze]);
 
@@ -145,6 +164,16 @@ export function useStableList<T>(live: T[]): StableList<T> {
     [thawIfIdle],
   );
 
+  // Items arriving while the interaction is already underway must freeze now:
+  // the operator is aiming at the (now nonempty) queue, and a poll that
+  // reorders it is exactly the #1414 bug. The enter handler skipped earlier
+  // because nothing was on screen to aim at then.
+  useEffect(() => {
+    if (live.length > 0 && (pointerInside.current || focusInsideNow())) {
+      freeze();
+    }
+  }, [live, freeze, focusInsideNow]);
+
   // Disabling the focused decide button clears `document.activeElement` without
   // dispatching blur/focusout in Chromium. The parent render that disables it
   // is the one reliable observation point left, so check after every commit;
@@ -155,7 +184,7 @@ export function useStableList<T>(live: T[]): StableList<T> {
 
   return {
     items: frozen ?? live,
-    holding: frozen !== null,
+    holding: held,
     containerProps: {
       onPointerEnter,
       onPointerLeave,

@@ -30,15 +30,17 @@ describe("chat rails collapse to single-rail below lg (issue #1383)", () => {
   const chatView = read("views/ChatView.tsx");
   const chatHeader = read("views/chat/ChatHeader.tsx");
 
-  it("shows the channel rail only from lg, toggled below it", () => {
-    // The rail: on from lg, otherwise governed by the mobile pane toggle.
-    expect(chatView).toContain(
-      'cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")',
-    );
+  it("shows the full channel rail below lg only when toggled", () => {
+    // The mobile rail stays full-width and is governed by the shared-pane toggle.
+    expect(chatView).toContain('cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")');
     // Regression guard: the `md` rail is what produced the two-rail band.
-    expect(chatView).not.toContain(
-      'cn("md:flex", mobilePane === "rail" ? "flex" : "hidden")',
-    );
+    expect(chatView).not.toContain('cn("md:hidden", mobilePane === "rail" ? "flex" : "hidden")');
+  });
+
+  it("keeps a separate desktop rail from lg onward", () => {
+    // A desktop-local compact rail must not affect the 768–1023px mobile-pane flow.
+    expect(chatView).toContain('className="hidden lg:flex"');
+    expect(chatView).not.toContain('className="hidden md:flex"');
   });
 
   it("shows the chat pane full-width below lg (single pane), split at lg", () => {
@@ -50,6 +52,11 @@ describe("chat rails collapse to single-rail below lg (issue #1383)", () => {
     // The "Show channels" affordance must reach up to lg, matching the rail.
     expect(chatHeader).toContain("size-8 lg:hidden");
     expect(chatHeader).not.toContain("size-8 md:hidden");
+  });
+
+  it("offers the desktop channel collapse separately from the mobile rail toggle", () => {
+    expect(chatHeader).toContain('className="hidden size-8 lg:inline-flex"');
+    expect(chatHeader).toContain('aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}');
   });
 });
 

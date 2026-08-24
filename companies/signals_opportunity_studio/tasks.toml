@@ -1,0 +1,46 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup an opportunity studio is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-signal-sources"
+title = "Set up the signal sources"
+priority = "high"
+note = """
+Open a `signals` row for each source this studio watches, with how often \
+it is read and what a meaningful change in it looks like.
+
+A brief is only as good as what it watched. Sources chosen ad hoc each \
+week produce a brief that reflects what was easy to find.
+
+Done when the standing sources have rows with a cadence.\
+"""
+
+[[task]]
+id = "set-up-the-opportunity-bar"
+title = "Set up the opportunity bar"
+priority = "high"
+note = """
+State what promotes a signal to an `opportunities` row: size, timing, and \
+why this studio in particular could act on it.
+
+Done when the bar is a `decisions` row.\
+"""
+
+[[task]]
+id = "set-up-the-weekly-brief"
+title = "Set up the weekly brief"
+priority = "medium"
+note = """
+Decide what a `briefs` row contains and when it is delivered, and put the \
+template in the workspace. The brief is the product.
+
+Done when the template exists and the first brief is scheduled.\
+"""

@@ -29,7 +29,7 @@
  * component needs a colour that layer 2 does not name, the fix is to name it
  * here — not to reach past it into a ramp or an arbitrary value.
  *
- * See `docs/design-system/tokens.md` for the full reference and
+ * See `docs/design-system/README.md` for the full reference and
  * `docs/brand/README.md` for why these values and not others.
  * ========================================================================== */
 
@@ -768,6 +768,12 @@
        status hues would imply a health that they do not carry. */
     --kg-brain-1: var(--pink-mark);
     --kg-brain-2: var(--cyan-mark);
+    /* A workflow stage is declared structure, not a finished run, so it takes
+       an identity hue rather than a status one — the palette contract in
+       docs/brand/README.md keeps amber, green and red for the five run states.
+       tone-2 blue sits clear of the graph's cyan workflows and violet
+       AI teammates in both themes. */
+    --kg-stage: var(--tone-2);
     /* The travelling spark that fires along a memory link. A lightened
        brain-1 rather than its own hue, so the constellation stays one
        colour family however brain-1 is retuned. */
@@ -780,6 +786,7 @@
     --kg-warn: var(--status-blocked);
     --kg-brain-1: var(--pink-bright);
     --kg-brain-2: var(--cyan-bright);
+    --kg-stage: var(--tone-2);
     --kg-spark: color-mix(in oklab, var(--kg-brain-1) 65%, white);
 }
 
@@ -826,6 +833,7 @@
     --err: var(--destructive);
     --brain-1: var(--kg-brain-1);
     --brain-2: var(--kg-brain-2);
+    --stage: var(--kg-stage);
     --kg-tool: var(--kg-brain-2);
 }
 

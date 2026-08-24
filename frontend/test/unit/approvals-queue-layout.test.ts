@@ -132,7 +132,7 @@ describe("the approvals backlog queue (#1427)", () => {
     expect(permissionHeading()).toBeDefined();
 
     const revoke = [...container.querySelectorAll("button")].find((button) =>
-      button.textContent?.includes("Revoke"),
+      button.textContent?.includes("Remove"),
     )!;
     await act(async () => revoke.focus());
 

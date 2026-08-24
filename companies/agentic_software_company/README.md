@@ -28,6 +28,22 @@
 
 Humans keep **product direction**; the agents run everything else. The output of this harness is **an entire SaaS product**.
 
+## Tool servers
+
+Engineers read other people's code and current API docs all day, and diagnose incidents from production evidence rather than from memory.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `deepwiki` | Documentation and Q&A for any public GitHub repository. Public and no-auth. | on |
+| `context7` | Version-accurate API and library documentation, so answers match the release in use. | on |
+| `sentry` | Production errors and their stack traces, for diagnosing an incident from evidence. Needs a token. | off — needs a token |
+| `linear` | Issues and cycles, when the work is tracked outside this board. Needs a token. | off — needs a token |
+
 ## Run it
 
 ```sh

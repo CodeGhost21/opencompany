@@ -175,8 +175,8 @@ than the stale brain the rebuild was trying to replace.
 ## Registry-driven pollers
 
 A registry swap only helps surfaces that read the registry. `WorkflowScheduler`
-already re-read it every tick; `CompanyScheduler`, `MailboxPoller` and
-`TelegramPoller` each snapshotted an `Arc<CompanyRuntime>` at boot and would have
+already re-read it every tick; `CompanyScheduler` and `MailboxPoller` each
+snapshotted an `Arc<CompanyRuntime>` at boot and would have
 kept driving the replaced — and now quiesced — runtime forever. Each gained a
 `following(registry)` opt-in that the boot path uses; the snapshot remains the
 fallback, so existing embedders are unaffected.

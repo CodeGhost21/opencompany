@@ -99,19 +99,73 @@ struct Ctx {
     user: String,
 }
 
+/// The persona's opening line, which is what identifies the agent asking.
+///
+/// Not simply the prompt's first line. OpenHuman prepends a `## Tool Policy
+/// Boundary` block to the whole assembled prompt when the session has tool
+/// restrictions (`agent/harness/session/turn/context.rs`), so the persona is no
+/// longer at the top. Keying on line one silently matched that heading for
+/// every agent, no rule fired, and each turn fell through to the endpoint's
+/// plain-text default — which reads here as "the turn opened no card" rather
+/// than as "the script stopped matching".
+fn persona_line(system_prompt: &str) -> String {
+    let mut lines = system_prompt.lines();
+    if system_prompt.starts_with("## Tool Policy Boundary") {
+        // The block is a heading, its bullet list, then a blank line.
+        for line in lines.by_ref() {
+            if line.trim().is_empty() {
+                break;
+            }
+        }
+    }
+    lines
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The persona opening line is found past the tool-policy block for both the
+/// unnamed form ("You are the {role} …") and the named form ("You are {name},
+/// the {role} …"). An agent whose name differs from its role opens with the
+/// named form; if that line were read as empty, no rule would fire for it.
+#[test]
+fn persona_line_skips_the_tool_policy_boundary_for_both_persona_forms() {
+    let base = "\
+## Tool Policy Boundary
+- Agent: ceo
+- Channel: web
+- Entry point: chat
+- Allowed permission: supervised
+- Risk: low
+
+";
+    let unnamed = format!(
+        "{base}You are the Chief Executive at Acme. Speak in the first person as this role."
+    );
+    assert_eq!(
+        persona_line(&unnamed),
+        "You are the Chief Executive at Acme. Speak in the first person as this role."
+    );
+    let named = format!(
+        "{base}You are Alex, the Content Writer at Acme. Speak in the first person as this role."
+    );
+    assert_eq!(
+        persona_line(&named),
+        "You are Alex, the Content Writer at Acme. Speak in the first person as this role."
+    );
+}
+
 impl Ctx {
     fn of(body: &Value) -> Self {
         let msgs = body["messages"].as_array().cloned().unwrap_or_default();
         let text = |m: &Value| m["content"].as_str().unwrap_or("").to_string();
-        let role = msgs
-            .iter()
-            .find(|m| m["role"] == "system")
-            .map(text)
-            .unwrap_or_default()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string();
+        let role = persona_line(
+            &msgs
+                .iter()
+                .find(|m| m["role"] == "system")
+                .map(text)
+                .unwrap_or_default(),
+        );
         Ctx {
             role,
             tool_results: msgs

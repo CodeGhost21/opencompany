@@ -115,4 +115,39 @@ describe("useStableList (#1414)", () => {
     });
     expect(captured.holding).toBe(false);
   });
+
+  it("does not freeze an empty queue, so new approvals appear while the pointer rests over it", async () => {
+    // The queue is empty; the operator's cursor sits over the (large) empty
+    // state. A stationary cursor must not freeze the empty snapshot, or a
+    // just-arrived approval would stay invisible — until its deadline — while
+    // the page claims nothing needs approval.
+    await renderItems([]);
+    await act(async () => captured.containerProps.onPointerEnter());
+    expect(captured.holding).toBe(true);
+    expect(captured.items).toEqual([]);
+
+    // A poll brings a deadline-bound approval in. It must render immediately,
+    // even though the pointer never moved.
+    await renderItems(["a"]);
+    expect(captured.items).toEqual(["a"]);
+  });
+
+  it("freezes the instant rows arrive while the pointer is already inside", async () => {
+    await renderItems([]);
+    await act(async () => captured.containerProps.onPointerEnter());
+
+    // Rows arrive under a stationary cursor — the operator is now aiming at a
+    // real card, so a poll that reorders it must not slide another card's
+    // button under the pointer (#1414).
+    await renderItems(["a", "b"]);
+    expect(domOrder()).toEqual(["a", "b"]);
+
+    // The card the operator was aiming at is removed by a poll. Frozen: the
+    // rendered order is unchanged until the pointer leaves.
+    await renderItems(["b"]);
+    expect(domOrder()).toEqual(["a", "b"]);
+
+    await act(async () => captured.containerProps.onPointerLeave());
+    expect(domOrder()).toEqual(["b"]);
+  });
 });

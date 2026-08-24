@@ -54,13 +54,13 @@ function stopIndexFor(view: string | null): number {
 
 describe("the stop-view ⇄ resume-marker contract", () => {
   /** The one stop that hands the browser to a third party, so the only one that arms. */
-  const connections = TOUR.find((s) => s.sub === "connections");
+  const connections = TOUR.find((s) => s.sub === "oauth");
 
-  it("still has a Connections stop at all", () => {
-    expect(connections, "the tour should still have a Connections stop").toBeDefined();
+  it("still has an accounts stop at all", () => {
+    expect(connections, "the tour should still have an OAuth stop").toBeDefined();
   });
 
-  it("pins the view the Connections stop publishes", () => {
+  it("pins the view the accounts stop publishes", () => {
     // NOT a tautology, and the distinction is the whole reason this test is
     // here. Reading `stop.view` and then looking it up in `TOUR` would pass by
     // construction and prove nothing — the vacuous shape that let the e2e spec
