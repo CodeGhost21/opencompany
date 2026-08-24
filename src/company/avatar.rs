@@ -1367,8 +1367,9 @@ mod test {
     #[test]
     fn gif_animation_cost_counts_every_frame() {
         assert_eq!(
-            gif_animation_cost(&gif_animated((100, 100), &[(100, 100), (50, 50)])),
-            Ok(Some(12_500))
+            gif_animation_cost(&gif_animated((100, 100), &[(100, 100), (50, 50)]))
+                .unwrap(),
+            Some(12_500)
         );
         // Frames may be sub-rectangles of the screen; each one is still paid for.
         assert_eq!(
