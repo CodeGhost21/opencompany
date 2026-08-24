@@ -224,12 +224,17 @@ export function companyCovers(allow: string[], glob: string): boolean {
   // The metered, credentialed, and third-party namespaces are explicit opt-ins
   // on the host: a catch-all `*` never covers them here, even though
   // `grantMatches` treats `*` as a generic match. A belt cannot reintroduce a
-  // capability the company intentionally omitted. A dotted descendant ask
-  // (`search.web`, `media.image`, `paypal.wallet`) is as much an opt-in as the
-  // bare namespace, so it must not fall through to the generic matcher below
-  // either, or a wildcard would look like it covers a grant the host rejects.
+  // capability the company intentionally omitted. Workspace writes are also
+  // explicit-only because they overwrite operator-owned guidance. A dotted
+  // descendant ask (`search.web`, `media.image`, `paypal.wallet`) is as much
+  // an opt-in as the bare namespace, so it must not fall through to the generic
+  // matcher below either, or a wildcard would look like it covers a grant the
+  // host rejects.
   // Likewise a bare `search` grant covers its sub-grant asks, matching
   // `grants_search_explicit`.
+  if (literal === "workspace.write") {
+    return grantsExplicit(allow, "workspace");
+  }
   if (literal === "media" || literal.startsWith("media.")) {
     return grantsExplicit(allow, "media");
   }
