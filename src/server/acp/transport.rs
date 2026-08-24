@@ -583,6 +583,8 @@ mode = "full"
             email: "admin@example.test".to_string(),
             role: UserRole::Admin,
             must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
         });
 
         state.acp_sessions().insert(
