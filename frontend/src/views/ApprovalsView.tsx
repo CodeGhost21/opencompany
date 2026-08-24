@@ -545,7 +545,7 @@ export function StandingPermissions({
         you can end it sooner.
       </p>
       <div className="flex flex-col gap-2">
-        {grants.map((g) => {
+        {grants.map((g, index) => {
           const busy = revoking.has(g.id);
           const expired = g.expires_at_millis <= now;
           return (
