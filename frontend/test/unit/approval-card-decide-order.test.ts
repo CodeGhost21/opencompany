@@ -351,6 +351,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ]);
   });
 
+  it("names each permission revocation with the grantee it affects (#1411)", async () => {
     await act(async () => {
       root.render(
         createElement(StandingPermissions, {
@@ -370,7 +371,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ).not.toBeNull();
   });
 
-  it("distinguishes revocations for identical grants with different expirations (#1411)", async () => {
+
     const first: StandingGrant = { ...GRANT, id: "grant-short", expires_at_millis: T0 + 60 * 60 * 1000 };
     const second: StandingGrant = { ...GRANT, id: "grant-long", expires_at_millis: T0 + 7 * 24 * 60 * 60 * 1000 };
 
