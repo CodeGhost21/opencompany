@@ -131,6 +131,12 @@ async fn upload(
                 .to_string(),
         )));
     };
+    // Sniffing proves the bytes *name* an image; this proves the image they
+    // name is not a decompression bomb. An avatar is drawn at a handful of
+    // pixels, so a header claiming 65535×65535 in a 4 MiB payload has nothing
+    // legitimate behind it — refuse it before it is stored and served to every
+    // member who views the roster.
+    check_image_dimensions(&bytes).map_err(ApiError)?;
 
     // One folder for every avatar this company holds. Adopted rather than
     // created-or-failed, so two people picking a face at the same moment do not
