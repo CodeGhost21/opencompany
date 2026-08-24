@@ -252,12 +252,13 @@ export function SetupController({
         .then((roster) => {
           if (cancelled) return;
           // The return is handled only with the roster read in hand. Consuming
-          // the debt before it could not tell a transient failure from a handled
-          // return: the dialog would stay shut (correctly — the roster is
-          // unknown) but the resume would be gone, reachable again only through
-          // the Company-page prompt.
+          // the resume before it could not tell a transient failure from a
+          // handled return: the dialog would stay shut (correctly — the roster
+          // is unknown) but the resume would be gone, reachable again only
+          // through the Company-page prompt. The redesign debt stays whatever
+          // the read says — see `clearSetupRedesign` for why the return does
+          // not pay it.
           if (wasResuming) clearSetupResuming(scope);
-          if (wasRedesigning) clearSetupRedesign(scope);
           const empty = teamIsUnstaffed(roster);
           setUnstaffed(empty);
           if (wasRedesigning) {
