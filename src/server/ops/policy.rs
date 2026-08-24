@@ -389,14 +389,9 @@ async fn set_policy(
     record.overlay_policy = (!entry.is_empty()).then_some(entry);
 
     save(&company, &record).await?;
-    // The live gate enforces what `GET` reports: the effective policy (override
-    // resolved over the manifest) drives native evaluation AND the deadline, not
-    // just the TTL. Without the spend cap here, a tightened cap would be reported
-    // while native spends under the old one kept executing without approval.
-    company
-        .runtime
-        .approval_gate
-        .apply_effective_policy(record.effective_policy());
+    // The persisted override is picked up by the next runtime turn. Do not
+    // mutate the shared gate here: an in-flight turn must finish under the
+    // policy snapshot it started with.
     Ok(Json(PolicyDto::build(&record)))
 }
 
