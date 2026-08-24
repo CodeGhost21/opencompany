@@ -1294,6 +1294,21 @@ members = ["engineer", "ceo"]
         assert_eq!(mention_slug("Ana  M. Ruiz"), "ana-m-ruiz");
     }
 
+    /// A symbol-only display name ("🙂") slugs to nothing, which would leave
+    /// the person unmentionable while the picker still advertises a row. The
+    /// fallback must hand such a user a real, typable alias — the email local
+    /// part, then the id — so the picker can insert a spelling the host's
+    /// `opens_mention` accepts and the directory can resolve.
+    #[test]
+    fn a_symbol_only_display_name_still_gets_a_typable_slug() {
+        let users = vec![
+            user("u1", "smiley@acme.test", Some("🙂")),
+            user("u2", "no_name@acme.test", Some("!!!")),
+            user("u3", "plain@acme.test", Some("Ada")),
+        ];
+        assert_eq!(user_slugs(&users), vec!["smiley", "no-name", "ada"]);
+    }
+
     // -----------------------------------------------------------------------
     // Desks and everyone
     // -----------------------------------------------------------------------
