@@ -99,3 +99,26 @@ describe("chrome tokens", () => {
     expect(declaration(theme, "color-chrome-border")).toBe("var(--chrome-border)");
   });
 });
+
+describe("light accessibility tokens", () => {
+  const light = block(":root");
+
+  it("gives form controls a stronger boundary than decorative borders", () => {
+    // A text field has no fill difference from the card it sits on. Its
+    // `--input` stroke must therefore not inherit the deliberately subtle
+    // decorative `--border` value (issue #1394).
+    expect(declaration(light, "input")).not.toBe(declaration(light, "border"));
+    expect(declaration(light, "input")).toBe("var(--surface-light-input)");
+    expect(declaration(light, "surface-light-input")).toBe("oklch(0.62 0.0149 286.09)");
+  });
+
+  it("uses the AA light error text weight for destructive text", () => {
+    expect(declaration(light, "destructive")).toBe("var(--red-text)");
+  });
+
+  it("keeps every light status mark at its measured accessible weight", () => {
+    expect(declaration(light, "green-mark")).toBe("oklch(0.60 0.1627 151.05)");
+    expect(declaration(light, "cyan-mark")).toBe("oklch(0.61 0.1479 237.32)");
+    expect(declaration(light, "amber-mark")).toBe("oklch(0.62 0.1585 72.33)");
+  });
+});

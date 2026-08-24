@@ -44,6 +44,10 @@ interface Sources {
    * the whole graph over them would take the real rings down with them.
    */
   desks: DeskDto[];
+  /** The desks read answered. A rejected `/desks` draws no pillars but must
+   *  not drive the "No desks yet" empty state — that claim is only true of a
+   *  company a successful read found empty, not one whose request failed. */
+  desksRead: boolean;
   people: Person[];
   memories: MemoryEntry[];
   /** The company's saved workflow graphs, whole — nodes and edges, not names. */
@@ -59,6 +63,7 @@ const EMPTY: Sources = {
   // nobody in it (`docs/spec/runtime/company-setup.md`).
   team: [],
   desks: [],
+  desksRead: false,
   people: [],
   memories: [],
   workflows: [],
@@ -68,10 +73,11 @@ const EMPTY: Sources = {
 /**
  * The command centre: the company's knowledge graph, and nothing else.
  *
- * The page is the graph — no header, no strip, no top bar (the shell hides its
- * own for this view). The company sits at the core, its desks are the pillars,
- * the jobs hang off each pillar, the teammate who does each job sits above it,
- * and their tools are the outer ring.
+ * The page is the graph — no header or strip. The shell does not render a top
+ * bar for any view; its remaining controls live in the sidebar. The company
+ * sits at the core, its desks are the pillars, the jobs hang off each pillar,
+ * the teammate who does each job sits above it, and their tools are the outer
+ * ring.
  *
  * Every ring is **declared** now: the pillars are the company's own desks
  * (issue #486), the outer ring is the grants the host resolved for each
@@ -157,10 +163,13 @@ export function Overview({ client, company, companyName }: Props) {
 
       const tasks = tasksResult.status === "fulfilled" ? tasksResult.value : ([] as Task[]);
       const roster = rosterResult.status === "fulfilled" ? rosterResult.value : null;
-      const desks = desksResult.status === "fulfilled" ? desksResult.value : ([] as DeskDto[]);
+      const desksRead = desksResult.status === "fulfilled";
+      const desks = desksRead ? desksResult.value : ([] as DeskDto[]);
       const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
       const memories =
-        memoriesResult.status === "fulfilled" ? memoriesResult.value : ([] as MemoryEntry[]);
+        memoriesResult.status === "fulfilled"
+          ? memoriesResult.value.items
+          : ([] as MemoryEntry[]);
       const flowList = flowListResult.status === "fulfilled" ? flowListResult.value : [];
 
       // `listWorkflows` answers with `{id,name,description,editable,enabled}`
@@ -197,6 +206,7 @@ export function Overview({ client, company, companyName }: Props) {
         // agents made an unstaffed company look busy.
         team: roster?.length ? roster.map(fromDto) : [],
         desks,
+        desksRead,
         people,
         memories,
         workflows,
@@ -268,7 +278,13 @@ export function Overview({ client, company, companyName }: Props) {
         </div>
       )}
       <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
-        <span className="truncate">
+        {/* Volatile: the timestamp is `now` relative to the host's clock, so
+            two runs of the same code land a minute apart and the label's
+            glyphs change — the graph's settle time depends on machine speed.
+            Masked via data-visual-volatile (visual.spec.ts) rather than
+            frozen, because a frozen client clock turns "just now" labels in
+            the list below into a distance that grows every day. */}
+        <span className="truncate" data-visual-volatile>
           {sources.fetchedAt === null
             ? loading
               ? "Loading…"
@@ -284,7 +300,7 @@ export function Overview({ client, company, companyName }: Props) {
           disabled={loading}
           title="This page is a snapshot, not a live view. Re-read the company."
           aria-label="Refresh the graph"
-          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+          className="inline-flex min-h-6 items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50 md:min-h-0"
         >
           <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
           Refresh
@@ -335,6 +351,17 @@ export function Overview({ client, company, companyName }: Props) {
           memory={memoryGraph}
           toolLabels={adapted.toolLabels}
           statusSlot={statusSlot}
+          emptyState={
+            !loading &&
+            sources.fetchedAt !== null &&
+            // Only a fulfilled read may claim the company has no desks. A
+            // rejected `/desks` draws the graph without pillars but must not
+            // overlay "No desks yet" on top of it — that is the same lie the
+            // empty state exists to avoid, pointed at the company instead of
+            // the control (issue #1313).
+            sources.desksRead &&
+            sources.desks.length === 0
+          }
         />
       </Suspense>
     </div>

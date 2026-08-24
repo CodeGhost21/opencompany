@@ -1,0 +1,50 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a marketing agency is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-campaign-flow"
+title = "Set up the campaign flow"
+priority = "high"
+note = """
+Decide how a campaign goes from brief to live: who approves, what is \
+measured, and what opens a `campaigns` row. Put the sequence in the \
+workspace.
+
+A campaign flow that is different every time cannot be improved, because \
+nothing is comparable to anything.
+
+Done when the sequence is written and live campaigns have rows.\
+"""
+
+[[task]]
+id = "set-up-the-experiment-rule"
+title = "Set up the experiment rule"
+priority = "high"
+note = """
+State what an `experiments` row must declare before it runs: the \
+hypothesis, the metric, and the result that would end it.
+
+A test whose success criterion is chosen after the numbers arrive is not a \
+test.
+
+Done when the rule is a `decisions` row and running tests have rows.\
+"""
+
+[[task]]
+id = "set-up-the-audience-record"
+title = "Set up the audience record"
+priority = "medium"
+note = """
+Open an `audiences` row for each audience this agency actually targets, \
+with what is known about it and how that was learned.
+
+Done when each audience has a row citing its evidence.\
+"""

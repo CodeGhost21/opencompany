@@ -620,7 +620,7 @@ impl LettreMailSender {
             .body(email.body.clone())
             .map_err(|e| OpenCompanyError::Store(format!("build message: {e}")))?;
 
-        let builder = match creds.security {
+        let mut builder = match creds.security {
             SmtpSecurity::None => {
                 AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&creds.host)
                     .port(creds.port)
@@ -634,12 +634,17 @@ impl LettreMailSender {
                 .map_err(|e| OpenCompanyError::Store(format!("smtp relay: {e}")))?
                 .port(creds.port),
         };
-        let transport = builder
-            .credentials(Credentials::new(
+        // An empty username means the relay takes unauthenticated mail, so do
+        // not configure credentials — lettre would otherwise attempt AUTH with
+        // an empty secret and fail on a listener that advertises no mechanism.
+        // The CI Stalwart fixture's plaintext port 25 is exactly that listener.
+        if !creds.username.is_empty() {
+            builder = builder.credentials(Credentials::new(
                 creds.username.clone(),
                 creds.password.clone(),
-            ))
-            .build();
+            ));
+        }
+        let transport = builder.build();
         transport
             .send(message)
             .await
