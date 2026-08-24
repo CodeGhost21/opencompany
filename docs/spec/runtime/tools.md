@@ -115,6 +115,14 @@ re-derive these answers from the generic glob matcher: it reports `*` as
 covering everything, which is right for the ordinary families and wrong for
 every opt-in namespace above.
 
+The predicates accept two spellings — the bare namespace (`search`) or a
+`namespace.`-descendant (`search.web`) — plus, for the workspace pair, the exact
+`workspace.write` token. A `*` **glued** to the namespace (`search*`,
+`workspace.write*`) is neither: the write path stores a request glob verbatim,
+and no predicate accepts the glued form, so the coverage check and the card
+preview both report it as not applying. Write the broken form instead
+(`search.*`, or `search.web`) when a sub-grant ask is meant.
+
 ## The catalog
 
 `src/company/tool_catalog.rs` enumerates everything a company can grant —
