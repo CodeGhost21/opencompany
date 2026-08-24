@@ -2784,10 +2784,10 @@ fn overlay_fingerprint(
 ///   independent rows, so a reorder is a real edit rather than a spurious
 ///   difference. Its length is folded in first so `["a","b"]` cannot collide
 ///   with `["ab"]`.
-/// - The `Some`/`None` distinction is hashed for both fields, because "not
-///   overridden" and "overridden to the manifest's current value" must stay
-///   apart: the manifest can change under a rebuild, and collapsing them would
-///   pin the override to a value the operator never chose.
+/// - The `Some`/`None` distinction is hashed for policy fields that affect the
+///   roster. A deadline-only override is normalized to `None`: TTL is enforced
+///   by the live gate and is not part of the roster snapshot, so it must not
+///   trigger a roster rebuild.
 /// - **Attribution (`set_by`, `at_millis`) is deliberately NOT hashed**, for the
 ///   same reason the budget fingerprint omits it: who set the tier and when
 ///   changes nothing an agent can act on, and folding it in would rebuild the
@@ -2797,10 +2797,24 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    match override_ {
-        None => 0u8.hash(&mut hasher),
-        Some(entry) => {
-            1u8.hash(&mut hasher);
+    let Some(entry) = override_ else {
+        0u8.hash(&mut hasher);
+        return hasher.finish();
+    };
+
+    // TTL is applied by the live ManifestApprovalGate, not the roster's
+    // ApprovalPolicy snapshot. A deadline-only overlay therefore has exactly
+    // the same roster semantics as no overlay and must not force a rebuild.
+    if entry.mode.is_none()
+        && entry.always_approve.is_none()
+        && entry.auto_approve_under_usd.is_none()
+    {
+        0u8.hash(&mut hasher);
+        return hasher.finish();
+    }
+
+    1u8.hash(&mut hasher);
+    {
             match &entry.mode {
                 Some(mode) => {
                     1u8.hash(&mut hasher);
