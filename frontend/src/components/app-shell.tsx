@@ -924,7 +924,7 @@ export function AppShell({
     client
       .listDesks(company)
       .then(async (desks) => {
-        if (cancelled) return;
+        if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
         // that 404s `/team` keeps its desks rather than losing the whole list.
