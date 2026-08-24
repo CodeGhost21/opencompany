@@ -148,7 +148,9 @@ describe("the operator overview landing page (#1321)", () => {
         // finished after the visit but is older than the paused pack, so it
         // would fall off that page. The since-visit panel reads its own
         // failed-only page, so it still sees the attempt.
-        url.includes("status=failed,paused")
+        // `URLSearchParams` percent-encodes the comma, so the stopped page's
+        // `status=failed%2Cpaused` is what actually hits the wire.
+        url.includes("status=failed%2Cpaused")
           ? Promise.resolve([paused])
           : Promise.resolve([failed]),
       ),
