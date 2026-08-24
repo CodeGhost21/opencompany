@@ -37,12 +37,15 @@ export function FeedbackForm({ client, company, onDone, showCancel = true }: Pro
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function submit(preview: boolean) {
+  async function submit(preview: boolean, itemId?: string) {
     if (!note.trim() || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await client.feedback({ category, note: note.trim(), preview }, company);
+      const res = await client.feedback(
+        { category, note: note.trim(), preview, item_id: itemId },
+        company,
+      );
       setResult(res);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "something went wrong");
@@ -52,7 +55,16 @@ export function FeedbackForm({ client, company, onDone, showCancel = true }: Pro
   }
 
   if (result) {
-    return <FeedbackResult result={result} onDone={onDone} onEdit={() => setResult(null)} />;
+    return (
+      <FeedbackResult
+        result={result}
+        error={error}
+        busy={busy}
+        onDone={onDone}
+        onEdit={() => setResult(null)}
+        onSend={() => void submit(false, result.item_id)}
+      />
+    );
   }
 
   return (
@@ -98,11 +110,8 @@ export function FeedbackForm({ client, company, onDone, showCancel = true }: Pro
             Cancel
           </Button>
         )}
-        <Button variant="outline" disabled={busy || !note.trim()} onClick={() => void submit(true)}>
+        <Button disabled={busy || !note.trim()} onClick={() => void submit(true)}>
           Preview
-        </Button>
-        <Button disabled={busy || !note.trim()} onClick={() => void submit(false)}>
-          Send
         </Button>
       </div>
     </div>
@@ -111,16 +120,30 @@ export function FeedbackForm({ client, company, onDone, showCancel = true }: Pro
 
 function FeedbackResult({
   result,
+  error,
+  busy,
   onDone,
   onEdit,
+  onSend,
 }: {
   result: FeedbackResponse;
+  error: string | null;
+  busy: boolean;
   onDone: () => void;
   onEdit: () => void;
+  onSend: () => void;
 }) {
+  const errorAlert = error && (
+    <Alert variant="destructive">
+      <ShieldAlert className="size-4" />
+      <AlertDescription>{error}</AlertDescription>
+    </Alert>
+  );
+
   if (result.blocked) {
     return (
       <div className="space-y-4">
+        {errorAlert}
         <Alert variant="destructive">
           <ShieldAlert className="size-4" />
           <AlertTitle>Not shared</AlertTitle>
@@ -138,6 +161,7 @@ function FeedbackResult({
   if (result.preview_body) {
     return (
       <div className="space-y-4">
+        {errorAlert}
         <div className="grid gap-2">
           <Label htmlFor="feedback-preview">This is exactly what would be shared</Label>
           <Textarea
@@ -165,7 +189,9 @@ function FeedbackResult({
           <Button variant="ghost" onClick={onEdit}>
             Edit
           </Button>
-          <Button onClick={onDone}>Done</Button>
+          <Button disabled={busy} onClick={onSend}>
+            Send
+          </Button>
         </div>
       </div>
     );
@@ -175,6 +201,7 @@ function FeedbackResult({
 
   return (
     <div className="space-y-4">
+      {errorAlert}
       <Alert>
         <CheckCircle2 className="size-4" />
         <AlertTitle>{title}</AlertTitle>
