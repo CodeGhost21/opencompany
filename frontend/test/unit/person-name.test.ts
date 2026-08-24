@@ -58,8 +58,10 @@ describe("personName", () => {
     expect(personName(ada)).toBe("Ada Lovelace");
     // The last resort, and the only place a raw key is rendered: a
     // wallet-signed-in person has no name to guess, and showing their key beats
-    // showing a blank where a name belongs.
-    const wallet = { id: "u2", email: "wallet:7cVfgArCheMR6Cs29HGxw" };
+    // showing a blank where a name belongs. A *valid* key — one the host's
+    // `decode_wallet_address` accepts as 32 bytes, so the console is testing
+    // the same identity the host would.
+    const wallet = { id: "u2", email: "wallet:7cVfgArCheMR6Cs29HGxwPFXhAxrJ6UP3TcTZqSKz8bE" };
     expect(personName(wallet)).toBe(wallet.email);
   });
 });
