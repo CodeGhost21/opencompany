@@ -1175,7 +1175,9 @@ async fn run_import(path: PathBuf, home: Option<PathBuf>) -> Result<()> {
 /// restoring any fs-only secrets/keys the bundle carried.
 async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result<()> {
     let home_was_flagged = home.is_some();
-    use opencompany::store::export::{find_bundle_root, import_bundle, restore_fs_artifacts};
+    use opencompany::store::export::{
+        find_bundle_root, import_bundle_with_scopes, restore_fs_artifacts,
+    };
     use opencompany::store::paths::Bundle;
 
     let home = resolve_home_migrated(home)?;
