@@ -1526,10 +1526,18 @@ impl FsSecretStore {
 #[async_trait]
 impl SecretStore for FsSecretStore {
     async fn get(&self, company: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
-        let path = self.bundle(company).secret(key);
+        let bundle = self.bundle(company);
+        let path = bundle.secret(key);
         match tokio::fs::read_to_string(&path).await {
             Ok(value) => Ok(Some(SecretValue(value))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let legacy_path = bundle.legacy_secret(key);
+                match tokio::fs::read_to_string(&legacy_path).await {
+                    Ok(value) => Ok(Some(SecretValue(value))),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(io_err(&legacy_path, e)),
+                }
+            }
             Err(e) => Err(io_err(&path, e)),
         }
     }
@@ -1540,7 +1548,23 @@ impl SecretStore for FsSecretStore {
         let path = bundle.secret(key);
         tokio::fs::write(&path, value.expose())
             .await
-            .map_err(|e| io_err(&path, e))
+            .map_err(|e| io_err(&path, e))?;
+
+        // A clear is a revocation, not a migration. Keeping the legacy bytes
+        // would let a colliding, not-yet-migrated alias resurrect the revoked
+        // credential through the fallback. Remove the shared legacy file in
+        // that case; the conservative result is that every alias loses the
+        // ambiguous credential rather than any alias retaining a secret the
+        // operator explicitly cleared.
+        if value.expose().is_empty() {
+            let legacy_path = bundle.legacy_secret(key);
+            match tokio::fs::remove_file(&legacy_path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_err(&legacy_path, e)),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2520,6 +2544,7 @@ mod test {
                 log.append(
                     &id,
                     CompanyEvent::OperatorMessage {
+                        mentions: Vec::new(),
                         parent: None,
                         text: format!("event {i}"),
                         by: None,
@@ -2848,6 +2873,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "a".into(),
                     by: None,
@@ -2861,6 +2887,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "b".into(),
                     by: None,
@@ -2891,6 +2918,7 @@ mod test {
         log.append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -2907,6 +2935,7 @@ mod test {
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -2988,6 +3017,165 @@ mod test {
         );
         // Company B cannot see company A's secret.
         assert_eq!(secrets.get(&b, "github_token").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn secret_store_reads_legacy_file_and_keeps_it_after_rotation() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let key = "mcp/acme prod/auth";
+        let bundle = Bundle::new(root, &company);
+        bundle.ensure_dirs().await.unwrap();
+        let legacy_path = bundle.legacy_secret(key);
+        tokio::fs::write(&legacy_path, "old-not-a-real-token")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            secrets.get(&company, key).await.unwrap(),
+            Some(SecretValue("old-not-a-real-token".into()))
+        );
+
+        secrets
+            .set(
+                &company,
+                key,
+                SecretValue("rotated-not-a-real-token".into()),
+            )
+            .await
+            .unwrap();
+
+        // The legacy file is kept for a non-empty rotation: a slug may be shared
+        // by several keys, so it may still hold a colliding alias's value. The
+        // canonical file shadows it for this key, so `get` returns the rotated
+        // value.
+        assert!(tokio::fs::metadata(&legacy_path).await.is_ok());
+        assert_eq!(
+            secrets.get(&company, key).await.unwrap(),
+            Some(SecretValue("rotated-not-a-real-token".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn rotating_one_colliding_key_keeps_the_other_alias_readable() {
+        // Issue #1510 migration hazard: two distinct keys can share one legacy
+        // slug (`mcp/acme prod/auth` and `mcp/acme_prod/auth` both slug to
+        // `mcp_acme_prod_auth`). Rotating one of them used to delete the shared
+        // legacy file, so the other alias's next `get` fell through to `None`
+        // even though it had been reading its own value before the upgrade.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let bundle = Bundle::new(root, &company);
+        bundle.ensure_dirs().await.unwrap();
+
+        // The shared file, exactly as a pre-injective install would have left
+        // it: one value for both keys, last write wins.
+        let key_a = "mcp/acme prod/auth";
+        let key_b = "mcp/acme_prod/auth";
+        let shared = bundle.legacy_secret(key_a);
+        assert_eq!(shared, bundle.legacy_secret(key_b));
+        tokio::fs::write(&shared, "token-for-underscore-name")
+            .await
+            .unwrap();
+
+        // Rotate only A. B's value must survive in the kept legacy file.
+        secrets
+            .set(&company, key_a, SecretValue("rotated-token-a".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company, key_a).await.unwrap(),
+            Some(SecretValue("rotated-token-a".into()))
+        );
+        assert_eq!(
+            secrets.get(&company, key_b).await.unwrap(),
+            Some(SecretValue("token-for-underscore-name".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_one_colliding_key_revokes_the_ambiguous_legacy_value() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let bundle = Bundle::new(root, &company);
+        bundle.ensure_dirs().await.unwrap();
+
+        let key_a = "mcp/acme prod/auth";
+        let key_b = "mcp/acme_prod/auth";
+        let shared = bundle.legacy_secret(key_a);
+        assert_eq!(shared, bundle.legacy_secret(key_b));
+        tokio::fs::write(&shared, "legacy-token-must-not-return")
+            .await
+            .unwrap();
+
+        // Clearing A must not leave the old shared credential available to B.
+        secrets
+            .set(&company, key_a, SecretValue(String::new()))
+            .await
+            .unwrap();
+        assert!(!tokio::fs::try_exists(&shared).await.unwrap());
+        assert_eq!(secrets.get(&company, key_b).await.unwrap(), None);
+    }
+    #[tokio::test]
+    async fn canonical_namespace_does_not_bleed_into_legacy_fallback() {
+        // Issue #1510's follow-up: `key-` was itself a valid legacy slug, so
+        // the old canonical file for `foo` (`key-foo`) was returned when
+        // reading `key-foo` through the legacy fallback, and writing `key-foo`
+        // deleted `foo`. The `%` canonical prefix makes the two namespaces
+        // disjoint.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+
+        secrets
+            .set(&company, "foo", SecretValue("value-for-foo".into()))
+            .await
+            .unwrap();
+        // `key-foo` was never set, and the legacy fallback must not reach the
+        // canonical file of `foo`.
+        assert_eq!(
+            secrets.get(&company, "key-foo").await.unwrap(),
+            None,
+            "legacy fallback reached a canonical file of a different key"
+        );
+
+        // Writing `key-foo` must not disturb `foo`'s value.
+        secrets
+            .set(&company, "key-foo", SecretValue("value-for-key-foo".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company, "foo").await.unwrap(),
+            Some(SecretValue("value-for-foo".into())),
+            "writing `key-foo` deleted `foo`"
+        );
+        assert_eq!(
+            secrets.get(&company, "key-foo").await.unwrap(),
+            Some(SecretValue("value-for-key-foo".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_set_succeeds_for_encoding_heavy_keys() {
+        // A 20-emoji MCP server name used to exceed the filesystem component
+        // limit once percent-encoded; the filename must stay bounded so `set`
+        // does not fail with ENAMETOOLONG.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let key = format!("mcp/{}/auth", "🎯".repeat(20));
+        let value = SecretValue("not-a-real-token".into());
+
+        secrets.set(&company, &key, value.clone()).await.unwrap();
+        assert_eq!(secrets.get(&company, &key).await.unwrap(), Some(value));
     }
     /// The put/delete race the index lock exists for: a same-address write
     /// and delete interleaving as write-blob / delete-both / append-index

@@ -44,6 +44,19 @@ Brand / Campaigns / Playbooks workspace and SEO, landing-page, email, and
 brand-positioning skills. Shared, non-company skills live in the repo-level
 [`skills/`](../../skills/) library and can be installed into any company.
 
+## Tool servers
+
+Campaign briefs, audience notes and the copy under review live in a shared workspace.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `notion` | The workspace this company's documents already live in. Needs a token. | off — needs a token |
+
 ## Run it
 
 ```sh
