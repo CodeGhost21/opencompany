@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   fetchRecentRuns,
+  fetchRun,
   fetchRunsForWorkflowRun,
   type ObservatoryRun,
 } from "@/api/observatory";
