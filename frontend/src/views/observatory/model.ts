@@ -48,20 +48,24 @@ export function spansFromRuns(runs: ObservatoryRun[]): Span[] {
 /**
  * One span per **step**, for the deeper zoom.
  *
- * A step carries an elapsed duration rather than an end stamp, so its span runs
- * from its own `atMillis` for `elapsedMs`. A step with no elapsed (a thinking
- * marker) becomes a point — which is honest: we know when it happened and not
- * how long it took.
+ * A completed tool call's `atMillis` is stamped when its completion row was
+ * written — the call's **end**, not its start — so the span runs *backward*
+ * from there by `elapsedMs`. A step with no elapsed (a thinking marker, or a
+ * call still running) carries its start stamp and becomes a point — which is
+ * honest: we know when it happened and not how long it took.
  */
 export function spansFromSteps(run: ObservatoryRun): Span[] {
-  return run.steps.map((step) => ({
-    id: `${run.id}#${step.seq}`,
-    lane: run.agentId,
-    startMs: step.atMillis,
-    endMs: step.atMillis + (step.elapsedMs ?? 0),
-    state: stepState(step),
-    label: step.label,
-  }));
+  return run.steps.map((step) => {
+    const elapsed = step.elapsedMs ?? 0;
+    return {
+      id: `${run.id}#${step.seq}`,
+      lane: run.agentId,
+      startMs: elapsed > 0 ? step.atMillis - elapsed : step.atMillis,
+      endMs: step.atMillis,
+      state: stepState(step),
+      label: step.label,
+    };
+  });
 }
 
 /** How one step paints. */
