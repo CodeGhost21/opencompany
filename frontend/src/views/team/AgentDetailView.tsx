@@ -500,6 +500,44 @@ export function AgentDetailView({
   }
 
   /**
+   * Write this teammate's own tool-grant list — the Tools card is a report
+   * AND an editor (the read-only report of a decision nobody could change was
+   * the dead end this card existed to end).
+   *
+   * Its own write rather than a field on the shared draft, because `tools` is
+   * not shaped like the others: the host gates it on admin where name, role and
+   * instructions are member-open, so folding it into `save()` would make every
+   * ordinary edit by a member 403 the moment a stale tools value rode along.
+   * Sent alone, a member never sends the key at all.
+   */
+  async function saveTools(globs: string[]) {
+    if (!agent) return;
+    setSaving(true);
+    try {
+      const updated = await client.updateAgent(agentId, { tools: globs }, company);
+      // A slow save must not clobber the active detail: only fold the response
+      // in when the agent on screen is still the one we saved (the same guard
+      // the ordinary save, reset, budget and inbox writes use).
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+      toast.success("Tool grants updated.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Couldn't save these tool grants.",
+      );
+      // Rethrow so the card keeps its editor open on a refusal — closing it
+      // would read as "saved" for a write the host rejected.
+      throw error;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /**
    * Save the harness binding, the model override, or both (issue #1245's
    * harness-picker follow-up) — one `PATCH`, so the host's cross-field check
    * (a model only means anything on the harness this same save leaves the
