@@ -1431,7 +1431,14 @@ export function AppShell({
       // exactly one of the trips that has to survive.
       writeLastChannel(scope, channelId);
     },
-    [scope, client, company, chatChannelByThread.main],
+    // The whole map, not just `.main`: the callback reads every key and value
+    // (`Object.keys`/`Object.values` for the rendered and visible thread sets),
+    // and a company switch whose first desk id matches the previous company's
+    // leaves `.main` unchanged while the rest of the map — the DM channels for
+    // a different roster — moves. Rebuilding the callback on the whole map is
+    // cheap: it changes on desk load and company switch, never per poll (the
+    // `mentionFeedRef` comment above is what keeps the *feed* out of the deps).
+    [scope, client, company, chatChannelByThread],
   );
 
   /**
