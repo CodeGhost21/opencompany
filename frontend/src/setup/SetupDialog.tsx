@@ -154,6 +154,17 @@ export function SetupDialog({
    * [`onRedesign`] this does not close the dialog — the retry continues here.
    */
   onRetry?: (fallbackIds: string[]) => void;
+  /**
+   * Settle the persisted redesign debt once a replacement build-out lands.
+   *
+   * The debt names the team this run replaced — rows the sweep is deleting as
+   * it lands. Called before the completion screen shows, so a reload there
+   * cannot reopen setup against a boundary that no longer exists: `null` when
+   * the replacement is a designed team (the debt is paid), or the new
+   * fallback's ids when the replacement fell back again (still owed, but now
+   * naming the rows that must go).
+   */
+  onReplacementComplete?: (fallbackIds: string[] | null) => void;
 }) {
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
   const [phase, setPhase] = useState<Phase>({ kind: "asking", step: 0 });
