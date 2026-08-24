@@ -8,7 +8,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatHistoryMessageDto } from "@/api/types";
 import { fromHistory, mergeHistoryInOrder, type ChatMessage } from "@/lib/chat";
-import { startVisiblePolling } from "@/lib/visible-poll";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appShell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
