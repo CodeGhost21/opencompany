@@ -151,6 +151,7 @@ export function Overview({ client, company, companyName }: Props) {
     } else {
       shell.removeAttribute("inert");
       if (outageWasShowingRef.current) {
+        console.log("[probe] dismissal branch, refresh disabled:", refreshButtonRef.current?.disabled, "loading:", loading);
         outageWasShowingRef.current = false;
         // The overlay that held focus unmounts with the very render that
         // clears the outage, so focus must land somewhere right now. The
@@ -176,6 +177,7 @@ export function Overview({ client, company, companyName }: Props) {
     if (!loading && !loadError && restoreFocusToRefreshRef.current) {
       restoreFocusToRefreshRef.current = false;
       const active = document.activeElement;
+      console.log("[probe] handoff run, active is shell:", active === graphShellRef.current, "active is body:", active === document.body, "refresh exists:", !!refreshButtonRef.current);
       if (active === graphShellRef.current || active === document.body) {
         refreshButtonRef.current?.focus();
       }
