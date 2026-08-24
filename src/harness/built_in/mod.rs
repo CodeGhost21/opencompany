@@ -2811,14 +2811,19 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
     }
     1u8.hash(&mut hasher);
     match &entry.mode {
-        Some(mode) => { 1u8.hash(&mut hasher); mode.hash(&mut hasher); }
+        Some(mode) => {
+            1u8.hash(&mut hasher);
+            mode.hash(&mut hasher);
+        }
         None => 0u8.hash(&mut hasher),
     }
     match &entry.always_approve {
         Some(kinds) => {
             1u8.hash(&mut hasher);
             kinds.len().hash(&mut hasher);
-            for kind in kinds { kind.hash(&mut hasher); }
+            for kind in kinds {
+                kind.hash(&mut hasher);
+            }
         }
         None => 0u8.hash(&mut hasher),
     }
@@ -2826,7 +2831,10 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
         Some(cap) => {
             1u8.hash(&mut hasher);
             match cap {
-                Some(amount) => { 1u8.hash(&mut hasher); amount.to_bits().hash(&mut hasher); }
+                Some(amount) => {
+                    1u8.hash(&mut hasher);
+                    amount.to_bits().hash(&mut hasher);
+                }
                 None => 0u8.hash(&mut hasher),
             }
         }
