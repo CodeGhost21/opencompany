@@ -322,11 +322,13 @@ export function PolicySettings({ client, company }: Props) {
       // Only `mode` is sent: an omitted field leaves the always-ask list where
       // it is, so picking a tier cannot silently discard a list the operator
       // edited earlier.
-      // `dirty` means the operator has unsaved list edits; keep them.
+      // `dirty` means the operator has unsaved list edits; keep them. The tier
+      // request touches neither the cap nor the deadline, so their drafts stay
+      // too.
       apply(
         await setPolicy(client, company, { mode }),
         "Autonomy tier updated",
-        !dirty,
+        { alwaysAsk: !dirty, spendCap: false, deadline: false },
       );
     } catch (error) {
       toast.error(
