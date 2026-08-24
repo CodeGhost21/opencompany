@@ -1259,9 +1259,13 @@ async fn edit_me(
     // derived one back, which is the same intent `null` carries, so the two
     // normalize to one stored state rather than to a name that renders as a gap.
     if let Some(name) = body.display_name {
-        user.display_name = name
+        let name = name
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty());
+        if let Some(name) = &name {
+            super::validate_display_name(name)?;
+        }
+        user.display_name = name;
     }
     if let Some(avatar) = avatar {
         user.avatar = avatar;
