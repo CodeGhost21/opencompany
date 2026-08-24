@@ -123,6 +123,7 @@ describe("what an agent's tools amount to", () => {
       requested: ["workspace.read", "email.send"],
       companyAllow: ["workspace.*"],
       deskAllow: [],
+      deskCeilingActive: false,
       effective: ["workspace.read"],
     });
     expect(summary.standardGrant).toBe(false);
