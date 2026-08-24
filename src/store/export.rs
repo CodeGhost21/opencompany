@@ -207,6 +207,9 @@ struct BundleContents {
     ledger: Vec<LedgerEntry>,
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
+    /// Traces retained in a provider's archive tier. Empty for base stores and
+    /// bundles written before archive export was introduced.
+    archived_traces: Vec<CompressedTrace>,
     /// Operator facts. Empty when the source served no fact port (an old
     /// bundle, or an export run without one) — never a failure.
     facts: Vec<FactRecord>,
