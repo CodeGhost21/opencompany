@@ -288,6 +288,31 @@ export function SetupDialog({
 
     (async () => {
       const fallback = phase.fallback;
+      // A replacing run clears the team the company already has before building
+      // the new one. Without this, a second pass over a staffed company stacks
+      // a duplicate roster on the first — which is the exact failure the gate
+      // exists to prevent. The baseline survives: it is not on the operator's
+      // roster (no `global` row) and cannot be deleted anyway.
+      if (replacing) {
+        try {
+          const roster = await client.listTeam(company);
+          for (const member of staffedTeam(roster)) {
+            if (cancelled) return;
+            await client.removeTeamMember(member.id, company);
+          }
+        } catch {
+          // Could not clear the old team. Building on top of it would duplicate,
+          // so stop rather than proceed — the standard team already there is the
+          // better outcome, and the operator can try again.
+          if (cancelled) return;
+          building.current = false;
+          setPhase({
+            kind: "failed",
+            reason: "We couldn't replace your current team. Try again in a moment.",
+          });
+          return;
+        }
+      }
       for (let i = 0; i < agents.length; i++) {
         const agent = agents[i];
         try {
@@ -319,7 +344,7 @@ export function SetupDialog({
     // `created` on the same phase, and depending on it would re-enter the loop
     // on every reveal.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase.kind, client, company]);
+  }, [phase.kind, client, company, replacing]);
 
   return (
     // Blocking: the no-op `onOpenChange` is what makes it so. Base UI drives
