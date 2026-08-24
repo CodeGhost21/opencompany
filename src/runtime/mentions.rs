@@ -1550,7 +1550,10 @@ members = ["engineer", "ceo"]
         // same way on a mention chip and in the people list.
         assert_eq!(user_label(&user("u", "jane.doe@x.test", None)), "Jane Doe");
         // A blanked display name is the same intent as `null`.
-        assert_eq!(user_label(&user("u", "jane.doe@x.test", Some("  "))), "Jane Doe");
+        assert_eq!(
+            user_label(&user("u", "jane.doe@x.test", Some("  "))),
+            "Jane Doe"
+        );
         // An identity with no name in it to derive stays the honest fallback.
         assert_eq!(user_label(&user("u", "@x.test", None)), "someone");
     }
