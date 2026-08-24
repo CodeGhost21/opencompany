@@ -652,7 +652,8 @@ impl ApprovalGate for ManifestApprovalGate {
         //    like `payment` now parks `payment.send` natively, where before it
         //    parked nothing. That direction is the fail-safe one — an operator
         //    who named a family meant the family.
-        if crate::policy::always_approve::matches(&self.policy.always_approve, effect.kind()) {
+        let policy = self.policy.read().expect("policy lock poisoned");
+        if crate::policy::always_approve::matches(&policy.always_approve, effect.kind()) {
             return Ok(PolicyDecision::RequireApproval);
         }
 
