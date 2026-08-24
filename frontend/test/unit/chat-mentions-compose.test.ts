@@ -157,6 +157,23 @@ describe("stripCodeRegions", () => {
     expect(masked).not.toContain("@engineer");
     expect(masked.split("\n")).toHaveLength(text.split("\n").length);
   });
+
+  it("does not treat a text-suffixed fence line as a closing fence", () => {
+    // CommonMark only lets a closing fence be followed by spaces or tabs, so
+    // `````not-a-close``` is still inside the block. If it closed the mask
+    // early, a later `@engineer` the renderer still shows as code would
+    // unmask and resolve.
+    const text = "before\n```\ncode\n```not-a-close\n@engineer\n```\nafter";
+    const masked = stripCodeRegions(text);
+    expect(masked).not.toContain("@engineer");
+    expect(masked).toHaveLength(text.length);
+  });
+
+  it("still closes a fence whose trailing whitespace is only spaces or tabs", () => {
+    const text = "before\n```\n@engineer\n```  \nafter";
+    const masked = stripCodeRegions(text);
+    expect(masked).not.toContain("@engineer");
+  });
 });
 
 describe("rankMentionables", () => {
