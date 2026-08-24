@@ -241,6 +241,11 @@ const NAV: NavItem[] = [
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
 
+// The console is hash-routed, so a normal `href="#main-content"` would also
+// be treated as a route change. Keep the conventional fragment for link
+// semantics, then focus this stable landmark without changing the route.
+const MAIN_CONTENT_ID = "main-content";
+
 // Which views are routable is decided in `@/lib/console-routes`, not here.
 // `NAV` above is presentation: a row means a surface is offered in the sidebar,
 // and its absence means only that the surface is not offered. `VIEWS` is every
@@ -1975,6 +1980,16 @@ export function AppShell({
     // `SidebarProvider` paints the chrome layer itself — see its own note on
     // why that fill lives there and not here (issue #1178).
     <SidebarProvider className="h-svh overflow-hidden">
+      <a
+        href={`#${MAIN_CONTENT_ID}`}
+        className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById(MAIN_CONTENT_ID)?.focus();
+        }}
+      >
+        Skip to content
+      </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -2003,21 +2018,23 @@ export function AppShell({
             <SidebarCollapseButton />
           </div>
         </SidebarHeader>
-        <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
-        </SidebarContent>
-        <SidebarFooter>
-          <SidebarControls
-            lifecycleState={feed.status.lifecycle}
-            emergencyPaused={feed.status.emergency_paused}
-            companies={companies}
-            activeCompany={company}
-            onSwitchCompany={onSwitchCompany}
-            onBackToPicker={onBackToPicker}
-            view={view}
-            onNavigate={setView}
-          />
-        </SidebarFooter>
+        <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
+          <SidebarContent data-tour="sidebar">
+            <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
+          </SidebarContent>
+          <SidebarFooter>
+            <SidebarControls
+              lifecycleState={feed.status.lifecycle}
+              emergencyPaused={feed.status.emergency_paused}
+              companies={companies}
+              activeCompany={company}
+              onSwitchCompany={onSwitchCompany}
+              onBackToPicker={onBackToPicker}
+              view={view}
+              onNavigate={setView}
+            />
+          </SidebarFooter>
+        </nav>
         <SidebarRail />
       </Sidebar>
 
@@ -2029,7 +2046,7 @@ export function AppShell({
           wrapper that clips and cannot scroll. On the task board that clipped
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
-      <SidebarInset className="min-h-0 min-w-0">
+      <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the
@@ -2292,6 +2309,7 @@ export function AppShell({
               // this view knows whether the id matches anything parked, so it
               // does that check itself and says so when it does not.
               sub={sub}
+              chatChannelByThread={chatChannelByThread}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
               // Issue #1211: mark this id as "mine" before the resolve POST
