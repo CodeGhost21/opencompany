@@ -314,6 +314,48 @@ describe("resetting to the manifest's policy", () => {
     expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
   });
 
+  it("restores focus to the checked tier after a successful reset", async () => {
+    // The DELETE resolves to the manifest state — overridden=false — so the
+    // reset button unmounts before the dialog closes, the exact moment the
+    // `finalFocus` reset branch must fall back to the checked tier radio.
+    const del = vi.fn(async () => status("full"));
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async (path: string) =>
+        path.endsWith("/policy")
+          ? overridden("readonly", "full")
+          : { slugs: [], unwired: [] },
+      put: vi.fn(async () => status("full")),
+      del,
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    await act(async () => {
+      const button = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("manifest's policy"),
+      )!;
+      button.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+    // The override cleared, so the reset button is gone; focus must land on
+    // the checked tier radio rather than falling out of the interface.
+    expect(
+      [...container.querySelectorAll("button")].some((b) =>
+        b.textContent?.includes("manifest's policy"),
+      ),
+    ).toBe(false);
+    expect(document.activeElement).toBe(
+      document.querySelector("[data-testid=policy-tier-full]"),
+    );
+  });
+
   it("confirms a reset that drops an always-ask gate the manifest does not carry", async () => {
     const initial: PolicyStatus = {
       mode: "full",
