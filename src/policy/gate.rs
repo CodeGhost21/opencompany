@@ -578,8 +578,8 @@ impl ManifestApprovalGate {
     /// here. The invariant that must survive that edit is the one direction:
     /// whatever this parks must stay a **subset** of what
     /// [`evaluate_supervised`](Self::evaluate_supervised) parks.
-    fn evaluate_auto(&self, effect: &Effect) -> PolicyDecision {
-        self.evaluate_supervised(effect)
+    fn evaluate_auto(policy: &Policy, effect: &Effect) -> PolicyDecision {
+        Self::evaluate_supervised_with_policy(policy, effect)
     }
 
     /// Evaluates the supervised taxonomy using a captured policy snapshot.
