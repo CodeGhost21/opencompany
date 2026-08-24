@@ -694,7 +694,16 @@ fn is_valid_alias_for(mention: &Mention, dir: &[MentionAlias]) -> bool {
     // `"#engineering"`, which is nobody's alias and would fail every desk
     // mention the console's own picker can produce for that spelling.
     let body = mention.text.strip_prefix('@').unwrap_or(&mention.text);
-    let body = body.strip_prefix('#').unwrap_or(body);
+    // `@#…` is the desk-only spelling. `extract_with_known` narrows a hashed
+    // body to desk targets when scanning text, and revalidation must apply the
+    // same rule: without it, a user or agent whose label happens to start with
+    // `#` would pass the alias check below (the hash is stripped, leaving a
+    // plain word) with a visually desk-shaped mention that never names them.
+    let desk_spelling = body.strip_prefix('#');
+    if desk_spelling.is_some() && !matches!(mention.target, MentionTarget::Desk { .. }) {
+        return false;
+    }
+    let body = desk_spelling.unwrap_or(body);
     let body = body.to_lowercase();
     dir.iter()
         .any(|entry| entry.target == mention.target && entry.aliases.iter().any(|a| a == &body))
