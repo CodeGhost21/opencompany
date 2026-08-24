@@ -365,7 +365,7 @@ pub(crate) fn child_calls_to_repeat(
             continue;
         };
         let mut graph = parent;
-        let mut record = None;
+        let mut record: Option<ChildGateRecord> = None;
         let mut prefix = String::new();
 
         // A nested child is restarted from its own root, so calls in every
