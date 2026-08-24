@@ -368,14 +368,14 @@ async fn set_policy(
     record.overlay_policy = (!entry.is_empty()).then_some(entry);
 
     save(&company, &record).await?;
-    let ttl_hours = record
-        .effective_policy()
-        .approval_ttl_hours
-        .unwrap_or(DEFAULT_TTL_MILLIS / (60 * 60 * 1000));
+    // The live gate enforces what `GET` reports: the effective policy (override
+    // resolved over the manifest) drives native evaluation AND the deadline, not
+    // just the TTL. Without the spend cap here, a tightened cap would be reported
+    // while native spends under the old one kept executing without approval.
     company
         .runtime
         .approval_gate
-        .set_ttl_millis(ttl_hours.saturating_mul(60 * 60 * 1000));
+        .apply_effective_policy(record.effective_policy());
     Ok(Json(PolicyDto::build(&record)))
 }
 
@@ -401,14 +401,14 @@ async fn clear_policy(
     let mut record = load_record(&company).await?;
     record.overlay_policy = None;
     save(&company, &record).await?;
-    let ttl_hours = record
-        .effective_policy()
-        .approval_ttl_hours
-        .unwrap_or(DEFAULT_TTL_MILLIS / (60 * 60 * 1000));
+    // The live gate enforces what `GET` reports: the effective policy (override
+    // resolved over the manifest) drives native evaluation AND the deadline, not
+    // just the TTL. Without the spend cap here, a tightened cap would be reported
+    // while native spends under the old one kept executing without approval.
     company
         .runtime
         .approval_gate
-        .set_ttl_millis(ttl_hours.saturating_mul(60 * 60 * 1000));
+        .apply_effective_policy(record.effective_policy());
     Ok(Json(PolicyDto::build(&record)))
 }
 
