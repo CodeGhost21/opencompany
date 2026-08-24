@@ -301,9 +301,18 @@ export function SetupController({
           if (wasRedesigning) {
             // The first pass shipped a fallback team and the operator went to
             // wire a model. Reopen in redesign mode so the next build-out
-            // replaces that team instead of stacking a second one.
-            setRedesigning(true);
-            setOpen(true);
+            // replaces that team instead of stacking a second one — but only
+            // while that team still exists. Another operator may have deleted
+            // or replaced it while model settings were open; reopening against
+            // a vanished boundary would sweep nothing and stack a second team
+            // over their work, so a stale debt falls through to the ordinary
+            // return (open only over an unstaffed company).
+            if (reconcileRedesign(scope, roster) !== null) {
+              setRedesigning(true);
+              setOpen(true);
+            } else if (empty) {
+              setOpen(true);
+            }
           } else if (empty) {
             setOpen(true);
           }
