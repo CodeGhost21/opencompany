@@ -195,6 +195,116 @@ impl Memory for FakeEngine {
     }
 }
 
+/// A `Memory` backend that wraps [`FakeEngine`] and injects one failure into
+/// the archive partition.
+///
+/// `store_with_taint` counts writes whose namespace is the archive tier and
+/// errors on the `fail_archive_store_on`-th one, then recovers. Eviction's
+/// archive-then-delete order is what this targets: the maintenance loop
+/// archives a few traces, hits the injected failure, and the archive must
+/// still be bounded on that partial-failure path.
+#[derive(Clone)]
+struct FlakyStore {
+    inner: Arc<FakeEngine>,
+    fail_archive_store_on: u32,
+    archive_stores: Arc<Mutex<u32>>,
+}
+
+impl FlakyStore {
+    fn arc(fail_archive_store_on: u32) -> Arc<dyn Memory> {
+        Arc::new(Self {
+            inner: Arc::new(FakeEngine::default()),
+            fail_archive_store_on,
+            archive_stores: Arc::new(Mutex::new(0)),
+        })
+    }
+}
+
+#[async_trait]
+impl Memory for FlakyStore {
+    fn name(&self) -> &str {
+        "flaky-store"
+    }
+
+    async fn store(
+        &self,
+        namespace: &str,
+        key: &str,
+        content: &str,
+        category: MemoryCategory,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.store_with_taint(
+            namespace,
+            key,
+            content,
+            category,
+            session_id,
+            MemoryTaint::Internal,
+        )
+        .await
+    }
+
+    async fn store_with_taint(
+        &self,
+        namespace: &str,
+        key: &str,
+        content: &str,
+        category: MemoryCategory,
+        session_id: Option<&str>,
+        taint: MemoryTaint,
+    ) -> anyhow::Result<()> {
+        if namespace.ends_with("/archive") {
+            let mut stores = self.archive_stores.lock().unwrap();
+            *stores += 1;
+            if *stores == self.fail_archive_store_on {
+                anyhow::bail!("injected archive store failure");
+            }
+        }
+        self.inner
+            .store_with_taint(namespace, key, content, category, session_id, taint)
+            .await
+    }
+
+    async fn recall(
+        &self,
+        query: &str,
+        limit: usize,
+        opts: RecallOpts<'_>,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+        self.inner.recall(query, limit, opts).await
+    }
+
+    async fn get(&self, namespace: &str, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
+        self.inner.get(namespace, key).await
+    }
+
+    async fn list(
+        &self,
+        namespace: Option<&str>,
+        category: Option<&MemoryCategory>,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+        self.inner.list(namespace, category, session_id).await
+    }
+
+    async fn forget(&self, namespace: &str, key: &str) -> anyhow::Result<bool> {
+        self.inner.forget(namespace, key).await
+    }
+
+    async fn namespace_summaries(&self) -> anyhow::Result<Vec<NamespaceSummary>> {
+        self.inner.namespace_summaries().await
+    }
+
+    async fn count(&self) -> anyhow::Result<usize> {
+        self.inner.count().await
+    }
+
+    async fn health_check(&self) -> bool {
+        self.inner.health_check().await
+    }
+}
+
 /// One shared engine, which is the arrangement every isolation test needs: a
 /// leak is only observable when both tenants are in the same store. There is
 /// deliberately no per-company binding to build — the engine is process-scoped
