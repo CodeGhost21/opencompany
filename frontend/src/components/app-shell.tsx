@@ -2367,6 +2367,7 @@ export function AppShell({
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
         onCompleted={() => setTeamBuilt((n) => n + 1)}
+        onRouteDismiss={() => setView("overview")}
       />
 
       <TourController company={company} setView={setView} hold={setupOpen} />
