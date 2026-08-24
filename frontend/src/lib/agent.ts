@@ -302,6 +302,25 @@ export function summarizeGrants(tools: AgentToolsDto): ToolGrantSummary {
 }
 
 /**
+ * The ceiling an editor draft is actually narrowed by — the host's desk level
+ * in [`agent_scoped_grants`], mirrored so the preview cannot promise a grant
+ * the host drops.
+ *
+ * `deskAllow` is the host's desk ceiling already intersected with the company
+ * grant, and **empty means no desk states a ceiling**, the same empty-is-not-
+ * nothing trap `requested` carries. So a non-empty `deskAllow` IS the gate a
+ * draft glob has to clear, and when it is empty the company allow-list is.
+ * Checking a draft against this list is the exact predicate the host applies
+ * when it re-derives `effective`, so a warning drawn from it cannot disagree
+ * with the saved result the way one drawn from `companyAllow` alone can — the
+ * marketing agency's creative desk omits `media`, while the company allows it,
+ * so a draft adding `media` would warn here and then land struck through.
+ */
+export function grantCeiling(tools: AgentToolsDto): string[] {
+  return tools.deskAllow.length > 0 ? tools.deskAllow : tools.companyAllow;
+}
+
+/**
  * How an agent's tier reads on screen.
  *
  * `isOrchestrator` rather than `tier === "orchestrator"`: a company that tags
