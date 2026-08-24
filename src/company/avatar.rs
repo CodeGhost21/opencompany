@@ -1367,19 +1367,20 @@ mod test {
     #[test]
     fn gif_animation_cost_counts_every_frame() {
         assert_eq!(
-            gif_animation_cost(&gif_animated((100, 100), &[(100, 100), (50, 50)]))
-                .unwrap(),
+            gif_animation_cost(&gif_animated((100, 100), &[(100, 100), (50, 50)])).unwrap(),
             Some(12_500)
         );
         // Frames may be sub-rectangles of the screen; each one is still paid for.
         assert_eq!(
-            gif_animation_cost(&gif_animated((4096, 4096), &[(128, 128)]))
-                .unwrap(),
+            gif_animation_cost(&gif_animated((4096, 4096), &[(128, 128)])).unwrap(),
             Some(16_384)
         );
         // Not a GIF, and a GIF with no Image Descriptor: nothing to count.
         assert_eq!(gif_animation_cost(PNG_SIGNATURE).unwrap(), None);
-        assert_eq!(gif_animation_cost(&gif_animated((16, 16), &[])).unwrap(), None);
+        assert_eq!(
+            gif_animation_cost(&gif_animated((16, 16), &[])).unwrap(),
+            None
+        );
     }
 
     /// A global color table is skipped only when the descriptor's flag says one
@@ -1427,14 +1428,12 @@ mod test {
     #[test]
     fn webp_animation_cost_counts_every_anmf_frame() {
         assert_eq!(
-            webp_animation_cost(&webp_animated((100, 100), &[(100, 100), (50, 50)]))
-                .unwrap(),
+            webp_animation_cost(&webp_animated((100, 100), &[(100, 100), (50, 50)])).unwrap(),
             Some(12_500)
         );
         // Frames may be sub-rectangles of the canvas; each one is still paid for.
         assert_eq!(
-            webp_animation_cost(&webp_animated((4096, 4096), &[(128, 128)]))
-                .unwrap(),
+            webp_animation_cost(&webp_animated((4096, 4096), &[(128, 128)])).unwrap(),
             Some(16_384)
         );
         // Not a WebP, and a WebP with no ANMF chunks: nothing to count.
@@ -1447,8 +1446,7 @@ mod test {
     #[test]
     fn apng_animation_cost_counts_the_canvas_and_every_fctl_frame() {
         assert_eq!(
-            apng_animation_cost(&apng_animated((100, 100), &[(100, 100), (50, 50)]))
-                .unwrap(),
+            apng_animation_cost(&apng_animated((100, 100), &[(100, 100), (50, 50)])).unwrap(),
             Some(22_500)
         );
         // A still PNG carries no acTL, so there is nothing animated to count.
