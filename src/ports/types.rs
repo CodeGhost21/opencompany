@@ -4081,28 +4081,7 @@ impl CompanyRecord {
     /// allowing the policy parser to downgrade it to `supervised` would loosen
     /// a `readonly` manifest.
     pub fn effective_policy(&self) -> Policy {
-        let manifest = &self.manifest.policy;
-        let Some(override_) = &self.overlay_policy else {
-            return manifest.clone();
-        };
-        Policy {
-            mode: override_
-                .mode
-                .as_deref()
-                .filter(|mode| POLICY_MODES.contains(mode))
-                .map(str::to_owned)
-                .unwrap_or_else(|| manifest.mode.clone()),
-            always_approve: override_
-                .always_approve
-                .clone()
-                .unwrap_or_else(|| manifest.always_approve.clone()),
-            auto_approve_under_usd: override_
-                .auto_approve_under_usd
-                .unwrap_or(manifest.auto_approve_under_usd),
-            approval_ttl_hours: override_
-                .approval_ttl_hours
-                .unwrap_or(manifest.approval_ttl_hours),
-        }
+        effective_policy(&self.manifest.policy, self.overlay_policy.as_ref())
     }
 
     /// The first `agent_id` on this record carrying more than one override, if
