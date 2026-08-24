@@ -921,11 +921,12 @@ async fn live_ports(
 ) -> Result<(
     opencompany::store::export::Ports,
     Option<Arc<dyn opencompany::ports::FactStore>>,
+    Option<Arc<dyn opencompany::store::MemoryScopes>>,
     opencompany::store::StorageKind,
 )> {
-    opencompany::store::MemoryScopes,
-        FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, StorageSettings,
-        open_memory_overlay, open_storage,
+    use opencompany::store::{
+        FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, MemoryScopes,
+        StorageSettings, open_memory_overlay, open_storage,
     };
     let settings = StorageSettings::from_env()?;
     // Every refusal lives in the lib (`store::select::refuse_bundle_env`)
