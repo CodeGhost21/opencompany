@@ -102,6 +102,7 @@ describe("companyCovers", () => {
     expect(companyCovers(["*"], "paypal.wallet")).toBe(false);
     expect(companyCovers(["*"], "mcp:*")).toBe(false);
     expect(companyCovers(["*"], "mcp:notion")).toBe(false);
+    expect(companyCovers(["*"], "mcp*")).toBe(false);
   });
 
   it("treats the bare workspace grant as explicit-only, not a catch-all read", () => {
