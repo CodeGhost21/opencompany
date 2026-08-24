@@ -1085,6 +1085,8 @@ export function ChatView({
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
+        directMessages={directMessageChannels(members)}
+        onStartDirectMessage={selectChannel}
         className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
       />
       <ChannelRail
@@ -1094,6 +1096,8 @@ export function ChatView({
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
+        directMessages={directMessageChannels(members)}
+        onStartDirectMessage={selectChannel}
         collapsed={channelsCollapsed}
         onExpand={toggleChannels}
         className="hidden lg:flex"
