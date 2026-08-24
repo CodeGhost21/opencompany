@@ -828,6 +828,40 @@ impl DeepTraceStore for FsOps {
         Ok(mine)
     }
 
+    async fn list_step_details_for_runs(
+        &self,
+        company: &CompanyId,
+        run_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<RunStepDetailRecord>>> {
+        // One scan of the company-wide file; the per-run alternative rescans it
+        // once per listed run on the Observatory index.
+        let all =
+            read_jsonl::<RunStepDetailRecord>(&self.bundle(company).deep_trace_jsonl()).await?;
+        let mut by_run: std::collections::HashMap<String, Vec<RunStepDetailRecord>> =
+            run_ids.iter().map(|id| (id.clone(), Vec::new())).collect();
+        for record in all {
+            if let Some(mine) = by_run.get_mut(&record.run_id) {
+                mine.push(record);
+            }
+        }
+        for (run_id, mine) in by_run.iter_mut() {
+            // Last-write-wins per step_seq, oldest first — the same settling the
+            // single-run read applies (see `list_step_details`).
+            let mut by_seq: std::collections::HashMap<u32, RunStepDetailRecord> =
+                std::collections::HashMap::new();
+            for record in std::mem::take(mine) {
+                if &record.run_id != run_id {
+                    continue;
+                }
+                by_seq.insert(record.step_seq, record);
+            }
+            let mut settled: Vec<RunStepDetailRecord> = by_seq.into_values().collect();
+            settled.sort_by_key(|r| r.step_seq);
+            *mine = settled;
+        }
+        Ok(by_run)
+    }
+
     async fn purge_deep_trace(&self, company: &CompanyId, run_id: Option<&str>) -> Result<u64> {
         let path = self.bundle(company).deep_trace_jsonl();
         let lock = path_lock(&path);
