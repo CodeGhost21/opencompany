@@ -164,4 +164,31 @@ describe("the sidebar identity while the operator changes company", () => {
     expect(reads).toEqual(["alpha", "ghost"]);
     expect(text()).not.toContain("alpha user");
   });
+
+  it("leaves an untouched display name off an avatar-only save", async () => {
+    const { client, patches } = host();
+    await show(client, "alpha");
+
+    // Open the profile dialog. The dialog renders through a portal, so its
+    // controls live under `document.body`, not the mount container.
+    const row = container.querySelector('[data-testid="profile-row"]');
+    expect(row).toBeTruthy();
+    await act(async () => {
+      (row as HTMLElement).click();
+    });
+
+    // Save with no edits at all. The name in the box equals the stored
+    // `me.displayName`, so the payload must omit it — a stale echo would
+    // revert a display name another client changed while the dialog was open.
+    const save = document.body.querySelector('[data-testid="profile-save"]');
+    expect(save).toBeTruthy();
+    await act(async () => {
+      (save as HTMLButtonElement).click();
+    });
+
+    expect(patches).toHaveLength(1);
+    const body = patches[0].body as Record<string, unknown>;
+    expect(body).not.toHaveProperty("displayName");
+    expect(body).not.toHaveProperty("avatar");
+  });
 });
