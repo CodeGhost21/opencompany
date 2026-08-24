@@ -1983,6 +1983,16 @@ export function AppShell({
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
           why that fill lives there and not here (issue #1178). */}
       <SidebarProvider className="h-svh overflow-hidden">
+        <a
+          href={`#${MAIN_CONTENT_ID}`}
+          className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
+          onClick={(event) => {
+            event.preventDefault();
+            document.getElementById(MAIN_CONTENT_ID)?.focus();
+          }}
+        >
+          Skip to content
+        </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -2011,7 +2021,8 @@ export function AppShell({
             <SidebarCollapseButton />
           </div>
         </SidebarHeader>
-        <SidebarContent data-tour="sidebar">
+        <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
+          <SidebarContent data-tour="sidebar">
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
         <SidebarFooter>
@@ -2030,6 +2041,7 @@ export function AppShell({
             onNavigate={setView}
           />
         </SidebarFooter>
+        </nav>
         <SidebarRail />
       </Sidebar>
 
