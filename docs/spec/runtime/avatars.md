@@ -101,7 +101,8 @@ that ends up carrying nothing.
 A teammate's face is editable by any member, not only an admin. Picking a
 colleague's icon is not a privilege boundary the way widening a tool grant is,
 and a company whose only admin is away should not be stuck with eleven hashed
-blobs. `tools` remains the one admin-gated field on that route.
+blobs. `tools` (a grant), `model` (a cost/scope choice) and `harness` (a routing
+binding) remain the admin-gated fields on that route.
 
 A **person's** face is writable only by that person. `PATCH …/users/{id}` is
 admin-only and can set somebody's `displayName` — right for making a roster of
