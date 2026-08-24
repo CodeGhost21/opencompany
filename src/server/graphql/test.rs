@@ -2316,7 +2316,7 @@ async fn agent_runs_walks_a_workflow_run_to_its_reasoning() {
 
     let value = query(
         router(state),
-        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"wr-1\") { id agentId nodeId workflowRunId status stepCount steps { seq kind label result deep { reasoning } } } } }"}"#,
+        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"wr-1\") { id agentId nodeId workflowRunId status stepCount steps { seq kind label result failure deep { reasoning } } } } }"}"#,
     )
     .await;
 
