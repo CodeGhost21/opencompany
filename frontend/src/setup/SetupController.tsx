@@ -85,6 +85,8 @@ export function SetupController({
   onOpenChange?: (open: boolean) => void;
   /** Setup finished and created a team — the roster reads should refresh. */
   onCompleted?: () => void;
+  /** Leaves the manual `#/setup` route after skip or completion. */
+  onRouteDismiss?: () => void;
 }) {
   const scope = useLocalScope();
   const [open, setOpen] = useState(false);
