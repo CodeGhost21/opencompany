@@ -2033,13 +2033,10 @@ async fn notify_mentioned(
         title: format!("{who} mentioned you in {desk}"),
         audience: Some(audience),
         // The console's channel-id space, so a badge lands without the browser
-        // having loaded that transcript. Direct messages use `dm:<teammate-id>`
-        // in the console, while the host thread id is the bare teammate id.
-        context: Some(if users.iter().any(|u| u.id == desk) {
-            format!("dm:{desk}")
-        } else {
-            desk.to_string()
-        }),
+        // having loaded that transcript. Whether the thread is a DM is a
+        // question about the roster, not the human user directory — see
+        // [`mention_context`].
+        context: Some(mention_context(runtime, id, &users, desk).await),
     };
     if let Err(err) = runtime.notifications().append(id, &note).await {
         tracing::warn!(
@@ -2049,6 +2046,46 @@ async fn notify_mentioned(
              still renders, but nobody is badged for it"
         );
     }
+}
+
+/// The console channel id a mention in `desk` belongs to.
+///
+/// A desk channel's id is its own thread id, so the context is the desk id
+/// unchanged. A DM's thread id is the bare roster teammate id, while the
+/// console's channel id for the same DM is `dm:<teammate-id>` — and the
+/// console addresses a DM with that bare id (ChatView sends
+/// `active.member.id`). So a mention in a DM has to be re-keyed into the
+/// console's channel-id space or the rail has no row to badge, and opening the
+/// DM can never match or clear the notification.
+///
+/// The roster check goes through [`crate::runtime::assignee::resolve`] for its
+/// desk-first ordering: the same one `responder_for` uses, so a desk whose id
+/// happens to match a teammate id still stores the desk id. A `dm:`-addressed
+/// thread is already in the console's channel-id space and is kept as-is.
+async fn mention_context(
+    runtime: &CompanyRuntime,
+    id: &CompanyId,
+    users: &[crate::ports::users::UserRecord],
+    desk: &str,
+) -> String {
+    if desk.starts_with(crate::runtime::assignee::DM_PREFIX) {
+        return desk.to_string();
+    }
+    if users.iter().any(|u| u.id == desk) {
+        return format!("dm:{desk}");
+    }
+    let Ok(Some(record)) = runtime.store().load(id).await else {
+        // Best-effort, same as the caller: a store that will not answer must
+        // not fail the message, and the bare id still renders a chip.
+        return desk.to_string();
+    };
+    if matches!(
+        crate::runtime::assignee::resolve(&record, desk),
+        crate::runtime::assignee::AssigneeResolution::Agent(_)
+    ) {
+        return format!("dm:{desk}");
+    }
+    desk.to_string()
 }
 
 /// Runs a chat cycle and emits any implied webhooks, rendering the responses.
@@ -9528,6 +9565,71 @@ mode = "full"
             notified[0].notification.kind, "mention",
             "the reply's @everyone mention has to file the same kind of row an \
              operator message's does"
+        );
+    }
+
+    /// **The Codex P1 finding:** the context a DM mention stores was decided by
+    /// the human user directory, but a DM's thread id is a roster teammate's
+    /// agent id — which no user record has — so a mention in a normal DM stored
+    /// the bare id. The console's rail keys a DM by `dm:<teammate-id>` (and the
+    /// console sends that bare id as the `chat` for a DM), so no rail row
+    /// displayed the badge and opening the DM could neither match nor clear it.
+    #[tokio::test]
+    async fn a_mention_in_a_dm_stores_the_console_dm_channel_id() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        // A second person for the broadcast to reach — the author is always
+        // excluded from their own `@everyone`.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state.clone());
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        let member_id = runtime
+            .users()
+            .list_users(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.email == "harness-member@example.test")
+            .expect("seeded member")
+            .id;
+
+        // A message addressed to the `designer` DM thread — the bare roster
+        // teammate id, exactly what the console sends for a DM.
+        let response = app
+            .clone()
+            .oneshot(chat_to("cc @everyone on this", Some("designer")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = runtime.notifications().list(&id, &member_id).await.unwrap();
+                if !notes.is_empty() {
+                    return notes;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the mentioned member was notified");
+
+        // The offline echo brain answers the same text, so `@everyone` may land
+        // twice — once for the operator's message, once for the echoed reply.
+        // The count is incidental; the invariant is that *every* mention filed
+        // out of this exchange is keyed to the console's `dm:designer` channel,
+        // not the bare roster thread id.
+        assert!(!notified.is_empty(), "the mentioned member was notified");
+        let contexts: Vec<_> = notified
+            .iter()
+            .map(|n| n.notification.context.as_deref())
+            .collect();
+        assert!(
+            contexts.iter().all(|c| *c == Some("dm:designer")),
+            "every mention in a DM has to store the console's DM channel id, \
+             not the bare roster thread id — got {contexts:?}"
         );
     }
 }
