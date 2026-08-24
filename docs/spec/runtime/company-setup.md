@@ -282,8 +282,7 @@ operator cannot obtain must never be the one thing that traps them.
 A secret's *presence* is reported, never its bytes — so there is nothing to
 pre-fill the key box with, and the configured state is drawn as a settled fact
 rather than an empty field. An empty box with placeholder text reads as an
-unanswered question, which on a hosted tenant is the one impression it must not
-give.
+unanswered question — on a hosted tenant, the one impression it must not give.
 
 ## What a teammate can reach on day one
 
