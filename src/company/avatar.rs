@@ -228,9 +228,12 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC | 0xDC | 0xDD) {
             // `len` covers the length field and the payload but not the marker,
             // so the segment ends at `i + 2 + len`. A real SOF always carries
-            // at least one component, so `len >= 10` and the size bytes below
-            // are guaranteed to sit inside it.
-            if i + 2 + len > bytes.len() {
+            // at least one component, which makes the payload `precision(1) +
+            // height(2) + width(2) + 3*components` — `len >= 10`. Anything
+            // shorter cannot hold the size bytes the fixed indexes below read;
+            // the segment-end check alone would let a declared length of two
+            // through and then index past the buffer.
+            if len < 10 || i + 2 + len > bytes.len() {
                 return None;
             }
             let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
