@@ -900,8 +900,10 @@ function Tools({
       title="Tools"
       subtitle={
         summary.standardGrant
-          ? "This teammate lists no tools of its own, so it holds everything the company allows."
-          : "What this teammate asked for, narrowed by what the company allows."
+          ? deskCeilingActive
+            ? "This teammate lists no tools of its own, so it holds what its desk allows, narrowed by the company."
+            : "This teammate lists no tools of its own, so it holds everything the company allows."
+          : "What this teammate asked for, narrowed by what its desk and the company allow."
       }
       action={
         canEdit && !editing ? (
