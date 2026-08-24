@@ -1078,13 +1078,14 @@ async fn run_issue_password(
 
     let home = resolve_home_migrated(home)?;
     let settings = opencompany::store::StorageSettings::from_env()?;
-    let Some(handles) = opencompany::store::open_storage(&settings, &home).await? else {
-        return Err(opencompany::error::OpenCompanyError::Config(format!(
-            "storage backend `{:?}` keeps no user accounts, so there is no password to issue. \
-             Set OPENCOMPANY_STORAGE to the backend this deployment serves with.",
-            settings.kind
-        )));
-    };
+    let handles = opencompany::store::open_storage(&settings, &home)
+        .await?
+        .unwrap_or_else(|| {
+            // The filesystem backend is the default and its ports are selected
+            // by the runtime builder when `open_storage` returns `None`.
+            let fs_ops = Arc::new(opencompany::store::FsOps::new(home.clone()));
+            opencompany::store::StorageHandles::from_fs(fs_ops)
+        });
 
     let id = CompanyId::new(company);
     // The manifest is the other source of a standing grant, so a company that
