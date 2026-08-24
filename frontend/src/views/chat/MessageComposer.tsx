@@ -6,17 +6,22 @@ import {
   CaseSensitive,
   Code,
   Italic,
+  Loader2,
+  Paperclip,
   Strikethrough,
+  X,
 } from "lucide-react";
 
 import type { MessageIntent } from "@/api/tasks";
+import type { AttachmentDto } from "@/api/types";
+import { formatBytes } from "@/api/workspace";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface Props {
   placeholder: string;
   disabled?: boolean;
-  onSend: (text: string, intent?: MessageIntent) => void;
+  onSend: (text: string, intent?: MessageIntent, attachments?: AttachmentDto[]) => void;
   /**
    * Called as the box is typed in, so the company can show a typing
    * indicator.
@@ -45,6 +50,15 @@ interface Props {
    * back as a refusal. The control was the only part missing.
    */
   deliverableChoice?: boolean;
+  /**
+   * Upload one attachment's bytes and hand back its stored reference (issue
+   * #1682). Given only where attaching makes sense — the channel and DM
+   * composers — so the paperclip is present exactly when the surface can carry
+   * a file. The composer holds the returned reference as a pending chip and
+   * threads it onto the next `onSend`; the actual upload/verify lives in
+   * `ChatView`.
+   */
+  uploadAttachment?: (file: File) => Promise<AttachmentDto>;
 }
 
 /** The markdown a toolbar button wraps the selection in. */
@@ -70,8 +84,19 @@ export function MessageComposer({
   compact,
   deliverableChoice,
   onTyping,
+  uploadAttachment,
 }: Props) {
   const [draft, setDraft] = useState("");
+  // The single file staged for the next send (issue #1682). v1 carries one
+  // attachment per message, so a fresh pick replaces the last rather than
+  // appending — the wire (`Vec<Attachment>`) already allows more when the UI
+  // grows to it.
+  const [pending, setPending] = useState<AttachmentDto | null>(null);
+  // The upload is in flight: the paperclip spins and Send waits, so a message
+  // cannot post ahead of the bytes it references.
+  const [uploading, setUploading] = useState(false);
+  const [attachError, setAttachError] = useState<string>();
+  const fileInput = useRef<HTMLInputElement>(null);
   // What the NEXT line is for, and only the next one. It starts and resets
   // unselected: an intent is an operator assertion, so no button may claim one
   // until the operator presses it (issue #984). An unmarked message therefore
@@ -86,10 +111,35 @@ export function MessageComposer({
 
   function send() {
     const text = draft.trim();
-    if (!text || disabled) return;
+    // A message must carry text; an attachment rides an operator's words, it is
+    // not a message on its own. Also held back while the upload is mid-flight,
+    // so a send never references bytes that have not landed.
+    if (!text || disabled || uploading) return;
     setDraft("");
-    onSend(text, deliverableChoice ? intent : undefined);
+    onSend(text, deliverableChoice ? intent : undefined, pending ? [pending] : undefined);
     setIntent(undefined);
+    setPending(null);
+    setAttachError(undefined);
+  }
+
+  /** Upload the picked file and stage its reference as the pending chip. */
+  async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Reset the input so re-picking the same file fires `change` again.
+    e.target.value = "";
+    if (!file || !uploadAttachment) return;
+    setUploading(true);
+    setAttachError(undefined);
+    try {
+      const reference = await uploadAttachment(file);
+      setPending(reference);
+    } catch (err) {
+      // The filename is operator content — the message says an upload failed
+      // without echoing what it was called.
+      setAttachError(err instanceof Error ? err.message : "Couldn't attach that file.");
+    } finally {
+      setUploading(false);
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -137,6 +187,35 @@ export function MessageComposer({
               </Button>
             ))}
           </div>
+        )}
+
+        {/* The staged attachment (issue #1682), shown above the box the moment
+            its upload lands and cleared on send or removal. One chip in v1. */}
+        {pending && (
+          <div className="flex items-center gap-2 border-b px-3 py-1.5">
+            <Paperclip className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="min-w-0 truncate text-xs font-medium" title={pending.name}>
+              {pending.name}
+            </span>
+            <span className="shrink-0 text-2xs text-muted-foreground">
+              {formatBytes(pending.size)}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="ml-auto size-6 shrink-0 text-muted-foreground"
+              aria-label={`Remove ${pending.name}`}
+              title="Remove attachment"
+              onClick={() => setPending(null)}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </div>
+        )}
+        {attachError && (
+          <p role="alert" className="border-b px-3 py-1.5 text-2xs text-destructive">
+            {attachError}
+          </p>
         )}
 
         {/* A native textarea rather than the design-system one: the composer
@@ -211,6 +290,37 @@ export function MessageComposer({
           >
             <AtSign className="size-4" />
           </Button>
+          {/* The paperclip (issue #1682), present exactly where attaching makes
+              sense — a composer given an `uploadAttachment`. Born disabled and
+              wired to nothing in the #361 console rebuild; this is where it
+              starts working. */}
+          {uploadAttachment && (
+            <>
+              <input
+                ref={fileInput}
+                type="file"
+                className="hidden"
+                aria-hidden
+                tabIndex={-1}
+                onChange={(e) => void onPickFile(e)}
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 text-muted-foreground"
+                aria-label="Attach a file"
+                title="Attach a file"
+                disabled={disabled || uploading}
+                onClick={() => fileInput.current?.click()}
+              >
+                {uploading ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Paperclip className="size-4" />
+                )}
+              </Button>
+            </>
+          )}
           {!compact && (
             <Button
               variant="ghost"
