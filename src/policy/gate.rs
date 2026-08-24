@@ -580,14 +580,18 @@ impl ManifestApprovalGate {
         self.evaluate_supervised(effect)
     }
 
-    /// The supervised-mode checkpoint taxonomy.
+    /// Evaluates the supervised taxonomy using a captured policy snapshot.
+    ///
+    /// Keeping the cap as an argument prevents a caller that already holds the
+    /// policy read guard from attempting a recursive read of the non-reentrant
+    /// `RwLock`.
+    fn evaluate_supervised_with_policy(policy: &Policy, effect: &Effect) -> PolicyDecision {
+        Self::evaluate_supervised_with_cap(effect, policy.auto_approve_under_usd)
+    }
+
     fn evaluate_supervised(&self, effect: &Effect) -> PolicyDecision {
-        let cap = self
-            .policy
-            .read()
-            .expect("policy lock poisoned")
-            .auto_approve_under_usd;
-        Self::evaluate_supervised_with_cap(effect, cap)
+        let policy = self.policy.read().expect("policy lock poisoned");
+        Self::evaluate_supervised_with_policy(&policy, effect)
     }
 
     fn evaluate_supervised_with_cap(effect: &Effect, cap: Option<f64>) -> PolicyDecision {
@@ -666,15 +670,12 @@ impl ApprovalGate for ManifestApprovalGate {
         }
 
         let mode = policy.mode.clone();
-        drop(policy);
-
-        // 3. mode dispatch. A word with no arm is not a tier — the manifest
-        //    validator rejects anything outside `POLICY_MODES` before a company
-        //    loads — so `None` here means a path that reached a `Policy` without
-        //    validation. It fails safe: require approval.
-        let decision = self
-            .mode_decision(mode.as_str(), effect)
-            .unwrap_or(PolicyDecision::RequireApproval);
+        let decision = match mode.as_str() {
+            "full" => PolicyDecision::Allow,
+            "readonly" => PolicyDecision::RequireApproval,
+            "supervised" | "auto" => Self::evaluate_supervised_with_policy(&policy, effect),
+            _ => PolicyDecision::RequireApproval,
+        };
         Ok(decision)
     }
 

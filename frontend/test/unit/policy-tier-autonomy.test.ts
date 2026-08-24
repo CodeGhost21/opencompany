@@ -142,6 +142,22 @@ describe("the autonomy direction", () => {
     expect(widensSpendCap(10, 10)).toBe(false);
   });
 
+  it("rejects a blank spend cap without sending a policy update", async () => {
+    const { client, put } = makeClient(status("supervised"));
+    await mount(client);
+    const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
+    await type(input, "   ");
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save cap"))!
+        .click();
+    });
+    expect(put).not.toHaveBeenCalled();
+    expect(toasts.error).toHaveBeenCalledWith(
+      "Enter a non-negative amount, or choose no cap.",
+    );
+  });
+
   it("gates the same way the host matcher does", () => {
     expect(gatedBy(["shell"], "shell")).toBe(true);
     expect(gatedBy(["payment"], "payment.send")).toBe(true);
@@ -187,7 +203,9 @@ describe("changing the autonomy tier", () => {
     expect(document.body.textContent).toContain("always-ask list still wins");
 
     await act(async () => {
-      document.querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!.click();
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
       await Promise.resolve();
     });
     expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { mode: "full" });
@@ -323,6 +341,33 @@ describe("resetting to the manifest's policy", () => {
     expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
   });
 
+  it("confirms a reset that loosens the manifest spend cap", async () => {
+    const initial: PolicyStatus = {
+      ...overridden("full", "full"),
+      autoApproveUnderUsd: 10,
+      manifestAutoApproveUnderUsd: 20,
+    };
+    const { client, del } = makeClient(initial);
+    await mount(client);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("manifest's policy"))!
+        .click();
+    });
+    expect(del).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      "restores the manifest's looser spend cap",
+    );
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+    });
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+  });
   it("keeps a reset that tightens the tier to one click", async () => {
     const { client, del } = makeClient(overridden("full", "readonly"));
     await mount(client);

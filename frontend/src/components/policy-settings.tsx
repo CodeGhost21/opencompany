@@ -289,10 +289,10 @@ export function PolicySettings({ client, company }: Props) {
     if (resyncDraft) {
       setDraftAlways(next.alwaysApprove.join(", "));
       setDirty(false);
-      setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
-      setNoSpendCap(next.autoApproveUnderUsd === null);
-      setDraftDeadline((next.approvalTtlHours ?? 24).toString());
     }
+    setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
+    setNoSpendCap(next.autoApproveUnderUsd === null);
+    setDraftDeadline((next.approvalTtlHours ?? 24).toString());
     toast.success(message, { description: next.takesEffect });
   };
 
@@ -565,12 +565,18 @@ export function PolicySettings({ client, company }: Props) {
                             {status.manifestAlwaysApprove.length > 0
                               ? status.manifestAlwaysApprove.join(", ")
                               : "none"}
-                            {removedAlwaysAsk.length > 0 &&
-                              `; ${removedAlwaysAsk.join(", ")} ${
-                                removedAlwaysAsk.length === 1
-                                  ? "stops"
-                                  : "stop"
-                              } always asking for approval`}
+                            {spendCapWidens && (
+                              <>
+                                {removedAlwaysAsk.length > 0 ||
+                                widensAutonomy(
+                                  status.tiers,
+                                  status.mode,
+                                  status.manifestMode,
+                                )
+                                  ? " It also"
+                                  : " This"} restores the manifest's looser spend cap.
+                              </>
+                            )}
                             .
                           </>
                         )}
