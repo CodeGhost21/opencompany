@@ -465,7 +465,11 @@ export function SetupDialog({
               <DialogDescription>{step.hint}</DialogDescription>
             </DialogHeader>
             {phase.step === 0 && inference !== "ready" && (
-              <InferenceNotice unavailable={inference === "unavailable"} onLeave={onLeave} />
+              <InferenceNotice
+                unavailable={inference === "unavailable"}
+                harnessReachable={harnessReachable}
+                onLeave={onLeave}
+              />
             )}
             {phase.step === 0 && replacing && (
               <Alert data-testid="setup-redesign-notice">
