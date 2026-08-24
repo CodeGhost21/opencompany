@@ -348,10 +348,17 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
     // Reported already narrowed by the company grant, so the console can render
     // the three rows as a strictly shrinking chain. A raw union could show a
     // desk "granting" something the company never allowed.
-    let desk_allow = if desk_tools.iter().all(Vec::is_empty) {
-        Vec::new()
-    } else {
+    //
+    // `desk_ceiling_active` is a separate flag rather than `!desk_allow.is_empty()`:
+    // the narrowed list can resolve to empty while a ceiling is still in play
+    // (a desk whose only grant the company's `*` does not confer), and the
+    // console has to keep the desk level as the gate in that case instead of
+    // falling back to the company allow-list.
+    let desk_ceiling_active = !desk_tools.iter().all(Vec::is_empty);
+    let desk_allow = if desk_ceiling_active {
         agent_scoped_grants(company_allow, &desk_refs, &[])
+    } else {
+        Vec::new()
     };
 
     AgentToolsDto {
@@ -359,6 +366,7 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
         requested,
         company_allow: company_allow.to_vec(),
         desk_allow,
+        desk_ceiling_active,
     }
 }
 
