@@ -202,6 +202,7 @@ pub fn router() -> Router<AppState> {
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
+        .merge(deep_trace::router())
         .merge(finance::router())
         .merge(finances::router())
         .merge(usage::router())
