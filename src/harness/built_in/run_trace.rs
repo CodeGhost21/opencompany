@@ -180,7 +180,22 @@ impl RunTraceSink {
                 let mut buffers = self.deep_reasoning.lock().expect("deep reasoning");
                 let buffer = buffers.entry(step_seq).or_default();
                 buffer.push_str(&reasoning);
-                detail.reasoning = Some(buffer.clone());
+                // Each emitted chunk already passed through `bound_detail`, but
+                // the concatenation can still exceed DEEP_REASONING_CHAR_CAP,
+                // and every store trusts the caller's bound. Re-bind the
+                // aggregate so a long reasoning stream cannot grow a row past
+                // the documented 64 KiB bound with `clipped == false`.
+                let mut bounded = crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                    reasoning: Some(buffer.clone()),
+                    ..TurnStepDetail::default()
+                });
+                detail.reasoning = bounded.reasoning.take();
+                detail.clipped |= bounded.clipped;
+                // Cap the accumulator itself: only the first CAP bytes are ever
+                // written, so keeping more in memory serves nothing.
+                if let Some(bounded) = &detail.reasoning {
+                    *buffer = bounded.clone();
+                }
             }
             let record = crate::ports::deep_trace::RunStepDetailRecord {
                 run_id: self.run_id.clone(),
