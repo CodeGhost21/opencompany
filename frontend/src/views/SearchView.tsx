@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Loader2, Search, TriangleAlert } from "lucide-react";
+import { Check, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { clearSearch, getSearch, saveSearch, type SearchStatus } from "@/api/search";
@@ -191,9 +191,7 @@ export function SearchView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto" data-testid="search-view">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div>
-          <h1 className="flex items-center gap-2 text-lg font-medium">
-            <Search className="size-5" /> Search
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Search</h1>
           <p className="text-sm text-muted-foreground">
             Where your teammates look things up. Every teammate that can search
             gets one <code>web_search</code> tool — this decides which index

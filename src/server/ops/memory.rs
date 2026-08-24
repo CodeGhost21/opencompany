@@ -369,15 +369,46 @@ struct MemoryStats {
     /// — for any company whose operator had not hand-authored a fact, however
     /// much memory the agents had accumulated.
     last_updated_at_millis: u64,
-    /// Total agent-accessible context chunks — learned context, task outcomes,
-    /// and the operator-fact mirrors together.
-    agent_chunks: usize,
-    /// Of those chunks, how many are stored task outcomes.
+    /// Operator facts plus the non-mirrored context chunks displayed by the
+    /// Brain. This stays authoritative even when the list caps context rows.
+    total_items: usize,
+    /// Context chunks written by teammates, excluding task outcomes, the
+    /// mirrors of operator-authored facts, and operator-dropped documents.
+    teammate_memory: usize,
+    /// Context chunks produced by an operator-dropped document or link (the
+    /// `document/…` prefix), disjoint from teammate memory — the console
+    /// renders these as their own origin, and counting them as teammate memory
+    /// would attribute operator-supplied knowledge to an agent.
+    document_memory: usize,
+    /// Stored task outcomes, excluding operator-fact mirrors.
     task_outcomes: usize,
 }
 
+/// `GET /memory` — the rows together with the context-truncation metadata for
+/// the SAME read, so the console's "newest N of M" notice never compares the
+/// capped rows against a count taken at a different moment. The metadata
+/// describes the unqueried browse list; a `?query=` request returns search
+/// matches, not "the newest N", so it reports the metadata as not applicable.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryList {
+    items: Vec<MemoryEntry>,
+    /// The non-mirror context chunk population before the 500-row display
+    /// cap — the "M" in the console's "showing the newest N of M" notice.
+    /// Facts are never capped, so they are not counted here. `0` for a
+    /// `?query=` request, whose rows are search matches the metadata does not
+    /// describe.
+    total_context: usize,
+    /// Whether the context rows dropped any to [`MAX_CONTEXT_ENTRIES`], from
+    /// this same read. Always `false` for a `?query=` request.
+    context_truncated: bool,
+}
+
 /// `GET /memory` — everything the company remembers, so the console lists what
-/// the Brain header counts. Two sources, in this order:
+/// the Brain header counts. Returns `items` (the rows) with the context
+/// truncation metadata for the same read (`totalContext`, `contextTruncated`)
+/// so the console's "newest N of M" notice never compares the capped rows
+/// against a count taken at a different moment. Two sources, in this order:
 ///
 /// 1. **Operator facts** (FactStore) — newest-first, editable/deletable.
 /// 2. **Context rows** (ContextStore chunks that are not operator-fact
@@ -394,13 +425,18 @@ struct MemoryStats {
 async fn list_facts(
     company: ScopedCompany,
     Query(ListQuery { query, kind }): Query<ListQuery>,
-) -> Result<Json<Vec<MemoryEntry>>, ApiError> {
+) -> Result<Json<MemoryList>, ApiError> {
     let rows = company
         .runtime
         .facts()
         .list(company.id(), query.as_deref(), kind)
         .await?;
     let mut entries: Vec<MemoryEntry> = rows.into_iter().map(MemoryEntry::from).collect();
+
+    // The non-mirror context chunk population BEFORE the display cap — the "M"
+    // in the console's "newest N of M" notice. Facts are never capped, so this
+    // excludes them; a `?kind=` filter omits context entirely and leaves it 0.
+    let mut total_context = 0;
 
     // A fact-kind filter is inherently facts-only — context chunks carry no
     // `FactKind`, so skip them (and the reads) when one is set.
@@ -410,6 +446,16 @@ async fn list_facts(
         // the reads so a huge context store can't unbound this request.
         let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
         let metas = company.runtime.context.list(company.id(), "").await?;
+        // The truncation metadata describes the unqueried browse list — the
+        // "newest N of M" notice. With `?query=` the rows are search matches,
+        // not "the newest N", so the metadata is not applicable and stays 0/
+        // false rather than implying a search result was omitted by the cap.
+        if query.is_none() {
+            total_context = metas
+                .iter()
+                .filter(|m| !m.label.starts_with(&mirror_prefix))
+                .count();
+        }
         let metas = capped_newest_first(metas, &mirror_prefix, MAX_CONTEXT_ENTRIES);
         // One batched read for every surviving body — how few round trips
         // that really is, is the backend's business (see `peek_many`); what
@@ -458,7 +504,11 @@ async fn list_facts(
         entries.extend(context_entries(chunks, query.as_deref()));
     }
 
-    Ok(Json(entries))
+    Ok(Json(MemoryList {
+        items: entries,
+        total_context,
+        context_truncated: total_context > MAX_CONTEXT_ENTRIES,
+    }))
 }
 
 /// `GET /memory/traces` — the retained, newest-last cycle trace window.
@@ -510,24 +560,40 @@ async fn memory_stats(company: ScopedCompany) -> Result<Json<MemoryStats>, ApiEr
         .await?;
     // `list` is newest-first, so the head carries the freshest timestamp.
     let facts_updated_at_millis = facts.first().map(|f| f.updated_at_millis).unwrap_or(0);
-    // Prefix `""` lists every chunk; the task-outcome prefix narrows to stored
-    // outcomes (a subset of the total).
+    // Count the same disjoint context populations as `context_entries` without
+    // its display cap: operator-fact mirrors duplicate FactStore rows and must
+    // not inflate teammate memory, task outcomes get their own bucket, and
+    // document/link chunks are operator-supplied material with their own
+    // origin (never something a teammate learned).
     let chunks = company.runtime.context.list(company.id(), "").await?;
-    let agent_chunks = chunks.len();
     // Chunks list in insertion order, not freshness order, and a backend that
     // predates the stamp reports `0` — so take the max rather than the head.
     let chunks_stored_at_millis = chunks.iter().map(|m| m.stored_at_millis).max().unwrap_or(0);
-    let task_outcomes = company
-        .runtime
-        .context
-        .list(company.id(), OUTCOME_LABEL_PREFIX)
-        .await?
-        .len();
+    let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
+    let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
+    let document_prefix = format!("{}/", crate::ingest::DOCUMENT_LABEL_PREFIX);
+    let (teammate_memory, task_outcomes, document_memory) = chunks
+        .iter()
+        .filter(|chunk| !chunk.label.starts_with(&mirror_prefix))
+        .fold(
+            (0, 0, 0),
+            |(teammate_memory, task_outcomes, document_memory), chunk| {
+                if chunk.label.starts_with(&outcome_prefix) {
+                    (teammate_memory, task_outcomes + 1, document_memory)
+                } else if chunk.label.starts_with(&document_prefix) {
+                    (teammate_memory, task_outcomes, document_memory + 1)
+                } else {
+                    (teammate_memory + 1, task_outcomes, document_memory)
+                }
+            },
+        );
     Ok(Json(MemoryStats {
         facts: facts.len(),
         facts_updated_at_millis,
         last_updated_at_millis: facts_updated_at_millis.max(chunks_stored_at_millis),
-        agent_chunks,
+        total_items: facts.len() + teammate_memory + task_outcomes + document_memory,
+        teammate_memory,
+        document_memory,
         task_outcomes,
     }))
 }
@@ -1082,6 +1148,27 @@ mod route_tests {
                 bulk_peeks: AtomicUsize::new(0),
             })
         }
+
+        fn with_labels(labels: &[&str]) -> Arc<Self> {
+            let mut metas = Vec::new();
+            let mut bodies = HashMap::new();
+            for (index, label) in labels.iter().enumerate() {
+                let addr = format!("addr-{index:04}");
+                metas.push(ChunkMeta {
+                    addr: ChunkAddr::new(addr.clone()),
+                    label: (*label).to_string(),
+                    len: 0,
+                    stored_at_millis: (index + 1) as u64,
+                });
+                bodies.insert(addr, format!("note {index}"));
+            }
+            Arc::new(Self {
+                metas,
+                bodies,
+                single_peeks: AtomicUsize::new(0),
+                bulk_peeks: AtomicUsize::new(0),
+            })
+        }
     }
 
     #[async_trait]
@@ -1194,9 +1281,17 @@ mod route_tests {
     }
 
     async fn get_memory(state: &AppState) -> (StatusCode, Value) {
+        get_json(state, "/api/v1/company/memory").await
+    }
+
+    async fn get_stats(state: &AppState) -> (StatusCode, Value) {
+        get_json(state, "/api/v1/company/memory/stats").await
+    }
+
+    async fn get_json(state: &AppState, uri: &str) -> (StatusCode, Value) {
         let request = Request::builder()
             .method("GET")
-            .uri("/api/v1/company/memory")
+            .uri(uri)
             .header("cookie", crate::server::test_support::fixed_cookie("acme"))
             .body(Body::empty())
             .unwrap();
@@ -1205,6 +1300,145 @@ mod route_tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    async fn post_json(state: &AppState, uri: &str, body: Value) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn brain_stats_exclude_operator_fact_mirrors_from_the_display_partition() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_labels(&[
+            "agent-memory/ceo/note",
+            "task-outcome/ceo",
+            "operator-fact/fact-123",
+            "document/contract/0",
+        ]);
+        let state = state_over(home.path(), context).await;
+
+        let (created, _) = post_json(
+            &state,
+            "/api/v1/company/memory",
+            serde_json::json!({
+                "kind": "fact",
+                "title": "Operator note",
+                "body": "A durable fact",
+            }),
+        )
+        .await;
+        assert_eq!(created, StatusCode::OK);
+
+        let (status, stats) = get_stats(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["facts"], 1);
+        assert_eq!(stats["teammateMemory"], 1);
+        assert_eq!(stats["taskOutcomes"], 1);
+        assert_eq!(stats["documentMemory"], 1);
+        assert_eq!(stats["totalItems"], 4);
+        assert!(
+            stats.get("agentChunks").is_none(),
+            "the ambiguous all-chunks count must not reach the display"
+        );
+    }
+
+    /// The document-label contract (`ingest::chunk`): a dropped document or
+    /// link is operator-supplied material, so its chunks must never inflate
+    /// teammate memory. One multi-chunk upload is several `document/…` rows;
+    /// they get their own bucket while `totalItems` still counts them.
+    #[tokio::test]
+    async fn brain_stats_keep_document_chunks_out_of_teammate_memory() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_labels(&[
+            "document/contract/0",
+            "document/contract/1",
+            "document/contract/2",
+            "agent-memory/ceo/note",
+        ]);
+        let state = state_over(home.path(), context).await;
+
+        let (status, stats) = get_stats(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["facts"], 0);
+        assert_eq!(stats["teammateMemory"], 1);
+        assert_eq!(stats["documentMemory"], 3);
+        assert_eq!(stats["taskOutcomes"], 0);
+        assert_eq!(
+            stats["totalItems"], 4,
+            "document chunks stay in the display partition, just not under teammate memory"
+        );
+    }
+
+    /// The truncation notice must be decided from ONE server snapshot: the
+    /// list response carries `totalContext`/`contextTruncated` for the same
+    /// read that produced the rows, so the console never compares the capped
+    /// rows against an independently-timed count.
+    #[tokio::test]
+    async fn the_brain_list_reports_its_own_truncation() {
+        let home = tempfile::tempdir().unwrap();
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
+
+        let (status, list) = get_memory(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            list["contextTruncated"], true,
+            "past the 500-row list cap, the list read must say it truncated"
+        );
+        assert_eq!(
+            list["totalContext"], total as u64,
+            "the uncapped context count is the 'M' in the notice, from the same read"
+        );
+        assert_eq!(
+            list["items"].as_array().unwrap().len(),
+            MAX_CONTEXT_ENTRIES,
+            "the rows are capped to the newest 500"
+        );
+
+        // The stats counts are never capped — the display partition still
+        // reports the full store when the list truncates.
+        let (status, stats) = get_stats(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["totalItems"], total as u64);
+    }
+
+    /// A `?query=` request returns search matches, not "the newest N", so the
+    /// truncation metadata is not applicable — it must not claim a search
+    /// result was omitted by the cap, however far past it the store is.
+    #[tokio::test]
+    async fn the_brain_list_omits_truncation_metadata_for_queried_requests() {
+        let home = tempfile::tempdir().unwrap();
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
+
+        let (status, list) = get_json(&state, "/api/v1/company/memory?query=note").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            list["contextTruncated"], false,
+            "a query result is not 'the newest N', so nothing was 'truncated'"
+        );
+        assert_eq!(
+            list["totalContext"], 0,
+            "truncation metadata does not describe queried rows"
+        );
+        assert!(
+            list["items"].as_array().unwrap().len() <= MAX_CONTEXT_ENTRIES,
+            "the query still returns its (capped) matches"
+        );
     }
 
     /// #1488: with more chunks than the cap, the list must keep the NEWEST
@@ -1217,9 +1451,9 @@ mod route_tests {
         let total = MAX_CONTEXT_ENTRIES + 2;
         let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
 
-        let (status, rows) = get_memory(&state).await;
+        let (status, list) = get_memory(&state).await;
         assert_eq!(status, StatusCode::OK);
-        let rows = rows.as_array().expect("a JSON array");
+        let rows = list["items"].as_array().expect("a JSON items array");
         assert_eq!(rows.len(), MAX_CONTEXT_ENTRIES);
         let stamps: Vec<u64> = rows
             .iter()
@@ -1249,9 +1483,9 @@ mod route_tests {
         let context = ScriptedContext::with_chunks(3);
         let state = state_over(home.path(), context.clone()).await;
 
-        let (status, rows) = get_memory(&state).await;
+        let (status, list) = get_memory(&state).await;
         assert_eq!(status, StatusCode::OK);
-        let rows = rows.as_array().expect("a JSON array");
+        let rows = list["items"].as_array().expect("a JSON items array");
         assert_eq!(rows.len(), 3);
         // The bodies really flowed through the bulk read (newest first).
         assert_eq!(rows[0]["title"], "note 3");

@@ -69,14 +69,14 @@ describe("the fullscreen graph's narrow chrome", () => {
 
   it("shrinks and insets both paddles below 900px, then further at 390px", () => {
     render();
-    for (const label of ["Previous department", "Next department"]) {
+    for (const label of ["Previous desk", "Next desk"]) {
       const classes = paddle(label).className;
       expect(classes).toContain("max-[899px]:h-20");
       expect(classes).toContain("max-[899px]:w-10");
       expect(classes).toContain("max-[639px]:h-14");
       expect(classes).toContain("max-[639px]:w-8");
     }
-    expect(paddle("Previous department").className).toContain("max-[899px]:left-3");
-    expect(paddle("Next department").className).toContain("max-[899px]:right-3");
+    expect(paddle("Previous desk").className).toContain("max-[899px]:left-3");
+    expect(paddle("Next desk").className).toContain("max-[899px]:right-3");
   });
 });

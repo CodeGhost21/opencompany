@@ -112,11 +112,6 @@ pub mod publish;
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
 mod publish_turn_test;
-/// Issue #245, agent half: `repo_checkout` / `repo_pr` behind an explicit
-/// `repo` grant — a **confined** working tree cloned out of the host's mirror
-/// (a full object copy, then every reference back to the mirror severed), plus
-/// the per-turn ledger that deletes it again. See [`repo`].
-pub mod repo;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
@@ -233,6 +228,14 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// The company home's MCP store directory — `<home>/mcp`, the same one
+    /// [`McpRuntime`](crate::harness::mcp::McpRuntime) is built over.
+    ///
+    /// Carried because OpenHuman's `mcp_registry_*` tools take a config now
+    /// instead of reading a process global, and the toolbelt has to hand them
+    /// the config that selects *this* company's store. `None` leaves those two
+    /// tools off the belt, which is what a caller with no MCP home should get.
+    pub mcp_home: Option<PathBuf>,
     /// Whether each private agent workspace is initialized as a Git repository
     /// and checkpointed after tool calls. Host-level `[workspace]` config owns
     /// this switch; false preserves the pre-checkpoint behavior exactly.
@@ -567,31 +570,6 @@ pub struct HarnessDeps {
     /// construction site but the production runtime builder) **fails closed**:
     /// no workspace tools are wired and agents behave exactly as before.
     pub workspace: Option<Arc<dyn crate::ports::WorkspaceStore>>,
-    /// Issue #245, agent half — the company's [`RepoManager`], so an agent that
-    /// explicitly grants `repo` can check a bound repository out and read a
-    /// pull request. `None` (the default at every construction site but the
-    /// production runtime builder) **fails closed**: no repository tools are
-    /// wired and agents behave exactly as before.
-    ///
-    /// [`RepoManager`]: crate::runtime::RepoManager
-    pub repos: Option<Arc<crate::runtime::RepoManager>>,
-    /// The company's bound repositories, resolved to **data** before deps
-    /// construction — the `mcp_servers` doctrine, and for the same reason:
-    /// [`build::build_agent`] is synchronous while reading the binding index is
-    /// async, and the tool descriptions name what is bound so a model does not
-    /// have to guess. Empty means nothing is bound, which is also what makes a
-    /// `repo` grant with no bindings wire nothing and warn.
-    pub repo_bindings: Vec<crate::runtime::repo_manager::types::RepoBinding>,
-    /// The shared per-turn ledger of checkouts and diff spills, so the
-    /// [`CheckoutJanitor`](brain::CheckoutJanitor) claimed at each entry point
-    /// can delete them however the turn ends.
-    ///
-    /// Same cheap-shared-handle pattern as [`Self::pending_publishes`], and for
-    /// the same structural reason: the tools are built **once per agent** while
-    /// the deletion boundary is **per turn**. Default is an empty ledger, which
-    /// simply means nothing is ever recorded for deletion — the boot sweep is
-    /// the backstop.
-    pub checkouts: repo::CheckoutLedger,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -1191,21 +1169,6 @@ pub struct HarnessPool {
     /// again to notice it. That was live for both integrations until the tools
     /// were observed missing from an agent whose settings page said "Connected".
     billing_fingerprints: RwLock<HashMap<CompanyId, u64>>,
-    /// Fingerprint of the company's bound-repository set the cached roster was
-    /// built from, keyed by company (issue #245). Drives repository freshness:
-    /// [`ensure`](Self::ensure) re-reads the binding index from the
-    /// [`SecretStore`] on every call and rebuilds the roster whenever it moves —
-    /// so a bind, a credential rotation and a revoke each reach the agent on the
-    /// company's **next** turn with no restart.
-    ///
-    /// All three have to move it, which is why the fingerprint is over
-    /// `(key, token_fingerprint, branches)` rather than over the key alone: a
-    /// rotation changes nothing about *which* repositories exist, and a roster
-    /// that kept a tool description naming a binding whose credential has since
-    /// been revoked would offer an agent a checkout that can no longer fetch.
-    /// With no secret store wired the set is the static
-    /// [`HarnessDeps::repo_bindings`], whose fingerprint never moves.
-    repo_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Fingerprint of the operator skill-delta set the cached roster was built
     /// from, keyed by company (issue #41). Drives skill-delta freshness:
     /// [`ensure`](Self::ensure) re-fetches the deltas from the
@@ -1320,7 +1283,6 @@ impl HarnessPool {
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
             billing_fingerprints: RwLock::new(HashMap::new()),
-            repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
             override_fingerprints: RwLock::new(HashMap::new()),
@@ -1472,15 +1434,6 @@ impl HarnessPool {
             hasher.finish()
         };
 
-        // Re-read + fingerprint the company's bound repositories (issue #245):
-        // one index document, read live, so a bind / rotate / revoke reaches the
-        // agent on the next turn. Only companies that explicitly grant `repo`
-        // touch the store on this axis; everything else resolves to the static
-        // `deps.repo_bindings` (empty at every construction site but the
-        // production builder), whose fingerprint never moves.
-        let repo_bindings = self.resolve_repo_bindings(company, deps).await;
-        let repo_fp = repo_binding_fingerprint(&repo_bindings);
-
         // Re-fetch + fingerprint the operator skill deltas (issue #41) BEFORE the
         // fast-path check. A skills-only change leaves every other axis stable, so
         // unless skills participate in the staleness check the cached roster is
@@ -1521,7 +1474,6 @@ impl HarnessPool {
             let capability_fingerprints = self.capability_fingerprints.read().await;
             let composio_fingerprints = self.composio_fingerprints.read().await;
             let billing_fingerprints = self.billing_fingerprints.read().await;
-            let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
             let override_fingerprints = self.override_fingerprints.read().await;
@@ -1534,7 +1486,6 @@ impl HarnessPool {
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
                 && billing_fingerprints.get(&company.id) == Some(&billing_fp)
-                && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
                 && override_fingerprints.get(&company.id) == Some(&override_fp)
@@ -1571,10 +1522,6 @@ impl HarnessPool {
         // And the company's own search provider, so a key pasted (or cleared) in
         // the console decides what the rebuilt agents search through.
         fresh_deps.tenant_search = tenant_search_config;
-        // And the freshly-read bindings (issue #245), so a repository bound or
-        // revoked in the console is what the rebuilt agents' tools resolve
-        // against — including the descriptions that name what is bound.
-        fresh_deps.repo_bindings = repo_bindings;
         // Same treatment for the overlay-agent set: `company` may be a stale
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
@@ -1647,10 +1594,6 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), billing_fp);
-        self.repo_fingerprints
-            .write()
-            .await
-            .insert(company.id.clone(), repo_fp);
         self.skill_fingerprints
             .write()
             .await
@@ -1761,7 +1704,7 @@ impl HarnessPool {
     ///
     /// A transient **read error** keeps that connection too, with a warning,
     /// rather than un-wiring the billing tools — the same direction
-    /// [`Self::resolve_repo_bindings`] and [`Self::resolve_effective_mcp`]
+    /// [`Self::resolve_effective_mcp`]
     /// degrade in, and the safe one here for a specific reason: a stale
     /// Chargebee credential is refused by Chargebee, which the agent surfaces as
     /// a tool error it can report, whereas a tool that has vanished is invisible
@@ -1885,41 +1828,6 @@ impl HarnessPool {
                      connection: {err}"
                 );
                 deps.paypal.clone()
-            }
-        }
-    }
-
-    /// Re-reads the company's bound repositories (issue #245) from the
-    /// [`RepoManager`](crate::runtime::RepoManager), so a bind, a credential
-    /// rotation or a revoke reaches the roster on the next turn.
-    ///
-    /// Only companies that **explicitly** grant `repo` read at all; everything
-    /// else answers empty without touching the store, mirroring
-    /// [`Self::resolve_composio`]. A transient read error degrades to the
-    /// boot-resolved [`HarnessDeps::repo_bindings`] with a warning rather than
-    /// dropping an agent's repository tools mid-session — the same direction
-    /// [`Self::resolve_effective_mcp`] degrades in, and the safe one: a stale
-    /// binding list still resolves against real bindings, while an empty one
-    /// un-wires the tools entirely.
-    async fn resolve_repo_bindings(
-        &self,
-        company: &CompanyRecord,
-        deps: &HarnessDeps,
-    ) -> Vec<crate::runtime::repo_manager::types::RepoBinding> {
-        if !crate::company::grants_repo_explicit(&company.manifest.tools.allow) {
-            return Vec::new();
-        }
-        let Some(repos) = deps.repos.as_ref() else {
-            return deps.repo_bindings.clone();
-        };
-        match repos.list().await {
-            Ok(bindings) => bindings,
-            Err(err) => {
-                tracing::warn!(
-                    company = %company.id,
-                    "[repo] could not read the repository bindings; keeping the last known set: {err}"
-                );
-                deps.repo_bindings.clone()
             }
         }
     }
@@ -2086,14 +1994,6 @@ impl HarnessPool {
             .await
             .get(company)
             .copied()
-    }
-
-    /// The current bound-repository fingerprint for a company (test-only), so a
-    /// bind / rotate / revoke freshness test can assert the roster was actually
-    /// rebuilt rather than inferring it (issue #245).
-    #[cfg(test)]
-    pub async fn repo_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
-        self.repo_fingerprints.read().await.get(company).copied()
     }
 
     /// The current skill-delta fingerprint for a company (test-only), so a
@@ -3127,37 +3027,6 @@ fn skill_delta_fingerprint(deltas: &[SkillState]) -> u64 {
 /// Over `(key, token_fingerprint, branches)`, sorted by key, because those are
 /// exactly the three things a rebuild has to notice:
 ///
-/// * **key** — a bind adds one, a revoke removes one, and either changes what
-///   `repo_checkout` can resolve and what its description names;
-/// * **token fingerprint** — a rotation leaves the key alone, and a *revoked*
-///   credential blanks it while the key survives, so keying on the set of
-///   repositories would leave an agent holding a tool over a binding that can no
-///   longer fetch;
-/// * **branches** — the set a checkout may name, and the only other field the
-///   tools read.
-///
-/// Deliberately not `size_bytes` or `last_fetched_millis`: both move on every
-/// fetch, and a fetch is something the agent's own tool does — folding them in
-/// would rebuild the roster after every checkout, for no change an agent can
-/// observe.
-fn repo_binding_fingerprint(bindings: &[crate::runtime::repo_manager::types::RepoBinding]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut ordered: Vec<&crate::runtime::repo_manager::types::RepoBinding> =
-        bindings.iter().collect();
-    ordered.sort_by(|a, b| a.key.cmp(&b.key));
-
-    let mut hasher = DefaultHasher::new();
-    ordered.len().hash(&mut hasher);
-    for binding in ordered {
-        binding.key.hash(&mut hasher);
-        binding.token_fingerprint.hash(&mut hasher);
-        binding.branches.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
 /// Build every roster agent for a company: every manifest `[[agent]]`, plus
 /// every operator- or orchestrator-added [`OverlayAgent`] (issue #71 — Active
 /// Runtime Teammates) that does not collide with a manifest agent id.
@@ -3259,6 +3128,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the per-server read-only MCP declaration, so a
             // server-declared read-only bridge call does not park under `auto`.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(workspace) = deps.workspace.as_ref() {
+            agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
+        }
         // Issue #304: give the policy something to measure `budget_usd_daily`
         // against. Only wired when the host has a meter — without one the cap
         // arm stays inert and warns once, rather than parking every priced call
@@ -3332,6 +3204,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the same per-server read-only MCP declaration the
             // manifest agents get — an overlay teammate calls the same servers.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(workspace) = deps.workspace.as_ref() {
+            agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
+        }
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
@@ -3449,6 +3324,7 @@ pub(crate) fn workflow_wiring_deps(
         store: runtime.store.clone(),
         meter,
         workspace_root: std::env::temp_dir(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: std::env::temp_dir(),
         model_override: None,
@@ -3489,9 +3365,6 @@ pub(crate) fn workflow_wiring_deps(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: repo::CheckoutLedger::default(),
     }
 }
 
@@ -4032,6 +3905,7 @@ description = "Builds the product."
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
+                mcp_home: None,
                 workspace_git_enabled: false,
                 audit_root: dir.path().to_path_buf(),
                 model_override: None,
@@ -4071,9 +3945,6 @@ description = "Builds the product."
                 search: None,
                 tenant_search: None,
                 workspace: None,
-                repos: None,
-                repo_bindings: Vec::new(),
-                checkouts: crate::harness::repo::CheckoutLedger::default(),
             },
             store,
             meter,
@@ -4247,6 +4118,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -4286,9 +4158,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
 
         let roster = build_roster(&record(), &deps, &[], &HashMap::new())
@@ -5015,6 +4884,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5054,9 +4924,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -5203,6 +5070,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5242,9 +5110,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -5310,184 +5175,6 @@ description = "Builds the product."
     }
 
     // --- Bound-repository freshness (issue #245) ----------------------------
-
-    /// A bind, a credential **rotation** and a revoke each rebuild the roster on
-    /// the company's next turn, with no restart.
-    ///
-    /// All three are asserted because they fail differently, and the middle one
-    /// is the reason the fingerprint is over `(key, token_fingerprint,
-    /// branches)` rather than over the set of keys. A rotation changes nothing
-    /// about *which* repositories exist; a revoke blanks a credential while the
-    /// key survives for the moment before the entry is dropped. A roster keyed
-    /// on the key set alone holds through both, and an agent is left holding a
-    /// tool over a binding that can no longer fetch.
-    ///
-    /// The index is written straight into the live secret store rather than
-    /// through `bind`, because what is under test is the *staleness gate*, and
-    /// binding for real would drag a `git` fixture and a network-shaped code
-    /// path into a test about a hash.
-    #[tokio::test]
-    async fn ensure_rebuilds_when_a_repository_is_bound_rotated_or_revoked() {
-        use crate::runtime::repo_manager::types::RepoBinding;
-
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
-        let dir = tempfile::tempdir().unwrap();
-        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
-        deps.secrets = Some(secrets.clone());
-        deps.repos = Some(Arc::new(crate::runtime::RepoManager::new(
-            CompanyId::new("acme"),
-            dir.path().join("repos"),
-            secrets.clone(),
-        )));
-
-        // The grant is what opens this axis at all: a company that does not
-        // explicitly grant `repo` never reads the index, so its fingerprint can
-        // never move. That is the fast path every other company stays on.
-        let mut rec = record();
-        rec.manifest.tools.allow = vec!["repo".to_string()];
-
-        let pool = HarnessPool::new();
-        let write_index = |bindings: Vec<RepoBinding>| {
-            let secrets = secrets.clone();
-            async move {
-                let json = serde_json::to_string(&serde_json::json!({ "bindings": bindings }))
-                    .expect("index json");
-                secrets
-                    .set(
-                        &CompanyId::new("acme"),
-                        crate::runtime::repo_manager::REPO_INDEX_KEY,
-                        crate::ports::types::SecretValue(json),
-                    )
-                    .await
-                    .expect("write index");
-            }
-        };
-        let binding = |fingerprint: &str| RepoBinding {
-            key: "acme-widgets-000000000000".to_string(),
-            url: "https://github.com/acme/widgets".to_string(),
-            owner: "acme".to_string(),
-            repo: "widgets".to_string(),
-            branches: vec!["main".to_string()],
-            token_fingerprint: fingerprint.to_string(),
-            last_fetched_millis: None,
-            size_bytes: 0,
-            bound_at_millis: 1,
-            can_push: None,
-        };
-
-        pool.ensure(&rec, &deps).await.expect("first ensure");
-        let empty = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-
-        // Stability first, so every change assertion below cannot pass by
-        // coincidence.
-        pool.ensure(&rec, &deps).await.expect("redundant ensure");
-        assert_eq!(
-            pool.repo_fingerprint_of(&rec.id).await,
-            Some(empty),
-            "an unchanged binding set must not move the fingerprint"
-        );
-
-        // Bind.
-        write_index(vec![binding("0f1e2d3c4b5a")]).await;
-        pool.ensure(&rec, &deps).await.expect("post-bind ensure");
-        let bound = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-        assert_ne!(empty, bound, "a bind must move the staleness fingerprint");
-
-        // Rotate: same repository, same branches, new credential.
-        write_index(vec![binding("aaaaaaaaaaaa")]).await;
-        pool.ensure(&rec, &deps).await.expect("post-rotate ensure");
-        let rotated = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-        assert_ne!(
-            bound, rotated,
-            "a credential rotation must move the fingerprint even though the \
-             repository set is identical"
-        );
-
-        // Revoke.
-        write_index(Vec::new()).await;
-        pool.ensure(&rec, &deps).await.expect("post-revoke ensure");
-        let revoked = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-        assert_ne!(rotated, revoked, "a revoke must move the fingerprint");
-        assert_eq!(revoked, empty, "and must land back on the empty set");
-        assert_eq!(
-            pool.resident_companies().await,
-            1,
-            "same company, rebuilt in place — not a new residency"
-        );
-    }
-
-    /// A company that does not explicitly grant `repo` never reads the binding
-    /// index, so this axis is inert for it — the fast path every company that
-    /// does not use the feature stays on.
-    #[tokio::test]
-    async fn a_company_without_the_repo_grant_never_moves_on_this_axis() {
-        use crate::runtime::repo_manager::types::RepoBinding;
-
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
-        let dir = tempfile::tempdir().unwrap();
-        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
-        deps.secrets = Some(secrets.clone());
-        deps.repos = Some(Arc::new(crate::runtime::RepoManager::new(
-            CompanyId::new("acme"),
-            dir.path().join("repos"),
-            secrets.clone(),
-        )));
-
-        // A wildcard, deliberately: `*` does not confer `repo`, so even a
-        // broadly-permissioned company stays off this axis.
-        let mut rec = record();
-        rec.manifest.tools.allow = vec!["*".to_string()];
-
-        let pool = HarnessPool::new();
-        pool.ensure(&rec, &deps).await.expect("first ensure");
-        let before = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-
-        let json = serde_json::to_string(&serde_json::json!({
-            "bindings": [RepoBinding {
-                key: "acme-widgets-000000000000".to_string(),
-                url: "https://github.com/acme/widgets".to_string(),
-                owner: "acme".to_string(),
-                repo: "widgets".to_string(),
-                branches: vec!["main".to_string()],
-                token_fingerprint: "0f1e2d3c4b5a".to_string(),
-                last_fetched_millis: None,
-                size_bytes: 0,
-                bound_at_millis: 1,
-                can_push: None,
-            }]
-        }))
-        .unwrap();
-        secrets
-            .set(
-                &CompanyId::new("acme"),
-                crate::runtime::repo_manager::REPO_INDEX_KEY,
-                crate::ports::types::SecretValue(json),
-            )
-            .await
-            .unwrap();
-
-        pool.ensure(&rec, &deps).await.expect("post-bind ensure");
-        assert_eq!(
-            pool.repo_fingerprint_of(&rec.id).await,
-            Some(before),
-            "an ungranted company must not read the index, let alone rebuild on it"
-        );
-    }
 
     // --- Billing-credential freshness (issues #788, #789) -------------------
 
@@ -5877,6 +5564,7 @@ description = "Builds the product."
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5916,9 +5604,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
 
@@ -6062,6 +5747,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -6101,9 +5787,6 @@ description = "Sets direction."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
@@ -6223,6 +5906,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -6262,9 +5946,6 @@ description = "Sets direction."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 
@@ -7113,37 +6794,6 @@ budget_usd_daily = 0.0
                 crate::company::credentials::Credential::from_value("managed-platform-token"),
                 crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             ));
-            // Issue #245: a repository manager AND a binding, because the tools
-            // are gated on both — with a manager and nothing bound the belt
-            // would be missing `repo_checkout` / `repo_pr` and this check would
-            // pass while never having looked at them, which is the exact way
-            // `describe_skill` stayed invisible here while parking in
-            // production.
-            // Issue #752 added a fourth gate: a backend that keeps the
-            // credential off this container's disk. Declared here for the same
-            // reason the binding below is — without it the belt would be
-            // missing `repo_checkout` / `repo_pr` and this check would pass
-            // while never having looked at them.
-            deps.repos = Some(Arc::new(
-                crate::runtime::RepoManager::new(
-                    CompanyId::new("acme"),
-                    dir.path().join("repos"),
-                    Arc::new(crate::store::FsSecretStore::new(dir.path())),
-                )
-                .with_storage_kind(crate::store::StorageKind::Mongodb),
-            ));
-            deps.repo_bindings = vec![crate::runtime::repo_manager::types::RepoBinding {
-                key: "acme-widgets-000000000000".to_string(),
-                url: "https://github.com/acme/widgets".to_string(),
-                owner: "acme".to_string(),
-                repo: "widgets".to_string(),
-                branches: vec!["main".to_string()],
-                token_fingerprint: "0f1e2d3c4b5a".to_string(),
-                last_fetched_millis: None,
-                size_bytes: 0,
-                bound_at_millis: 1,
-                can_push: None,
-            }];
             // A registered MCP server is what puts `mcp_list_servers`,
             // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
             // tools issue #443 is about. Without one the coverage check would
@@ -7243,7 +6893,7 @@ budget_usd_daily = 0.0
             (&["*"][..], false, true),
             (&["*"][..], true, true),
             (
-                &["workspace", "search", "media", "composio", "repo"][..],
+                &["workspace", "search", "media", "composio"][..],
                 false,
                 true,
             ),
@@ -7258,7 +6908,6 @@ budget_usd_daily = 0.0
             "workspace_write",
             "file_read",
             "describe_skill",
-            "repo_checkout",
             #[cfg(feature = "mcp")]
             "mcp_list_servers",
             #[cfg(feature = "mcp")]

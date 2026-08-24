@@ -165,7 +165,7 @@ for (const theme of ["light", "dark"] as const) {
   test(`the knowledge graph fills the card without spilling out of it (${theme})`, async ({
     page,
   }) => {
-    await open(page, theme, "/#/overview");
+    await open(page, theme, "/#/company/graph");
 
     const graph = await page.evaluate(() => {
       const card = document.querySelector('[data-testid="content-surface"]')!;
