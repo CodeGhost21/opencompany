@@ -551,6 +551,56 @@ async fn evict_older_than_archives_everything_it_removes() {
 }
 
 #[tokio::test]
+async fn evict_older_than_bounds_the_archive_at_the_retention_limit() {
+    // `OlderThan` has no `n` of its own to bound the archive by, so eviction
+    // prunes it to the retention limit — the same window the live set is held
+    // to. Without this, an operator-sized older-than sweep would move the whole
+    // lifetime into the archive and grow storage without bound, and
+    // `GET /memory/archives` would be a bounded read only by the route's
+    // sort-and-tail rather than by construction.
+    let mem = engine();
+    let id = acme_id();
+    let memory = mem.memory();
+    let limit = crate::runtime::maintenance::TRACE_RETENTION_LIMIT;
+    let n = limit + 10;
+    for i in 0..n {
+        memory
+            .save_trace(
+                &id,
+                CompressedTrace {
+                    cycle_id: format!("c{i}"),
+                    summary: "s".into(),
+                    at_millis: 100 + i as u64,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let removed = memory
+        .evict(
+            &id,
+            EvictionPolicy::OlderThan {
+                before_millis: u64::MAX,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed, n as u64, "the whole live window is evicted");
+    assert!(
+        memory
+            .recent_traces(&id, usize::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        mem.archived_traces(&id).await.unwrap().len(),
+        limit,
+        "an older-than sweep cannot grow the archive past the retention limit"
+    );
+}
+
+#[tokio::test]
 async fn task_results_do_not_appear_among_traces() {
     let mem = engine();
     let id = acme_id();
