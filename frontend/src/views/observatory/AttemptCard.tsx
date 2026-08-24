@@ -32,12 +32,18 @@ function opensItself(run: ObservatoryRun): boolean {
 interface Props {
   run: ObservatoryRun;
   nowMs: number;
-  /** Scroll target: the step named by the address, when this attempt owns it. */
+  /** The attempt a deep link names, when this card owns it. */
+  turn?: string | null;
+  /**
+   * The step a deep link names, scrolled to within the named attempt. Carried
+   * only by the card `turn` matches — a `step` must never open every card.
+   */
   focusStep?: number | null;
 }
 
-export function AttemptCard({ run, nowMs, focusStep }: Props) {
-  const [open, setOpen] = useState(() => opensItself(run) || focusStep !== null);
+export function AttemptCard({ run, nowMs, turn, focusStep }: Props) {
+  const focused = turn === run.id;
+  const [open, setOpen] = useState(() => opensItself(run) || focused);
   const state = runState(run);
   const elapsed =
     (run.finishedAtMillis ?? nowMs) - (run.startedAtMillis ?? run.createdAtMillis);
