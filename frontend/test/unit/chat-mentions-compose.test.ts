@@ -840,6 +840,25 @@ describe("resolvableMentions", () => {
     ).toEqual([]);
   });
 
+  /**
+   * An unequal backtick run is not code, so a mention inside it that *opens*
+   * must resolve: `` `code @engineer`` `` (one opener, two trailing) is
+   * rendered with `@engineer` visible, and the host's fallback extraction
+   * resolves it — the console must not blank the span and send an explicit
+   * empty list that suppresses the host's read.
+   */
+  it("resolves a mention inside an unequal, unclosed backtick run", () => {
+    const out = resolvableMentions("`code @engineer``", directory);
+    expect(out.map((m) => m.text)).toEqual(["@engineer"]);
+    expect(out[0].target).toEqual({ kind: "agent", id: "engineer" });
+  });
+
+  it("still does not resolve an @ immediately after a backtick", () => {
+    // `@` after a backtick is not a mention-opening position on either side,
+    // matching the host's `opens_mention` and the `jane@acme.com` rule.
+    expect(resolvableMentions("`@engineer``", directory)).toEqual([]);
+  });
+
   it("does not resolve an @ inside another token", () => {
     expect(resolvableMentions("jane@engineer", directory)).toEqual([]);
     expect(resolvableMentions("/docs/@eng", directory)).toEqual([]);
