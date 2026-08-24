@@ -1367,16 +1367,16 @@ mod test {
     fn gif_animation_cost_counts_every_frame() {
         assert_eq!(
             gif_animation_cost(&gif_animated((100, 100), &[(100, 100), (50, 50)])),
-            Some(12_500)
+            Ok(Some(12_500))
         );
         // Frames may be sub-rectangles of the screen; each one is still paid for.
         assert_eq!(
             gif_animation_cost(&gif_animated((4096, 4096), &[(128, 128)])),
-            Some(16_384)
+            Ok(Some(16_384))
         );
         // Not a GIF, and a GIF with no Image Descriptor: nothing to count.
-        assert_eq!(gif_animation_cost(PNG_SIGNATURE), None);
-        assert_eq!(gif_animation_cost(&gif_animated((16, 16), &[])), None);
+        assert_eq!(gif_animation_cost(PNG_SIGNATURE), Ok(None));
+        assert_eq!(gif_animation_cost(&gif_animated((16, 16), &[])), Ok(None));
     }
 
     /// A global color table is skipped only when the descriptor's flag says one
