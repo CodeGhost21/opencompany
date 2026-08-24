@@ -750,15 +750,17 @@ export function ChatView({
       // A company switch while the POST was in flight invalidates the
       // result: the reply belongs to the old company and must not
       // repopulate the new company's (just-cleared) transcript. Skip the
-      // transcript writes; route the shell's send bracket by the answer's
-      // own shape so a detached turn keeps its held frame — the reply is
-      // durably journaled in the old company's history and rehydrates when
-      // the operator returns.
+      // transcript writes and fold nothing into the active scope —
+      // `onSendStale` releases the shell's send bracket (echo suppression
+      // and held frames) without arming a working row or rendering through
+      // the current company's routing, while the reply stays durably
+      // journaled in the old company's history and rehydrates when the
+      // operator returns (issue #983/#1000). `outcome` stays non-resolved
+      // so the `finally` bracket is a no-op: no reply is on screen in the
+      // current company, so neither `onSendEnd` nor `onSendFailed` may run.
       if (companyRef.current !== company) {
-        if (isDetachedChat(answer)) {
-          outcome = "detached";
-          if (chatId) onSendDetached?.(chatId, answer.turnId);
-        }
+        outcome = "detached";
+        if (chatId) onSendStale?.(chatId);
         return;
       }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
