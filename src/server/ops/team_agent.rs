@@ -1281,6 +1281,50 @@ members = ["writer", "ceo"]
         );
     }
 
+    /// A desk ceiling can resolve to an **empty** narrowed list while still
+    /// being active: `media` is an explicit opt-in that a bare `*` does not
+    /// confer, so a desk naming only `media` under a company that allows `*`
+    /// narrows everything away. The DTO must report the ceiling active with an
+    /// empty `deskAllow` — a console keying on `deskAllow`'s emptiness would
+    /// substitute `companyAllow` and promise grants the host drops.
+    #[tokio::test]
+    async fn an_active_desk_ceiling_that_resolves_empty_is_reported_active() {
+        let manifest = r#"
+[company]
+name = "Acme"
+[policy]
+mode = "full"
+[tools]
+allow = ["*"]
+
+[[agent]]
+id = "writer"
+role = "Writer"
+
+[[group_chat]]
+id = "creative"
+name = "Creative desk"
+members = ["writer"]
+tools = ["media"]
+"#;
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), manifest).await;
+
+        let (_, writer) = get_agent(&state, "writer").await;
+        assert!(
+            strings(&writer["tools"]["deskAllow"]).is_empty(),
+            "media under a bare * is an explicit opt-in that narrows to nothing: {writer}"
+        );
+        assert_eq!(
+            writer["tools"]["deskCeilingActive"], true,
+            "the desk states a ceiling even though the narrowed list is empty: {writer}"
+        );
+        assert!(
+            strings(&writer["tools"]["effective"]).is_empty(),
+            "with an empty ceiling the standard grant holds nothing: {writer}"
+        );
+    }
+
     /// A roster that tags nobody still has an orchestrator: the first declared
     /// agent. A console that read `tier` alone would call every teammate on such
     /// a company a worker, and be wrong about all of them.
