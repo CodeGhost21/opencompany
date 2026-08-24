@@ -61,6 +61,16 @@ pub(crate) async fn state_with_manifest(
     home: &std::path::Path,
     manifest: CompanyManifest,
 ) -> AppState {
+    state_with_builder(home, manifest, |builder| builder).await
+}
+
+/// [`state_with_manifest`] with a runtime-builder override, for a test that
+/// swaps a store the runtime owns — e.g. a counting deep-trace store.
+async fn state_with_builder(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    override_runtime: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
+) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -85,8 +95,7 @@ pub(crate) async fn state_with_manifest(
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
-        .with_id(id.clone())
+    let runtime = override_runtime(RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone()))
         .build()
         .await
         .unwrap();
