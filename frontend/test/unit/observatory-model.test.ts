@@ -122,9 +122,12 @@ describe("totals", () => {
     expect(totals([live], NOW).steps).toBe(2);
   });
 
-  it("includes cached input in the token total", () => {
+  it("does not add cached input to the token total", () => {
+    // `cachedInputTokens` is a subset of `inputTokens` (providers report it
+    // as prompt_tokens_details.cached_tokens), so the total is input + output
+    // and cached rides as its own diagnostic column.
     const t = totals([run()], NOW);
-    expect(t.tokens).toBe(17);
+    expect(t.tokens).toBe(15);
   });
 
   it("runs the clock to now for an unfinished attempt", () => {
