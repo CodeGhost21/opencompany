@@ -156,6 +156,21 @@ async fn providers(state: &AppState) -> serde_json::Value {
     body_json(response).await
 }
 
+/// `providers`, with the console's own `?…` query appended to the request.
+async fn providers_from(state: &AppState, query: &str) -> serde_json::Value {
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/companies/acme/auth/hub?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    body_json(response).await
+}
+
 // ---------------------------------------------------------------------------
 // The buttons
 // ---------------------------------------------------------------------------
@@ -202,6 +217,46 @@ async fn the_start_url_points_at_the_hub_and_returns_to_this_console() {
     // Encoded as one value: unescaped, the console's own `?company=` would be
     // read by the hub as one of its own query parameters.
     assert!(!start.contains("redirectUri=http://"));
+}
+
+#[tokio::test]
+async fn a_setup_handoff_asks_the_hub_to_return_to_the_setup_destination() {
+    // A dead setup link that falls back to the form and continues through an
+    // ecosystem button has to arrive on the same roster the link promised. The
+    // destination rides in the return URI as a query parameter (`&from=setup`):
+    // the console's own fragment cannot cross the OAuth round trip — the hub
+    // appends `token=…&key=auth` to whatever it was given, and anything after a
+    // `#` there would swallow them.
+    let home = home();
+    let state = state_with(home.path(), Some(Arc::new(MockHubIdentityExchange::new()))).await;
+
+    let body = providers_from(&state, "from=setup").await;
+    let start = body["providers"][0]["startUrl"].as_str().unwrap();
+
+    assert!(
+        start.ends_with(
+            "redirectUri=http%3A%2F%2F127.0.0.1%3A8080%2F%3Fcompany%3Dacme%26from%3Dsetup"
+        ),
+        "the redirect must carry the setup destination: {start}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_from_is_dropped_not_obeyed() {
+    // `from` rides the return URI through an external service and back into the
+    // address bar, so a value that could escape it — a fragment that would
+    // capture the hub's token, say — must be ignored, and the buttons must
+    // still come back.
+    let home = home();
+    let state = state_with(home.path(), Some(Arc::new(MockHubIdentityExchange::new()))).await;
+
+    let body = providers_from(&state, "from=https%3A%2F%2Fevil.example%0A").await;
+    let start = body["providers"][0]["startUrl"].as_str().unwrap();
+
+    assert!(
+        start.ends_with("redirectUri=http%3A%2F%2F127.0.0.1%3A8080%2F%3Fcompany%3Dacme"),
+        "the malformed destination must be dropped: {start}"
+    );
 }
 
 #[tokio::test]
