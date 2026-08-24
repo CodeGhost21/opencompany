@@ -230,6 +230,37 @@ pub struct CycleRunner<'a> {
     rt: &'a CompanyRuntime,
 }
 
+/// The single agent this cycle is addressed to, if there is exactly one.
+///
+/// `None` means "touches the whole company" and yields the company-wide
+/// [`serial`](crate::company::runtime::CompanyRuntime::serial) lock. That is the
+/// safe side: better to serialize a cycle that could have run beside another
+/// than to let two turns that write each other's state overlap.
+///
+/// A batch naming two different agents is deliberately whole-company — that one
+/// cycle runs both turns, so it must serialize against each of them.
+fn single_agent(events: &[(Option<EventSeq>, CompanyEvent)]) -> Option<String> {
+    let mut found: Option<&str> = None;
+    for (_, event) in events {
+        let chat = match event {
+            CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref(),
+            // Any other event kind may touch the whole company and so takes the
+            // wide lock. If a second per-agent event kind is ever added, it
+            // belongs here explicitly.
+            _ => return None,
+        };
+        // A message with no `chat` is routed to the orchestrator, which may
+        // drive the whole company.
+        let name = chat?;
+        match found {
+            None => found = Some(name),
+            Some(prev) if prev == name => {}
+            Some(_) => return None,
+        }
+    }
+    found.map(str::to_owned)
+}
+
 impl<'a> CycleRunner<'a> {
     /// Binds a runner to a runtime.
     pub fn new(rt: &'a CompanyRuntime) -> Self {
@@ -337,7 +368,36 @@ impl<'a> CycleRunner<'a> {
             );
         }
 
-        let guard = self.rt.serial.lock().await;
+        // Which agent is this cycle addressed to?
+        //
+        // If it is exactly one, take only that agent's slot so two operators
+        // talking to two different agents run side by side. If the cycle touches
+        // the whole company (a scheduler tick, an unaddressed message routed to
+        // the orchestrator, or a batch naming more than one agent), take
+        // `serial` and serialize against everything — including every in-flight
+        // agent turn.
+        //
+        // The per-agent slot is looked up (or created) under a short-lived lock
+        // on the map, which is released immediately: holding the map for the
+        // whole turn would reintroduce exactly the serialization this lifts. The
+        // guard chosen below outlives the bracket close, so neither lock can be
+        // released before the critical section it describes ends.
+        // Both branches yield the same guard type — an owned guard over an
+        // `Arc<tokio::sync::Mutex<()>>` — so the choice of which lock to hold does not
+        // leak into the rest of this function.
+        let guard = match single_agent(&events) {
+            Some(agent) => {
+                let slot = {
+                    let mut slots = self.rt.per_agent.lock().await;
+                    slots
+                        .entry(agent)
+                        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                        .clone()
+                };
+                slot.lock_owned().await
+            }
+            None => self.rt.serial.clone().lock_owned().await,
+        };
         let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
@@ -1398,6 +1458,7 @@ approval.]"
                 text: "This approval was already resolved.".to_string(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
                 message_id: None,
             }],
             executed_effects: Vec::new(),
@@ -1429,6 +1490,7 @@ approval.]"
                     .to_string(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
                 message_id: None,
             }],
             executed_effects: Vec::new(),
@@ -1696,6 +1758,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                         text: text.to_string(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     })
                     .await?;
                 break;
@@ -2772,6 +2835,56 @@ impl CycleHost for CycleHostImpl<'_> {
 mod test {
     use super::*;
 
+    /// `single_agent` picks an agent slot only when the batch is one addressed
+    /// operator message, and falls back to the whole-company lock otherwise —
+    /// the invariant the per-agent lock leans on (issue: parallel agent turns).
+    #[test]
+    fn single_agent_picks_one_addressee_and_falls_back_otherwise() {
+        fn op(chat: Option<&str>) -> (Option<EventSeq>, CompanyEvent) {
+            (
+                None,
+                CompanyEvent::OperatorMessage {
+                    text: "hi".to_string(),
+                    by: None,
+                    chat: chat.map(str::to_string),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                },
+            )
+        }
+
+        // One message addressed to one agent -> that agent's slot.
+        assert_eq!(
+            single_agent(&[op(Some("frits"))]),
+            Some("frits".to_string())
+        );
+        // Several messages, all the same agent -> still that agent's slot.
+        assert_eq!(
+            single_agent(&[op(Some("frits")), op(Some("frits"))]),
+            Some("frits".to_string())
+        );
+        // Two different agents in one batch -> whole company.
+        assert_eq!(single_agent(&[op(Some("frits")), op(Some("sjaan"))]), None);
+        // Unaddressed message (routed to the orchestrator) -> whole company.
+        assert_eq!(single_agent(&[op(None)]), None);
+        // A non-operator event in the batch -> whole company.
+        assert_eq!(
+            single_agent(&[(
+                None,
+                CompanyEvent::TurnStarted {
+                    turn_id: "t1".to_string(),
+                    chat_id: "frits".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )]),
+            None
+        );
+        // Empty batch -> whole company.
+        assert_eq!(single_agent(&[]), None);
+    }
+
     /// Issue #845: a `workflow` message reaches the brain carrying the builder
     /// briefing, and nothing else does.
     ///
@@ -3020,6 +3133,7 @@ mod test {
                         text: format!("handled: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -3054,6 +3168,7 @@ mod test {
                         text: format!("that needs your approval: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -3084,6 +3199,7 @@ mod test {
                         text: "orchestrator".into(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     },
                     OutboundMessage {
                         message_id: None,
@@ -3096,6 +3212,7 @@ mod test {
                         reply_to: Some(ReplyTo {
                             chat_id: "strategy".into(),
                         }),
+                        mentions: Vec::new(),
                     },
                 ],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "delegating cycle")],
@@ -3199,6 +3316,7 @@ mod test {
                     text: "settled".into(),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 }],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "settling cycle")],
                 ledger_deltas: Vec::new(),
@@ -4958,6 +5076,7 @@ mod test {
                     text: "thought about it".into(),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 }],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "metered cycle")],
                 ledger_deltas: Vec::new(),

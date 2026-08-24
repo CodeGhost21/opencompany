@@ -68,6 +68,21 @@ fn mongo_err(e: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("mongodb error: {e}"))
 }
 
+/// Whether the driver classified this error as worth trying again.
+///
+/// Asks the driver rather than matching on the message, because the driver is
+/// the thing that knows: it attaches these labels from the server's own reply
+/// and its view of the topology. `SystemOverloadedError` is a shared cluster
+/// asking to be called back shortly, which is precisely the case that used to
+/// kill a booting tenant (#1716).
+#[cfg(feature = "mongodb")]
+fn is_retryable(err: &mongodb::error::Error) -> bool {
+    use mongodb::error::{RETRYABLE_ERROR, RETRYABLE_WRITE_ERROR, SYSTEM_OVERLOADED_ERROR};
+    err.contains_label(RETRYABLE_ERROR)
+        || err.contains_label(RETRYABLE_WRITE_ERROR)
+        || err.contains_label(SYSTEM_OVERLOADED_ERROR)
+}
+
 /// How a port-contract limit maps onto a MongoDB `find`.
 ///
 /// An enum with a distinct `Empty` arm, rather than the `Option<i64>` this used
@@ -403,7 +418,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 36] = [
+        let plans: [(&str, IndexModel); 37] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -482,6 +497,12 @@ impl MongoStore {
             // the field is on every document by the time this index matters.
             ("runs", nonunique(doc! {"company_id": 1, "agent_id": 1})),
             ("runs", nonunique(doc! {"company_id": 1, "status": 1})),
+            // The workflow-run join: a node's attempt has no card and no
+            // conversation, so this is the only handle on it.
+            (
+                "runs",
+                nonunique(doc! {"company_id": 1, "workflow_run_id": 1}),
+            ),
             (
                 "run_steps",
                 unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
@@ -516,7 +537,19 @@ impl MongoStore {
         // is.
         const INDEX_CONCURRENCY: usize = 10;
 
-        let extra: [(&str, IndexModel); 9] = [
+        /// How many times one index creation is retried before giving up.
+        ///
+        /// Only errors the driver itself labels retryable are retried; a wrong
+        /// key spec fails on the first attempt as it always did.
+        const INDEX_RETRIES: u32 = 4;
+
+        /// Base backoff between retries, doubled each attempt: 100ms, 200ms,
+        /// 400ms, 800ms — 1.5s in total, which is short against a 60s startup
+        /// budget and long enough to outlast the load-shedding actually
+        /// observed.
+        const INDEX_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+        let extra: [(&str, IndexModel); 11] = [
             ("owners", unique(doc! {"company_id": 1})),
             // Issue #241: the cross-replica arbiter. This unique compound index
             // is what turns two replicas racing one schedule minute into one
@@ -533,6 +566,18 @@ impl MongoStore {
             ("run_outputs", unique(doc! {"company_id": 1, "run_id": 1})),
             (
                 "run_outputs",
+                nonunique(doc! {"company_id": 1, "at_ms": -1}),
+            ),
+            // The unredacted step detail. `(company_id, run_id, step_seq)` is
+            // unique because that pair IS the key — a reasoning run flushes
+            // twice under the same ordinal and must converge rather than
+            // duplicate. The recency index backs the newest-N-runs prune.
+            (
+                "run_step_details",
+                unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
+            ),
+            (
+                "run_step_details",
                 nonunique(doc! {"company_id": 1, "at_ms": -1}),
             ),
             // Issue #726: the runtime journal. `(company_id, seq)` is unique
@@ -580,31 +625,77 @@ impl MongoStore {
         // one index no longer decides whether the other forty-three exist.
         let results: Vec<Result<()>> = futures::stream::iter(plans.into_iter().chain(extra))
             .map(|(name, index)| async move {
-                self.collection(name)
-                    .create_index(index)
-                    .await
-                    .map(|_| ())
-                    .map_err(|err| mongo_err(format!("index on `{name}`: {err}")))
+                let mut backoff = INDEX_RETRY_BACKOFF;
+                let mut attempt = 0;
+                loop {
+                    match self.collection(name).create_index(index.clone()).await {
+                        Ok(_) => return Ok(()),
+                        // The driver classifies its own errors, so retry exactly
+                        // what it says is retryable rather than guessing from the
+                        // message. `SystemOverloadedError` in particular is the
+                        // server asking to be called back shortly — treating it
+                        // as fatal is reading "try again" as "give up".
+                        Err(err) if attempt < INDEX_RETRIES && is_retryable(&err) => {
+                            tracing::warn!(
+                                collection = name, attempt = attempt + 1, %err,
+                                "index creation returned a retryable error; retrying"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            backoff *= 2;
+                            attempt += 1;
+                        }
+                        Err(err) => {
+                            return Err(mongo_err(format!("index on `{name}`: {err}")));
+                        }
+                    }
+                }
             })
             .buffer_unordered(INDEX_CONCURRENCY)
             .collect()
             .await;
 
+        let total = results.len();
         let failures: Vec<_> = results
             .into_iter()
             .filter_map(std::result::Result::err)
             .collect();
         let failed = failures.len();
-        match failures.into_iter().next() {
-            // The count matters: one failing index is a different problem from
-            // every index failing, and the first error alone cannot tell them
-            // apart.
-            Some(first) if failed > 1 => Err(mongo_err(format!(
-                "{failed} indexes failed; first: {first}"
-            ))),
-            Some(first) => Err(first),
-            None => Ok(()),
+        let Some(first) = failures.into_iter().next() else {
+            return Ok(());
+        };
+
+        // An index that could not be created is LOUD but not fatal.
+        //
+        // This used to return `Err`, which failed the store's construction and
+        // took the process down with it. Under Kubernetes that was a crash-loop
+        // and the next attempt usually succeeded. Under the microVM runtime the
+        // workload is PID 1, so its exit panics the guest kernel and the tenant
+        // is simply gone — five of two hundred tenants died that way in one
+        // ramp, because a shared Atlas cluster shed load while they all booted
+        // at once (#1716).
+        //
+        // Indexes are a performance property, not a correctness precondition
+        // for the process existing: every query here is correct without them,
+        // only slower, and the next boot re-runs this. Refusing to start is the
+        // strictly worse failure, and it is the same judgement this file already
+        // makes one function below — "a store that will not boot is worse than
+        // one whose oldest run rows are not yet filterable by desk".
+        //
+        // The count matters and is kept: one failing index is a different
+        // problem from every index failing, and the first error alone cannot
+        // tell them apart.
+        if failed > 1 {
+            tracing::error!(
+                failed, total, first = %first,
+                "some indexes could not be created; serving without them"
+            );
+        } else {
+            tracing::error!(
+                failed, total, error = %first,
+                "an index could not be created; serving without it"
+            );
         }
+        Ok(())
     }
 
     fn collection(&self, name: &str) -> Collection<Document> {
@@ -2328,21 +2419,31 @@ impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
         // Prune to the cap: collect this company's run ids newest-first and delete
         // everything past `MAX`. Two statements, like the revision prune — Mongo
         // has no "delete all but the newest N" operator; the recency index keeps
-        // the read cheap.
+        // the read cheap. Each run owns at most one row here (this method
+        // upserts by run id), so a row a concurrent writer refreshes mid-scan
+        // carries a newer `at_ms` than the cap row — conditioning the delete on
+        // `at_ms <= cutoff` spares exactly the refreshed outputs, closing the
+        // scan-to-delete race the deep prune beside it re-verifies in full.
         let mut cursor = coll
             .find(doc! {"company_id": company.as_ref()})
             .sort(doc! {"at_ms": -1, "run_id": -1})
             .await
             .map_err(mongo_err)?;
-        let mut ids: Vec<String> = Vec::new();
+        let mut ranked: Vec<(String, i64)> = Vec::new();
         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            ids.push(get_str(&doc, "run_id")?);
+            ranked.push((get_str(&doc, "run_id")?, get_i64(&doc, "at_ms")?));
         }
-        if ids.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
-            let stale: Vec<&String> = ids.iter().skip(MAX_RUN_OUTPUTS_PER_COMPANY).collect();
+        if ranked.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
+            let cutoff = ranked[MAX_RUN_OUTPUTS_PER_COMPANY - 1].1;
+            let stale: Vec<&str> = ranked
+                .iter()
+                .skip(MAX_RUN_OUTPUTS_PER_COMPANY)
+                .map(|(id, _)| id.as_str())
+                .collect();
             coll.delete_many(doc! {
                 "company_id": company.as_ref(),
                 "run_id": {"$in": stale},
+                "at_ms": {"$lte": cutoff},
             })
             .await
             .map_err(mongo_err)?;
@@ -2364,6 +2465,194 @@ impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
             Some(doc) => Ok(Some(serde_json::from_str(&get_str(&doc, "output_json")?)?)),
             None => Ok(None),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DeepTraceStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::deep_trace::DeepTraceStore for MongoStore {
+    async fn append_step_detail(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::deep_trace::RunStepDetailRecord,
+    ) -> Result<()> {
+        use crate::ports::deep_trace::MAX_DEEP_RUNS_PER_COMPANY;
+        let coll = self.collection("run_step_details");
+        // Upsert: last-write-wins per `(company, run_id, step_seq)`, so a
+        // reasoning run that flushes partway and again at close converges.
+        coll.update_one(
+            doc! {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "step_seq": record.step_seq as i64,
+            },
+            doc! {"$set": {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "step_seq": record.step_seq as i64,
+                "at_ms": record.at_millis as i64,
+                "detail_json": serde_json::to_string(&record.detail)?,
+            }},
+        )
+        .with_options(UpdateOptions::builder().upsert(true).build())
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap by RUN, not by row: ranking rows would leave a
+        // surviving run holding a torn half of its own trace. A run's recency is
+        // the newest `at_ms` any of its rows carries, so a long run is ranked by
+        // when it last wrote. Ranking and deleting are two statements (Mongo has
+        // no "delete all but the newest N" operator), and a run a concurrent
+        // writer refreshes between them must survive — so the delete is
+        // conditional on the recency the ranking observed, not on the run id
+        // alone. `at_ms` is monotone per run, so "still the recency we saw" is
+        // exactly "still ranks past the cap"; a run written to since is spared.
+        let mut cursor = coll
+            .aggregate(vec![
+                doc! {"$match": {"company_id": company.as_ref()}},
+                doc! {"$group": {"_id": "$run_id", "newest": {"$max": "$at_ms"}}},
+                doc! {"$sort": {"newest": -1, "_id": -1}},
+                doc! {"$skip": MAX_DEEP_RUNS_PER_COMPANY as i64},
+            ])
+            .await
+            .map_err(mongo_err)?;
+        let mut stale: Vec<(String, i64)> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            stale.push((get_str(&doc, "_id")?, get_i64(&doc, "newest")?));
+        }
+        if !stale.is_empty() {
+            let candidate_ids: Vec<&str> = stale.iter().map(|(id, _)| id.as_str()).collect();
+            // Re-verify in one pass: the newest `at_ms` each candidate carries
+            // *now*, then delete only the candidates that did not move since
+            // the ranking read them. A candidate another prune already removed
+            // has no current row, so deleting it is a no-op.
+            let mut verify = coll
+                .aggregate(vec![
+                    doc! {
+                        "$match": {
+                            "company_id": company.as_ref(),
+                            "run_id": {"$in": candidate_ids},
+                        }
+                    },
+                    doc! {"$group": {"_id": "$run_id", "newest": {"$max": "$at_ms"}}},
+                ])
+                .await
+                .map_err(mongo_err)?;
+            let mut newest: std::collections::HashMap<String, i64> = Default::default();
+            while let Some(doc) = verify.try_next().await.map_err(mongo_err)? {
+                newest.insert(get_str(&doc, "_id")?, get_i64(&doc, "newest")?);
+            }
+            let doomed: Vec<(&str, i64)> = stale
+                .iter()
+                .filter(|(id, seen)| newest.get(id.as_str()).is_none_or(|now| now <= seen))
+                .map(|(id, seen)| (id.as_str(), *seen))
+                .collect();
+            if !doomed.is_empty() {
+                // The ranking promised a run written to since is spared WHOLE,
+                // so recency is re-checked one final time, at the delete: a
+                // candidate holding any row newer than the `seen` the ranking
+                // recorded was refreshed after the verification pass, and it
+                // survives entire — deleting its older rows while keeping the
+                // new one would leave exactly the torn trace the run-level
+                // ranking exists to prevent. The delete predicate below still
+                // excludes rows newer than `seen`, so a write that lands after
+                // this check cannot lose the data it just wrote either.
+                let mut live = coll
+                    .aggregate(vec![
+                        doc! {
+                            "$match": {
+                                "company_id": company.as_ref(),
+                                "$or": doomed
+                                    .iter()
+                                    .map(|(id, seen)| {
+                                        doc! {
+                                            "run_id": id,
+                                            "at_ms": {"$gt": seen},
+                                        }
+                                    })
+                                    .collect::<Vec<_>>(),
+                            }
+                        },
+                        doc! {"$group": {"_id": "$run_id"}},
+                    ])
+                    .await
+                    .map_err(mongo_err)?;
+                let mut refreshed: std::collections::HashSet<String> = Default::default();
+                while let Some(row) = live.try_next().await.map_err(mongo_err)? {
+                    refreshed.insert(get_str(&row, "_id")?.to_string());
+                }
+                let doomed: Vec<(&str, i64)> = doomed
+                    .into_iter()
+                    .filter(|(id, _)| !refreshed.contains(*id))
+                    .collect();
+                if doomed.is_empty() {
+                    return Ok(());
+                }
+                // The delete is itself conditional on the recency the ranking
+                // observed, not just on the run id: a writer that refreshes one
+                // of these runs after the freshness check above but before this
+                // delete would otherwise have its brand-new detail rows removed
+                // by a `delete_many` keyed on `run_id` alone. `at_ms` is
+                // monotone per run, so "row is at or below the recency we saw"
+                // is exactly "this row was already stale when we ranked" — a
+                // row written since has a larger `at_ms` and survives.
+                let stale_row = doomed
+                    .iter()
+                    .map(|(id, seen)| {
+                        doc! {
+                            "run_id": id,
+                            "at_ms": {"$lte": seen},
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                coll.delete_many(doc! {
+                    "company_id": company.as_ref(),
+                    "$or": stale_row,
+                })
+                .await
+                .map_err(mongo_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_step_details(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Vec<crate::ports::deep_trace::RunStepDetailRecord>> {
+        let mut cursor = self
+            .collection("run_step_details")
+            .find(doc! {"company_id": company.as_ref(), "run_id": run_id})
+            .sort(doc! {"step_seq": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(crate::ports::deep_trace::RunStepDetailRecord {
+                run_id: run_id.to_string(),
+                step_seq: get_i64(&doc, "step_seq")? as u32,
+                at_millis: get_i64(&doc, "at_ms")? as u64,
+                detail: serde_json::from_str(&get_str(&doc, "detail_json")?)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn purge_deep_trace(&self, company: &CompanyId, run_id: Option<&str>) -> Result<u64> {
+        let filter = match run_id {
+            Some(id) => doc! {"company_id": company.as_ref(), "run_id": id},
+            None => doc! {"company_id": company.as_ref()},
+        };
+        let result = self
+            .collection("run_step_details")
+            .delete_many(filter)
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count)
     }
 }
 
@@ -2401,6 +2690,8 @@ impl crate::ports::runs::RunStore for MongoStore {
             task_id: spec.task_id,
             agent_id: spec.agent_id,
             chat_id: spec.chat_id,
+            workflow_run_id: spec.workflow_run_id,
+            node_id: spec.node_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2430,6 +2721,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
                 "task_id": run.task_id.as_deref(),
+                "workflow_run_id": run.workflow_run_id.as_deref(),
                 "agent_id": run.agent_id.as_str(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
@@ -2467,6 +2759,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
                     "task_id": run.task_id.as_deref(),
+                    "workflow_run_id": run.workflow_run_id.as_deref(),
                     "agent_id": run.agent_id.as_str(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
@@ -2488,6 +2781,9 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut query = doc! {"company_id": company.as_ref()};
         if let Some(task_id) = &filter.task_id {
             query.insert("task_id", task_id.as_str());
+        }
+        if let Some(workflow_run_id) = &filter.workflow_run_id {
+            query.insert("workflow_run_id", workflow_run_id.as_str());
         }
         if let Some(agent_id) = &filter.agent_id {
             query.insert("agent_id", agent_id.as_str());
@@ -4395,15 +4691,24 @@ mod test {
         Some(Arc::new(store))
     }
 
-    /// One failing index must not stop the other forty-three from being created.
+    /// One failing index must not stop the other forty-three from being
+    /// created, **nor stop the store from opening at all**.
+    ///
+    /// Two properties in one test, because they have the same setup.
     ///
     /// `ensure_indexes` runs concurrently, so a short-circuit would drop
     /// in-flight driver operations mid-await — and an operation cancelled after
     /// its request is sent but before its reply is read leaves a connection the
     /// pool cannot safely reuse. That hazard does not exist in a sequential
     /// loop; it arrived with the concurrency, so it is pinned here.
+    ///
+    /// And the failure is now reported by logging rather than by refusing to
+    /// construct the store (#1716). Returning `Err` here took the whole process
+    /// down; under the microVM runtime the workload is PID 1, so that panicked
+    /// the guest kernel and the tenant was gone. Indexes are a performance
+    /// property, not a precondition for the process existing.
     #[tokio::test]
-    async fn every_index_is_attempted_even_when_one_fails() {
+    async fn a_failing_index_stops_neither_the_other_indexes_nor_the_boot() {
         let Some(store) = store().await else { return };
 
         // `store()` has already run `ensure_indexes` once, so the assertion has
@@ -4429,14 +4734,12 @@ mod test {
             .await
             .expect("seed the conflicting index");
 
-        let err = store
+        // The store must still open. A tenant that cannot boot because one
+        // index conflicts is strictly worse than one serving without it.
+        store
             .ensure_indexes()
             .await
-            .expect_err("the conflicting index should make this fail");
-        assert!(
-            format!("{err}").contains("owners"),
-            "the error should name the collection that failed: {err}"
-        );
+            .expect("a conflicting index must not stop the store from opening");
 
         // The point: the run continued past the failure and recreated the index
         // dropped above. A short-circuit would leave it absent.
@@ -4516,6 +4819,8 @@ mod test {
                 task_id: None,
                 agent_id: agent.to_string(),
                 chat_id: None,
+                workflow_run_id: None,
+                node_id: None,
                 attempt: 1,
                 status: crate::ports::runs::RunStatus::Succeeded,
                 trigger_event_seq: None,
@@ -4542,6 +4847,8 @@ mod test {
             task_id: None,
             agent_id: "engineer".to_string(),
             chat_id: None,
+            workflow_run_id: None,
+            node_id: None,
             attempt: 1,
             status: crate::ports::runs::RunStatus::Pending,
             trigger_event_seq: None,
@@ -5295,6 +5602,100 @@ mod test {
             Some(7),
             "first-write-wins still holds for the fields that were present"
         );
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_deep_trace_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_deep_trace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The prune ranks by RUN and keeps the newest `MAX` runs whole — and a run
+    /// that fell past the cap survives once it is written to again. The
+    /// conformance suite never crosses the cap, so the aggregation the prune
+    /// uses to rank, and the re-verification that spares a refreshed run, are
+    /// exercised here against the real server.
+    #[tokio::test]
+    async fn deep_trace_prune_keeps_the_newest_runs_and_spares_a_refreshed_one() {
+        use crate::ports::deep_trace::DeepTraceStore;
+        use crate::ports::deep_trace::{
+            MAX_DEEP_RUNS_PER_COMPANY, RunStepDetailRecord, TurnStepDetail,
+        };
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("pruner");
+        let detail = |run: &str, seq: u32, at: u64, reasoning: &str| RunStepDetailRecord {
+            run_id: run.to_string(),
+            step_seq: seq,
+            at_millis: at,
+            detail: TurnStepDetail {
+                reasoning: Some(reasoning.to_string()),
+                ..TurnStepDetail::default()
+            },
+        };
+        // Fill past the cap with two rows per run, so the prune must drop whole
+        // runs rather than tear them.
+        let cap = MAX_DEEP_RUNS_PER_COMPANY;
+        for i in 0..cap + 2 {
+            let run = format!("r{i:03}");
+            s.append_step_detail(&company, &detail(&run, 0, (i * 2) as u64, "first"))
+                .await
+                .unwrap();
+            s.append_step_detail(&company, &detail(&run, 1, (i * 2 + 1) as u64, "second"))
+                .await
+                .unwrap();
+        }
+        // The two oldest runs fell past the cap and are gone whole…
+        assert!(
+            s.list_step_details(&company, "r000")
+                .await
+                .unwrap()
+                .is_empty(),
+            "r000 ranked oldest and must be pruned"
+        );
+        assert!(
+            s.list_step_details(&company, "r001")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // …and every surviving run kept both rows.
+        for i in 2..cap + 2 {
+            let run = format!("r{i:03}");
+            assert_eq!(
+                s.list_step_details(&company, &run).await.unwrap().len(),
+                2,
+                "{run} must survive whole"
+            );
+        }
+        // A run that already ranked stale is written to again — the concurrent
+        // refresh the delete's re-verification exists to protect. The next
+        // append's prune must keep it, not delete what it just received.
+        s.append_step_detail(
+            &company,
+            &detail("r000", 2, 1_000_000, "refreshed after ranking stale"),
+        )
+        .await
+        .unwrap();
+        let refreshed = s.list_step_details(&company, "r000").await.unwrap();
+        assert_eq!(
+            refreshed.len(),
+            1,
+            "a refreshed run is not deleted by the prune that follows"
+        );
+        assert_eq!(
+            refreshed[0].detail.reasoning.as_deref(),
+            Some("refreshed after ranking stale"),
+            "the refreshed detail is the one that survives"
+        );
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_run_store_workflow_join() {
+        let Some(s) = store().await else { return };
+        conformance::assert_run_store_workflow_join(s.clone()).await;
         drop_db(&s).await;
     }
 

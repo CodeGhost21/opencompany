@@ -218,8 +218,7 @@ the logistics coordinator has a mandate rather than a job title.
 | Order dispatch | On new order | Moves the order through fulfilment |
 | Weekly content schedule | Mondays | Drafts the week's posts, holds them for review |
 
-Every one of those needs a connection that does not exist on day one. That is
-the phase boundary, stated concretely.
+Every one of those needs a connection that does not exist on day one.
 
 ## The question we deliberately do not ask
 
@@ -283,8 +282,7 @@ operator cannot obtain must never be the one thing that traps them.
 A secret's *presence* is reported, never its bytes — so there is nothing to
 pre-fill the key box with, and the configured state is drawn as a settled fact
 rather than an empty field. An empty box with placeholder text reads as an
-unanswered question, which on a hosted tenant is the one impression it must not
-give.
+unanswered question — on a hosted tenant, the one impression it must not give.
 
 ## What a teammate can reach on day one
 
@@ -379,9 +377,8 @@ setup again. Acceptable, and probably correct.
 
 Only obvious once it ran. **Every company under `companies/` declares a roster**,
 so none of them can ever reach the flow — there is no way to demo or test setup
-against the shipped examples. `companies/e2e_setup` exists for exactly that
-reason: a company that ships with nobody on it, which the end-to-end lane runs
-against.
+against the shipped examples. `companies/e2e_setup` exists for exactly that: a
+company that ships with nobody on it, which the end-to-end lane runs against.
 
 And the lane has to actually run it. It did not, for as long as the flow was
 broken: `frontend/test/e2e/company-setup.spec.ts` carried a `test.skip` written
@@ -399,17 +396,20 @@ Two related problems surfaced in the same run, both fixed:
 
 - The Team page fabricated a twelve-agent starter roster whenever the host
   answered with nobody, so "this company has no team yet" rendered directly above
-  twelve agents that did not exist on the host. A genuinely empty company now
-  shows an honest empty state. The same sentence had to go for the mirror-image
-  reason once the gate started opening again: the prompt renders above the
-  baseline's teammates, who *do* exist on the host, so it now reads "this company
-  hasn't been set up yet" — true whether the roster below it holds nobody or the
-  baseline's four.
+  twelve agents that did not exist on the host; a genuinely empty company now
+  shows an honest empty state. Once the gate reopened, the same sentence had to
+  go for the mirror-image reason: the prompt renders above the baseline's
+  teammates, who *do* exist, so it now reads "this company hasn't been set up
+  yet" — true whether the roster below it holds nobody or the baseline's four.
 - The product tour is held not only while the dialog is open but for as long as
   the company is unstaffed. Otherwise skipping setup popped the tour's welcome
   straight over an empty console — the first impression this document exists to
   replace. The hold is a render-time gate, not a state one: the tour's own effect
   consumes a one-shot resume marker and must not be made to re-run.
+- Skipping is not a one-way door: the empty-team prompt remains, and anyone can
+  reopen setup from **Settings → Product tour → Set up company** or `#/setup`,
+  which forces the dialog open even for a staffed company — an explicit request,
+  not the automatic first-run offer.
 
 ## Open questions
 

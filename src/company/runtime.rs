@@ -10,6 +10,7 @@
 //! the methods here are thin delegations so callers hold a single
 //! `Arc<CompanyRuntime>`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,6 +157,9 @@ pub struct OpsStores {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class records of each task attempt: status, trace, cost (#242).
     pub runs: Arc<dyn RunStore>,
+    /// The unredacted companion of a run's steps — reasoning text and raw tool
+    /// I/O, kept beside the scrubbed skeleton in [`Self::runs`].
+    pub deep_trace: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
     /// Per-workflow edit history, for rollback of an edited workflow (#274).
     pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// Durable cross-replica scheduler fire claims (#241).
@@ -323,6 +327,27 @@ pub struct CompanyRuntime {
     /// hold. Handing the lock over is also what makes
     /// [`quiesce`](Self::quiesce)'s drain meaningful across the swap.
     pub(crate) serial: Arc<TokioMutex<()>>,
+    /// One lock slot per addressed agent, so two operators talking to two
+    /// different agents in the same company do not serialize behind each other.
+    ///
+    /// [`serial`](Self::serial) is held for a whole cycle — a live agent turn —
+    /// so with only that lock, three messages to three agents in one company run
+    /// strictly one after another even though nothing they touch is shared: each
+    /// agent has its own conversation history in the harness pool, and the state
+    /// they *do* share (the task board, the event-log `seq`) already has its own
+    /// finer lock. This map hands each addressed agent its own slot so their
+    /// turns overlap while a whole-company cycle still serializes against all of
+    /// them.
+    ///
+    /// A cycle with no single addressee — a scheduler tick, an unaddressed
+    /// message routed to the orchestrator, or a batch naming more than one agent
+    /// — falls back to [`serial`](Self::serial) and so still serializes against
+    /// everything. That is deliberate: such a cycle may touch the whole company.
+    ///
+    /// `Arc`-shared for the same reason as `serial`: a rebuilt runtime must
+    /// inherit the *same* per-agent slots (issue #290), or an agent mid-turn
+    /// could start a second turn beside itself across the swap.
+    pub(crate) per_agent: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
     /// Held across a REST board write's read → validate → write, so two
     /// concurrent edits cannot each validate against a snapshot that predates
     /// the other's edge (issue #185 review).
@@ -468,6 +493,7 @@ impl CompanyRuntime {
             workflow_gates: WorkflowGateQueue::default(),
             blocked_nodes: BlockedNodeQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
+            per_agent: Arc::new(TokioMutex::new(HashMap::new())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "openhuman")]
@@ -1168,6 +1194,12 @@ impl CompanyRuntime {
         &self.ops.runs
     }
 
+    /// The unredacted companion of this company's run steps: reasoning text and
+    /// raw tool I/O, kept beside the scrubbed skeleton in [`Self::runs`].
+    pub fn deep_trace(&self) -> &Arc<dyn crate::ports::deep_trace::DeepTraceStore> {
+        &self.ops.deep_trace
+    }
+
     /// This company's per-workflow edit history (#274), the snapshot ring a
     /// workflow rollback reads and writes.
     pub fn workflow_revisions(&self) -> &Arc<dyn WorkflowRevisionStore> {
@@ -1303,8 +1335,14 @@ impl CompanyRuntime {
     /// Called by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) on a
     /// rebuild, before the successor is registered and therefore before anything
     /// can be holding either lock through *this* runtime.
-    pub fn adopt_locks(&mut self, serial: Arc<TokioMutex<()>>, task_writes: Arc<TokioMutex<()>>) {
+    pub fn adopt_locks(
+        &mut self,
+        serial: Arc<TokioMutex<()>>,
+        per_agent: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
+        task_writes: Arc<TokioMutex<()>>,
+    ) {
         self.serial = serial;
+        self.per_agent = per_agent;
         self.task_writes = task_writes;
     }
 
@@ -2116,6 +2154,7 @@ impl CompanyRuntime {
                 ),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             }],
             executed_effects: Vec::new(),
             parked: Vec::new(),
@@ -2318,6 +2357,7 @@ impl CompanyRuntime {
                             text: text.clone(),
                             steps: Vec::new(),
                             reply_to: None,
+                            mentions: Vec::new(),
                         })
                         .await
                     {
@@ -2410,6 +2450,7 @@ impl CompanyRuntime {
                         text: text.to_string(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     })
                     .await
                 {
