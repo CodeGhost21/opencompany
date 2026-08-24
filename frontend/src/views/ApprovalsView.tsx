@@ -684,6 +684,7 @@ function grantDurationLabel(expiresInMillis: number): string {
   );
 }
 
+export function ApprovalCard({
   approval: a,
   now,
   askerNames,
