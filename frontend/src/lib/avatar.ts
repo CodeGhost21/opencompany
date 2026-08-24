@@ -159,6 +159,18 @@ const blobUrlRefs = new Map<string, number>();
  * with their tiles instead of being hoarded past the cap.
  */
 const componentUrls = new Map<string, string>();
+/**
+ * Mounted consumers of a specific uploaded face, by cache key.
+ *
+ * Revoking an object URL does not unpaint an `<img>` that already decoded it,
+ * so `forgetAvatarNode` deleting the cache cannot redraw a tile that has
+ * already resolved — the tile has to be told. These callbacks are that
+ * channel: a mounted consumer subscribes for its node, and a forget fires the
+ * callbacks so the tiles re-resolve (to the tone tile, once the deleted bytes
+ * 404). The registry is bounded by mounted blob-avatar consumers; every
+ * subscription removes itself on unmount, and forget clears the whole set.
+ */
+const forgetListeners = new Map<string, Set<() => void>>();
 
 /**
  * The most distinct uploaded faces the cache keeps at once.
