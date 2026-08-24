@@ -3572,8 +3572,7 @@ mod tests {
     #[test]
     fn the_policy_fingerprint_moves_when_the_always_ask_list_does() {
         let empty = effective_policy_fingerprint(&fp_policy("auto", &[], None, None));
-        let one =
-            effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], None, None));
+        let one = effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], None, None));
         let two = effective_policy_fingerprint(&fp_policy(
             "auto",
             &["payment.send", "filing.submit"],
@@ -3828,18 +3827,8 @@ mod tests {
     #[test]
     fn re_setting_the_same_tier_does_not_rebuild_the_roster() {
         assert_eq!(
-            effective_policy_fingerprint(&fp_policy(
-                "auto",
-                &["payment.send"],
-                Some(25.0),
-                None
-            )),
-            effective_policy_fingerprint(&fp_policy(
-                "auto",
-                &["payment.send"],
-                Some(25.0),
-                None
-            )),
+            effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], Some(25.0), None)),
+            effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], Some(25.0), None)),
             "re-setting the same tier must not move the fingerprint"
         );
     }
