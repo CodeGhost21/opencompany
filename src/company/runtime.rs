@@ -2624,12 +2624,20 @@ impl CompanyRuntime {
         let mut _confirm_guard = None;
         let item = match item_id {
             Some(id) => {
+                // A nonexistent `item_id` is caller-supplied, so it must not
+                // mint an entry in the process-wide confirm-lock registry,
+                // which is never evicted. Validate existence before taking the
+                // lock; the feedback family is append-only, so an id that
+                // exists here still exists at the locked re-read below.
+                if self.feedback.get(&id).await?.is_none() {
+                    return Err(OpenCompanyError::NotFound(format!("feedback item {id}")));
+                }
                 _confirm_guard = Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
                 let item = self
                     .feedback
                     .get(&id)
                     .await?
-                    .ok_or_else(|| OpenCompanyError::NotFound(format!("feedback item {id}")))?;
+                    .expect("feedback item exists: existence checked before taking the confirm lock");
                 if !preview {
                     if item.issue_status.is_some() {
                         return Ok(FeedbackResponse::recorded(&item));
