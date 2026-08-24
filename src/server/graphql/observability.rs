@@ -296,11 +296,14 @@ fn assemble(
 
 /// `Company.agentRuns` — attempts, newest first, optionally narrowed.
 pub(crate) async fn resolve_runs(
+    ctx: &Context<'_>,
     runtime: &Arc<CompanyRuntime>,
     task_id: Option<String>,
     workflow_run_id: Option<String>,
     limit: i32,
 ) -> async_graphql::Result<Vec<AgentRunGql>> {
+    let auth = ctx.data::<GqlAuth>()?;
+    let may_read_deep = approval_visibility::may_read_deep_trace(auth);
     let filter = RunFilter {
         task_id,
         workflow_run_id,
@@ -322,12 +325,17 @@ pub(crate) async fn resolve_runs(
         .list_run_steps_for_runs(runtime.id(), &ids)
         .await?;
     // The deep half degrades to "none" per run on any store failure, exactly as
-    // the single-run read does.
-    let details_by_run = runtime
-        .deep_trace()
-        .list_step_details_for_runs(runtime.id(), &ids)
-        .await
-        .unwrap_or_default();
+    // the single-run read does. A caller who may not read the unredacted bodies
+    // is not given the store read at all — see `load`.
+    let details_by_run = if may_read_deep {
+        runtime
+            .deep_trace()
+            .list_step_details_for_runs(runtime.id(), &ids)
+            .await
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     Ok(rows
         .into_iter()
         .map(|record| {
@@ -343,11 +351,14 @@ pub(crate) async fn resolve_runs(
 
 /// `Company.agentRun` — one attempt by id, or null.
 pub(crate) async fn resolve_run(
+    ctx: &Context<'_>,
     runtime: &Arc<CompanyRuntime>,
     id: String,
 ) -> async_graphql::Result<Option<AgentRunGql>> {
+    let auth = ctx.data::<GqlAuth>()?;
+    let may_read_deep = approval_visibility::may_read_deep_trace(auth);
     let Some(record) = runtime.runs().get_run(runtime.id(), &id).await? else {
         return Ok(None);
     };
-    Ok(Some(load(runtime, record).await?))
+    Ok(Some(load(runtime, record, may_read_deep).await?))
 }
