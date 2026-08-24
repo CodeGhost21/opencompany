@@ -615,8 +615,8 @@ export function ChatView({
   // a reply that lands while you are reading the channel is read, and should
   // not leave a badge on the channel you are sitting in.
   useEffect(() => {
-    if (channel) onChannelViewed?.(channel.id, historyPending);
-  }, [channel?.id, messages.length, historyPending, onChannelViewed]);
+    if (channel) onChannelViewed?.(channel.id, historyPending, mentionFeedRevision);
+  }, [channel?.id, messages.length, historyPending, mentionFeedRevision, onChannelViewed]);
 
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
