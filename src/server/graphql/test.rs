@@ -2247,7 +2247,7 @@ async fn a_prose_note_projects_no_binary_metadata() {
 async fn given_a_workflow_node_attempt(state: &AppState) {
     use crate::ports::deep_trace::{RunStepDetailRecord, TurnStepDetail};
     use crate::ports::runs::{NewRun, RunStepRecord};
-    use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
+    use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
 
     let id = CompanyId::new("acme");
     let runtime = state.registry().get(&id).expect("runtime");
