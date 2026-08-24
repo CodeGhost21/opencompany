@@ -688,6 +688,7 @@ export function AgentDetailView({
         client={client}
         company={company}
         agent={avatarOpen ? agent : null}
+        busy={avatarSaving}
         onOpenChange={setAvatarOpen}
         onPick={(avatar) => {
           setAvatarOpen(false);
