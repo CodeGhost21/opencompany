@@ -91,6 +91,12 @@ export const SETUP_HANDOFF_FLAG = "from";
  */
 export const SETUP_HANDOFF_FRAGMENT = `#/company?${SETUP_HANDOFF_FLAG}=setup`;
 
+/** A fragment marker scoped to one connection and company. */
+export function setupHandoffFragment(scope: SetupHandoffScope): string {
+  const company = scope.company ?? "single";
+  return `#/company?${SETUP_HANDOFF_FLAG}=setup&connection=${encodeURIComponent(scope.connection)}&company=${encodeURIComponent(company)}`;
+}
+
 export interface SetupHandoffScope {
   connection: string;
   company: string | null;
