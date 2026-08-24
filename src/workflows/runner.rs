@@ -400,6 +400,12 @@ async fn run_workflow_inner(
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
+    // Issue #617: one per-run record of every child the resolver gates. The
+    // resolver (invoked by the engine mid-run) writes it; the parking path
+    // (after the engine returns) reads it to name a child pause. Created out
+    // here and owned past the engine call — the engine future and the
+    // capability bundle drop before parking runs.
+    let child_gates = Arc::new(super::caps::resolver::ChildGateRegistry::default());
     let capabilities = super::caps::build_capabilities(
         turn,
         deps,
@@ -413,6 +419,7 @@ async fn run_workflow_inner(
             board: board.clone(),
             blocks: blocks.clone(),
             approvals: approvals.clone(),
+            child_gates: child_gates.clone(),
         },
     )
     .await?;
@@ -985,11 +992,25 @@ async fn run_workflow_inner(
     // Only when the run actually paused: a run that reached the end has no
     // continuation coming, so there is nothing to guard against and nothing to
     // warn about.
-    let (performed, unreplayable) = if outcome.pending_approvals.is_empty() {
+    let (performed, mut unreplayable) = if outcome.pending_approvals.is_empty() {
         (Vec::new(), Vec::new())
     } else {
         super::replay::outward_calls_performed(&graph, &outcome.output, workflow)
     };
+    // Issue #617: a child that paused namespaced gates (`sub::work`) will
+    // restart when its gate is approved, and a restart re-runs the child's
+    // ungated outward calls. Their results are not carried up when the child
+    // pauses, so nothing can be replayed — report them exactly like the
+    // top-level unreplayable calls above, so the operator is warned that
+    // approving restarts the child from the top.
+    if !outcome.pending_approvals.is_empty() {
+        unreplayable.extend(super::replay::child_calls_to_repeat(
+            &graph,
+            &outcome.pending_approvals,
+            &child_gates,
+            &trigger_input,
+        ));
+    }
     for call in &unreplayable {
         tracing::warn!(
             company = %record.id,
@@ -1020,6 +1041,9 @@ async fn run_workflow_inner(
             // sign-off.
             output: &outcome.output,
             edges: &workflow.edges,
+            // Issue #617: the resolver's per-child gate record, so a namespaced
+            // child gate's card can name the child's tool and reason.
+            child_gates: &child_gates,
         },
     )
     .await;
@@ -1401,6 +1425,10 @@ struct PausedGates<'a> {
     /// untouched.
     output: &'a Value,
     edges: &'a [crate::company::WorkflowEdgeDef],
+    /// Issue #617: the resolver's per-child gate record, so a namespaced child
+    /// gate (`sub::work`) is described from what the gate pass classified
+    /// rather than falling back to an unclassified parent-graph lookup.
+    child_gates: &'a super::caps::resolver::ChildGateRegistry,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -1490,6 +1518,9 @@ async fn park_pending_gates(
         // gate's card can carry the verbatim upstream content awaiting sign-off.
         output,
         edges,
+        // Issue #617: the resolver's per-child gate record, for a namespaced
+        // child gate's card.
+        child_gates,
     } = paused;
     if pending.is_empty() {
         return;
@@ -1545,7 +1576,24 @@ async fn park_pending_gates(
         let gate = match gated.iter().find(|gate| gate.node_id == *node_id) {
             Some(gate) => Some(gate),
             None => {
-                described = super::gate::describe_call(graph, node_id);
+                // Issue #617: a namespaced id (`sub::work`, nested one level
+                // per child as `sub::nested::work`) names a gate inside a child
+                // the resolver ran. The parent graph has no node with that id,
+                // so describe it from the child's own gate record, descending
+                // the registry through the `sub_workflow` nodes — resolving an
+                // expression-bound `workflow_id` against the trigger input
+                // where the engine's `once` scope allows — so the child's tool
+                // and reason reach the card the way a top-level policy gate's
+                // do. Falls back to the parent-graph read for every other gate
+                // (an authored child gate, which the registry never sees, keeps
+                // its pre-existing behaviour).
+                described = super::caps::resolver::child_gate_call(
+                    child_gates,
+                    graph,
+                    node_id,
+                    Some(trigger_input),
+                )
+                .or_else(|| super::gate::describe_call(graph, node_id));
                 described.as_ref()
             }
         };

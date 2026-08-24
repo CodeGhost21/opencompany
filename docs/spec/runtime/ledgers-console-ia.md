@@ -69,9 +69,9 @@ list the company held, spliced in where the single "Ledgers" row used to sit.
 
 It did not survive contact with the cap. A company may declare up to
 `MAX_DECLARED` = 12 lists (`src/ledger/spec.rs`) on top of the 3 built-ins
-(`tasks`, `goals`, `decisions`) — 15 list rows, sharing the sidebar with the 8
-other fixed `NAV` entries (Overview, Company, Chat, Brain, Workspace,
-Approvals, Workflows, Settings). Twenty-three rows in one sidebar is not a
+(`tasks`, `goals`, `decisions`) — 15 list rows, sharing the sidebar with the 9
+other fixed `NAV` entries (Overview, Company, Chat, Work, Workspace,
+Approvals, Finance, Workflows, Settings). Twenty-four rows in one sidebar is not a
 list of destinations an operator scans, it is a wall. The draft read fine
 during review only because it was checked against a demo company holding
 exactly three lists — the cap itself was never rendered and never looked at.

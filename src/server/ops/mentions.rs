@@ -26,6 +26,7 @@
 //! privacy argument and the use case are absent. Same `401` as
 //! [`read_state`](super::read_state), and for the same reason.
 
+use crate::server::error::Rejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -115,9 +116,9 @@ struct MentionablesDto {
     everyone: MentionableEveryoneDto,
 }
 
-async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDto>, Response> {
+async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDto>, Rejection> {
     if company.actor.is_none() {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     }
 
     let record = company
@@ -458,6 +459,7 @@ mod tests {
             description: None,
             tools: None,
             instructions: None,
+            ..Default::default()
         });
         store.save(&record).await.expect("save");
 
