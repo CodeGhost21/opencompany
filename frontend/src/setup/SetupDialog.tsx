@@ -251,7 +251,10 @@ export function SetupDialog({
     // tailored roster.
     try {
       void getInferenceStatus(client, company).then(
-        (status) => settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable"),
+        (status) => {
+          setHarnessReachable(status.harnessReachable !== false);
+          settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable");
+        },
         () => {
           // Do not silently treat an unreadable status as a configured model.
           // The setup route may still work, but its result must not be promised
