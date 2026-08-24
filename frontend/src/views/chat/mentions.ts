@@ -275,9 +275,18 @@ export function insertMention(
  * the mention is dropped, leaving a chip-less literal that pings nobody. The
  * row's own `aliases` carry a typable fallback (the host-minted slug), so the
  * picker inserts that instead, keeping the picked mention real.
+ *
+ * The `#` spelling is desk-only: the host's fallback extraction narrows
+ * `@#…` to desk targets, so accepting a `#`-prefixed label for a user or
+ * agent row would insert a visually desk-shaped mention that revalidation
+ * still lets through (it strips the hash without checking the target kind).
+ * A `#`-led label only wins here on a desk row, where `@#name` is exactly
+ * the spelling the host resolves; every other kind falls back to its slug.
  */
 function mentionableText(entry: Mentionable): string {
-  const opens = (s: string) => /^[\p{L}\p{N}_#]/u.test(s);
+  const opens = (s: string) =>
+    /^[\p{L}\p{N}_]/u.test(s) ||
+    (entry.target.kind === "desk" && /^#[\p{L}\p{N}_]/u.test(s));
   if (opens(entry.label)) return entry.label;
   for (const alias of entry.aliases) {
     if (opens(alias)) return alias;
