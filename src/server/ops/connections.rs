@@ -68,10 +68,13 @@ struct ProviderConfig {
     client_secret: String,
 }
 
-/// Resolves the app credentials needed to revoke a historical provider grant
-/// from an injected environment seam (revocation tests point this at a
-/// [`crate::app::config::MapEnv`]; production goes through
-/// [`best_effort_revoke`]'s `ProcessEnv` pin).
+/// Resolves the app credentials needed to revoke a historical provider grant.
+///
+/// They no longer make this host a provider connection endpoint: `start` always
+/// refuses, regardless of whether these values are present. The seam is an
+/// injected [`crate::app::config::EnvSource`] so revocation tests can point it
+/// at a [`crate::app::config::MapEnv`]; production goes through
+/// [`best_effort_revoke`]'s `ProcessEnv` pin.
 fn provider_config_from(
     provider: &str,
     env: &dyn crate::app::config::EnvSource,
