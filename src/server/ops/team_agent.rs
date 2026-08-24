@@ -72,7 +72,7 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::{self, MethodRouter};
 use serde::{Deserialize, Serialize};
 
@@ -81,7 +81,7 @@ use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{AgentOverride, CompanyRecord};
 use crate::runtime::builder::agent_scoped_grants;
-use crate::server::error::ApiError;
+use crate::server::error::{ApiError, Rejection};
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::team::{AgentPath, daily_spend_samples, double_option};
 use crate::server::users::admin::require_admin;
@@ -109,7 +109,22 @@ pub(super) enum AgentSource {
 
 /// The fields a `PATCH` accepts for a teammate — manifest-declared or overlay
 /// alike. Sent to the console so it renders the same rule the host enforces.
-const EDITABLE_FIELDS: [&str; 5] = ["name", "role", "description", "tools", "instructions"];
+///
+/// Seven since `feat/external-acp` met #1530 on `main`: that issue added
+/// `instructions` and widened this list from overlay-only to both kinds, while
+/// #1245's harness-picker follow-up added `model` and `harness`. Neither knew
+/// about the other, so this is their union. It widens nothing on its own —
+/// `tools`, `model` and `harness` stay admin-gated in [`edit_agent`], and
+/// [`EDITABLE_FIELDS_MEMBER`] is unchanged from what #1530 left it.
+const EDITABLE_FIELDS: [&str; 7] = [
+    "name",
+    "role",
+    "description",
+    "tools",
+    "instructions",
+    "model",
+    "harness",
+];
 
 /// The subset a **non-admin** member may `PATCH` (issue #619).
 ///
@@ -162,6 +177,20 @@ pub(super) struct AgentDetailDto {
     /// teammate has none by construction.
     #[serde(skip_serializing_if = "Option::is_none")]
     tier: Option<String>,
+    /// Which `[[harness]]` this teammate runs its turns on, by declared id
+    /// (issue #1245's harness-picker follow-up). `None` means the harness
+    /// marked `default = true` — read `GET {scope}/harnesses` for the full
+    /// declared set, including which one that is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    /// This teammate's own model override, when it has one (issue #1245's
+    /// per-agent follow-up) — a manifest `[[agent]].model` line, or its
+    /// overlay `OverlayAgent::model` equivalent. Unlike `tier`, both kinds
+    /// can carry one. Meaningful only when the teammate resolves to an `acp`
+    /// harness; the console has no way to know that from this response alone
+    /// and should treat it as informational rather than validating it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     /// Whether this teammate is the company's orchestrator — resolved by the
     /// roster rule (tagged tier first, else the first declared agent), not read
     /// off `tier` alone, so an untagged roster's real orchestrator is named.
@@ -265,6 +294,57 @@ pub(super) fn declared_tier(record: &CompanyRecord, agent_id: &str) -> Option<St
         .iter()
         .find(|agent| agent.id == agent_id)
         .and_then(|agent| agent.tier.clone())
+}
+
+/// The declared per-agent model override for `agent_id`, from whichever half
+/// of the roster it comes from (issue #1245's per-agent follow-up).
+///
+/// Unlike [`declared_tier`], this checks **both** the manifest row and the
+/// overlay row — `Agent::model` and `OverlayAgent::model` are siblings that
+/// both exist, since a model override (unlike a tier tag) is something an
+/// operator-defined teammate can carry too. `None` means undeclared, exactly
+/// as `declared_tier`'s own contract: this is what the roster *wrote*, not a
+/// resolved answer.
+pub(super) fn declared_model(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    // Through `effective_agent`, not `manifest.agents` directly: a blueprint
+    // teammate's edit is stored as an overlay, and reading the raw manifest
+    // row skips it. That is what made a `PATCH` here look successful and read
+    // back at the old value — the write landed, this never looked at it.
+    record
+        .effective_agent(agent_id)
+        .and_then(|agent| agent.model.clone())
+        .or_else(|| {
+            record
+                .overlay_agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .and_then(|agent| agent.model.clone())
+        })
+}
+
+/// The declared harness binding for `agent_id`, from whichever half of the
+/// roster it comes from (issue #1245's harness-picker follow-up).
+///
+/// Sibling of [`declared_model`] in shape and in reason: `Agent::harness` and
+/// `OverlayAgent::harness` are the same field on both roster halves now, and
+/// `None` means "the default harness", not "undeclared" — unlike
+/// [`declared_tier`], every teammate resolves to *some* harness, this just
+/// says whether it named one explicitly.
+pub(super) fn declared_harness(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    // Through `effective_agent`, not `manifest.agents` directly: a blueprint
+    // teammate's edit is stored as an overlay, and reading the raw manifest
+    // row skips it. That is what made a `PATCH` here look successful and read
+    // back at the old value — the write landed, this never looked at it.
+    record
+        .effective_agent(agent_id)
+        .and_then(|agent| agent.harness.clone())
+        .or_else(|| {
+            record
+                .overlay_agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .and_then(|agent| agent.harness.clone())
+        })
 }
 
 /// Whether `agent_id` is this company's orchestrator.
@@ -405,6 +485,24 @@ pub(super) struct EditAgent {
     /// is normalized to a reset, so an override can never blank a persona.
     #[serde(default, deserialize_with = "double_option")]
     instructions: Option<Option<String>>,
+    /// The teammate's own model override (issue #1245's per-agent follow-up).
+    /// A double option for the same reason as `description`: absent leaves it
+    /// alone, `null` clears it back to the harness's own default, and a
+    /// string sets it. Admin-only, alongside `tools` — see [`edit_agent`]:
+    /// a model choice carries the same "this is a cost/scope decision, not a
+    /// teammate's own detail" character `tools` does, not a name or a role.
+    #[serde(default, deserialize_with = "double_option")]
+    model: Option<Option<String>>,
+    /// Which declared `[[harness]]` this teammate runs on (issue #1245's
+    /// harness-picker follow-up). Same double-option shape and the same
+    /// admin gate as `model` — see [`edit_agent`]. `null` clears it back to
+    /// the harness marked `default = true`; a string pins it to one of the
+    /// ids `GET {scope}/harnesses` lists. Validated against that same list at
+    /// write time, so a typo or a stale id from a client that cached an old
+    /// harness list is a `400`, not a teammate silently orphaned from every
+    /// harness's serve set.
+    #[serde(default, deserialize_with = "double_option")]
+    harness: Option<Option<String>>,
 }
 
 /// `GET {scope}/team/{agent_id}` — one agent, read.
@@ -478,7 +576,7 @@ async fn edit_agent(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
-) -> Result<Json<AgentDetailDto>, Response> {
+) -> Result<Json<AgentDetailDto>, crate::server::Rejection> {
     // Serialize with every other write to `overlay_agents`, so a console edit
     // and a concurrent `add_agent` cannot clobber one another's roster.
     let write_lock = company_write_lock(company.id());
@@ -488,11 +586,8 @@ async fn edit_agent(
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
-        })?;
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
 
     // Identity before validation, so an unknown id is a 404 rather than a
     // complaint about the shape of a body nobody could have applied anyway.
@@ -510,7 +605,8 @@ async fn edit_agent(
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         )))
-        .into_response());
+        .into_response()
+        .into());
     }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
 
@@ -534,7 +630,7 @@ async fn edit_agent(
     // Deliberately unlike `set_budget`, which authorises first: that route is
     // admin-only in full, so admin-first is self-consistent there. This one is
     // admin-only *per field*, which is what makes the ordering load-bearing.
-    if body.tools.is_some() {
+    if body.tools.is_some() || body.model.is_some() || body.harness.is_some() {
         require_admin(&headers, &state, &company.runtime, peer).await?;
     }
 
@@ -545,6 +641,87 @@ async fn edit_agent(
         .map(|globs| trimmed_globs(&globs))
         .transpose()
         .map_err(|e| e.into_response())?;
+    // Present-and-null clears; a blank string clears too — an empty override
+    // and no override mean the same thing (the harness's own default model
+    // applies), and storing `Some("")` would only make the two look
+    // different on the wire. Hoisted above the mutation below (unlike
+    // `tools`/`name`) because the cross-field check just below needs the
+    // *resulting* value, not `body.model` itself.
+    let model = body
+        .model
+        .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    // Same double-option contract, and same reason to hoist: validated below
+    // against the declared harness list before anything is written.
+    let harness = body
+        .harness
+        .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+
+    // Resolved through `harness_by_id`, not against the declared list: a
+    // coding CLI this build drives is bindable without any `[[harness]]`
+    // naming it, and `GET {scope}/harnesses` offers exactly those ids in the
+    // picker. Checking the declared list here would refuse a binding the
+    // console had just offered.
+    if let Some(Some(id)) = &harness
+        && record.manifest.harness_by_id(id).is_none()
+    {
+        return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+            format!("no harness named `{id}` is available for this company."),
+        ))));
+    }
+
+    // A model override only means anything on an `acp` harness — the same
+    // rule `CompanyManifest::validate` enforces for a manifest agent's own
+    // `model`, applied here because an overlay teammate never passes through
+    // that validation (it lives on the record, not the parsed manifest).
+    // Resolved against the harness this edit actually leaves the teammate
+    // on: the new binding when one was sent, else its current one — so
+    // setting a model in the same request as switching to an ACP harness
+    // is accepted, not rejected against the stale binding.
+    let resulting_model = model
+        .clone()
+        .unwrap_or_else(|| declared_model(&record, &agent_id));
+    if let Some(model_value) = &resulting_model {
+        let resulting_harness_id = harness
+            .clone()
+            .unwrap_or_else(|| declared_harness(&record, &agent_id))
+            .unwrap_or_else(|| record.manifest.default_harness_id());
+        let bound = record.manifest.harness_by_id(&resulting_harness_id);
+        if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but this teammate's harness has no ACP \
+                     transport to forward it to. Bind it to an ACP harness first, or clear \
+                     the model."
+                ),
+            ))));
+        }
+        // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
+        // still cannot carry a model, because the runner wire protocol has no
+        // field for one. `CompanyManifest::validate` already refuses this
+        // combination, so accepting it here let the API store a binding a
+        // manifest is not allowed to declare — and one that could never take
+        // effect. The wording is the validator's, so both refusals read the
+        // same.
+        if bound
+            .as_ref()
+            .and_then(|h| h.acp.as_ref())
+            .map(|acp| acp.transport.as_str())
+            == Some("runner")
+        {
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                     `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                     yet — the runner wire protocol doesn't carry them."
+                ),
+            ))));
+        }
+    }
+
+    // Captured before the two are consumed below. `Some` means the request
+    // carried the field at all — including a `null` that clears it, which
+    // changes routing exactly as much as setting one does.
+    let routing_changed = model.is_some() || harness.is_some();
 
     if is_manifest {
         // Stored as an overlay on the record, exactly like the daily-budget
@@ -567,6 +744,18 @@ async fn edit_agent(
                     .map(|text| text.trim().to_string())
                     .unwrap_or_default(),
             );
+        }
+        // Issue #1245's per-agent follow-up. These were advertised as editable
+        // and accepted by this handler, but the override built here carried
+        // only the four fields above — so a blueprint teammate's harness or
+        // model edit returned 200 and was then read back at its old value,
+        // with nothing anywhere reporting the loss. Blank is the stored form
+        // of "cleared", exactly as for `description`.
+        if let Some(model) = model {
+            entry.model = Some(model.unwrap_or_default());
+        }
+        if let Some(harness) = harness {
+            entry.harness = Some(harness.unwrap_or_default());
         }
         record.upsert_agent_override(entry);
     } else {
@@ -598,6 +787,14 @@ async fn edit_agent(
         if let Some(tools) = tools {
             agent.tools = tools;
         }
+        // Issue #1245's per-agent follow-up: already trimmed/blank-cleared
+        // and cross-validated above.
+        if let Some(model) = model {
+            agent.model = model;
+        }
+        if let Some(harness) = harness {
+            agent.harness = harness;
+        }
     }
 
     // Issue #1530: the persona override, written to the record for **either**
@@ -620,12 +817,38 @@ async fn edit_agent(
         }
     }
 
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
+
+    // A harness or model change needs the runtime rebuilt, not just saved.
+    //
+    // Lanes, router bindings and `LocalAcpAgent`'s model map are snapshots
+    // `RuntimeBuilder` takes once, and `HarnessBrain::refresh_record` refreshes
+    // only the record — so without this the save is durable and inert: it
+    // survives, reads back correctly, and changes nothing about where turns go
+    // until the process restarts. The same reasoning `inference.rs` applies to
+    // a provider change, which is likewise chosen at build time.
+    //
+    // Only for these two fields. A name, role, tools or description edit does
+    // not affect routing, and rebuilding a company for one would be a large
+    // cost for no effect.
+    // A let-chain rather than a nested `if`: the tuple form clippy's
+    // `collapsible_if` suggests would evaluate `rebuild_company` before
+    // testing the flag, rebuilding on every name edit — the exact cost this
+    // guard exists to avoid.
+    if routing_changed
+        && let Err(error) = crate::runtime::rebuild_company(&state, company.id()).await
+    {
+        // Not fatal, and deliberately not a failed response: the edit *is*
+        // saved and will apply on the next start. A host that cannot rebuild
+        // in place (no rebuilder wired) is an ordinary configuration, not an
+        // error the operator caused by editing a teammate.
+        tracing::warn!(
+            %error,
+            agent = %agent_id,
+            "saved the harness binding but could not rebuild the company runtime; \
+             it applies on the next restart"
+        );
+    }
 
     // The caller either passed `require_admin` above or sent no `tools`, so
     // re-resolve rather than assume: an admin editing only a name must still
@@ -633,7 +856,7 @@ async fn edit_agent(
     let is_admin = is_admin_actor(&headers, &state, &company, peer).await;
     detail(&company, &record, &agent_id, is_admin)
         .await
-        .map_err(|e| e.into_response())
+        .map_err(|e| e.into_response().into())
 }
 
 /// Rejects a field that was sent but is blank, and trims one that was sent.
@@ -797,6 +1020,8 @@ async fn detail(
         blueprint_instructions,
         instructions_overridden,
         tier: declared_tier(record, agent_id),
+        harness: declared_harness(record, agent_id),
+        model: declared_model(record, agent_id),
         is_orchestrator: is_orchestrator(record, agent_id),
         tools: agent_tools(record, agent_id),
         desks: desks_for(record, agent_id),
@@ -890,6 +1115,41 @@ name = "Content desk"
 members = ["writer", "ceo"]
 "#;
 
+    /// [`ROSTER`], plus a declared `[[harness]]` set (issue #1245's
+    /// harness-picker follow-up): `laptop` is a `local` ACP harness and the
+    /// **default**, so a fresh overlay teammate — which names no harness of
+    /// its own — lands there and a model override on it is meaningful. Tests
+    /// that need to exercise the harness picker itself declare a second,
+    /// non-default `built_in` entry (`main`) to switch *away* from.
+    const ACP_ROSTER: &str = r#"
+[company]
+name = "Acme"
+[policy]
+mode = "full"
+[tools]
+allow = ["workspace", "workspace.*", "composio"]
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction and delegates."
+tier = "orchestrator"
+tools = ["workspace.read", "email.send"]
+
+[[harness]]
+id = "main"
+kind = "built_in"
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+default = true
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+
     fn home() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("oc-agent-detail-")
@@ -936,6 +1196,8 @@ members = ["writer", "ceo"]
             role: "Researcher".to_string(),
             description: None,
             tools: vec!["docs.*".to_string()],
+            model: None,
+            harness: None,
         });
         record.overlay_agents.push(OverlayAgent {
             id: "standard".to_string(),
@@ -943,6 +1205,8 @@ members = ["writer", "ceo"]
             role: "Generalist".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         // A manifest agent's own line.
@@ -1780,7 +2044,15 @@ prompt = "Lead decisively."
         let (_, agent) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&agent["editable"]),
-            vec!["name", "role", "description", "tools", "instructions"],
+            vec![
+                "name",
+                "role",
+                "description",
+                "tools",
+                "instructions",
+                "model",
+                "harness"
+            ],
             "{agent}"
         );
     }
@@ -1911,6 +2183,320 @@ prompt = "Lead decisively."
         );
     }
 
+    /// Issue #1245's per-agent follow-up: an admin can set and clear a
+    /// teammate's own model override, and a member meets the same `403` this
+    /// module already enforces for `tools` — the two fields share the
+    /// "cost/scope decision" character `edit_agent`'s own docs give for why
+    /// `tools` is admin-only.
+    ///
+    /// `ACP_ROSTER`, not `ROSTER`: the fresh overlay teammate lands on
+    /// whichever harness is `default = true`, and a model only means
+    /// anything there when that harness is `acp` — see the cross-field
+    /// rejection test below for the `built_in` case this deliberately avoids.
+    #[tokio::test]
+    async fn an_admin_can_set_and_clear_a_teammates_model_override() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ACP_ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        // Undeclared until set.
+        let (_, before) = get_agent(&state, &jamie).await;
+        assert!(before["model"].is_null(), "{before}");
+
+        // A member may not set one.
+        let (status, refusal) = send_as(
+            &state,
+            "PATCH",
+            &format!("/api/v1/company/team/{jamie}"),
+            Some(json!({"model": "claude-opus-4-5"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+
+        // An admin may.
+        let (status, set) = patch_agent(&state, &jamie, json!({"model": "claude-opus-4-5"})).await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["model"], "claude-opus-4-5");
+
+        let (_, reread) = get_agent(&state, &jamie).await;
+        assert_eq!(reread["model"], "claude-opus-4-5", "{reread}");
+
+        // `null` clears it back to the harness's own default.
+        let (status, cleared) = patch_agent(&state, &jamie, json!({"model": null})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["model"].is_null(), "{cleared}");
+    }
+
+    /// Issue #1245's harness-picker follow-up: a model override is refused
+    /// outright when the teammate's harness (here, the implicit `built_in`
+    /// default `ROSTER` never overrides) has no ACP transport to forward it
+    /// to — the overlay-write mirror of `CompanyManifest::validate`'s
+    /// identical rule for a manifest agent's own `model`.
+    #[tokio::test]
+    async fn a_model_override_is_refused_off_an_acp_harness() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, refusal) =
+            patch_agent(&state, &jamie, json!({"model": "claude-opus-4-5"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (_, unchanged) = get_agent(&state, &jamie).await;
+        assert!(unchanged["model"].is_null(), "{unchanged}");
+    }
+
+    /// Issue #1245's harness-picker follow-up: a teammate's harness binding
+    /// is admin-only (same gate as `model`/`tools`), validated against the
+    /// company's own declared set, and clears back to the default with
+    /// `null` — the same three behaviours the model test above proves for
+    /// `model`, on the sibling field.
+    #[tokio::test]
+    async fn an_admin_can_pin_and_clear_a_teammates_harness() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ACP_ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        // Undeclared until set — this teammate is on the default (`laptop`)
+        // implicitly, not by naming it.
+        let (_, before) = get_agent(&state, &jamie).await;
+        assert!(before["harness"].is_null(), "{before}");
+
+        // A member may not set one.
+        let (status, refusal) = send_as(
+            &state,
+            "PATCH",
+            &format!("/api/v1/company/team/{jamie}"),
+            Some(json!({"harness": "main"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+
+        // An unknown id is refused, not silently accepted into a binding
+        // that would orphan the teammate from every harness's serve set.
+        let (status, refusal) =
+            patch_agent(&state, &jamie, json!({"harness": "does-not-exist"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        // An admin may pin it to a declared harness.
+        let (status, set) = patch_agent(&state, &jamie, json!({"harness": "main"})).await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["harness"], "main");
+
+        let (_, reread) = get_agent(&state, &jamie).await;
+        assert_eq!(reread["harness"], "main", "{reread}");
+
+        // `null` clears it back to the declared default.
+        let (status, cleared) = patch_agent(&state, &jamie, json!({"harness": null})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["harness"].is_null(), "{cleared}");
+    }
+
+    /// Issue #1245's harness-picker follow-up: switching a teammate onto an
+    /// ACP harness and setting its model happen in the same `PATCH` in the
+    /// console's own edit flow, so the cross-field check has to validate
+    /// against the *new* binding, not the stale one — this is the case that
+    /// would wrongly 400 if it read `declared_harness` unconditionally
+    /// instead of preferring the harness this same request also sent.
+    #[tokio::test]
+    async fn harness_and_model_can_be_set_together_against_the_new_binding() {
+        let home_dir = home();
+        // `main` (`built_in`) is default here — the opposite of `ACP_ROSTER`
+        // — so a model alone would be refused, and only succeeds because
+        // this request also moves the teammate onto `laptop` in the same call.
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "main"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, set) = patch_agent(
+            &state,
+            &jamie,
+            json!({"harness": "laptop", "model": "claude-opus-4-5"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["harness"], "laptop");
+        assert_eq!(set["model"], "claude-opus-4-5");
+    }
+
+    /// The same edit against a **manifest** teammate, which is the common case
+    /// and the one that silently did nothing.
+    ///
+    /// Both fields were advertised in `editable` and accepted with a 200, but
+    /// the override written for a blueprint agent carried only name, role,
+    /// tools and description — so the values were dropped on the floor and the
+    /// next read returned the blueprint's. Nothing surfaced the loss: the
+    /// response body echoed the request, so it looked saved.
+    ///
+    /// Asserted through a fresh `GET` rather than the `PATCH` response,
+    /// because echoing the request back is precisely what made the bug
+    /// invisible.
+    #[tokio::test]
+    async fn harness_and_model_persist_for_a_manifest_teammate() {
+        let home_dir = home();
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "main"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML).await;
+
+        let (status, set) = patch_agent(
+            &state,
+            "ceo",
+            json!({"harness": "laptop", "model": "claude-opus-4-5"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert_eq!(reread["harness"], "laptop", "{reread}");
+        assert_eq!(reread["model"], "claude-opus-4-5", "{reread}");
+
+        // And clearing returns it to the blueprint rather than sticking.
+        let (status, cleared) =
+            patch_agent(&state, "ceo", json!({"harness": null, "model": null})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        let (_, after) = get_agent(&state, "ceo").await;
+        assert!(after["harness"].is_null(), "{after}");
+        assert!(after["model"].is_null(), "{after}");
+    }
+
+    /// Resetting instructions must not take the harness and model with it.
+    ///
+    /// `clear_agent_override` drops an override row once nothing is left in
+    /// it, and its retention predicate named only the fields that existed when
+    /// it was written — so for a teammate whose row held instructions plus a
+    /// harness, clearing the first deleted the row and silently reverted the
+    /// second to the blueprint.
+    #[tokio::test]
+    async fn clearing_instructions_leaves_the_harness_binding_alone() {
+        let home_dir = home();
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "main"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML).await;
+
+        let (status, _) = patch_agent(
+            &state,
+            "ceo",
+            json!({"harness": "laptop", "instructions": "Be brief."}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, after) = get_agent(&state, "ceo").await;
+        assert_eq!(
+            after["harness"], "laptop",
+            "clearing one override field must not discard the others: {after}"
+        );
+    }
+
+    /// A `runner` harness is `kind = "acp"` and still cannot carry a model —
+    /// its wire protocol has no field for one. `CompanyManifest::validate`
+    /// already refuses the combination, so accepting it here let the API store
+    /// a binding a manifest may not declare and that could never take effect.
+    #[tokio::test]
+    async fn a_model_is_refused_on_a_runner_bound_harness() {
+        let home_dir = home();
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "main"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "shared"
+kind = "acp"
+
+[harness.acp]
+transport = "runner"
+runner = "build-box"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML).await;
+
+        let (status, refused) = patch_agent(
+            &state,
+            "ceo",
+            json!({"harness": "shared", "model": "claude-opus-4-5"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused.to_string().contains("runner"),
+            "the refusal names the reason: {refused}"
+        );
+    }
+
     /// **Review of #745.** An unknown id answers the same way whether or not
     /// the body carries `tools`.
     ///
@@ -2001,7 +2587,15 @@ prompt = "Lead decisively."
         let (_, as_admin) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&as_admin["editable"]),
-            vec!["name", "role", "description", "tools", "instructions"],
+            vec![
+                "name",
+                "role",
+                "description",
+                "tools",
+                "instructions",
+                "model",
+                "harness"
+            ],
             "{as_admin}"
         );
 

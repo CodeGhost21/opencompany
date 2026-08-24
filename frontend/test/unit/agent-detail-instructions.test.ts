@@ -56,6 +56,13 @@ function makeClient(detail: AgentDetailDto, updateAgent = vi.fn(async () => deta
     // A member role skips the people directory; a company of `null` skips the
     // board read entirely, so neither needs a real answer here.
     get: vi.fn(async () => ({ role: "member" })),
+    // Since `feat/external-acp` merged, the detail view also reads the
+    // company's declared harnesses on mount (issue #1245's harness picker).
+    // These tests predate that and care about none of it — an empty list is
+    // the honest answer for a fixture that declares no `[[harness]]`, and it
+    // keeps the picker off the screen so the instructions assertions below
+    // still address the control they mean.
+    listHarnesses: vi.fn(async () => []),
     scopeFor: () => "",
   } as unknown as OpenCompanyClient;
 }
