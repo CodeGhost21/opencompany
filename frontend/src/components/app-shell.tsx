@@ -867,7 +867,7 @@ export function AppShell({
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
-          if (cancelled || entries.length === 0) return;
+          if (cancelled || requestCompany !== company || entries.length === 0) return;
           const hydrated = fromHistory(entries);
           setThreads((ts) =>
             ts.map((t) => {
