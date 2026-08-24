@@ -227,8 +227,8 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// which is a header parse in the same spirit as [`image_dimensions`]: it
 /// answers "how much painting does a viewer do" without doing any of it.
 ///
-/// Returns `None` when the bytes are not a GIF, or a GIF that never reaches an
-/// Image Descriptor (nothing to count). Returns `Err` when a GIF that has
+/// Returns `Ok(None)` when the bytes are not a GIF, or a GIF that never reaches
+/// an Image Descriptor (nothing to count). Returns `Err` when a GIF that has
 /// reached at least one Image Descriptor ends without a clean trailer: a viewer
 /// decodes the frames that are present, so a truncated animation repaints its
 /// counted area just the same and must be held to
