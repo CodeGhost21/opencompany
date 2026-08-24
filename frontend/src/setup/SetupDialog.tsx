@@ -657,8 +657,9 @@ export function SetupDialog({
             </DialogHeader>
             {phase.step === 0 && inference !== "ready" && (
               <InferenceNotice
-                unavailable={inference === "unavailable"}
+                inference={inference}
                 harnessReachable={harnessReachable}
+                canManage={canManage}
                 onLeave={onLeave}
               />
             )}
