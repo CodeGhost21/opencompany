@@ -657,19 +657,29 @@ async fn edit_agent(
         .harness
         .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
 
-    // Resolved through `harness_by_id`, not against the declared list: a
-    // coding CLI this build drives is bindable without any `[[harness]]`
+    // A coding CLI this build drives is bindable without any `[[harness]]`
     // naming it, and `GET {scope}/harnesses` offers exactly those ids in the
-    // picker. Checking the declared list here would refuse a binding the
-    // console had just offered.
-    if let Some(Some(id)) = &harness
-        && record.manifest.harness_by_id(id).is_none()
-        && !(state.acp_agents().is_some() && ACP_AGENTS.contains(&id.as_str()))
-    {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "no harness named `{id}` is available for this company."
-        )))
-        .into());
+    // picker. But `harness_by_id` resolves an `ACP_AGENTS` id on *any* build
+    // via the implicit-local fallback, which would let a hosted admin bind a
+    // teammate to a CLI the server has nothing to launch — accepted by `PATCH`,
+    // then dead on the next rebuild. So gate that fallback the same way the
+    // picker does: declared harnesses (and the built-in when a manifest
+    // declares none) are always bindable, an undeclared coding CLI only when
+    // this host wires an `AcpAgentFactory`, and anything else is refused.
+    if let Some(Some(id)) = &harness {
+        let declared = record
+            .manifest
+            .effective_harnesses()
+            .iter()
+            .any(|h| h.id == *id);
+        let bindable =
+            declared || (ACP_AGENTS.contains(&id.as_str()) && state.acp_agents().is_some());
+        if !bindable {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "no harness named `{id}` is available for this company."
+            )))
+            .into());
+        }
     }
 
     // A model override only means anything on an `acp` harness — the same
