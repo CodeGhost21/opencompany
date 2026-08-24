@@ -22,7 +22,9 @@ console is a separate Vite app. See
 
 A **TinyHumans API key** unlocks Medulla, the orchestrator. Without one you can
 still build, inspect, and explore every company in
-[`companies/`](../companies/); the agents just won't do real work.
+[`companies/`](../companies/); the agents just won't do real work. Live
+cognition also needs the `medulla` feature compiled in — the from-source
+commands below already build with it.
 
 ```sh
 export TINYHUMANS_API_KEY="th-..."
