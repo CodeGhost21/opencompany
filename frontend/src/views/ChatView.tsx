@@ -253,6 +253,7 @@ export function ChatView({
   onSendDetached,
   onSendFailed,
   onSendStale,
+  scopeCompanyRef,
   openTurns,
   liveStepsByThread,
   unread,
