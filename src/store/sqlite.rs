@@ -386,13 +386,10 @@ fn sql_err(e: rusqlite::Error) -> OpenCompanyError {
 /// company-wide, matching the read path: losing a notification is worse than
 /// showing one person one extra line.
 fn audience_admits(audience: Option<&str>, user: &str) -> bool {
-    match audience {
-        None => true,
-        Some(raw) => match serde_json::from_str::<Vec<String>>(raw) {
-            Ok(ids) => ids.iter().any(|id| id == user),
-            Err(_) => true,
-        },
-    }
+    let decoded: Option<Vec<String>> = audience.and_then(|raw| serde_json::from_str(raw).ok());
+    // Decode once, then defer to the one shared rule on `Notification` so this
+    // cannot drift from `list()` in this file or the other two backends.
+    crate::ports::notifications::audience_admits(decoded.as_deref(), user)
 }
 
 /// Notification ids in this company that `user` is allowed to see.
