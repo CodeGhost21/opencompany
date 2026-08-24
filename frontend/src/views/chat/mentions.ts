@@ -634,7 +634,7 @@ export function mentionRegex(mentions: Array<{ text: string }>): RegExp {
 export function mentionablesFor(
   directory: {
     agents: Array<{ id: string; name: string; role: string }>;
-    people: Array<{ id: string; label: string; slug: string }>;
+    people: Array<{ id: string; label: string; slug: string; avatar?: string }>;
     desks: Array<{ id: string; name: string; memberIds: string[] }>;
     everyone: { label: string; aliases: string[] };
   },
