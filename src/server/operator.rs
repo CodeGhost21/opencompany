@@ -7574,8 +7574,8 @@ mode = "full"
             ])
         );
     }
-
-
+    #[test]
+    fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
             mentions: Vec::new(),
             mention_depth: 0,
