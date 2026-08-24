@@ -493,10 +493,9 @@ fn child_calls_preceding(
             continue;
         };
         out.push(UnreplayableCall {
-            node_id: node.id.clone(),
+            node_id: format!("{output_prefix}{}", node.id),
             slug,
-            why: "it runs inside a child workflow whose ungated calls are not carried up when \
-                  the child pauses, so approving restarts the child and calls it again",
+            why: "it runs inside a child workflow whose ungated calls are not carried up when \n                  the child pauses, so approving restarts the child and calls it again",
         });
     }
     out
