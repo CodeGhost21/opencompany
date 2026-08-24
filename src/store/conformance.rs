@@ -324,6 +324,7 @@ pub async fn assert_isolation_by_company(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -559,6 +560,7 @@ pub async fn assert_append_only_event_and_ledger(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -573,6 +575,7 @@ pub async fn assert_append_only_event_and_ledger(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -593,6 +596,7 @@ pub async fn assert_append_only_event_and_ledger(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -629,6 +633,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -647,6 +652,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -692,6 +698,7 @@ pub async fn assert_event_subscription_surfaces_gap(events: Arc<dyn EventLog>) {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -727,6 +734,7 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
                         by: None,
                         chat: None,
                         deliverable: None,
+                        attachments: Vec::new(),
                     },
                 )
                 .await
@@ -999,6 +1007,7 @@ pub async fn assert_export_totality(
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         events.append(&id, ev.clone()).await.unwrap();
         appended.push(ev);

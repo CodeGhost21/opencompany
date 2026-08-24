@@ -604,6 +604,39 @@ type Message {
 	cannot disagree about who was mentioned.
 	"""
 	mentions: [MessageMention!]!
+	"""
+	Files attached to this message (issue #1682), each a reference into the
+	company workspace with the store-computed name / mime / size. Empty on a
+	reply, a system pill, and every operator message journaled before the
+	field existed. Same [`MessageView`] field the REST route reads, so the
+	two surfaces carry the same rows (issue #65).
+	"""
+	attachments: [MessageAttachment!]!
+}
+
+"""
+One file attached to a history message (issue #1682). GraphQL mirror of the
+REST `attachments` array, so the two surfaces carry the same rows. Every
+field is store-authored metadata; the bytes are fetched separately through
+the hardened `GET …/workspace/blob/{nodeId}` route.
+"""
+type MessageAttachment {
+	"""
+	The workspace node id the payload is stored under.
+	"""
+	nodeId: ID!
+	"""
+	The stored file's display name.
+	"""
+	name: String!
+	"""
+	The stored payload's media type.
+	"""
+	mime: String!
+	"""
+	The stored payload's exact length in bytes.
+	"""
+	size: Float!
 }
 
 """

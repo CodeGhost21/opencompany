@@ -32,8 +32,8 @@ use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, OutboundMessage, OverlayDesk,
-    OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
+    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, OutboundMessage,
+    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -1364,6 +1364,22 @@ struct ChatMessage {
     /// console against a newer host gets extraction too.
     #[serde(default)]
     mentions: Option<Vec<crate::ports::types::Mention>>,
+    /// The workspace node ids of files attached to this message (issue #1682).
+    ///
+    /// **Ids only, and nothing else is trusted.** The client uploads each file
+    /// first (`POST {scope}/chat/upload`), gets back a `node_id`, and lists
+    /// those ids here. The host re-resolves each within this company's own
+    /// workspace and takes the name / mime / size from the store — so a foreign
+    /// or spoofed reference cannot cross a company boundary or misdescribe its
+    /// payload (see `resolve_attachments`). An id that resolves to no binary
+    /// node in this company is a `400`.
+    ///
+    /// Additive in both directions: this struct has no `deny_unknown_fields`,
+    /// so a newer console against an older host has its ids ignored and its
+    /// message still posts, and an older console omits the field entirely — an
+    /// absent list is an empty one, the exact pre-#1682 wire shape.
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1806,6 +1822,56 @@ struct AcceptedTurn {
 /// Best-effort on the row and on the transcript line, never on the append: the
 /// message is the thing the operator can lose, and the other two are how we
 /// describe it.
+/// Resolves the client's attachment `node_id`s to durable [`Attachment`]s
+/// (issue #1682).
+///
+/// The whole security posture of chat attachments lives here. The client hands
+/// this route ids only; every name / mime / size on the journaled event is read
+/// from the company's own workspace tree, never from the request — so a client
+/// cannot claim a `report.pdf` is a `photo.png`, nor pretend a two-byte file is
+/// two gigabytes. Each id must resolve to a **binary** node in *this* company's
+/// tree: a foreign id (the IDOR a shared, guessable ULID would otherwise open),
+/// one that names a prose note, or one that names nothing is a `400`, on the
+/// same terms a bad thread `parent` is. The tree scan is the same read
+/// `upload()` does to re-fetch a just-stored node, so no new store surface is
+/// introduced.
+///
+/// Preserves the caller's order and refuses on the first bad id, so the message
+/// is never journaled with a partial or reordered attachment list.
+async fn resolve_attachments(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node_ids: &[String],
+) -> Result<Vec<Attachment>, ApiError> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tree = runtime.workspace().tree(id).await?;
+    node_ids
+        .iter()
+        .map(|node_id| {
+            let node = tree
+                .iter()
+                .find(|n| &n.id == node_id && n.is_binary())
+                .ok_or_else(|| {
+                    ApiError(OpenCompanyError::InvalidRequest(format!(
+                        "attachment {node_id} is not a file in this company's workspace"
+                    )))
+                })?;
+            Ok(Attachment {
+                node_id: node.id.clone(),
+                name: node.name.clone(),
+                // A binary node always carries both — `is_binary()` is exactly
+                // `mime.is_some()`, and the store computes `size` alongside it —
+                // so the defaults are unreachable and exist only to keep this
+                // total without an `unwrap` a later store change could break.
+                mime: node.mime.clone().unwrap_or_default(),
+                size: node.size.unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
 async fn accept_chat_turn(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -1816,6 +1882,12 @@ async fn accept_chat_turn(
 ) -> Result<AcceptedTurn, ApiError> {
     runtime.ensure_running().await?;
     runtime.ensure_accepting().map_err(ApiError)?;
+
+    // Issue #1682: resolve the client's attachment ids to durable references
+    // before the journal write, so a bad reference refuses the send outright —
+    // on the same terms a malformed `parent` does — rather than journaling a
+    // message that points at a file this company does not have.
+    let attachments = resolve_attachments(runtime, id, &message.attachments).await?;
 
     let message_event = CompanyEvent::OperatorMessage {
         text: message.text.clone(),
@@ -1839,6 +1911,10 @@ async fn accept_chat_turn(
         mentions: runtime
             .resolve_mentions(&message.text, message.mentions.clone(), by)
             .await,
+        // Issue #1682: the store-resolved references, so the durable record
+        // carries the name/mime/size the store computed and never the client's
+        // claim. Empty on a message with no attachment, which skips the field.
+        attachments,
     };
     let message_seq = runtime
         .events()
@@ -2386,6 +2462,44 @@ struct ChatHistoryMessageDto {
     /// legacy shape is unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mentions: Vec<ChatMentionDto>,
+    /// Files attached to this message (issue #1682), each a reference into the
+    /// company workspace with the store-computed name / mime / size. Omitted
+    /// when the message carries none — which is every reply, every system pill,
+    /// and every operator message journaled before the field existed — so the
+    /// legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<ChatAttachmentDto>,
+}
+
+/// One file attached to a history message (issue #1682). Mirrors `Attachment`
+/// in `frontend/src/lib/chat.ts`, and carries only store-authored metadata —
+/// the id the payload is reachable at, and the name / mime / size the store
+/// computed. The bytes are fetched separately through the hardened
+/// `GET …/workspace/blob/{nodeId}` route.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAttachmentDto {
+    /// The workspace node id the payload is stored under — what the console
+    /// hands the blob route to download or preview it.
+    node_id: String,
+    /// The stored file's display name.
+    name: String,
+    /// The stored payload's media type, so the console decides download-vs-
+    /// preview without fetching the bytes.
+    mime: String,
+    /// The stored payload's exact length in bytes.
+    size: u64,
+}
+
+impl From<Attachment> for ChatAttachmentDto {
+    fn from(attachment: Attachment) -> Self {
+        Self {
+            node_id: attachment.node_id,
+            name: attachment.name,
+            mime: attachment.mime,
+            size: attachment.size,
+        }
+    }
 }
 
 /// One mention on a history message. Mirrors `Mention` in
@@ -2464,6 +2578,11 @@ impl From<MessageView> for ChatHistoryMessageDto {
                 .mentions
                 .into_iter()
                 .map(ChatMentionDto::from)
+                .collect(),
+            attachments: view
+                .attachments
+                .into_iter()
+                .map(ChatAttachmentDto::from)
                 .collect(),
         }
     }
@@ -4012,6 +4131,7 @@ mode = "full"
                 parent: None,
                 deliverable: None,
                 detach: false,
+                attachments: Vec::new(),
             };
             let accepted = accept_chat_turn(
                 &runtime,
@@ -7629,6 +7749,7 @@ mode = "full"
                 chat: Some("General".into()),
                 parent: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }))
             .is_none(),
             "the operator's own message must not reach the console over SSE"
@@ -8392,6 +8513,7 @@ mode = "full"
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),
