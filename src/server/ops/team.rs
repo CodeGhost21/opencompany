@@ -563,32 +563,15 @@ async fn add_member(
             ..Default::default()
         });
     }
-    // A create-time face, validated before it is stored for the reason the PATCH
-    // gives: the value is rendered into an `src=` wherever this teammate appears.
-    // Blank is dropped rather than stored — "no choice" is the hashed default.
-    let avatar = match body
-        .avatar
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => {
-            let stored = crate::company::avatar::resolve(
-                company.runtime.workspace().as_ref(),
-                company.id(),
-                value,
-            )
-            .await
-            .map_err(|e| ApiError(e).into_response())?;
-            record.upsert_agent_override(AgentOverride {
-                agent_id: agent.id.clone(),
-                avatar: Some(stored.clone()),
-                ..Default::default()
-            });
-            Some(stored)
-        }
-        None => None,
-    };
+    // The resolved face is applied to the record under the lock so the upsert
+    // lands in the same atomic save as the teammate itself.
+    if let Some(stored) = resolved_avatar.clone() {
+        record.upsert_agent_override(AgentOverride {
+            agent_id: agent.id.clone(),
+            avatar: Some(stored),
+            ..Default::default()
+        });
+    }
     company.runtime.store().save(&record).await?;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
