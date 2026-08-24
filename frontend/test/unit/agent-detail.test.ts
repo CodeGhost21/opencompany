@@ -109,6 +109,7 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: [],
       companyAllow: ["workspace", "composio"],
+      deskAllow: [],
       effective: ["workspace", "composio"],
     });
     expect(summary.standardGrant).toBe(true);
