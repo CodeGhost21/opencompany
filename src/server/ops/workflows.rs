@@ -1915,9 +1915,9 @@ async fn draft_from_description(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
-                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
-                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot").into(),
+                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot").into(),
+                RunnerGap::NotWired => super::not_wired("the workflow copilot").into(),
             },
         );
     }
@@ -2130,9 +2130,9 @@ async fn fix_from_run(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
-                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
-                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot").into(),
+                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot").into(),
+                RunnerGap::NotWired => super::not_wired("the workflow copilot").into(),
             },
         );
     }
