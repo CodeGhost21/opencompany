@@ -76,7 +76,7 @@ describe("the fullscreen graph's narrow chrome", () => {
       expect(classes).toContain("max-[639px]:h-14");
       expect(classes).toContain("max-[639px]:w-8");
     }
-    expect(paddle("Previous department").className).toContain("max-[899px]:left-3");
-    expect(paddle("Next department").className).toContain("max-[899px]:right-3");
+    expect(paddle("Previous desk").className).toContain("max-[899px]:left-3");
+    expect(paddle("Next desk").className).toContain("max-[899px]:right-3");
   });
 });
