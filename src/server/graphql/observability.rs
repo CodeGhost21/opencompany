@@ -213,7 +213,7 @@ impl AgentRunGql {
                 RunStepGql {
                     seq: record.step_seq as i32,
                     at_millis: record.at_millis as f64,
-                    kind: format!("{:?}", step.kind).to_lowercase(),
+                    kind: step.kind.wire_word().to_string(),
                     status: match step.status {
                         crate::ports::types::TurnStepStatus::Ok => "ok",
                         crate::ports::types::TurnStepStatus::Error => "error",
