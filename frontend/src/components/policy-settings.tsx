@@ -359,7 +359,8 @@ export function PolicySettings({ client, company }: Props) {
     if (
       manifestTier &&
       (widensAutonomy(status.tiers, status.mode, status.manifestMode) ||
-        removedAlwaysAsk.length > 0)
+        removedAlwaysAsk.length > 0 ||
+        spendCapWidens)
     ) {
       setPendingReset(true);
       setPendingTier(manifestTier);
