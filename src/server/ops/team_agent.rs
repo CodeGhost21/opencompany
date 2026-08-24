@@ -664,10 +664,9 @@ async fn edit_agent(
     if let Some(Some(id)) = &harness
         && record.manifest.harness_by_id(id).is_none()
     {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "no harness named `{id}` is available for this company."
-        )))
-        .into_response());
+        return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+            format!("no harness named `{id}` is available for this company."),
+        ))));
     }
 
     // A model override only means anything on an `acp` harness — the same
