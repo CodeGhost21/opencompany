@@ -560,6 +560,18 @@ pub(crate) struct DelegationRunner<'a> {
     /// (issues #1035, #1152). `None` for every path that is not an operator chat
     /// turn, and for a message whose sender expressed no preference.
     requested_intent: Option<crate::ports::types::MessageIntent>,
+    /// The other teammates this message named, when it named any.
+    ///
+    /// Context for the turn, **never a second dispatch**: one operator message
+    /// spawns exactly one turn, and this is how the teammate answering it
+    /// learns who else was addressed. It decides whether the work should
+    /// actually spread, and spreads it through the delegation tools it already
+    /// has — so a mention cannot become a way to start N turns with no approval
+    /// in sight.
+    ///
+    /// Empty on every path that is not a person typing into the composer, and
+    /// on every message that names nobody.
+    also_mentioned: Vec<String>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -616,6 +628,7 @@ impl<'a> DelegationRunner<'a> {
             task: None,
             run_sink: None,
             requested_intent: None,
+            also_mentioned: Vec::new(),
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -665,6 +678,7 @@ impl<'a> DelegationRunner<'a> {
             // A workflow run has no operator message and therefore no composer
             // choice; `None` is the only honest value here.
             requested_intent: None,
+            also_mentioned: Vec::new(),
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -868,6 +882,17 @@ impl<'a> DelegationRunner<'a> {
     /// make a dozen test call sites restate `None` to say nothing.
     pub(crate) fn requested(mut self, intent: Option<crate::ports::types::MessageIntent>) -> Self {
         self.requested_intent = intent;
+        self
+    }
+
+    /// Carries the other teammates this message named.
+    ///
+    /// A builder for the same reason [`requested`](Self::requested) is: optional
+    /// context about the turn, absent on every path that is not an operator
+    /// message, and threading it as an argument would make a dozen test call
+    /// sites restate an empty vector to say nothing.
+    pub(crate) fn also_mentioned(mut self, agents: Vec<String>) -> Self {
+        self.also_mentioned = agents;
         self
     }
 
@@ -1110,6 +1135,67 @@ impl<'a> DelegationRunner<'a> {
         // what *this* turn parked, not what the cycle was already holding from
         // an earlier one.
         let approvals_before = self.approvals_queued();
+        // Who else the message named, told to the teammate answering it.
+        //
+        // Appended to the turn input only — **not** to the journaled message,
+        // which is already stored verbatim with its own mention rows. A reader
+        // sees exactly what the author typed; the model additionally sees who
+        // that resolved to, which it otherwise could not know, because a mention
+        // is a structured fact about the message rather than a word in it.
+        //
+        // Deliberately phrased as context rather than an instruction: the turn
+        // decides whether the work needs to spread, and spreads it through the
+        // delegation tools it already has. Nothing here dispatches.
+        let with_mentions;
+        let message = if operator_turn && !self.also_mentioned.is_empty() {
+            // A responder with no hand-off tool at all (an overlay teammate,
+            // or a manifest member with an empty `delegates_to`) cannot act on
+            // "hand work to them" — see `responder_can_delegate`. Telling it
+            // to anyway is not a harmless nudge: it is an instruction the
+            // model has no tool to follow, for a name it now believes should
+            // be receiving work it never will.
+            with_mentions = {
+                let reachable = self.reachable_mentioned(responder);
+                let unreachable: Vec<&str> = self
+                    .also_mentioned
+                    .iter()
+                    .filter(|mentioned| !reachable.contains(mentioned))
+                    .map(String::as_str)
+                    .collect();
+                if unreachable.is_empty() {
+                    format!(
+                        "{message}
+
+[Also mentioned in this message: {}. They have not been asked to answer — you have. Hand work to them only if it genuinely needs them.]",
+                        self.also_mentioned.join(", ")
+                    )
+                } else if reachable.is_empty() {
+                    format!(
+                        "{message}
+
+[Also mentioned in this message: {}. They have not been asked to answer — you have. You have no way to hand this off to them, so answer it yourself, or say so if it genuinely needs them.]",
+                        self.also_mentioned.join(", ")
+                    )
+                } else {
+                    // Mixed: the responder can reach some of the named
+                    // teammates but not others, so "hand work to them"
+                    // would overstate the reach and "no way to hand off"
+                    // would understate it. Name which ones are out of
+                    // reach instead of asking the model to guess.
+                    format!(
+                        "{message}
+
+[Also mentioned in this message: {}. They have not been asked to answer — you have. You can hand work to {}, but not to {} — answer it yourself, or say so if it genuinely needs them.]",
+                        self.also_mentioned.join(", "),
+                        reachable.join(", "),
+                        unreachable.join(", ")
+                    )
+                }
+            };
+            with_mentions.as_str()
+        } else {
+            message
+        };
         let outcome = self
             .run_turn
             .run(self.company, responder, message, chat_id)
@@ -2684,6 +2770,31 @@ impl<'a> DelegationRunner<'a> {
         orchestrator::orchestrator_id(&self.record.effective_agents()).unwrap_or_default()
     }
 
+    /// Which of the specifically mentioned teammates `responder` can actually
+    /// reach. The orchestrator can reach every roster teammate; ordinary
+    /// responders are constrained by desk peers and their `delegates_to` list.
+    ///
+    /// The partition matters, not just whether it is empty: a responder that
+    /// can reach one named teammate but not another must not be told to "hand
+    /// work to them" as though everyone named were in play, nor told it has
+    /// "no way to hand off" when it can reach some — the wording names who is
+    /// out of reach.
+    fn reachable_mentioned(&self, responder: &str) -> Vec<String> {
+        if responder == self.orchestrator_id() {
+            return self.also_mentioned.clone();
+        }
+        let Some(agent) = self.record.effective_agent(responder) else {
+            return Vec::new();
+        };
+        let reachable =
+            delegation_tools::teammate_targets(self.record, responder, &agent.delegates_to);
+        self.also_mentioned
+            .iter()
+            .filter(|target| reachable.contains(target))
+            .cloned()
+            .collect()
+    }
+
     /// The voice a note this drain appends is recorded under.
     ///
     /// The orchestrator on every chat and task path, unchanged. On a **workflow
@@ -3820,6 +3931,82 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// promised really executed. A test with only the second half would pass on
     /// a path that drains but never claims — which is not the invariant, because
     /// the next such path written would inherit nothing.
+    /// A responder who cannot delegate (an ordinary manifest member with no
+    /// `delegates_to`) must not be told to "hand work to them" — it has no
+    /// tool to do that with. The orchestrator, who always can, keeps the
+    /// original phrasing.
+    #[tokio::test]
+    async fn also_mentioned_wording_matches_the_responders_own_delegation_reach() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .also_mentioned(vec!["chief".to_string()])
+            .handle_operator_message("engineer", "look into this", Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 1);
+        let (agent, message) = &calls[0];
+        assert_eq!(agent, "engineer");
+        assert!(
+            message.contains("You have no way to hand this off"),
+            "a non-delegating responder must be told plainly, not asked to do the impossible: {message}"
+        );
+        assert!(!message.contains("Hand work to them only if it genuinely needs them"));
+    }
+
+    /// The orchestrator always carries the hand-off tools, so it gets the
+    /// original "hand work to them" phrasing.
+    #[tokio::test]
+    async fn also_mentioned_wording_trusts_the_orchestrator_to_delegate() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .also_mentioned(vec!["engineer".to_string()])
+            .handle_operator_message("chief", "look into this", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 1);
+        let (agent, message) = &calls[0];
+        assert_eq!(agent, "chief");
+        assert!(
+            message.contains("Hand work to them only if it genuinely needs them"),
+            "the orchestrator can always delegate: {message}"
+        );
+        assert!(!message.contains("You have no way to hand this off"));
+    }
+
+    /// A responder that can reach ONE of two named teammates is told which one
+    /// is out of reach — not asked to "hand work to them" as though everyone
+    /// named were in play, nor told it has no way to hand off at all.
+    #[tokio::test]
+    async fn also_mentioned_wording_names_the_out_of_reach_teammate() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .also_mentioned(vec!["researcher".to_string(), "designer".to_string()])
+            .handle_operator_message("engineer", "look into this", Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 1);
+        let (agent, message) = &calls[0];
+        assert_eq!(agent, "engineer");
+        assert!(
+            message.contains("You can hand work to researcher, but not to designer"),
+            "the mixed case must name who is out of reach: {message}"
+        );
+        assert!(!message.contains("Hand work to them only if it genuinely needs them"));
+        assert!(!message.contains("You have no way to hand this off"));
+    }
+
     #[tokio::test]
     async fn an_operator_turn_approval_actually_lands_the_card() {
         let fx = Fixture::new();

@@ -106,7 +106,7 @@ export function MessageRow({
 
       <div className="flex min-w-0 flex-1 flex-col">
         {!continuation && <AuthorLine sender={sender} at={message.at} />}
-        <Markdown className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+        <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.taskId && (

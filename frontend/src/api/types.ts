@@ -160,6 +160,15 @@ export interface OutboundMessage {
    */
   taskId?: string;
   /**
+   * Who this reply names, as the host resolved them (issue #1645).
+   *
+   * Absent when it names nobody, and on a host that predates the field.
+   * When present the renderer can chip the resolved spans immediately
+   * rather than waiting for the history-rehydration path - the live POST
+   * response delivers the same mentions `chat/history` will later return.
+   */
+  mentions?: ChatMentionDto[];
+    /**
    * The durable id this reply was journaled under (issue #364) — the id
    * `chat/history` will return for it. Absent on a reply the host could not
    * journal, and on a host that predates the field; either way the console
@@ -248,6 +257,52 @@ export interface ChatHistoryMessageDto {
    * emoji. Absent when nobody has, and on a host that predates the field.
    */
   reactions?: ChatReactionDto[];
+  /**
+   * Who this message names, in reading order. Absent when it names nobody, and
+   * on a host that predates the field.
+   */
+  mentions?: ChatMentionDto[];
+}
+
+/**
+ * What a mention points at. Mirrors the Rust `MentionTarget`.
+ *
+ * `everyone` is a scope rather than an actor, which is why this is a union and
+ * not an `{ kind, id }` pair.
+ */
+export type MentionTarget =
+  | { kind: "agent"; id: string }
+  | { kind: "user"; id: string }
+  | { kind: "desk"; id: string }
+  | { kind: "everyone" };
+
+/**
+ * One mention as the composer *sends* it. Mirrors the Rust `Mention` input.
+ *
+ * Distinct from {@link ChatMentionDto}, which is what comes back: outgoing
+ * carries the target the picker resolved, incoming carries the label the host
+ * resolved it to. A client never sends a label and never receives a target.
+ */
+export interface ChatMentionInput {
+  target: MentionTarget;
+  /** The literal span typed, `@` included. */
+  text: string;
+  /** UTF-8 byte offset of `text` in the message body. */
+  offset: number;
+}
+
+/** One mention. Mirrors `ChatMentionDto` in `src/server/operator.rs`. */
+export interface ChatMentionDto {
+  /** The literal span the author typed, `@` included. */
+  text: string;
+  /** Byte offset of `text` in the message body. */
+  offset: number;
+  /** Who was named, as a display label — never a raw user id. */
+  label: string;
+  /** Whether the reading viewer is the one named (or was named by @everyone). */
+  mine: boolean;
+  /** Whether this mention renders but pinged nobody. */
+  quiet?: boolean;
 }
 
 /** One person's reaction. Mirrors `ChatReactionDto` in `src/server/operator.rs`. */
@@ -999,6 +1054,21 @@ export interface AgentDetailDto {
 export interface AgentToolsDto {
   requested: string[];
   companyAllow: string[];
+  /**
+   * The ceiling contributed by the desks this agent sits on — the union of
+   * their `tools`, already narrowed by `companyAllow`. **Empty means the
+   * narrowed ceiling grants nothing**, not "no desk narrows anything" — see
+   * `deskCeilingActive`, which tells those apart.
+   */
+  deskAllow: string[];
+  /**
+   * Whether any desk this agent sits on states a `tools` ceiling. Distinct
+   * from `deskAllow`: a ceiling can be active yet narrow to an empty list
+   * (a desk whose only grant the company does not allow), and the preview
+   * must keep the desk level as the gate in that case instead of falling
+   * back to `companyAllow`.
+   */
+  deskCeilingActive: boolean;
   effective: string[];
 }
 
@@ -1033,67 +1103,22 @@ export interface EditAgentInput {
    * persona the operator did not touch.
    */
   instructions?: string | null;
-  /**
-   * The teammate's own model override (issue #1245's per-agent follow-up).
-   * Same double-option shape as `description`: absent leaves it alone, `null`
-   * clears it back to the harness's own default, and a string sets it.
-   * Admin-only on the host, alongside `tools` — a member's `PATCH` carrying
-   * this key gets a `403`.
-   */
+  /** The teammate's own model override. */
   model?: string | null;
-  /**
-   * Which declared harness this teammate runs on (issue #1245's
-   * harness-picker follow-up). Same double-option shape as `model`: absent
-   * leaves it alone, `null` clears it back to the company's default, and a
-   * string pins it to one of the ids `GET {scope}/harnesses` lists.
-   * Admin-only on the host, alongside `model`/`tools`.
-   */
+  /** Which declared harness this teammate runs on. */
   harness?: string | null;
+  /** The teammate's own tool-grant globs. */
+  tools?: string[];
 }
 
-/**
- * One declared `[[harness]]`, from `GET {scope}/harnesses` (issue #1245's
- * harness-picker follow-up) — what Settings' Harnesses card and the per-agent
- * Harness picker both read, so the two cannot disagree about what the
- * company has declared. Read-only: a harness lives in the version-controlled
- * `company.toml`, the same as everything else `AgentDetailDto` treats as the
- * blueprint.
- */
+/** One declared or detected harness. */
 export interface HarnessDto {
   id: string;
-  /** `"built_in"` (managed) or `"acp"` (external). */
   kind: "built_in" | "acp";
-  /** Whether a teammate naming no harness runs here. Exactly one entry sets this. */
   default: boolean;
-  /** `acp` harnesses only: which CLI (`claude`/`codex`), when `transport === "local"`. */
   agent?: string;
-  /**
-   * Whether the host serving this company can spawn this harness's transport.
-   *
-   * Answered by the host because the console cannot work it out: a desktop
-   * connected to a *remote* company still has its own local survey, and
-   * probing a declared `transport = "local"` harness against the operator's
-   * laptop reports readiness for a machine that will never run those turns.
-   *
-   * Optional so a host predating the field degrades to not probing rather
-   * than to probing wrongly — the safe direction, since "can't say from here"
-   * is a state the page already renders honestly.
-   */
   runsHere?: boolean;
-  /** `acp` harnesses only: `"local"` (spawned on this machine) or `"runner"` (a registered remote). */
   transport?: string;
-  /**
-   * Whether this entry is **declared** in `company.toml` (`false`) or merely
-   * **detected** (`true`) — a coding CLI this build can drive, bindable
-   * without any `[[harness]]` naming it.
-   *
-   * The distinction is what the External harnesses page is built on. A
-   * declared harness is a property of the *company*, identical wherever the
-   * manifest is opened. A detected one is a property of the *machine*: the
-   * host says only "you may bind to this id" and cannot know whether the CLI
-   * is installed or signed in — that answer comes from `acpHarnesses()` on
-   * the desktop, joined against this list by `id`.
-   */
   detected: boolean;
 }
 
@@ -1809,12 +1834,50 @@ export interface PresenceDto {
 /**
  * Response of `GET {scope}/chat/mentionables` — everything an `@` can name.
  *
- * Presence reads only `people` from it, for the user-id → label map the
- * `presence` and `typing` frames deliberately do not carry.
+ * Mirrors `MentionablesDto` in `src/server/ops/mentions.rs`.
  */
 export interface MentionablesResponse {
-  agents: Array<{ id: string; name: string; role: string }>;
-  people: Array<{ id: string; label: string; slug: string }>;
-  desks: Array<{ id: string; name: string; memberIds: string[] }>;
-  everyone: { label: string; aliases: string[] };
+  agents: MentionableAgentDto[];
+  people: MentionablePersonDto[];
+  desks: MentionableDeskDto[];
+  everyone: MentionableEveryoneDto;
+}
+
+/** One teammate the picker can offer. */
+export interface MentionableAgentDto {
+  id: string;
+  name: string;
+  role: string;
+}
+
+/**
+ * One person the picker can offer.
+ *
+ * Id and label only, by design — this is deliberately not the admin user
+ * record, and must not grow toward it.
+ */
+export interface MentionablePersonDto {
+  id: string;
+  /** How this person is named to colleagues; never their login identity. */
+  label: string;
+  /** A short typable alias, disambiguated company-wide. Not a handle. */
+  slug: string;
+}
+
+/** One desk the picker can offer. */
+export interface MentionableDeskDto {
+  id: string;
+  name: string;
+  /** The teammates a mention of this desk expands to. */
+  memberIds: string[];
+}
+
+/**
+ * The broadcast token, described by the host rather than hard-coded here — a
+ * console that disagreed about the spellings would offer a row resolving to
+ * nothing.
+ */
+export interface MentionableEveryoneDto {
+  label: string;
+  aliases: string[];
 }

@@ -20,6 +20,7 @@ import {
   type BoardQuery,
   type BoardVote,
   type ReadMarker,
+  type ChatMentionInput,
   type MentionablesResponse,
   type PresenceListResponse,
   type ReadStateResponse,
@@ -480,6 +481,18 @@ export class OpenCompanyClient {
      * is exactly why this returns a union rather than the detached type.
      */
     detach?: boolean,
+    /**
+     * Who this message names, as the picker resolved them.
+     *
+     * Sent only when the picker actually resolved something, so an ordinary
+     * post keeps the exact body shape it had before mentions existed — the
+     * same omitted-field rule `deliverable` and `detach` follow.
+     *
+     * The host re-validates every entry against the live roster and demotes
+     * what no longer resolves, so this is a suggestion, not an instruction.
+     * Omitting it entirely asks the host to extract from the text instead.
+     */
+    mentions?: ChatMentionInput[],
   ): Promise<ChatPostResult> {
     const body: {
       text: string;
@@ -487,6 +500,7 @@ export class OpenCompanyClient {
       parent?: string;
       deliverable?: MessageIntent;
       detach?: boolean;
+      mentions?: ChatMentionInput[];
     } = {
       text,
     };
@@ -496,6 +510,10 @@ export class OpenCompanyClient {
     // Sent only when asked for, so an ordinary post keeps the exact body shape
     // it had before #983 — the same omitted-field rule `deliverable` follows.
     if (detach) body.detach = detach;
+    // `undefined` means the client has no directory and asks the host to
+    // extract mentions. An explicit empty list means the loaded directory
+    // resolved none and must suppress fallback extraction.
+    if (mentions !== undefined) body.mentions = mentions;
     return this.request<ChatPostResult>("POST", `${this.scope(company)}/chat`, body);
   }
 
@@ -631,11 +649,13 @@ export class OpenCompanyClient {
   }
 
   /**
-   * Everything an `@` can name. Presence uses only `people`, for the
-   * user-id → label map the live frames deliberately do not carry.
+   * Everything an `@` can name: teammates, people, desks, and the broadcast
+   * token's spellings.
    *
-   * A host that predates this route answers 404; callers treat that as an
-   * empty directory rather than throwing on load.
+   * A host that predates this route answers 404; the caller treats that as
+   * "no picker" and typing an `@` stays plain text, which the host still
+   * extracts what it can from. So an older host degrades to the previous
+   * behaviour rather than throwing on load.
    */
   mentionables(company?: string | null): Promise<MentionablesResponse> {
     return this.request<MentionablesResponse>(
@@ -912,6 +932,14 @@ export class OpenCompanyClient {
        * collect instructions changes nothing.
        */
       instructions?: string;
+      /**
+       * The job shape that decides this teammate's tool belt (issue #1674),
+       * carried by the first-run setup build-out. Sent as the validated wire
+       * spelling the roster proposal returned (`research`, `writing`, …); the
+       * host derives the belt from it, so the console never chooses a
+       * permission boundary. Omitted on every other add path.
+       */
+      focus?: string;
     },
     company?: string | null,
   ): Promise<TeamMemberDto> {

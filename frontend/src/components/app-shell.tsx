@@ -50,7 +50,11 @@ import {
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
-import { arrivedViaSetupHandoff, clearSetupHandoff } from "@/setup/state";
+import {
+  arrivedViaSetupHandoff,
+  clearSetupHandoff,
+  setupHandoffHasScope,
+} from "@/setup/state";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -523,7 +527,14 @@ export function AppShell({
   // completion gets, and so a reload cannot re-apply it.
   const setupScope = { connection: scope.connection, company };
   useEffect(() => {
-    if (!arrivedViaSetupHandoff(setupScope)) return;
+    // SetupWizard and the magic-link flow use the unscoped marker because the
+    // connection/company may not survive their full-page hand-off. Accept that
+    // form only when the marker really carries no scope: a marker scoped to a
+    // different connection/company must not suppress setup on this one, nor be
+    // cleared before the company it names has consumed it.
+    const scoped = arrivedViaSetupHandoff(setupScope);
+    const unscoped = !setupHandoffHasScope() && arrivedViaSetupHandoff();
+    if (!scoped && !unscoped) return;
     setSetupCompleted(true);
     clearSetupHandoff();
   }, [scope.connection, company]);
@@ -1401,6 +1412,7 @@ export function AppShell({
               makeMessage("company", event.text, {
                 channel: event.agentId,
                 taskId: event.taskId,
+                mentions: event.mentions,
                 // Issue #483 — see `liveReplyIdentity`.
                 ...liveReplyIdentity(event),
               }),
@@ -1445,6 +1457,7 @@ export function AppShell({
             makeMessage("company", event.text, {
               channel: event.agentId,
               taskId: event.taskId,
+              mentions: event.mentions,
               // Issue #483: same identity as the thread store above. This is
               // the store `hydrateChannel` writes into, so this is where the
               // duplicate was visible.

@@ -30,7 +30,6 @@ use oh::mcp::registry::types::{ConnStatus, InstalledServer, McpTool};
 use oh::security::{SecurityPolicy, ToolOperation};
 use oh::tools::traits::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
-use crate::company::Agent as ManifestAgent;
 use crate::company::mcp::{AuthMaterial, McpServerDecl, stdio_install_refusal};
 use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
@@ -38,7 +37,7 @@ use crate::harness::mcp_probe::{
 };
 use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
-use crate::runtime::tools::{grant_matches, grants_cover_server};
+use crate::runtime::tools::grants_cover_server;
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
 ///
@@ -93,22 +92,18 @@ pub fn registry_for_agent(
     }
 }
 
-/// Whether `agent`'s tool grants reach the MCP server named `name`, using the
-/// same glob semantics as every other tool grant (`mcp:*` = all, `mcp:notion` =
-/// exact).
-fn agent_grants_server(agent: &ManifestAgent, name: &str) -> bool {
-    let want = format!("mcp:{name}");
-    agent.tools.iter().any(|grant| grant_matches(grant, &want))
-}
-
 /// The credential substrings from the (enabled, grant-matched) servers this
 /// agent reaches — the known-secret set fed to
 /// [`scrub`](crate::harness::mcp_probe::scrub) so no configured credential can
-/// survive into an agent-visible error. Never serialized anywhere.
-pub fn granted_secrets(decls: &[McpServerDecl], agent: &ManifestAgent) -> Vec<String> {
+/// survive into an agent-visible error. `grants` must be the same effective
+/// grants passed to [`registry_for_agent`], rather than the raw manifest
+/// request, because an empty request inherits the company belt and therefore
+/// reaches every server that belt grants.
+/// Never serialized anywhere.
+pub fn granted_secrets(decls: &[McpServerDecl], grants: &[String]) -> Vec<String> {
     decls
         .iter()
-        .filter(|decl| decl.enabled && agent_grants_server(agent, &decl.name))
+        .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .flat_map(|decl| decl.auth.secret_values())
         .collect()
 }
@@ -870,29 +865,6 @@ mod tests {
         g.iter().map(|s| s.to_string()).collect()
     }
 
-    fn agent(grants: &[&str]) -> ManifestAgent {
-        ManifestAgent {
-            global: false,
-            id: "ceo".into(),
-            role: "Chief".into(),
-            name: None,
-            description: None,
-            tier: None,
-            harness: None,
-            tools: grants.iter().map(|g| g.to_string()).collect(),
-            delegates_to: vec![],
-            context: None,
-            budget_usd_daily: None,
-            prompt: None,
-            prompt_files: Vec::new(),
-            prompt_files_resolved: Vec::new(),
-            classes: Vec::new(),
-            ledgers: None,
-            can_declare_ledgers: true,
-            model: None,
-        }
-    }
-
     #[test]
     fn empty_decls_yield_no_registry() {
         assert!(registry_for_agent(&[], &grants(&["mcp:*"])).is_none());
@@ -1084,6 +1056,21 @@ mod tests {
         assert!(result.output().contains("remote ran ok"));
     }
 
+    /// An empty raw request inherits the company belt at the builder seam. The
+    /// scrubber must receive those effective grants too, or an MCP credential
+    /// echoed by a server can reach the agent-visible failure even though the
+    /// registry correctly wires that server.
+    #[test]
+    fn granted_secrets_follows_effective_grants() {
+        let mut server = decl("fixture", "http://127.0.0.1:1/mcp");
+        server.auth = AuthMaterial::Bearer("inherited-canary".into());
+        let inherited = granted_secrets(std::slice::from_ref(&server), &grants(&["*", "mcp:*"]));
+        assert_eq!(inherited, vec!["inherited-canary"]);
+
+        let omitted = granted_secrets(std::slice::from_ref(&server), &grants(&["*"]));
+        assert!(omitted.is_empty());
+    }
+
     /// SECURITY CANARY: a server that **reflects the submitted credential** in a
     /// non-401 error body must not leak it anywhere the `OcMcpCallTool` decorator
     /// surfaces — not the agent-visible result, and not the drained failure. This
@@ -1148,8 +1135,7 @@ mod tests {
         let endpoint = format!("http://{addr}/mcp");
         let mut d = decl("fixture", &endpoint);
         d.auth = AuthMaterial::Bearer(CANARY.into());
-        let agent = agent(&["mcp:*"]);
-        let secrets = granted_secrets(std::slice::from_ref(&d), &agent);
+        let secrets = granted_secrets(std::slice::from_ref(&d), &grants(&["mcp:*"]));
         let registry = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
 
         let queue = McpFailureQueue::default();
