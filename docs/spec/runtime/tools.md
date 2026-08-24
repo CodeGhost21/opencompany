@@ -99,6 +99,7 @@ must be named:
 | `media` | Spends real money per generated image or video. |
 | `composio` | Reaches the tenant's connected third-party accounts and moves real side effects — sends email, opens PRs. |
 | `search` | The queries leave the building, and a call is billed — to the managed platform, or to the company's own provider account. See [search.md](search.md). |
+| `mcp:*` | Reaches every `[[mcp_server]]` the company wired, each holding its own endpoint and credentials; a bare `*` must not hand a third-party server's tools to every teammate. |
 | `chargebee` | Billing API, wired only against the company's own Chargebee credentials. |
 | `paypal` | Wallet reads — a business's private figure, not a `*` wildcard's business. |
 | `hosting` | Publishes the workspace to the public internet and provisions databases the company pays for. |
