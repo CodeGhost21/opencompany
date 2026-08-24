@@ -100,7 +100,8 @@ and about fifteen minutes.
 ```sh
 git clone --recurse-submodules https://github.com/tinyhumansai/opencompany.git
 cd opencompany
-export TINYHUMANS_API_KEY="th-..."   # grab yours at tinyhumans.ai
+export TINYHUMANS_API_KEY="th-..."          # grab yours at tinyhumans.ai
+export OPENCOMPANY_FEATURES="medulla"       # compile in the hosted Medulla brain the key unlocks
 ./scripts/launch-demo.sh marketing up
 ```
 
