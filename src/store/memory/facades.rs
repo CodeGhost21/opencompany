@@ -749,10 +749,10 @@ impl ProviderMemoryStore {
     /// Reads the archived trace set, for the operator's inspection.
     ///
     /// The archive is a bounded recovery tier on this facade: eviction moves
-    /// traces here rather than destroying them, but it is not part of the
-    /// export bundle or the `GET /memory/traces` window — both read the live
-    /// set. This accessor exists so the operator tier and the "archives rather
-    /// than destroys" property tests can observe the tier itself.
+    /// traces here rather than destroying them. The export path carries this
+    /// tier separately from the live `GET /memory/traces` window — both read
+    /// distinct namespaces. This accessor exists so the operator tier and the
+    /// "archives rather than destroys" property tests can observe the tier itself.
     pub(super) async fn archived_traces(
         &self,
         company: &CompanyId,
