@@ -1144,20 +1144,43 @@ impl<'a> DelegationRunner<'a> {
             // to anyway is not a harmless nudge: it is an instruction the
             // model has no tool to follow, for a name it now believes should
             // be receiving work it never will.
-            with_mentions = if self.responder_can_reach_mentioned(responder) {
-                format!(
-                    "{message}
+            with_mentions = {
+                let reachable = self.reachable_mentioned(responder);
+                let unreachable: Vec<&str> = self
+                    .also_mentioned
+                    .iter()
+                    .filter(|mentioned| !reachable.contains(mentioned))
+                    .map(String::as_str)
+                    .collect();
+                if unreachable.is_empty() {
+                    format!(
+                        "{message}
 
 [Also mentioned in this message: {}. They have not been asked to answer — you have. Hand work to them only if it genuinely needs them.]",
-                    self.also_mentioned.join(", ")
-                )
-            } else {
-                format!(
-                    "{message}
+                        self.also_mentioned.join(", ")
+                    )
+                } else if reachable.is_empty() {
+                    format!(
+                        "{message}
 
 [Also mentioned in this message: {}. They have not been asked to answer — you have. You have no way to hand this off to them, so answer it yourself, or say so if it genuinely needs them.]",
-                    self.also_mentioned.join(", ")
-                )
+                        self.also_mentioned.join(", ")
+                    )
+                } else {
+                    // Mixed: the responder can reach some of the named
+                    // teammates but not others, so "hand work to them"
+                    // would overstate the reach and "no way to hand off"
+                    // would understate it. Name which ones are out of
+                    // reach instead of asking the model to guess.
+                    format!(
+                        "{message}
+
+[Also mentioned in this message: {}. They have not been asked to answer — you have. You can hand work to {}, but not to {} — answer it yourself, or say so if it genuinely needs them.]",
+                        self.also_mentioned.join(", "),
+                        reachable.join(", "),
+                        unreachable.join(", ")
+                    )
+                }
             };
             with_mentions.as_str()
         } else {
