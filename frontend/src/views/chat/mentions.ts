@@ -64,7 +64,10 @@ function opensMention(text: string, i: number): boolean {
   // Never inside an existing `<@id>` token. The bracket check below would
   // already refuse it, but the rule is documented, so it is stated.
   if (before === "<") return false;
-  return /[\s([{]/.test(before);
+  // Mirrors `opens_mention` in `src/runtime/mentions.rs` exactly: only ASCII
+  // whitespace or an opening bracket opens. JavaScript `\s` is wider and would
+  // open a picker after a pasted non-breaking space the host then drops.
+  return /[ \t\n\r([{]/.test(before);
 }
 
 /**
