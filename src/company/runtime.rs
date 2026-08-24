@@ -156,6 +156,9 @@ pub struct OpsStores {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class records of each task attempt: status, trace, cost (#242).
     pub runs: Arc<dyn RunStore>,
+    /// The unredacted companion of a run's steps — reasoning text and raw tool
+    /// I/O, kept beside the scrubbed skeleton in [`Self::runs`].
+    pub deep_trace: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
     /// Per-workflow edit history, for rollback of an edited workflow (#274).
     pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// Durable cross-replica scheduler fire claims (#241).
@@ -1213,6 +1216,12 @@ impl CompanyRuntime {
     /// with its status, step trace and cost.
     pub fn runs(&self) -> &Arc<dyn RunStore> {
         &self.ops.runs
+    }
+
+    /// The unredacted companion of this company's run steps: reasoning text and
+    /// raw tool I/O, kept beside the scrubbed skeleton in [`Self::runs`].
+    pub fn deep_trace(&self) -> &Arc<dyn crate::ports::deep_trace::DeepTraceStore> {
+        &self.ops.deep_trace
     }
 
     /// This company's per-workflow edit history (#274), the snapshot ring a

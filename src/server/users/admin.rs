@@ -352,7 +352,10 @@ async fn send_invite_mail(
         Err(err) => {
             // The error, never the message: a body echoed into a log or into
             // telemetry carries the recipient's address off this host.
-            tracing::warn!(company = %runtime.id(), "invite mail failed: {err}");
+            // `error!`, not `warn!`: the default `EnvFilter` (no `RUST_LOG`)
+            // shows errors only, and this is the only line that records why an
+            // invite could not be delivered.
+            tracing::error!(company = %runtime.id(), "invite mail failed: {err}");
             InviteDelivery::Failed
         }
     }

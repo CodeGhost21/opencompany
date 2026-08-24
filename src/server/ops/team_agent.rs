@@ -81,7 +81,7 @@ use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{AgentOverride, CompanyRecord};
 use crate::runtime::builder::agent_scoped_grants;
-use crate::server::error::ApiError;
+use crate::server::error::{ApiError, Rejection};
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::team::{AgentPath, daily_spend_samples, double_option};
 use crate::server::users::admin::require_admin;
@@ -664,10 +664,9 @@ async fn edit_agent(
     if let Some(Some(id)) = &harness
         && record.manifest.harness_by_id(id).is_none()
     {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "no harness named `{id}` is available for this company."
-        )))
-        .into_response());
+        return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+            format!("no harness named `{id}` is available for this company."),
+        ))));
     }
 
     // A model override only means anything on an `acp` harness — the same
@@ -688,12 +687,13 @@ async fn edit_agent(
             .unwrap_or_else(|| record.manifest.default_harness_id());
         let bound = record.manifest.harness_by_id(&resulting_harness_id);
         if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but this teammate's harness has no ACP \
-                 transport to forward it to. Bind it to an ACP harness first, or clear \
-                 the model."
-            )))
-            .into_response());
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but this teammate's harness has no ACP \
+                     transport to forward it to. Bind it to an ACP harness first, or clear \
+                     the model."
+                ),
+            ))));
         }
         // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
         // still cannot carry a model, because the runner wire protocol has no
@@ -708,12 +708,13 @@ async fn edit_agent(
             .map(|acp| acp.transport.as_str())
             == Some("runner")
         {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
-                 `transport = \"runner\"`. Model overrides aren't supported for a runner \
-                 yet — the runner wire protocol doesn't carry them."
-            )))
-            .into_response());
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                     `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                     yet — the runner wire protocol doesn't carry them."
+                ),
+            ))));
         }
     }
 

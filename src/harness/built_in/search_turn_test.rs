@@ -324,6 +324,8 @@ async fn harness(
         // test exercises the #238 search path only, and an unwired store is the
         // fail-closed default everywhere but the runtime builder.
         workspace: None,
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let record = CompanyRecord {

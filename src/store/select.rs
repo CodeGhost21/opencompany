@@ -415,6 +415,10 @@ pub struct StorageHandles {
     pub schedule_fires: Arc<dyn ScheduleFireStore>,
     /// Durable, console-facing per-node run output snapshots (#596).
     pub run_outputs: Arc<dyn WorkflowRunOutputStore>,
+    /// The unredacted companion of a turn's steps — reasoning text, raw tool
+    /// arguments and raw tool output. Holds secrets by design; see
+    /// [`crate::ports::deep_trace`].
+    pub deep_trace: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
     pub usage: Arc<dyn UsageMeter>,
     pub skills: Arc<dyn SkillStateStore>,
     /// Per-person, per-channel read markers (#755).
@@ -1123,6 +1127,7 @@ fn open_sqlite(data_dir: &Path) -> Result<Option<StorageHandles>> {
         workflow_revisions: store.clone(),
         schedule_fires: store.clone(),
         run_outputs: store.clone(),
+        deep_trace: store.clone(),
         usage: store.clone(),
         skills: store.clone(),
         read_state: store.clone(),
@@ -1167,6 +1172,7 @@ async fn open_mongodb(settings: &StorageSettings) -> Result<Option<StorageHandle
         workflow_revisions: store.clone(),
         schedule_fires: store.clone(),
         run_outputs: store.clone(),
+        deep_trace: store.clone(),
         usage: store.clone(),
         skills: store.clone(),
         read_state: store.clone(),

@@ -35,8 +35,9 @@
 //!   comes back, so scratch cannot appear in a durable result even if a driver
 //!   ignores the filter.
 //! - **Archive on evict.** The contract has no archive tier, so eviction is a
-//!   move between namespaces rather than a delete. See
-//!   [`facades::ProviderMemoryStore::evict`].
+//!   move between namespaces rather than a delete — and a `KeepRecent` eviction
+//!   bounds the archive by the same policy, so the move cannot grow storage
+//!   without bound either. See [`facades::ProviderMemoryStore::evict`].
 //! - **Taint.** Inbound-channel writes are stamped
 //!   [`MemoryTaint::ExternalSync`] via [`BoundMemory::inbound_context`].
 //!   Note the contract's `MemoryCore::store` requires taint on every call and

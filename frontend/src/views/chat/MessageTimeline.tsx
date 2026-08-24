@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { Bot, CircleDot, Hash, Lock, UserPlus } from "lucide-react";
+import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -53,6 +53,11 @@ interface Props {
   onDismissCard: (taskId: string) => void;
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
+  /**
+   * Places a first brief into the composer on an empty channel.
+   * Optional so the thread panel — which renders no intro — need not pass it.
+   */
+  onStartBrief?: () => void;
   /**
    * Opens the members pane, for the "Add people" card on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
@@ -111,6 +116,7 @@ export function MessageTimeline({
   onReact,
   onDismissCard,
   dismissingCardId,
+  onStartBrief,
   onAddPeople,
   now,
   askerNames,
@@ -267,6 +273,7 @@ export function MessageTimeline({
           channel={channel}
           empty={empty}
           loading={loading}
+          onStartBrief={onStartBrief}
           onAddPeople={onAddPeople}
         />
         {loading && <HistorySkeleton />}
@@ -373,11 +380,13 @@ function ChannelIntro({
   channel,
   empty,
   loading,
+  onStartBrief,
   onAddPeople,
 }: {
   channel: Channel;
   empty: boolean;
   loading: boolean;
+  onStartBrief?: () => void;
   onAddPeople?: () => void;
 }) {
   return (
@@ -397,7 +406,7 @@ function ChannelIntro({
           offering "add a teammate here" over a channel that turns out to be full
           of conversation reads as data loss. */}
       {empty && !loading && channel.kind === "channel" && (
-        <ActionCards onAddPeople={onAddPeople} />
+        <ActionCards onStartBrief={onStartBrief} onAddPeople={onAddPeople} />
       )}
     </div>
   );
@@ -478,14 +487,20 @@ function MarkTile({ icon: Icon, className }: { icon: typeof Hash; className?: st
  * exactly this, an icon circle — rather than on `muted`, which is the ground
  * for recessed *fills*.
  */
-function ActionCards({ onAddPeople }: { onAddPeople?: () => void }) {
+function ActionCards({
+  onStartBrief,
+  onAddPeople,
+}: {
+  onStartBrief?: () => void;
+  onAddPeople?: () => void;
+}) {
   return (
     <div className="mt-5 flex flex-wrap gap-4">
       <ActionCard
-        icon={Bot}
-        title="Create teammate"
-        hint="Add a teammate here."
-        href="#/company"
+        icon={Send}
+        title="Give the team a brief"
+        hint="Start with a first request."
+        onClick={onStartBrief}
       />
       <ActionCard
         icon={UserPlus}
