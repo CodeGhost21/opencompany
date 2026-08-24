@@ -58,6 +58,7 @@ import {
   buildChannels,
   buildTimeline,
   buildTimelineItems,
+  channelIdFromSegment,
   channelMembers,
   channelTitle,
   deskFromDto,
@@ -219,6 +220,9 @@ interface Props {
   failedApprovals?: Record<string, string>;
 }
 
+const FIRST_TEAM_BRIEF =
+  "Help us get started: propose the first three priorities for our company and who should own each one.";
+
 /**
  * The chat workspace.
  *
@@ -281,6 +285,10 @@ export function ChatView({
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [composerPrefill, setComposerPrefill] = useState<{
+    text: string;
+    revision: number;
+  } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
@@ -523,6 +531,16 @@ export function ChatView({
   // the line below wouldn't; it only made "main" look like a real channel id
   // (issue #368).
   /**
+   * The hash's second segment, URL-escapes undone.
+   *
+   * `useHashView` passes the segment through untouched, but hrefs mint channel
+   * links with `encodeURIComponent` — the "Open the conversation" pill on an
+   * approval card writes `#/chat/dm%3A<agent-id>` for a DM. Without this an
+   * encoded DM id compares against nothing and the link lands on the fallback
+   * channel instead of the conversation that raised the request.
+   */
+  const decodedSub = channelIdFromSegment(sub);
+  /**
    * A `#/chat/dm:…` link minted before issue #364 re-keyed DMs onto the
    * teammate's id, mapped onto the id that channel has now.
    *
@@ -531,9 +549,11 @@ export function ChatView({
    * deleted without leaving anything stranded.
    */
   const resolvedSub =
-    sub && !findChannel(sections, sub) ? resolveDmChannelId(sub, members) : null;
+    decodedSub && !findChannel(sections, decodedSub)
+      ? resolveDmChannelId(decodedSub, members)
+      : null;
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? sub) ?? firstChannel(sections))
+    ? (findChannel(sections, resolvedSub ?? decodedSub) ?? firstChannel(sections))
     : null;
   /**
    * The hash named a channel this company doesn't have, and the first-channel
@@ -545,7 +565,9 @@ export function ChatView({
    * the shim above resolved is not unknown; it found its channel.
    */
   const unknownChannel =
-    desks && sub && !resolvedSub && !findChannel(sections, sub) ? sub : null;
+    desks && decodedSub && !resolvedSub && !findChannel(sections, decodedSub)
+      ? decodedSub
+      : null;
 
   /**
    * Who is in the channel on screen — `null` when it names no membership, in
@@ -1132,9 +1154,16 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onStartBrief={() =>
+                setComposerPrefill((current) => ({
+                  text: FIRST_TEAM_BRIEF,
+                  revision: (current?.revision ?? 0) + 1,
+                }))
+              }
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
+              chatChannelByThread={chatChannelByThread}
               decidingApprovals={decidingApprovals}
               failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}
@@ -1156,6 +1185,7 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
+              prefill={composerPrefill ?? undefined}
               onSend={(text, intent) => void send(text, intent)}
               // Every keystroke asks; the hook throttles to one ping per
               // channel per few seconds and skips entirely while the event

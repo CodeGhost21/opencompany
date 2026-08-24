@@ -1,7 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   // AppWindow,  // re-add with the Pages nav entry below
-  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -51,6 +50,7 @@ import {
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
+import { arrivedViaSetupHandoff, clearSetupHandoff } from "@/setup/state";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -84,7 +84,7 @@ import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
-import { Overview } from "@/views/Overview";
+import { OperatorOverview } from "@/views/OperatorOverview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
@@ -104,7 +104,6 @@ import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
-import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { SettingsSection } from "@/views/SettingsSection";
 import { isSettingsPage } from "@/views/settings-pages";
@@ -222,11 +221,6 @@ const NAV: NavItem[] = [
   // through the switcher on `LedgersView`'s own title. See the comment above
   // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
-  // What the company remembers, and — now that an operator can select a
-  // memory engine — WHERE it remembers: the engine panel shows which driver
-  // is bound, what it negotiated, and whether the boot probe reached it.
-  // Re-listed (issue #302 parked it; the memory-engine work un-parks it).
-  { view: "memory", label: "Brain", icon: Brain },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   // Re-listed. Issue #302 parked the flat Finances page — a single ledger
@@ -248,6 +242,11 @@ const NAV: NavItem[] = [
   // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
+
+// The console is hash-routed, so a normal `href="#main-content"` would also
+// be treated as a route change. Keep the conventional fragment for link
+// semantics, then focus this stable landmark without changing the route.
+const MAIN_CONTENT_ID = "main-content";
 
 // Which views are routable is decided in `@/lib/console-routes`, not here.
 // `NAV` above is presentation: a row means a surface is offered in the sidebar,
@@ -280,10 +279,12 @@ const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
 
 /**
  * `#/tasks` with no card named the board page, which is retired (issue #1140).
+ * `#/memory` is the Brain browser's legacy address after it moved under
+ * Settings (issue #1416).
  *
- * It lands where the board actually lives now, so a bookmark, a habit, or a
- * link written before the move all still arrive at a board rather than at a
- * 404 — and so does `#/tasks/<malformed>`, which names no card either. A real
+ * Each retired route lands at its current home, so a bookmark, a habit, or a
+ * link written before the move still reaches the intended surface rather than
+ * a 404. `#/tasks/<malformed>` names no card, so it goes to the board; a real
  * `#/tasks/<id>` returns `null` from here and resolves untouched.
  *
  * Module scope, because `useHashView` holds this in a `useCallback` dependency
@@ -295,6 +296,7 @@ const REWRITE_RETIRED = (
   sub: string | null,
 ): [View, string | null] | null => {
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
+  if (head === "memory") return ["settings", "brain"];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
   // page: a bookmark or shared link must say where it actually lands.
@@ -531,6 +533,22 @@ export function AppShell({
    * the read, and a flag that was already `true` would not.
    */
   const [teamBuilt, setTeamBuilt] = useState(0);
+  /**
+   * Setup has already introduced the console while it builds the team, so do
+   * not immediately cover the roster it leads to with the tour welcome.
+   */
+  const [setupCompleted, setSetupCompleted] = useState(false);
+  // A setup that had to sign in hands off with a full-page navigation
+  // (`window.location.href`), so `onCompleted` never fires in this mount. The
+  // link carries a one-shot marker (`#/company?from=setup`); consume it here so
+  // this fresh mount applies the same welcome suppression a same-mount
+  // completion gets, and so a reload cannot re-apply it.
+  const setupScope = { connection: scope.connection, company };
+  useEffect(() => {
+    if (!arrivedViaSetupHandoff(setupScope)) return;
+    setSetupCompleted(true);
+    clearSetupHandoff();
+  }, [scope.connection, company]);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
@@ -2062,6 +2080,16 @@ export function AppShell({
     // `SidebarProvider` paints the chrome layer itself — see its own note on
     // why that fill lives there and not here (issue #1178).
     <SidebarProvider className="h-svh overflow-hidden">
+      <a
+        href={`#${MAIN_CONTENT_ID}`}
+        className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById(MAIN_CONTENT_ID)?.focus();
+        }}
+      >
+        Skip to content
+      </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -2090,21 +2118,23 @@ export function AppShell({
             <SidebarCollapseButton />
           </div>
         </SidebarHeader>
-        <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
-        </SidebarContent>
-        <SidebarFooter>
-          <SidebarControls
-            lifecycleState={feed.status.lifecycle}
-            emergencyPaused={feed.status.emergency_paused}
-            companies={companies}
-            activeCompany={company}
-            onSwitchCompany={onSwitchCompany}
-            onBackToPicker={onBackToPicker}
-            view={view}
-            onNavigate={setView}
-          />
-        </SidebarFooter>
+        <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
+          <SidebarContent data-tour="sidebar">
+            <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
+          </SidebarContent>
+          <SidebarFooter>
+            <SidebarControls
+              lifecycleState={feed.status.lifecycle}
+              emergencyPaused={feed.status.emergency_paused}
+              companies={companies}
+              activeCompany={company}
+              onSwitchCompany={onSwitchCompany}
+              onBackToPicker={onBackToPicker}
+              view={view}
+              onNavigate={setView}
+            />
+          </SidebarFooter>
+        </nav>
         <SidebarRail />
       </Sidebar>
 
@@ -2116,7 +2146,7 @@ export function AppShell({
           wrapper that clips and cannot scroll. On the task board that clipped
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
-      <SidebarInset className="min-h-0 min-w-0">
+      <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the
@@ -2130,7 +2160,17 @@ export function AppShell({
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
           {view === "overview" && (
-            <Overview client={client} company={company} companyName={feed.status.name} />
+            <OperatorOverview
+              client={client}
+              company={company}
+              companyName={feed.status.name}
+              feed={feed}
+              scope={scope}
+              // Issue #1015: re-read the run panels when a run parks or fails
+              // while this page stays open (the same tick TaskDetailView
+              // re-reads on).
+              attemptEventTick={attemptEventTick}
+            />
           )}
           {view === "company" && (
             <CompanyView
@@ -2155,6 +2195,10 @@ export function AppShell({
               onOpenAgent={(agentId) =>
                 agentId ? navigate("team", agentId) : navigate("company")
               }
+              // The graph at `#/company/graph` names its core node after the
+              // company the way the rest of the console does (issue #1219),
+              // not after the slug.
+              companyName={feed.status.name}
               // Setup just staffed the company, so the roster read is stale.
               refreshKey={teamBuilt}
               // Skipping setup must not be a dead end: an unstaffed company keeps
@@ -2330,7 +2374,6 @@ export function AppShell({
               onNavigateToDesk={(deskId) => navigate("company", deskId)}
             />
           )}
-          {view === "memory" && <MemoryView client={client} company={company} />}
           {view === "workspace" && (
             <Suspense
               fallback={
@@ -2368,6 +2411,7 @@ export function AppShell({
               // this view knows whether the id matches anything parked, so it
               // does that check itself and says so when it does not.
               sub={sub}
+              chatChannelByThread={chatChannelByThread}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
               // Issue #1211: mark this id as "mine" before the resolve POST
@@ -2494,10 +2538,21 @@ export function AppShell({
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
-        onCompleted={() => setTeamBuilt((n) => n + 1)}
+        onCompleted={() => {
+          // Keep these together: Company mounts with the new refresh key, and
+          // setup's payoff is the roster rather than the Overview graph.
+          setTeamBuilt((n) => n + 1);
+          setSetupCompleted(true);
+          setView("company");
+        }}
       />
 
-      <TourController company={company} setView={setView} hold={setupOpen} />
+      <TourController
+        company={company}
+        setView={setView}
+        hold={setupOpen}
+        suppressWelcome={setupCompleted}
+      />
     </SidebarProvider>
   );
 }

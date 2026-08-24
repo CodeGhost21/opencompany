@@ -280,6 +280,7 @@ async fn company_agent(
         classes: Vec::new(),
         ledgers: None,
         can_declare_ledgers: true,
+        model: None,
     };
     // The manifest default. `file_read` reaches nothing outside the sandbox, so
     // it is auto-approved here — the point is that the turn is gated by the real

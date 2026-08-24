@@ -40,8 +40,8 @@ use crate::harness::HarnessPool;
 use crate::ports::WorkflowRunContext;
 use crate::ports::types::CompanyRecord;
 use crate::runtime::workflow_resume::{
-    PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL, PAYLOAD_WORKFLOW_ID,
-    WORKFLOW_APPROVE_KIND,
+    PAYLOAD_ARGS, PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL,
+    PAYLOAD_WORKFLOW_ID, WORKFLOW_APPROVE_KIND,
 };
 
 /// A graph whose only working node is a `tool_call` running `shell`. The
@@ -73,6 +73,84 @@ to = "work"
 [[edge]]
 from = "work"
 to = "done"
+"#;
+
+/// The parent for the #617 regression. Its child carries the effectful node,
+/// which means only the resolver can apply the policy gate before tinyflows
+/// runs it.
+const SUB_WORKFLOW_PARENT: &str = r#"
+id = "parent"
+name = "Parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Child workflow"
+[node.config]
+workflow_id = "child"
+[[edge]]
+from = "start"
+to = "sub"
+"#;
+
+const SUB_WORKFLOW_CHILD: &str = r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "work"
+kind = "tool_call"
+name = "Work"
+[node.config]
+slug = "shell"
+[node.config.args]
+command = "echo ran > marker.txt"
+[[edge]]
+from = "start"
+to = "work"
+"#;
+
+/// A child whose gate is preceded by an ungated `http_request` POST — the
+/// #617 continuation hazard: approving restarts the child, and a restart
+/// re-calls the POST. `on_error = "continue"` keeps the SSRF guard's loopback
+/// refusal from halting the child before it reaches the gated `work` node.
+const SUB_WORKFLOW_CHILD_WITH_UPSTREAM: &str = r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+# `on_error` is a first-class node field, not a `config` key; the validator
+# rejects reserved keys inside `[node.config]`.
+on_error = "continue"
+[node.config]
+method = "POST"
+url = "http://127.0.0.1:9/notify"
+[[node]]
+id = "work"
+kind = "tool_call"
+name = "Work"
+[node.config]
+slug = "shell"
+[node.config.args]
+command = "echo ran > marker.txt"
+[[edge]]
+from = "start"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "work"
 "#;
 
 /// A company that grants `shell` and gates it — under `full` autonomy, for the
@@ -205,6 +283,147 @@ async fn a_policy_gated_tool_call_node_parks_instead_of_running() {
             .is_some_and(|reason| reason.contains("shell")),
         "the card must carry the policy's own reason: {:?}",
         card.effect.payload[PAYLOAD_REASON]
+    );
+}
+
+/// Issue #617. A policy gate inside a resolved child must surface at the parent
+/// boundary, where it is visible and resumable, rather than silently running.
+#[tokio::test]
+async fn a_policy_gated_child_tool_call_parks_and_resumes_through_its_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("company");
+    let workflows = source.join("workflows");
+    std::fs::create_dir_all(&workflows).expect("create child workflow directory");
+    std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD).expect("write child workflow");
+
+    let (mut deps, journal) =
+        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+    deps.workflow_source_dir = Some(source);
+    let record = record("\"shell\"");
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps).await.expect("roster builds");
+    let file = parse_workflow(SUB_WORKFLOW_PARENT).expect("parent parses");
+
+    let first = super::runner::run_workflow(
+        pool.clone(),
+        deps.clone(),
+        &record,
+        &file,
+        json!({}),
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("the parent pauses cleanly");
+    assert_eq!(first.pending_approvals, vec!["sub::work".to_string()]);
+    assert!(
+        !marker_written(dir.path()),
+        "the child shell call must not execute before approval"
+    );
+
+    let card = journal
+        .pending()
+        .into_iter()
+        .find(|pending| pending.effect.kind == WORKFLOW_APPROVE_KIND)
+        .expect("the child gate is parked for the operator")
+        .effect;
+    assert_eq!(card.payload[PAYLOAD_WORKFLOW_ID], "parent");
+    assert_eq!(card.payload[PAYLOAD_NODE_ID], "sub::work");
+    // Issue #617: the card must name the child's call — the same tool, reason
+    // and arguments a top-level policy gate carries — not just the namespaced
+    // node id the parent graph cannot resolve.
+    assert_eq!(
+        card.payload[PAYLOAD_TOOL], "shell",
+        "the card must name the child's tool, not just the node id"
+    );
+    assert!(
+        card.payload[PAYLOAD_REASON]
+            .as_str()
+            .is_some_and(|reason| reason.contains("shell")),
+        "the card must carry the policy's own reason: {:?}",
+        card.payload[PAYLOAD_REASON]
+    );
+    assert_eq!(
+        card.payload[PAYLOAD_ARGS]["command"], "echo ran > marker.txt",
+        "the card must carry the child call's arguments: {:?}",
+        card.payload[PAYLOAD_ARGS]
+    );
+
+    let continuation =
+        crate::runtime::workflow_resume::continuation_input(&card, &["sub::work".to_string()], &[])
+            .expect("the namespaced child gate is a valid continuation");
+    let second = super::runner::run_workflow(
+        pool,
+        deps,
+        &record,
+        &file,
+        continuation,
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("approval resumes the child through its parent");
+    assert!(second.pending_approvals.is_empty(), "{second:?}");
+    assert!(
+        marker_written(dir.path()),
+        "the approved child shell call must execute"
+    );
+}
+
+/// Issue #617, the continuation half. A child that parks namespaced gates
+/// restarts from the trigger when its gate is approved, and a restart re-runs
+/// the child's ungated outward calls — whose results were never carried up
+/// with the pause. The run must tell the operator, the same way the top-level
+/// path does for its own unreplayable calls, so approving is a decision made
+/// with that cost in view.
+#[tokio::test]
+async fn an_ungated_outward_call_before_a_child_gate_is_reported_unreplayable() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("company");
+    let workflows = source.join("workflows");
+    std::fs::create_dir_all(&workflows).expect("create child workflow directory");
+    std::fs::write(
+        workflows.join("child.toml"),
+        SUB_WORKFLOW_CHILD_WITH_UPSTREAM,
+    )
+    .expect("write child workflow");
+
+    let (mut deps, _journal) =
+        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+    deps.workflow_source_dir = Some(source);
+    // `shell` gated, `http_request` not — so the child runs the POST and then
+    // parks at the shell node, exactly the shape the hazard describes.
+    let record = record("\"shell\"");
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps).await.expect("roster builds");
+    let file = parse_workflow(SUB_WORKFLOW_PARENT).expect("parent parses");
+
+    let first = super::runner::run_workflow(
+        pool,
+        deps.clone(),
+        &record,
+        &file,
+        json!({}),
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("the parent pauses cleanly");
+    assert_eq!(first.pending_approvals, vec!["sub::work".to_string()]);
+
+    let notices = first
+        .notices
+        .iter()
+        .filter(|n| n.contains("fetch"))
+        .collect::<Vec<_>>();
+    assert!(
+        !notices.is_empty(),
+        "approving restarts the child, so its ungated http_request must be reported: {:?}",
+        first.notices
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.contains("http_request") && n.contains("restarts")),
+        "the notice must name the call and why it would repeat: {:?}",
+        notices
     );
 }
 

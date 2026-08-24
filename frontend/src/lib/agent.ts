@@ -2,7 +2,7 @@
 // the field definitions both the create dialog and the edit form render from,
 // and the three derivations that are easy to get quietly wrong.
 
-import type { AgentDetailDto, AgentToolsDto, EditAgentInput } from "@/api/types";
+import type { AgentDetailDto, AgentToolsDto, EditAgentInput, HarnessDto } from "@/api/types";
 
 /** The fields that describe an agent, in the order both forms show them. */
 export type AgentFieldKey = "name" | "role" | "description" | "instructions";
@@ -131,6 +131,72 @@ export function draftIsValid(detail: AgentDetailDto, draft: AgentDraft): boolean
     (field) =>
       field.kind !== "line" || !isEditable(detail, field.key) || draft[field.key].trim() !== "",
   );
+}
+
+/**
+ * The `PATCH` value for a teammate's model-override edit, or `undefined` when
+ * the draft did not actually change (issue #1245's per-agent follow-up).
+ *
+ * Its own function rather than a case inside `agentEdits`: the model lives in
+ * its own section of the detail view (admin-gated, separate from the
+ * name/role/description group `AGENT_FIELDS` edits together), so it needs its
+ * own draft, not a fourth `AgentFieldKey`.
+ *
+ * Same three-way contract as `description`'s handling inside `agentEdits`,
+ * and for the same reason: a blank draft means "clear the override, use the
+ * harness's own default" (`null`), not "leave it alone" (`undefined`) — an
+ * operator who emptied the field on purpose must see that take effect, not
+ * watch the old value silently survive the save.
+ */
+export function modelEdit(current: string | undefined, draft: string): string | null | undefined {
+  const next = draft.trim();
+  const before = current ?? "";
+  if (next === before) return undefined;
+  return next === "" ? null : next;
+}
+
+/**
+ * The `PATCH` value for a teammate's harness-binding edit, or `undefined`
+ * when the draft did not change (issue #1245's harness-picker follow-up).
+ *
+ * Same three-way contract as [`modelEdit`], and deliberately the sibling
+ * function rather than a shared generic: the two fields read alike today, but
+ * a harness id is a select's value (never free text an operator can leave
+ * whitespace in), so this skips the `.trim()` `modelEdit` needs.
+ */
+export function harnessEdit(current: string | undefined, draft: string): string | null | undefined {
+  const before = current ?? "";
+  if (draft === before) return undefined;
+  return draft === "" ? null : draft;
+}
+
+/**
+ * Which declared harness `harnessId` resolves to, and its `kind` — the
+ * question the Harness & Model editor needs answered to know whether to show
+ * the model field at all (only an `acp` harness has anywhere to forward it).
+ *
+ * `harnessId` absent or `""` means "the company default", the same contract
+ * `AgentDetailDto.harness` and a blank select both carry: resolved against
+ * whichever declared harness has `default: true`.
+ */
+export function resolvedHarnessKind(
+  harnesses: HarnessDto[],
+  harnessId: string | undefined,
+): HarnessDto["kind"] | undefined {
+  const id = harnessId || harnesses.find((h) => h.default)?.id;
+  return harnesses.find((h) => h.id === id)?.kind;
+}
+
+/**
+ * A harness's label in the picker's `<select>` — short enough for one line,
+ * specific enough that an operator can tell two ACP entries apart by CLI.
+ */
+export function harnessOptionLabel(harness: HarnessDto): string {
+  if (harness.kind === "acp") {
+    const cli = harness.agent ?? "external";
+    return harness.transport === "runner" ? `${cli} (remote) — ${harness.id}` : `${cli} — ${harness.id}`;
+  }
+  return `Managed — ${harness.id}`;
 }
 
 /** What an agent's tool grants amount to, once the intersection is applied. */

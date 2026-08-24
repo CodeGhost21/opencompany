@@ -1629,30 +1629,16 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
-    /// A call inside a `sub_workflow` child ran **without** being offered for
-    /// approval, on a company whose policy would have parked the same call at
-    /// the top level (issue #617).
+    /// A legacy audit record for a call inside a `sub_workflow` child that ran
+    /// without being offered for approval (issue #617).
     ///
-    /// # Why this is a journal line and not a fix
+    /// # Compatibility
     ///
-    /// A child graph is resolved and run *inside* the engine, so its nodes never
-    /// reach the gate pass that #460 and #614 added. Gating them is not
-    /// available: tinyflows cannot resume a child across the sub-workflow
-    /// boundary, and a paused child halts the parent with an unresumable error —
-    /// so marking the child's node would convert a run that works into one that
-    /// fails with no card to decide. Until the engine can resume across that
-    /// boundary, the honest thing is to keep running and **say so**.
-    ///
-    /// That is what this records. An operator auditing what the company was
-    /// asked to approve would otherwise see a hole with nothing explaining it;
-    /// this turns the hole into a line naming the child, the node and the call.
-    /// It is an audit record of a known limitation, not a decision anybody made.
-    ///
-    /// Journaled best-effort at child *resolution*, so it lands whether or not
-    /// the child's node is ultimately reached — the point is that the call was
-    /// never offered, and a run that stops earlier for another reason does not
-    /// make that less true. Deliberately **not** written for a dry run, which
-    /// executes nothing.
+    /// This was emitted by the audit-only interim while tinyflows could not
+    /// propagate a child approval to the parent. Current runs gate child graphs
+    /// before the engine executes them, so new records are no longer emitted.
+    /// The variant remains to deserialize existing append-only journals and to
+    /// preserve their operator-visible history.
     ///
     /// Additive: an entirely new `kind`, so no journal written before it existed
     /// carries it, and its presence changes how no existing variant serializes.
@@ -2801,6 +2787,20 @@ pub struct OverlayAgent {
     /// JSON so a standard-grant teammate serializes exactly as it did before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// A per-agent model override, carried the same way as
+    /// [`Agent::model`](crate::company::types::Agent) — see that field's docs.
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means this teammate takes its harness's own
+    /// model, unchanged from today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Which `[[harness]]` this teammate runs its turns on, by id — carried
+    /// the same way as [`Agent::harness`](crate::company::types::Agent::harness).
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means the harness marked `default = true`,
+    /// unchanged from today's hardcoded behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 /// An operator's runtime edit of a **manifest-declared** teammate.
@@ -2851,6 +2851,18 @@ pub struct AgentOverride {
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// The model this teammate runs, as an overlay on the blueprint.
+    ///
+    /// `Some("")` is the stored form of "cleared", matching `description`:
+    /// the write path already treats a blank and an absent value as one state,
+    /// and a distinct `None` here would mean "never edited" instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The harness this teammate is bound to, as an overlay on the blueprint.
+    ///
+    /// Cleared the same way as [`Self::model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -3972,6 +3984,12 @@ impl CompanyRecord {
             if entry.instructions.is_some() {
                 held.instructions = entry.instructions;
             }
+            if entry.model.is_some() {
+                held.model = entry.model;
+            }
+            if entry.harness.is_some() {
+                held.harness = entry.harness;
+            }
             return;
         }
         self.overlay_agent_edits.push(entry);
@@ -4027,6 +4045,16 @@ impl CompanyRecord {
         }
         if let Some(instructions) = entry.instructions.as_ref() {
             merged.prompt = Some(instructions.clone());
+        }
+        // Issue #1245. Empty means cleared, as for `description`: an operator
+        // moving a teammate back to the company default stores a blank rather
+        // than deleting the row, so the field stops tracking the blueprint
+        // only while an override actually exists.
+        if let Some(model) = entry.model.as_ref() {
+            merged.model = Some(model.clone()).filter(|text| !text.is_empty());
+        }
+        if let Some(harness) = entry.harness.as_ref() {
+            merged.harness = Some(harness.clone()).filter(|text| !text.is_empty());
         }
         std::borrow::Cow::Owned(merged)
     }
@@ -4160,12 +4188,19 @@ impl CompanyRecord {
         {
             entry.instructions = None;
         }
+        // Every field the override can carry, not just the ones it carried
+        // when this was written. A predicate that names a subset deletes rows
+        // that are still holding the fields it forgot — here, resetting a
+        // teammate's instructions would take their harness and model with it,
+        // silently reverting both to the blueprint.
         self.overlay_agent_edits.retain(|entry| {
             entry.name.is_some()
                 || entry.role.is_some()
                 || entry.description.is_some()
                 || entry.tools.is_some()
                 || entry.instructions.is_some()
+                || entry.model.is_some()
+                || entry.harness.is_some()
         });
     }
 
@@ -5733,6 +5768,8 @@ mod test {
             role: "Growth".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert!(record.is_roster_agent("ceo"));
         assert!(record.is_roster_agent("nova"));
@@ -5765,6 +5802,8 @@ mod test {
             role: "r".into(),
             description: None,
             tools: vec!["docs.*".into(), "email".into()],
+            model: None,
+            harness: None,
         };
         let round: OverlayAgent =
             serde_json::from_str(&serde_json::to_string(&scoped).unwrap()).unwrap();
@@ -5787,6 +5826,8 @@ mod test {
             role: "Worker".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
     }
 
@@ -5927,6 +5968,8 @@ mod test {
             role: "Designer".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         assert_eq!(
@@ -5970,6 +6013,8 @@ mod test {
             role: "Growth".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert_eq!(
             record.resolve_teammate_key("ceo"),
@@ -5990,6 +6035,8 @@ mod test {
                 role: "Designer".into(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             });
         }
         assert_eq!(
@@ -6490,6 +6537,8 @@ mod test {
             role: "Growth".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert_eq!(record.effective_budget("shane"), None);
 

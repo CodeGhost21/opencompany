@@ -178,5 +178,7 @@ statement that "the workflow path never consults `ApprovalPolicy`" was true when
 this was written and is not any more; the path split above is what governs there
 now, rather than the step being unreachable.
 
-`sub_workflow` children remain ungated on that path — the engine cannot resume a
-child across the boundary — which is issue #617, not this step's scope.
+`sub_workflow` children use the same policy-controlled gate on the parent path.
+The child gate is stored under a namespaced gate id, and resuming the parent
+resumes the child from that gate before the parent continues. This keeps child
+approval decisions auditable without requiring a separate top-level resume.

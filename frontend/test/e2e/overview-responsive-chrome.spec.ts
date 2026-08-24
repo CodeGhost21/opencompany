@@ -25,7 +25,7 @@ test.beforeEach(async ({ page }) => {
 for (const viewport of VIEWPORTS) {
   test(`keeps graph chrome reachable at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    await page.goto("/#/overview");
+    await page.goto("/#/company/graph");
 
     const legend = page.getByTestId("kg-legend");
     const previous = page.getByRole("button", { name: "Previous desk" });
