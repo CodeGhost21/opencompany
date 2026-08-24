@@ -776,40 +776,65 @@ export function SetupDialog({
  * story.
  */
 function InferenceNotice({
-  unavailable,
+  inference,
   harnessReachable,
+  canManage,
   onLeave,
 }: {
-  unavailable: boolean;
+  /** One of the settled non-ready readouts — never "checking" or "ready". */
+  inference: Exclude<InferenceReadiness, "checking" | "ready">;
   harnessReachable: boolean;
+  /**
+   * Whether the operator may wire or restart the company's model. The actions
+   * this notice can point at are an admin's — the Connections inference form
+   * and its restart control render only under management authority, and the
+   * host refuses the writes for a member — so an operator who cannot land them
+   * is told to ask an admin instead of being handed a link that can only 403.
+   */
+  canManage: boolean;
   onLeave: () => void;
 }) {
+  const restart = inference === "restart";
+  const unavailable = inference === "unavailable";
   const noModel = unavailable && !harnessReachable;
+  // Whether the notice has an action to offer. The restart arm is unconditional
+  // — `restartRequired` is only ever set where a restart can put the config to
+  // work, so the harness path is reachable by construction there.
+  const offered = restart || harnessReachable;
   return (
     <Alert data-testid="setup-inference-notice">
       <AlertTitle>
-        {noModel
-          ? "This deployment can't run a model"
-          : unavailable
-            ? "This host can't reach a model right now"
-            : "We couldn't check this host's model"}
+        {restart
+          ? "This company needs a restart"
+          : noModel
+            ? "This deployment can't run a model"
+            : unavailable
+              ? "This host can't reach a model right now"
+              : "We couldn't check this host's model"}
       </AlertTitle>
       <AlertDescription>
-        {noModel
-          ? "Your answers will create a standard team for your industry — no model on this host could tailor one."
-          : unavailable
-            ? "Your answers will create a standard team for your industry rather than tailor one to them."
-            : "Your answers may create a standard team rather than a tailored one."}{" "}
-        {harnessReachable ? (
+        {restart
+          ? "A model is set up for this company, but the running brain predates it — teammates keep echoing until the company is restarted. "
+          : noModel
+            ? "Your answers will create a standard team for your industry — no model on this host could tailor one. "
+            : unavailable
+              ? "Your answers will create a standard team for your industry rather than tailor one to them. "
+              : "Your answers may create a standard team rather than a tailored one. "}
+        {offered && canManage ? (
           <>
             <a
               href="#/settings/connections"
               onClick={onLeave}
               className="font-medium underline underline-offset-4"
             >
-              Set up a model
+              {restart ? "Restart the company" : "Set up a model"}
             </a>{" "}
             or carry on with the standard team.
+          </>
+        ) : offered ? (
+          <>
+            Ask an admin to {restart ? "restart the company" : "set up a model"}, or carry on
+            with the standard team.
           </>
         ) : (
           "Carry on with the standard team."
