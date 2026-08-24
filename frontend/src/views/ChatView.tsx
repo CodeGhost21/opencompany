@@ -168,7 +168,8 @@ interface Props {
    * declared stale rather than writing the old company's reply into the new
    * company's transcript.
    */
-  scopeCompanyRef: RefObject<string | null>;
+  /** The latest connection and company scope, updated by the shell while mounted. */
+  scopeRef: RefObject<{ connection: string; company: string | null }>;
   /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
