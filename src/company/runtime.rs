@@ -2168,7 +2168,19 @@ impl CompanyRuntime {
                 )
                 .await
             {
-                Ok(seq) => response.message_id = Some(seq.value().to_string()),
+                Ok(seq) => {
+                    response.message_id = Some(seq.value().to_string());
+                    // The durable half of a reply's mention, same as an operator
+                    // message's and the `/chat` path's. Without this an `@user`
+                    // the agent types back renders as a chip and nothing else —
+                    // the badge and the notification both silently missing for
+                    // whoever it named, which is worst for exactly the person it
+                    // is meant to reach: offline when the reply lands.
+                    if !reply_mentions.is_empty() {
+                        self.notify_mentions(&self.id, &reply_mentions, &seq, None, &chat_id)
+                            .await;
+                    }
+                }
                 Err(err) => tracing::warn!(
                     company = %self.id,
                     approval_id = %approval_id,
