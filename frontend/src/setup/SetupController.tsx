@@ -381,6 +381,28 @@ export function SetupController({
     [scope],
   );
 
+  /**
+   * Settle the persisted redesign debt the moment a replacement lands, so a
+   * reload on the completion screen cannot reopen setup against the rows the
+   * replacement just deleted.
+   *
+   * A designed replacement means the owed redesign is done: clear the whole
+   * record, exactly as completing setup would, so the flow re-offers if the
+   * operator later empties the team. A replacement that fell back again is
+   * still owed, but now names the new fallback team — re-key the debt so the
+   * next return (or reload) replaces those rows rather than the swept ones.
+   */
+  const onReplacementComplete = useCallback(
+    (fallbackIds: string[] | null) => {
+      if (fallbackIds) {
+        markSetupRedesign(scope, fallbackIds);
+      } else {
+        clearSetupSkipped(scope);
+      }
+    },
+    [scope],
+  );
+
   if (!checked && !force) return null;
   if (!open) return null;
 
