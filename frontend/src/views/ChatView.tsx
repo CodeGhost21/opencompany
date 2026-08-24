@@ -214,6 +214,9 @@ interface Props {
   failedApprovals?: Record<string, string>;
 }
 
+const FIRST_TEAM_BRIEF =
+  "Help us get started: propose the first three priorities for our company and who should own each one.";
+
 /**
  * The chat workspace.
  *
