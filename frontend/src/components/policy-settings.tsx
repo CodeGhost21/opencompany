@@ -652,7 +652,10 @@ export function PolicySettings({ client, company }: Props) {
                   type="button"
                   variant={noSpendCap ? "secondary" : "outline"}
                   disabled={saving}
-                  onClick={() => setNoSpendCap((current) => !current)}
+                  onClick={() => {
+                    setNoSpendCap((current) => !current);
+                    if (noSpendCap) setDraftSpend("");
+                  }}
                 >
                   {noSpendCap ? "No cap" : "Set no cap"}
                 </Button>
