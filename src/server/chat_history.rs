@@ -519,7 +519,7 @@ impl MessageView {
 ///   its `@` — which is exactly what a reader would have seen anyway.
 /// * **`mine` is decided.** Per viewer, and `true` for `@everyone` as well as
 ///   for a direct mention, because a broadcast is addressed to this reader too.
-fn project_mentions(
+pub(crate) fn project_mentions(
     mentions: &[Mention],
     authors: &HashMap<String, String>,
     viewer: &Viewer,
