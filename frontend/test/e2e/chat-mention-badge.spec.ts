@@ -138,7 +138,7 @@ async function mockApi(
       const desk = url.searchParams.get("desk") ?? "";
       const gate = options.historyGates?.[desk];
       if (gate) await gate;
-      return json([]);
+      return json(options.history?.[desk] ?? []);
     }
     if (path.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
