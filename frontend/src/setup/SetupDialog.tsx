@@ -503,10 +503,44 @@ export function SetupDialog({
             await client.removeTeamMember(member.id, company);
           }
         } catch {
-          // The replacement is in place; a failed sweep leaves a duplicate the
-          // operator can retire by hand rather than failing the whole redesign
-          // over it.
+          // The sweep is part of the replacement, so a sweep that cannot land
+          // means the redesign is not complete: the new team would sit beside
+          // the old boundary rather than replacing it. Roll the new rows back —
+          // the same atomicity the partial-replacement path above applies to the
+          // build — and fail, keeping the debt so a retry or reload runs the
+          // whole replacement again. Reporting completion here would clear the
+          // debt over a duplicated roster and leave no way back in.
           if (cancelled) return;
+          const kept: string[] = [];
+          for (const id of createdThisRun) {
+            if (cancelled) return;
+            try {
+              await client.removeTeamMember(id, company);
+            } catch {
+              // A rollback that could not land leaves its row in place. It stays
+              // in the boundary rather than being stranded for the next retry to
+              // miss, and the captured Set — which predates this run and cannot
+              // name it — is let go so it does not shadow that expanded boundary.
+              kept.push(id);
+            }
+          }
+          if (cancelled) return;
+          if (kept.length) {
+            createdIds.current = [...boundaryIds, ...kept];
+            redesignRoster.current = null;
+            // Persist the expansion too: a reload before the retry must still
+            // find the kept row, or the eventual replacement would sweep the
+            // original boundary and leave it stacked beside the new team.
+            onReplacementComplete?.([...boundaryIds, ...kept]);
+          } else {
+            createdIds.current = boundaryIds;
+          }
+          building.current = false;
+          setPhase({
+            kind: "failed",
+            reason: "We couldn't finish replacing your old team, so we kept the one you have. Try again in a moment.",
+          });
+          return;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, REVEAL_MS * 1.5));
