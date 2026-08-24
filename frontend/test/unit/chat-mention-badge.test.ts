@@ -376,3 +376,152 @@ describe("mentionsToClear", () => {
     });
   });
 });
+
+describe("renderedChannelIdForContext", () => {
+  it("places an exact rendered channel id outright", () => {
+    expect(
+      renderedChannelIdForContext("engineering", "general", new Set(["engineering", "design"])),
+    ).toBe("engineering");
+  });
+
+  it("aliases every general-chat spelling onto the rendered main channel", () => {
+    const rendered = new Set(["general", "engineering"]);
+    for (const spelling of ["main", "General", "GENERAL", ""]) {
+      expect(renderedChannelIdForContext(spelling, "general", rendered)).toBe("general");
+    }
+  });
+
+  it("drops a general spelling with no rendered main channel", () => {
+    expect(renderedChannelIdForContext("main", undefined, new Set(["engineering"]))).toBeUndefined();
+  });
+
+  it("keeps a non-rendered desk id rather than aliasing it", () => {
+    // A real desk whose id happens to be `general` wins outright; a context
+    // that names no rendered channel falls through to the alias, and anything
+    // else stays itself so a yet-to-render channel is not lost.
+    expect(renderedChannelIdForContext("design", "general", new Set(["engineering"]))).toBe(
+      "design",
+    );
+  });
+
+  it("returns undefined for a missing context", () => {
+    expect(renderedChannelIdForContext(undefined, "general", new Set(["engineering"]))).toBeUndefined();
+    expect(renderedChannelIdForContext(null, "general", new Set(["engineering"]))).toBeUndefined();
+  });
+});
+
+describe("threadsToReReadForMentions", () => {
+  // The console's thread → channel map: `main` aliases the first desk, desks
+  // keep their own id as channel, DMs are `dm:<member>`.
+  const byThread: Record<string, string> = {
+    main: "general",
+    engineering: "engineering",
+    ada: "dm:ada",
+  };
+  const loaded = {
+    engineering: new Set(["h1", "h2"]),
+    "dm:ada": new Set(["h7"]),
+  };
+
+  it("re-reads the thread of a mention whose subject is not loaded", () => {
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "engineering", subjectId: "42" })],
+        loaded,
+        byThread,
+        "general",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: ["engineering"], subjects: ["h42"] });
+  });
+
+  it("re-reads a DM thread for a dm: context", () => {
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "dm:ada", subjectId: "9" })],
+        loaded,
+        byThread,
+        "general",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: ["ada"], subjects: ["h9"] });
+  });
+
+  it("resolves a general-chat mention onto the main thread", () => {
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "General", subjectId: "5" })],
+        loaded,
+        byThread,
+        "general",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: ["main"], subjects: ["h5"] });
+  });
+
+  it("skips a mention whose subject is already loaded", () => {
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "engineering", subjectId: "1" })],
+        loaded,
+        byThread,
+        "general",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: [], subjects: [] });
+  });
+
+  it("skips mentions already seen this session", () => {
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "engineering", subjectId: "42" })],
+        loaded,
+        byThread,
+        "general",
+        new Set(["h42"]),
+      ),
+    ).toEqual({ threadIds: [], subjects: [] });
+  });
+
+  it("skips read and non-mention rows", () => {
+    expect(
+      threadsToReReadForMentions(
+        [
+          note({ id: "read", context: "engineering", subjectId: "42", readAt: 3 }),
+          { ...note({ id: "reaction", context: "engineering", subjectId: "42" }), kind: "reaction" },
+        ],
+        loaded,
+        byThread,
+        "general",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: [], subjects: [] });
+  });
+
+  it("dedupes two missing mentions that share a thread", () => {
+    expect(
+      threadsToReReadForMentions(
+        [
+          note({ id: "m1", context: "engineering", subjectId: "42" }),
+          note({ id: "m2", context: "engineering", subjectId: "43" }),
+        ],
+        loaded,
+        byThread,
+        "general",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: ["engineering"], subjects: ["h42", "h43"] });
+  });
+
+  it("skips a context no channel renders", () => {
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "ghost-desk", subjectId: "42" })],
+        loaded,
+        byThread,
+        "general",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: [], subjects: [] });
+  });
+});
