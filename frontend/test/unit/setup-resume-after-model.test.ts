@@ -567,6 +567,26 @@ describe("leaving the completion screen to wire a model", () => {
     expect(dialog(), "the owed redesign did not reopen").toBeTruthy();
     expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
 
+    const setField = async (testId: string, value: string) => {
+      const field = document.querySelector(`[data-testid="${testId}"]`) as
+        | HTMLInputElement
+        | HTMLTextAreaElement
+        | null;
+      expect(field, `no field ${testId}`).toBeTruthy();
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(
+          field instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype,
+          "value",
+        )!.set!;
+        setter.call(field, value);
+        field!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        (document.querySelector('[data-testid="setup-next"]') as HTMLElement).click();
+      });
+    };
     await setField("setup-field-industry", "E-commerce — homeware");
     await setField("setup-field-teamHint", "");
     await setField("setup-field-automate", "");
