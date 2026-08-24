@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Building2 } from "lucide-react";
 
 import { useConsole } from "@/lib/console-context";
-import { resolveAvatarSrc, staticAvatarSrc, retainAvatar, releaseAvatar, blobNodeId } from "@/lib/avatar";
+import { resolveAvatarSrc, staticAvatarSrc, retainAvatar, releaseAvatar, blobNodeId, subscribeAvatarNode } from "@/lib/avatar";
 import { TEAM_TONES, avatarFor, initials } from "@/lib/team";
 import { cn } from "@/lib/utils";
 
