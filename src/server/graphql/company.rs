@@ -448,6 +448,12 @@ pub struct TeamMemberGql {
     /// When that cap was set (epoch millis). `Float` round-trips the full u64
     /// range that would overflow GraphQL's `Int`, matching `Approval.atMillis`.
     pub budget_set_at_millis: Option<f64>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+    /// (`docs/spec/runtime/avatars.md`). Absent means **nobody has chosen**, and
+    /// the console draws the mascot it hashes from the id. Mirrors the REST
+    /// team DTO's `avatar`; both arms of the roster read answer the same way.
+    pub avatar: Option<String>,
 }
 
 /// Internal desk projection shared between `chats` and `chat`.
