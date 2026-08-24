@@ -54,6 +54,8 @@ export function ChannelRail({
   onExpand,
   openSections,
   onToggleSection,
+  directMessages = [],
+  onStartDirectMessage,
   className,
 }: Props) {
   // Section disclosure lives here rather than inside `Section`, because the
