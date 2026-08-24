@@ -2392,7 +2392,7 @@ async fn a_member_gets_the_trace_but_not_the_deep_half() {
                     crate::server::test_support::member_cookie("acme"),
                 )
                 .body(Body::from(
-                    r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq deep { reasoning } } } } }"}"#,
+                    r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq kind deep { reasoning } } } } }"}"#,
                 ))
                 .unwrap(),
         )
