@@ -798,7 +798,7 @@ export function ChatView({
         // below reads the response's shape and never this argument.
         true,
       );
-      if (scopeCompany !== companyScopeRef.current) {
+      if (scopeCompany !== scopeCompanyRef.current) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
         return;
