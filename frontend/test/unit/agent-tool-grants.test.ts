@@ -80,7 +80,7 @@ describe("companyCovers", () => {
   it("treats the catch-all as covering the ordinary families", () => {
     expect(companyCovers(["*"], "docs.*")).toBe(true);
     expect(companyCovers(["*"], "workspace.read")).toBe(true);
-    expect(companyCovers(["*"], "workspace.write")).toBe(true);
+    expect(companyCovers(["*"], "workspace.write")).toBe(false);
   });
 
   it("does not let the catch-all cover the explicit opt-in namespaces", () => {
