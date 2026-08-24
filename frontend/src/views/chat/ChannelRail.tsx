@@ -138,11 +138,13 @@ function CompactChannelRow({
   channel,
   active,
   unread,
+  mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
   unread: number;
+  mentions: number;
   onSelect: (id: string) => void;
 }) {
   const hasUnread = unread > 0 && !active;
