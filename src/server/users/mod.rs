@@ -19,7 +19,6 @@
 //! - [`token`]: minting and hashing the login/session secrets.
 //! - [`password`]: optional password hashing, verification, and policy.
 //! - [`cookie`]: naming, parsing, and rendering the session carriers.
-//! - [`devices`]: pairing a non-browser client as a person.
 //! - [`wallet`]: signing a challenge with an Ed25519 key instead of holding a
 //!   mailbox, for a company whose
 //!   [`AuthMode`](crate::app::config::AuthMode) is `wallet`.
@@ -33,9 +32,9 @@
 //!
 //! A *paired device* is what that client holds — the same [`SessionRecord`]
 //! with [`SessionKind::Device`], a label, and a year-long TTL, minted by
-//! [`devices`] from a code a signed-in human pasted in. Deliberately not a
+//! a code a signed-in human pasted in. Deliberately not a
 //! separate credential system, so that suspension, admin reset and a user's own
-//! password change already revoke devices without any of them growing a second
+//! password change already revoke sessions without any of them growing a second
 //! code path to remember.
 //!
 //! [`SessionRecord`]: crate::ports::SessionRecord
@@ -54,7 +53,6 @@
 
 pub mod admin;
 pub mod cookie;
-pub mod devices;
 pub mod password;
 pub mod routes;
 pub mod token;
@@ -66,8 +64,6 @@ pub use routes::router;
 
 #[cfg(test)]
 mod auth_test;
-#[cfg(test)]
-mod devices_test;
 #[cfg(test)]
 mod hub_test;
 #[cfg(test)]

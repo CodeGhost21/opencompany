@@ -38,7 +38,9 @@ import {
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar";
+import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
@@ -55,6 +57,9 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
+import { usePresence } from "@/hooks/use-presence";
+import { useTyping } from "@/hooks/use-typing";
+import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
@@ -100,6 +105,7 @@ import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { SettingsSection } from "@/views/SettingsSection";
+import { isSettingsPage } from "@/views/settings-pages";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
 // React Flow is heavy and only used here — load it on demand.
@@ -130,6 +136,62 @@ interface NavItem {
   view: View;
   label: string;
   icon: LucideIcon;
+}
+
+function SidebarNavigation({
+  view,
+  pending,
+  onNavigate,
+}: {
+  view: View;
+  pending: number;
+  onNavigate: (view: View) => void;
+}) {
+  const { isMobile, setOpenMobile } = useSidebar();
+
+  const navigate = useCallback(
+    (next: View) => {
+      onNavigate(next);
+      if (isMobile) setOpenMobile(false);
+    },
+    [isMobile, onNavigate, setOpenMobile],
+  );
+
+  return (
+    <SidebarGroup>
+      <SidebarMenu>
+        {NAV.map((item) => (
+          <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
+            <SidebarMenuButton
+              isActive={view === item.view}
+              tooltip={item.label}
+              onClick={() => navigate(item.view)}
+              className={RESTING_ROW}
+            >
+              <item.icon />
+              <span>{item.label}</span>
+            </SidebarMenuButton>
+            {item.view === "approvals" && pending > 0 && (
+              <>
+                <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                {/* Issue #1018: the badge is the sidebar's only attention
+                    signal and `SidebarMenuBadge` hides itself on the
+                    collapsed rail, so a collapsed sidebar said nothing was
+                    waiting. The dot is the same `pending` value rendered
+                    so it survives 32px — not a second source, so it cannot
+                    disagree with the badge or fork the count contract
+                    #932 pins. Exactly one of the two is visible at a
+                    time. */}
+                <SidebarMenuDot
+                  label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
+                />
+              </>
+            )}
+          </SidebarMenuItem>
+        ))}
+      </SidebarMenu>
+    </SidebarGroup>
+  );
 }
 
 // One flat list. The nav was grouped under "Operate" and "Configure" when the
@@ -231,6 +293,10 @@ const REWRITE_RETIRED = (
   sub: string | null,
 ): [View, string | null] | null => {
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
+  // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
+  // Team and Workspace. Do not render General under an address that names no
+  // page: a bookmark or shared link must say where it actually lands.
+  if (head === "settings" && sub !== null && !isSettingsPage(sub)) return ["settings", "general"];
   // Bare `#/team` is the Company page now (issue #1141). It rendered the
   // teammate card grid from a route with no nav entry, so nobody arrived at it;
   // the grid is Company's Cards half, and leaving `#/team` answering as well
@@ -239,8 +305,45 @@ const REWRITE_RETIRED = (
   // detail sub-page (issue #264), it is what the org chart's rows and the chat
   // pane's chips link to, and it is deliberately a page so it can be linked.
   if (head === "team" && !sub) return ["company", null];
+  // `#/connections` predates the split into OAuth / MCP / Inference; the
+  // accounts it named are the OAuth page.
+  if (head === "connections") return ["settings", "oauth"];
+  if (head === "oauth") return ["settings", "oauth"];
+  if (head === "mcp") return ["settings", "mcp"];
+  if (head === "people") return ["settings", "people"];
   return null;
 };
+
+const LEGACY_CONNECT_QUERY_KEYS = ["connected", "connect_error", "provider"] as const;
+
+/**
+ * Reads a former native OAuth callback's query whether it was appended to the
+ * path or, in a bookmarked hash address, to the hash itself.
+ *
+ * `useHashView` canonicalizes a retired hash before the shell's effects run,
+ * so this must happen during the initial render while the fragment query is
+ * still present. Path-query values take precedence if an address has both.
+ */
+function legacyConnectParams(): URLSearchParams {
+  const params = new URLSearchParams(window.location.search);
+  const [, hashQuery = ""] = window.location.hash.split("?");
+  const hashParams = new URLSearchParams(hashQuery);
+  for (const key of LEGACY_CONNECT_QUERY_KEYS) {
+    if (!params.has(key) && hashParams.has(key)) params.set(key, hashParams.get(key)!);
+  }
+  return params;
+}
+
+/** Removes consumed legacy OAuth callback values without disturbing hash flags. */
+function stripLegacyConnectParams(hash: string): string {
+  const separator = hash.indexOf("?");
+  if (separator === -1) return hash;
+  const path = hash.slice(0, separator);
+  const params = new URLSearchParams(hash.slice(separator + 1));
+  for (const key of LEGACY_CONNECT_QUERY_KEYS) params.delete(key);
+  const query = params.toString().replace(/=(?=&|$)/g, "");
+  return query ? `${path}?${query}` : path;
+}
 
 /** How many workflow run-progress frames (issue #371) the shell keeps for the
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
@@ -315,7 +418,7 @@ interface Props {
   onBackToPicker?: () => void;
 }
 
-/** The dashboard shell: sidebar nav + topbar around one company's views. */
+/** The dashboard shell: sidebar navigation and content around one company's views. */
 export function AppShell({
   client,
   company,
@@ -331,6 +434,7 @@ export function AppShell({
     "overview",
     REWRITE_RETIRED,
   );
+  const legacyConnectParamsRef = useRef(legacyConnectParams());
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
   // of always dropping it to the parent view.
@@ -655,21 +759,21 @@ export function AppShell({
   const pending = feed.status.pending_approvals;
 
   // A legacy native OAuth callback may have left `connected` or `connect_error`
-  // in a bookmarked URL. Land the operator on Connections, say what happened,
+  // in a bookmarked URL. Land the operator on the OAuth page, say what happened,
   // then strip the params so a refresh does not re-fire them. The #838 callback
   // itself now terminates on its explanatory page and never writes a credential.
   // Runs once; StrictMode's double invoke is harmless because the first run
   // clears the params the second reads.
   //
-  // Connections is a page of the Settings section now (`#/settings/connections`),
-  // so the bounce-back lands there rather than on a top-level view.
+  // The accounts page is `#/settings/oauth` since the Connections split, so the
+  // bounce-back lands there rather than on a top-level view.
   //
   // Before issue #300 the host answered a cancelled or expired handshake with a
   // JSON body, which the browser rendered as the page — a dead end with no way
   // back into the console. Preserve the readable landing for legacy URLs even
   // though #838 no longer redirects new native OAuth callbacks here.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    const params = legacyConnectParamsRef.current;
     const connected = params.get("connected");
     const failed = params.get("connect_error");
     if (!connected && !failed) return;
@@ -683,9 +787,9 @@ export function AppShell({
     window.history.replaceState(
       {},
       "",
-      window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+      window.location.pathname + (query ? `?${query}` : "") + stripLegacyConnectParams(window.location.hash),
     );
-    setView("settings", "connections");
+    setView("settings", "oauth");
     // The callback param carries the raw provider id (e.g. "slack"); show the
     // catalog display name ("Slack") when we know it, falling back to the id.
     const providerName = providerId
@@ -1227,7 +1331,7 @@ export function AppShell({
       // …and into the Chat workspace's transcripts, which is a *different*
       // store (issue #367). Chat became the nav-listed surface in #361 while
       // this injection kept writing only to the parked Conversation's threads,
-      // so anything the console did not POST for — an inbound Telegram turn, a
+      // so anything the console did not POST for — an inbound channel turn, a
       // background desk turn — reached Chat only on a page reload.
       //
       // The event names a thread; `chatChannelByThread` is the only thing that
@@ -1501,6 +1605,78 @@ export function AppShell({
   // upserts a `running` row keyed by `toolCallId`; a `tool_result` flips that row
   // to `ok`/`error` in place (FIFO fallback when no id pairs), mirroring
   // OpenHuman's `toolCallReceived` / `toolResultReceived`.
+  // Who is here, and who is typing. Both are shell-level because the SSE
+  // subscription is: the frames arrive on one stream for the whole console, so
+  // the state they feed has to live where that stream is read.
+  const presence = usePresence(client, company);
+  const typing = useTyping(client, company);
+  /**
+   * The company's people, id → label.
+   *
+   * Presence and typing frames carry a user id and no label — deliberately, so
+   * the wire does not repeat a name the console already holds — which means
+   * something has to hold it. This is that. Read from the mention directory
+   * rather than the admin user route, because it is the one people-listing a
+   * *member* may read.
+   *
+   * A host without the route leaves this empty, which degrades cleanly: the
+   * People section does not render and a typing line falls back to naming
+   * nobody rather than naming a raw id.
+   */
+  const [companyPeople, setCompanyPeople] = useState<Array<{ id: string; label: string }>>(
+    [],
+  );
+  useEffect(() => {
+    let live = true;
+    void client
+      .mentionables(company)
+      .then((d) => {
+        // `d.people` is trusted by the types and not by reality: a host that
+        // answers this route with a different shape — an older one, a proxy, a
+        // stub that returns `[]` for anything it does not recognise — makes
+        // this `undefined`, and `.map` on it throws during render. That blanks
+        // the WHOLE console, not just the presence roster.
+        //
+        // Not hypothetical: it took out every test in
+        // chat-channel-membership.spec.ts, a file with nothing to do with
+        // presence, because its mock returns `[]` for unmatched routes.
+        if (!live) return;
+        const people = Array.isArray(d?.people) ? d.people : [];
+        setCompanyPeople(people.map((p) => ({ id: p.id, label: p.label })));
+      })
+      .catch(() => {
+        if (live) setCompanyPeople([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  /**
+   * Who to name in the typing line for a given channel (and, when a thread
+   * is open, that thread) — a resolver rather than one precomputed array,
+   * because `ChatView` needs two independent lines: the main composer's
+   * (`parentId` unset) and the open thread panel's (`parentId` set to the
+   * parent message's id). A single array could only ever answer one of them,
+   * which is why thread typing indicators never worked before this: the wire
+   * and `useTyping` already carried `parentId`, but everything upstream threw
+   * it away.
+   *
+   * Resolved here rather than in the view because the label map is here.
+   * Somebody the directory does not name is dropped rather than shown as a raw
+   * id — "u_01H4… is typing" is worse than saying nothing. Reuses `typersIn`
+   * — the same filter+sort `TypingLine`'s stable ordering already relies on —
+   * rather than re-deriving it here.
+   */
+  const resolveTypingNames = useCallback(
+    (chatId: string, parentId?: string) => {
+      const byId = new Map(companyPeople.map((p) => [p.id, p.label]));
+      return typersIn(typing.typers, chatId, parentId, Date.now())
+        .map((t) => byId.get(t.userId))
+        .filter((label): label is string => Boolean(label));
+    },
+    [typing.typers, companyPeople],
+  );
   const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
     // Route by the frame's own thread id so concurrent turns (even from the same
     // desk member) never cross-attribute; fall back to the in-flight ref only
@@ -1703,6 +1879,20 @@ export function AppShell({
       }));
     }, []),
     onTurnEvent,
+    onPresenceEvent: useCallback(
+      (event: CompanyStreamEvent) => {
+        if (event.type !== "presence") return;
+        presence.onFrame(event);
+      },
+      [presence],
+    ),
+    onTypingEvent: useCallback(
+      (event: CompanyStreamEvent) => {
+        if (event.type !== "typing") return;
+        typing.onFrame(event);
+      },
+      [typing],
+    ),
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive
       // the live canvas. Progress frames are far more frequent than outcomes,
@@ -1801,39 +1991,7 @@ export function AppShell({
           </div>
         </SidebarHeader>
         <SidebarContent data-tour="sidebar">
-          <SidebarGroup>
-            <SidebarMenu>
-              {NAV.map((item) => (
-                <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
-                  <SidebarMenuButton
-                    isActive={view === item.view}
-                    tooltip={item.label}
-                    onClick={() => setView(item.view)}
-                    className={RESTING_ROW}
-                  >
-                    <item.icon />
-                    <span>{item.label}</span>
-                  </SidebarMenuButton>
-                  {item.view === "approvals" && pending > 0 && (
-                    <>
-                      <SidebarMenuBadge>{pending}</SidebarMenuBadge>
-                      {/* Issue #1018: the badge is the sidebar's only attention
-                          signal and `SidebarMenuBadge` hides itself on the
-                          collapsed rail, so a collapsed sidebar said nothing was
-                          waiting. The dot is the same `pending` value rendered
-                          so it survives 32px — not a second source, so it cannot
-                          disagree with the badge or fork the count contract
-                          #932 pins. Exactly one of the two is visible at a
-                          time. */}
-                      <SidebarMenuDot
-                        label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
-                      />
-                    </>
-                  )}
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroup>
+          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
         <SidebarFooter>
           <SidebarControls
@@ -1864,6 +2022,12 @@ export function AppShell({
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
+        {/* Every teammate's face in here is a way into who they are (issue
+            #1653): the panel is mounted once around the whole surface so a
+            click on an avatar in a transcript, a member list or a channel
+            header opens the same summary, over the page rather than instead of
+            it. */}
+        <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
@@ -1903,6 +2067,10 @@ export function AppShell({
               client={client}
               company={company}
               sub={sub}
+              presence={presence.peers}
+              companyPeople={companyPeople}
+              resolveTypingNames={resolveTypingNames}
+              onTyping={typing.announce}
               onNavigate={(channelId) => navigate("chat", channelId)}
               onReply={() => void feed.refresh()}
               transcripts={transcripts}
@@ -2190,6 +2358,7 @@ export function AppShell({
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
         </ContentSurface>
+        </AgentProfileProvider>
 
         {/* Mobile only: dedicated chrome for the way back to navigation, not an
             overlay on top of it. A `fixed` trigger here used to float over

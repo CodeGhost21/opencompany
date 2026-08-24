@@ -112,6 +112,42 @@ A disabled `[[mcp_server]]` is listed with `granted: false` rather than omitted:
 an operator needs to see that the server exists and is switched off, which an
 absent row cannot say.
 
+## Where a company's MCP servers are declared
+
+A company's effective servers merge in four layers, lowest precedence first:
+
+1. **Default** — `[[default_mcp_server]]` in the instance `config.toml`, shipped
+   to every company on the install (`docs/spec/runtime/config.md`).
+2. **Bundle** — `companies/<name>/mcp.json`, in the `{"mcpServers": {…}}` shape
+   every other MCP host uses. Parsed by `src/company/mcp_file.rs` and merged into
+   `mcp_servers` by `CompanyManifest::from_located` **before** validation, so a
+   bundle server is held to exactly the rules an inline entry is — HTTP
+   transport only, no credential in the URL, unique name.
+3. **Manifest** — `[[mcp_server]]` in `company.toml`. Layer 2 and 3 are the same
+   layer once loaded: a name declared in **both** is a validation problem naming
+   both files, refused rather than resolved by precedence, for the reason the
+   roster refuses a bundle that declares agents twice — either precedence rule
+   silently discards a declaration somebody wrote down.
+4. **Runtime** — what an operator adds or overrides from the console.
+
+The server's name is the `mcp.json` map key, so it cannot disagree with itself.
+`url` and `endpoint` are both accepted; setting both to different values is
+refused. A `$comment` key is ignored at file and server level, because JSON
+carries no comments and a template's reasoning has to live somewhere.
+
+An invalid **entry** is dropped with a logged reason rather than failing the
+boot — an `mcp.json` copied from a vendor README usually carries a stdio
+`command`, which hosted v1 does not support — while a malformed **file** is a
+manifest problem. `content_test` is what makes either fatal for a shipped
+template, and additionally requires every shipped server to be `https`,
+described, documented in its bundle README, and disabled if it names an
+`authSecret` (an enabled server that needs a token fails at an agent's first
+tool call rather than here).
+
+Removing a server from `mcp.json` takes effect on the next `serve`, which
+re-parses the bundle — not on an in-place rebuild, which uses the persisted
+manifest. That is the same behaviour as editing `company.toml`.
+
 ## Runtime overrides
 
 An operator may narrow a desk from the console. The override is stored on the
