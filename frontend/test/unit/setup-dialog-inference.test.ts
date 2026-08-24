@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { InferenceStatus } from "@/api/inference";
+import type { TeamMemberDto } from "@/api/types";
 import { SetupDialog } from "@/setup/SetupDialog";
 
 /**
