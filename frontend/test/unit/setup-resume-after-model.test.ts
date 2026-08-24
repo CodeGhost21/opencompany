@@ -529,4 +529,57 @@ describe("leaving the completion screen to wire a model", () => {
     expect(dialog()).toBeNull();
     expect(setupRedesign(SCOPE), "skip should cancel the owed redesign").toBe(false);
   });
+
+  it("clears the redesign debt when the replacement is designed, so a reload cannot reopen it", async () => {
+    // A designed replacement pays the redesign debt: the fallback team the debt
+    // named has been swept and replaced, so a reload on the completion screen
+    // must not reopen redesign over the new team. The whole record is cleared —
+    // skipped and resuming included — exactly as completing setup would.
+    const roster: TeamMemberDto[] = [...BASELINE];
+    const removed: string[] = [];
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      listTeam: async () => [...roster],
+      get: async () => ({ cognition: "echo" }),
+      post: async () => ({
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        template: "ecommerce",
+        source: "model",
+      }),
+      addTeamMember: async () => {
+        const member = { id: "ada", role: "Operations", inboxEnabled: false } as TeamMemberDto;
+        roster.push(member);
+        return member;
+      },
+      removeTeamMember: async (id: string) => {
+        removed.push(id);
+      },
+    } as unknown as OpenCompanyClient;
+
+    // Seed the debt the operator is owed: a fallback pass shipped f1 and they
+    // left to wire a model, naming that row as the replacement's boundary.
+    roster.push({ id: "f1", role: "Operations", inboxEnabled: false } as TeamMemberDto);
+    markSetupRedesign(SCOPE, ["f1"]);
+
+    await mount(client);
+
+    // The debt reopens the dialog in replacing mode, without any force flag.
+    expect(dialog(), "the owed redesign did not reopen").toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
+
+    await setField("setup-field-industry", "E-commerce — homeware");
+    await setField("setup-field-teamHint", "");
+    await setField("setup-field-automate", "");
+    for (let i = 0; i < 40 && !find("setup-finish"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+    }
+
+    expect(find("setup-finish"), "designed build-out never finished").toBeTruthy();
+    expect(removed, "the fallback row the debt named should be swept").toEqual(["f1"]);
+    // The whole record is gone — redesign, resuming and skip all cleared.
+    expect(setupRedesign(SCOPE), "the designed replacement should pay the debt").toBe(false);
+    expect(setupResuming(SCOPE)).toBe(false);
+  });
 });
