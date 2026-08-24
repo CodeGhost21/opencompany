@@ -601,7 +601,7 @@ async fn add_member(
         spent_today_usd: body.budget_usd_daily.map(|_| 0.0),
         budget_set_by: attribution.as_ref().map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.as_ref().map(|entry| entry.at_millis),
-        avatar,
+        avatar: resolved_avatar,
         // An operator just created this one, so it is by construction not from
         // the baseline — the merge only ever appends to the manifest roster.
         // It is also exactly the write that closes the first-run gate.
