@@ -1166,4 +1166,38 @@ mod test {
         // No envelope at all: also the corruption path.
         assert_eq!(decode::<u32>(&entry("not json"), &namespace), None);
     }
+
+    /// SCRATCH: proves the callsite-poisoning race behind the CI flake.
+    /// Deliberately NOT wrapped: this is the poisoner ordering.
+    #[test]
+    fn scratch_proves_callsite_poisoning() {
+        let namespace = Namespace::company_root(&CompanyId::new("acme"));
+        let entry = |content: &str| MemoryEntry {
+            id: "id".into(),
+            key: "key".into(),
+            content: content.into(),
+            namespace: Some(namespace.as_str().to_string()),
+            category: tinymemory_api::types::MemoryCategory::Custom("oc:trace".into()),
+            timestamp: String::new(),
+            session_id: None,
+            score: None,
+            taint: MemoryTaint::Internal,
+        };
+
+        // 1. Bare-thread corrupt decode FIRST — this is what `unreadable_content`
+        //    and the `"not json"` arm above can do when they win the scheduling
+        //    race. No subscriber on this thread -> global NoSubscriber ->
+        //    `Interest::never()` cached for the corrupt warn callsite.
+        assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
+
+        // 2. Now the guarded capture, same callsite. If the theory is right this
+        //    comes back empty and the assertion fires.
+        let warnings = warnings_from(|| {
+            assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
+        });
+        assert!(
+            warnings.contains("memory entry in our namespace failed to decode"),
+            "POISONED: {warnings:?}"
+        );
+    }
 }
