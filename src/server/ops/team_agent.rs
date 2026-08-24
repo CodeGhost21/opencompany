@@ -565,31 +565,39 @@ async fn agent_detail(
 /// any signed-in member, matching `POST …/team`: defining a teammate was never
 /// admin-only, so correcting one it defined is not either.
 ///
-/// # Why `tools` is the exception (issue #619)
+/// # Why three fields are the exception (issues #619, #1245)
 ///
 /// That reasoning covers what a teammate *is*. It does not cover what a
-/// teammate may *do*, and a tool grant is the second thing — the
-/// [`AdminScopedCompany`](super::AdminScopedCompany) axis: a write that settles
-/// something *on behalf of* the company rather than one a member makes for
-/// themselves.
+/// teammate may *do* or *run on*, and the three admin-gated fields are the
+/// second thing — the [`AdminScopedCompany`](super::AdminScopedCompany) axis: a
+/// write that settles something *on behalf of* the company rather than one a
+/// member makes for themselves.
 ///
-/// The sharp edge is that **an empty `tools` list means "inherit the company's
-/// standard grant"** — the widest grant the company has. So `{"tools": []}` is
-/// not a small edit, it is a *widening*, and left member-open it would let any
-/// signed-in member hand a deliberately-scoped teammate the company's whole
-/// grant back. That is the exact inversion this field was added to prevent, and
-/// `add_agent` already refuses its own version of it (a narrowing that lands
-/// empty is a hard error there, never a stored empty list).
+/// `tools` is the sharpest edge: **an empty `tools` list means "inherit the
+/// company's standard grant"** — the widest grant the company has. So
+/// `{"tools": []}` is not a small edit, it is a *widening*, and left
+/// member-open it would let any signed-in member hand a deliberately-scoped
+/// teammate the company's whole grant back. That is the exact inversion this
+/// field was added to prevent, and `add_agent` already refuses its own version
+/// of it (a narrowing that lands empty is a hard error there, never a stored
+/// empty list).
 ///
-/// So the admin check is **conditional on the field being present**, in the
+/// `model` and `harness` are admin-gated for the same *kind* of reason without
+/// that sharp edge: both are routing decisions the company owns rather than
+/// details of the teammate. A model override names the inference this company
+/// is paying for; a harness binding pins which serve set the teammate runs on.
+/// Neither is a name or a role the account holder would edit for themselves, so
+/// both sit with the grant on the admin side of the line.
+///
+/// So the admin check is **conditional on the fields being present**, in the
 /// same shape and for the same reason as the cap on
 /// [`add_member`](super::team): a member who edits a name or a role keeps
-/// working exactly as before, and adding this field must not quietly take an
+/// working exactly as before, and adding these fields must not quietly take an
 /// existing capability away from members.
 ///
 /// Being conditional is also what fixes its **position**: it runs after the
 /// `409`/`404` checks, so an unknown id answers `404` whether or not the body
-/// carried `tools`. See the comment at the check itself.
+/// carried an admin-gated field. See the comment at the check itself.
 ///
 /// Narrow-only-for-members was considered and rejected: it makes the scope a
 /// one-way ratchet, so a teammate scoped too tightly could never be loosened by
