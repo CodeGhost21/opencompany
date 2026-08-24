@@ -277,7 +277,17 @@ function ApprovalSummary({ feed }: { feed: Pick<CompanyFeed, "approvals" | "queu
   );
 }
 
-function RunRows({ state, runs, empty }: { state: RunLoad; runs: RunSummary[]; empty: string }) {
+function RunRows({
+  state,
+  runs,
+  empty,
+  deskIds,
+}: {
+  state: RunLoad;
+  runs: RunSummary[];
+  empty: string;
+  deskIds?: ReadonlySet<string>;
+}) {
   if (state === "loading") return <p className="mt-5 text-sm text-muted-foreground" aria-busy="true">Loading recent work…</p>;
   if (state === "error") return <p role="alert" className="mt-5 text-sm text-destructive">Couldn&apos;t read recent work from the company host.</p>;
   if (runs.length === 0) return <p className="mt-5 text-sm text-muted-foreground">{empty}</p>;
@@ -286,10 +296,22 @@ function RunRows({ state, runs, empty }: { state: RunLoad; runs: RunSummary[]; e
       {runs.slice(0, 3).map((run) => (
         <li key={run.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium">{run.taskId ? `Task ${run.taskId}` : "Conversation work"}</p>
+            <p className="truncate text-sm font-medium">
+              {run.taskId ? `Task ${run.taskId}` : run.chatId ? "Conversation work" : "Unattributed attempt"}
+            </p>
             <p className="text-xs text-muted-foreground">{RUN_STATUS_LABEL[run.status]}{run.error ? ` — ${run.error}` : ""}</p>
           </div>
-          {run.taskId ? <a href={`#/tasks/${encodeURIComponent(run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a> : <CircleAlert className="size-4 shrink-0 text-muted-foreground" aria-label="No task is attached to this attempt" />}
+          {run.taskId ? (
+            <a href={`#/tasks/${encodeURIComponent(run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
+          ) : run.chatId ? (
+            // A paused or failed operator-chat turn is investigated from the
+            // thread it was raised in — the icon alone hid it (issue #1643).
+            // The desk/DM form is the run-source rule: a known desk addresses
+            // by id, anything else is a roster member's DM.
+            <a href={chatHref(run.chatId, !deskIds?.has(run.chatId))} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
+          ) : (
+            <CircleAlert className="size-4 shrink-0 text-muted-foreground" aria-label="No task or conversation is attached to this attempt" />
+          )}
         </li>
       ))}
     </ul>
