@@ -576,6 +576,7 @@ impl BundleContents {
             ledger,
             events,
             traces,
+            archived_traces,
             facts,
             context,
             overlay_agents: meta.overlay_agents,
