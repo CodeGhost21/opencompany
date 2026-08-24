@@ -418,40 +418,48 @@ export function PolicySettings({ client, company }: Props) {
     }
   };
 
-  const saveSpendCap = async () => {
+  /** Persists a spend-cap value and resyncs the cap draft. */
+  const commitSpendCap = async (cap: number | null) => {
     if (!status || saving) return;
-    const cap = Number(draftSpend);
-    if (noSpendCap) {
-      setSaving(true);
-      try {
-        apply(
-          await setPolicy(client, company, { autoApproveUnderUsd: null }),
-          "Spend cap updated",
-        );
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not save the spend cap.");
-      } finally {
-        setSaving(false);
-      }
-      return;
-    }
-    if (draftSpend.trim() === "" || !Number.isFinite(cap) || cap < 0) {
-      toast.error("Enter a non-negative amount, or choose no cap.");
-      return;
-    }
     setSaving(true);
     try {
       apply(
-        await setPolicy(client, company, {
-          autoApproveUnderUsd: noSpendCap ? null : cap,
-        }),
+        await setPolicy(client, company, { autoApproveUnderUsd: cap }),
         "Spend cap updated",
+        // An unsaved always-ask edit and a half-typed deadline are the
+        // operator's; the PUT only touched the cap.
+        { alwaysAsk: !dirty, deadline: false },
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save the spend cap.");
     } finally {
       setSaving(false);
     }
+  };
+
+  const saveSpendCap = async () => {
+    if (!status || saving) return;
+    const cap = Number(draftSpend);
+    if (noSpendCap) {
+      // Choosing "no cap" tightens: with no cap every spend parks. Straight
+      // through, like any other tightening save.
+      await commitSpendCap(null);
+      return;
+    }
+    if (draftSpend.trim() === "" || !Number.isFinite(cap) || cap < 0) {
+      toast.error("Enter a non-negative amount, or choose no cap.");
+      return;
+    }
+    // Raising the cap lets more payments through without asking — the same
+    // widening the tier buttons and a loosening reset confirm, so it earns the
+    // same dialog. A tightening save goes straight through.
+    if (widensSpendCap(status.autoApproveUnderUsd, cap)) {
+      setPendingReset(false);
+      setPendingTier(null);
+      setPendingCapRaise(cap);
+      return;
+    }
+    await commitSpendCap(cap);
   };
 
   const saveDeadline = async () => {
