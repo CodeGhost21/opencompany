@@ -91,10 +91,21 @@ export const SETUP_HANDOFF_FLAG = "from";
  */
 export const SETUP_HANDOFF_FRAGMENT = `#/company?${SETUP_HANDOFF_FLAG}=setup`;
 
+export interface SetupHandoffScope {
+  connection: string;
+  company: string | null;
+}
+
 /** Whether the current address arrived from setup's sign-in hand-off. */
-export function arrivedViaSetupHandoff(): boolean {
+export function arrivedViaSetupHandoff(scope?: SetupHandoffScope): boolean {
   const [, query = ""] = window.location.hash.split("?");
-  return new URLSearchParams(query).get(SETUP_HANDOFF_FLAG) === "setup";
+  const params = new URLSearchParams(query);
+  if (params.get(SETUP_HANDOFF_FLAG) !== "setup") return false;
+  if (!scope) return true;
+  return (
+    params.get("connection") === scope.connection &&
+    params.get("company") === (scope.company ?? "single")
+  );
 }
 
 /**
