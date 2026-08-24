@@ -37,7 +37,7 @@ export function MentionPicker({
   // Keep the highlighted row in view as the arrows walk past the fold.
   // `block: "nearest"` so an already-visible row does not jump the list.
   useEffect(() => {
-    const el = list.current?.querySelector<HTMLElement>(`[data-index="${active}"]`);
+    const el = list.current?.querySelector<HTMLElement>(`#mention-option-${active}`);
     el?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
@@ -59,8 +59,8 @@ export function MentionPicker({
           key={`${entry.target.kind}:${"id" in entry.target ? entry.target.id : "everyone"}`}
           type="button"
           role="option"
+          id={`mention-option-${index}`}
           aria-selected={index === active}
-          data-index={index}
           data-testid="mention-option"
           // `onMouseDown` with `preventDefault`, not `onClick`: a click would
           // blur the textarea first, and the composer would lose the selection

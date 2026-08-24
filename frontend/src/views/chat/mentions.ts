@@ -344,6 +344,7 @@ export function resolvableMentions(
         if (!closesMention(masked, end)) continue;
         if (!best || end > best.end) {
           best = { end, target: entry.target };
+          ambiguous = false;
         } else if (end === best.end && !sameTarget(best.target, entry.target)) {
           // Two targets claiming the same span: nobody gets pinged. A shorter
           // alias never overrides a longer one, so only equal lengths collide.

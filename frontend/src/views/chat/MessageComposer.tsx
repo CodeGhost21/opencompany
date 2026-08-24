@@ -201,6 +201,7 @@ export function MessageComposer({
     setDraft(text);
     // Trailing the text, so a mention whose span was edited away goes with it.
     setMentions((current) => reconcileMentions(text, current));
+    setOutsideWarning(null);
     syncQuery(text, e.target.selectionStart);
     onTyping?.();
   }
@@ -248,7 +249,7 @@ export function MessageComposer({
     // span the directory can name and send the union, keeping the picker's
     // explicit targets for names the host's extraction would refuse as
     // ambiguous.
-    if (sending.length && mentionables) {
+    if (mentionables) {
       for (const m of resolvableMentions(text, mentionables)) {
         if (!sending.some((s) => s.text === m.text && s.offset === m.offset)) {
           sending = [...sending, m];
@@ -385,7 +386,10 @@ export function MessageComposer({
             syncQuery(el.value, el.selectionStart);
           }}
           onBlur={closePicker}
+          role="combobox"
+          aria-autocomplete="list"
           aria-controls={pickerOpen ? "mention-picker" : undefined}
+          aria-activedescendant={pickerOpen ? `mention-option-${activeRow}` : undefined}
           aria-expanded={pickerOpen}
           aria-label={placeholder}
           placeholder={placeholder}

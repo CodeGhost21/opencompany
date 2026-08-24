@@ -546,6 +546,7 @@ export function ChatView({
   }, [client, company]);
   useEffect(() => {
     let live = true;
+    setDirectory(null);
     void client
       .mentionables(company)
       .then((d) => {
