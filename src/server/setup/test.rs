@@ -213,9 +213,9 @@ async fn the_payload_lists_the_shipped_templates() {
     );
 }
 
-/// ACP is a cargo feature whose transport is not mounted in this tree, so the
-/// flow reports build state rather than offering a switch. A flag that claimed
-/// otherwise would send a client to an endpoint that 404s.
+/// ACP is a cargo feature whose transport is mounted under that feature, so
+/// the flow reports build state rather than offering a switch. A flag that
+/// claimed otherwise would send a client to an endpoint that 404s.
 #[tokio::test]
 async fn the_payload_reports_acp_as_build_state_not_a_setting() {
     let home_dir = home();
@@ -223,8 +223,9 @@ async fn the_payload_reports_acp_as_build_state_not_a_setting() {
 
     assert_eq!(dto["build"]["acp_in_build"], cfg!(feature = "acp"));
     assert_eq!(
-        dto["build"]["acp_transport_mounted"], false,
-        "no /acp handler is mounted anywhere in this tree"
+        dto["build"]["acp_transport_mounted"],
+        cfg!(feature = "acp"),
+        "the flag must match whether the /acp handler is actually mounted"
     );
     assert!(
         !dto["fields"]

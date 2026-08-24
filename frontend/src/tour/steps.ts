@@ -67,14 +67,14 @@ export const TOUR: TourStop[] = [
     body: "Anything that needs your sign-off before it happens waits here. Nothing risky runs without you.",
   },
   {
-    // Connections is a page of the Settings section now, so the stop navigates
-    // to `#/settings/connections` and spotlights the nav row that leads there.
+    // The accounts page is `#/settings/oauth` since the Connections split, so
+    // the stop navigates there and spotlights the nav row that leads to it.
     view: "settings",
-    sub: "connections",
+    sub: "oauth",
     target: '[data-tour="nav-settings"]',
     placement: "right",
     title: "Connect your tools",
-    body: "Plug in the tools your company already uses — Gmail, Slack, GitHub — so your teammates can act for real.",
+    body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your teammates can act for real.",
   },
   {
     view: "chat",

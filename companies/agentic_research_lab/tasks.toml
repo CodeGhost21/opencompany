@@ -1,0 +1,50 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a research lab is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-evidence-standard"
+title = "Set up the evidence standard"
+priority = "high"
+note = """
+State what this lab will accept as a source, and record it on `decisions`: \
+what counts as primary, what a single blog post is worth, and what a claim \
+must carry before it reaches `findings`.
+
+The standard is the lab. Without one written down, every report is as good \
+as whoever wrote it happened to feel that day.
+
+Done when the standard is a decision row and `sources` is graded by it.\
+"""
+
+[[task]]
+id = "set-up-the-question-queue"
+title = "Set up the question queue"
+priority = "high"
+note = """
+Open a `questions` row for each thing this lab is actually trying to \
+answer, phrased as a question with an answer that could be wrong.
+
+A question nobody wrote down is one three people research separately and \
+nobody finishes.
+
+Done when the open questions each have a row and an owner.\
+"""
+
+[[task]]
+id = "set-up-the-report-shape"
+title = "Set up the report shape"
+priority = "medium"
+note = """
+Decide what a finished report looks like — claim, evidence, confidence, \
+what would change the answer — and put the template in the workspace.
+
+Done when the template exists and the next report is written into it.\
+"""
