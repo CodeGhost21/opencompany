@@ -339,8 +339,9 @@ impl RosterBuilder {
     }
 
     /// One model call, parsed and validated. Never fails upward: an unreachable
-    /// model, a timeout and an unreadable answer are all "no roster from this
-    /// attempt", which is the only distinction a caller acts on.
+    /// model, a timeout and an unreadable answer all yield "no roster from this
+    /// attempt", but only the first two are `ModelUnreachable` — an unreadable
+    /// answer is `NotDesignable`, and the caller's next step differs for the two.
     async fn attempt(&self, message: Message, deadline: Instant) -> Attempt {
         let now = Instant::now();
         if now >= deadline {
