@@ -190,7 +190,7 @@ describe("readiness is the addressed company's, not the host's", () => {
     // A credential cannot put a harness-less binary on the design path, so the
     // CTA that promises otherwise would be a dead end — say so instead.
     expect(find("setup-inference-notice")?.textContent).toContain("can't run a model");
-    expect(linkNamed("Set up a model")).toBeNull();
+    expect(linkNamed("Set up a model")).toBeUndefined();
   });
 });
 
