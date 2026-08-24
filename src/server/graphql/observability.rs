@@ -137,7 +137,7 @@ impl AgentRunGql {
     /// `active` | `parked` | `terminal` — read this rather than inferring a
     /// phase from timestamps.
     async fn phase(&self) -> String {
-        format!("{:?}", self.record.status.phase()).to_lowercase()
+        self.record.status.phase().to_string()
     }
 
     /// The card this attempted, when it attempted one.
