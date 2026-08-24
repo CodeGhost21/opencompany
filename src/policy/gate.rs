@@ -785,7 +785,29 @@ mod test {
     }
 
     #[tokio::test]
-    async fn readonly_gates_everything() {
+    async fn apply_effective_policy_updates_live_state_without_dropping_queue_or_emergency() {
+        let gate = ManifestApprovalGate::new(policy("supervised", Some(5.0)));
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+
+        gate.apply_effective_policy(Policy {
+            approval_ttl_hours: Some(2),
+            ..policy("full", None)
+        });
+
+        assert_eq!(gate.parked_ids(), vec![id]);
+        assert!(gate.is_emergency());
+        assert_eq!(gate.ttl_millis(), 2 * 60 * 60 * 1000);
+        assert_eq!(
+            decide(&gate, &effect("misc.do", EffectGroup::Other)).await,
+            PolicyDecision::Allow
+        );
+    }
+
+
         let gate = ManifestApprovalGate::new(policy("readonly", None));
         assert_eq!(
             decide(&gate, &effect("misc.read", EffectGroup::Other)).await,
