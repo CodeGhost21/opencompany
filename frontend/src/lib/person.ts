@@ -13,6 +13,7 @@
 // both being tested.
 
 import { avatarRef } from "@/lib/avatar";
+import { base58ToBytes } from "@/lib/wallet";
 
 /** The shape both `Me` and `Person` satisfy — the two ways a person arrives. */
 export interface NamedPerson {
