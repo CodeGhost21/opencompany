@@ -1,6 +1,6 @@
 //! Memory-fact reads + writes: `GET /memory`, `GET /memory/traces`,
-//! `GET /memory/stats`, `POST /memory`, `DELETE /memory/{fact_id}` under both
-//! scope forms.
+//! `GET /memory/stats`, `GET /memory/archives`, `POST /memory`,
+//! `DELETE /memory/{fact_id}` under both scope forms.
 //!
 //! Bodies mirror the console's `MemoryEntry` (`frontend/src/api/memory.ts`).
 //! Facts land in the [`FactStore`](crate::ports::FactStore) — the console's
