@@ -1644,30 +1644,16 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
-    /// A call inside a `sub_workflow` child ran **without** being offered for
-    /// approval, on a company whose policy would have parked the same call at
-    /// the top level (issue #617).
+    /// A legacy audit record for a call inside a `sub_workflow` child that ran
+    /// without being offered for approval (issue #617).
     ///
-    /// # Why this is a journal line and not a fix
+    /// # Compatibility
     ///
-    /// A child graph is resolved and run *inside* the engine, so its nodes never
-    /// reach the gate pass that #460 and #614 added. Gating them is not
-    /// available: tinyflows cannot resume a child across the sub-workflow
-    /// boundary, and a paused child halts the parent with an unresumable error —
-    /// so marking the child's node would convert a run that works into one that
-    /// fails with no card to decide. Until the engine can resume across that
-    /// boundary, the honest thing is to keep running and **say so**.
-    ///
-    /// That is what this records. An operator auditing what the company was
-    /// asked to approve would otherwise see a hole with nothing explaining it;
-    /// this turns the hole into a line naming the child, the node and the call.
-    /// It is an audit record of a known limitation, not a decision anybody made.
-    ///
-    /// Journaled best-effort at child *resolution*, so it lands whether or not
-    /// the child's node is ultimately reached — the point is that the call was
-    /// never offered, and a run that stops earlier for another reason does not
-    /// make that less true. Deliberately **not** written for a dry run, which
-    /// executes nothing.
+    /// This was emitted by the audit-only interim while tinyflows could not
+    /// propagate a child approval to the parent. Current runs gate child graphs
+    /// before the engine executes them, so new records are no longer emitted.
+    /// The variant remains to deserialize existing append-only journals and to
+    /// preserve their operator-visible history.
     ///
     /// Additive: an entirely new `kind`, so no journal written before it existed
     /// carries it, and its presence changes how no existing variant serializes.

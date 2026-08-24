@@ -148,13 +148,8 @@ struct DeskDto {
 /// chats with any operator-added overlay members merged in (issue #72). Empty
 /// when the company defines none (the console then falls back to its static
 /// default threads).
-async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, Response> {
-    let record = scope
-        .runtime
-        .store()
-        .load(scope.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::server::Rejection> {
+    let record = scope.runtime.store().load(scope.id()).await?;
     let desks = record
         .map(|record| {
             // Manifest (blueprint) desks first, then operator-created overlay
@@ -1276,17 +1271,17 @@ async fn company_status(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<CompanyStatus>, Response> {
+) -> Result<Json<CompanyStatus>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     runtime
         .status()
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// The operator's chat request body.
@@ -2272,7 +2267,7 @@ async fn chat_actor(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Option<Actor>, Response> {
+) -> Result<Option<Actor>, crate::server::Rejection> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
     // `peer` is threaded from every one of this function's callers, all the
@@ -2283,10 +2278,10 @@ async fn chat_actor(
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     Ok(match auth {
         GqlAuth::User(user) => Some(Actor {
@@ -2312,13 +2307,13 @@ async fn operator_chat(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<ChatOk, Response> {
+) -> Result<ChatOk, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     let by = chat_actor(&headers, &state, &company, peer).await?;
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     chat_and_emit(&state, &company, runtime, message, by)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// `POST /api/v1/company/chat` (single-company alias).
@@ -2327,13 +2322,13 @@ async fn operator_chat_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<ChatOk, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<ChatOk, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     let by = chat_actor(&headers, &state, &id, peer).await?;
     chat_and_emit(&state, &id, runtime, message, by)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// Query params for `GET .../chat/history`.
@@ -2518,7 +2513,7 @@ async fn history_viewer(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Viewer, Response> {
+) -> Result<Viewer, crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
@@ -2534,18 +2529,15 @@ async fn chat_history_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let viewer = history_viewer(headers, state, company, peer).await?;
-    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
         .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
         .min(CHAT_HISTORY_PAGE_LIMIT);
-    let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let messages =
+        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit).await?;
     Ok(Json(
         messages
             .into_iter()
@@ -2563,9 +2555,9 @@ async fn chat_history(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     chat_history_response(&state, &company, runtime, &headers, peer, query).await
 }
 
@@ -2575,8 +2567,8 @@ async fn chat_history_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     chat_history_response(&state, &id, runtime, &headers, peer, query).await
 }
@@ -2611,19 +2603,14 @@ async fn attribution_audit_response(
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Json<AttributionAuditDto>, Response> {
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
     let _viewer = history_viewer(headers, state, company, peer).await?;
     let record = runtime
         .store()
         .load(runtime.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.to_string())).into_response()
-        })?;
-    let audit = channel_attributed_replies(&runtime, &record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
+    let audit = channel_attributed_replies(&runtime, &record).await?;
     Ok(Json(AttributionAuditDto {
         replies: audit.replies,
         affected: audit.affected,
@@ -2636,9 +2623,9 @@ async fn attribution_audit(
     Path(id): Path<String>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<AttributionAuditDto>, Response> {
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     attribution_audit_response(&state, &company, runtime, &headers, peer).await
 }
 
@@ -2647,8 +2634,8 @@ async fn attribution_audit_single(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<AttributionAuditDto>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     attribution_audit_response(&state, &id, runtime, &headers, peer).await
 }
@@ -2712,19 +2699,15 @@ async fn react_to_message(
     peer: Option<std::net::SocketAddr>,
     seq: String,
     body: ReactionBody,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let by = chat_actor(headers, state, company, peer).await?;
-    let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
-    validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
+    let message_seq = parse_message_id(&seq)?;
+    validate_emoji(&body.emoji)?;
     // The target must be a message. Without this the route would happily hang a
     // reaction off an approval, a lifecycle change, or a sequence position that
     // has never existed — none of which any reader could render, and all of
     // which would sit in the log forever claiming otherwise.
-    let target = runtime
-        .events()
-        .read_from(company, message_seq, 1)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let target = runtime.events().read_from(company, message_seq, 1).await?;
     let is_message = target
         .first()
         .filter(|stored| stored.seq == message_seq)
@@ -2736,7 +2719,9 @@ async fn react_to_message(
         });
     if !is_message {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
+                .into_response()
+                .into(),
         );
     }
     runtime
@@ -2750,8 +2735,7 @@ async fn react_to_message(
                 by,
             },
         )
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2763,9 +2747,9 @@ async fn react_to_message_scoped(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     react_to_message(&state, &company, runtime, &headers, peer, seq, body).await
 }
 
@@ -2776,8 +2760,8 @@ async fn react_to_message_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<StatusCode, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
 }
@@ -2787,12 +2771,12 @@ async fn list_approvals(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     // Membership got you the list; role decides whether you may read what is in
     // it (issue #618).
     Ok(Json(crate::server::approval_visibility::for_principal(
@@ -2805,12 +2789,12 @@ async fn list_approvals(
 async fn list_approvals_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
     // Same contents rule as the `{id}` form (issue #618) — the two handlers are
     // the same read behind two addressing forms, and a redaction applied to one
@@ -3164,16 +3148,16 @@ async fn resolve_approval(
     State(state): State<AppState>,
     Path((id, aid)): Path<(String, String)>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     let actor = resolving_actor(auth);
     run_resolve(&state, &company, runtime, aid, body, actor)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// Who is resolving this approval (issue #374).
@@ -3201,19 +3185,19 @@ async fn resolve_approval_single(
     State(state): State<AppState>,
     Path(aid): Path<String>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Response, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     let actor = resolving_actor(auth);
     run_resolve(&state, &id, runtime, aid, body, actor)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 #[cfg(test)]

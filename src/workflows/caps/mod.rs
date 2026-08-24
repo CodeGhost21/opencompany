@@ -51,7 +51,7 @@
 
 mod dry_run;
 mod http;
-mod resolver;
+pub(crate) mod resolver;
 mod state;
 mod tools;
 /// Issue #849: how much upstream output one agent node's turn may carry, and
@@ -138,6 +138,12 @@ pub struct RunContext<'a> {
     pub deep: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     /// Collects which attempt each node ran as, for the run's journal events.
     pub attempts: RunAttempts,
+    /// Per-run record of every child graph the resolver gated, so the parent's
+    /// parking path can name a child pause (issue #617). Created by the runner
+    /// before the engine call, handed to the resolver through `ChildPolicyGates`,
+    /// and read back when the run pauses. Crate-internal plumbing: the registry
+    /// type is not part of the public surface, so the field is not `pub`.
+    pub(crate) child_gates: Arc<resolver::ChildGateRegistry>,
 }
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
@@ -195,6 +201,7 @@ pub async fn build_capabilities(
         runs,
         deep,
         attempts,
+        child_gates,
     } = run;
     let company = record.id.clone();
     // Issue #562: the tier actually in force — the operator's console override
@@ -211,21 +218,22 @@ pub async fn build_capabilities(
     // created (issue #168). Read before `deps` may move into the agent runner.
     // REAL in both modes: it is a read, and a dry sub_workflow child runs under
     // this same (dry) bundle, so dry propagates rather than stopping here.
-    // Issue #617: a child's nodes never reach the gate pass, so the resolver
-    // carries the policy in order to *say* which of its calls were never
-    // offered for approval. `None` for a dry run — nothing executes, so there
-    // is nothing to disclose, and the resolver behaves exactly as before.
-    let audit = (!dry_run).then(|| self::resolver::ChildCallAudit {
-        policy: record.manifest.policy.clone(),
+    // Issue #617: child graphs are translated inside the engine, after the
+    // top-level gate pass. Give the resolver the same live policy and grants so
+    // it can mark those graphs before tinyflows runs them. `None` for a dry run
+    // because every effect slot is inert there.
+    let gates = (!dry_run).then(|| self::resolver::ChildPolicyGates {
+        policy: record.effective_policy(),
         run_id: run_id.to_string(),
-        events: deps.events.clone(),
+        grants: deps.approval_requests.grants(),
+        registry: child_gates.clone(),
     });
     let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
         deps.workflow_source_dir.clone(),
         deps.store.clone(),
         company.clone(),
         workflow_id.to_string(),
-        audit,
+        gates,
     ));
 
     // The four effectful slots, chosen by mode at this one point.
@@ -2695,6 +2703,7 @@ mod tests {
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2744,6 +2753,7 @@ mod tests {
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2910,6 +2920,7 @@ mod tests {
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2966,6 +2977,7 @@ mod tests {
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await

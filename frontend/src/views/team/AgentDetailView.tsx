@@ -713,9 +713,6 @@ function Identity({ agent, action }: { agent: AgentDetailDto; action?: ReactNode
                 <Mail className="size-3" /> Inbox
               </Badge>
             )}
-            <span className="font-mono text-xs text-muted-foreground" data-testid="agent-id">
-              {agent.id}
-            </span>
           </div>
         </div>
       </div>

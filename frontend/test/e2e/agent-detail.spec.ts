@@ -90,7 +90,6 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   await expect(page).toHaveURL(/#\/team\/ceo$/);
 
   await expect(page.getByTestId("agent-name")).toHaveText("Chief Executive");
-  await expect(page.getByTestId("agent-id")).toHaveText("ceo");
 
   // The tier, resolved by the host rather than read off the manifest string.
   await expect(page.getByTestId("agent-tier")).toContainText("Orchestrator");

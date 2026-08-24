@@ -11,7 +11,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-RUN npm run build
+RUN npm run build && npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────
 # Source is bind-mounted over /app; node_modules lives in a named volume.

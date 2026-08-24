@@ -48,7 +48,6 @@ export type View =
   | "ledgers"
   | "team"
   | "workspace"
-  | "memory"
   | "approvals"
   | "workflows"
   | "observatory"
@@ -104,7 +103,6 @@ const ROUTABLE: Record<View, true> = {
    */
   team: true,
   workspace: true,
-  memory: true,
   approvals: true,
   workflows: true,
   /**
@@ -152,3 +150,14 @@ const ROUTABLE: Record<View, true> = {
  * member.
  */
 export const VIEWS: View[] = Object.keys(ROUTABLE) as View[];
+
+/**
+ * Whether a sidebar destination owns the current view.
+ *
+ * Task cards keep their own deep-linkable `tasks` route, but the board that
+ * owns them lives under Work (`ledgers`). Keeping that parent destination
+ * active makes the detail screen read as part of the same work surface.
+ */
+export function isNavigationActive(item: View, view: View): boolean {
+  return item === view || (item === "ledgers" && view === "tasks");
+}

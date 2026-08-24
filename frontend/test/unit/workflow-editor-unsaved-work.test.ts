@@ -60,10 +60,11 @@ function stubClient(): OpenCompanyClient & { puts: unknown[] } {
     listTeam: async () => [],
     get: async (path: string) =>
       path.endsWith("/wired-channels") ? { channels: [] } : [],
-    // The dialog's 700ms preflight debounce calls `validateWorkflow`, which
-    // POSTs the graph. A stub without this throws synchronously out of the
-    // timer when the test runs long enough for it to fire — an unhandled
-    // error that fails the whole `vitest run` despite every test passing.
+    // The dialog debounces a `/workflows/validate` preflight while mounted and
+    // the callback can fire after a test body has already returned — the same
+    // stray-callback class as the `scrollIntoView` shim above. `savedGraph` is
+    // valid, so answering the preflight with `valid: true` is what a real host
+    // would say, and no assertion in this file reads preflight state.
     post: async () => ({ valid: true }),
     put: async (_path: string, body: unknown) => {
       puts.push(body);
