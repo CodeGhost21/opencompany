@@ -1996,6 +1996,9 @@ impl CompanyRuntime {
     /// The roster check goes through [`crate::runtime::assignee::resolve`] for
     /// its desk-first ordering: the same one `responder_for` uses, so a desk
     /// whose id happens to match a teammate id still stores the desk id. The
+    /// human user directory is deliberately consulted **only** when the store
+    /// will not answer — never ahead of that resolution, or a desk id matching
+    /// a human id would be misclassified as `dm:<id>`. The
     /// resolution carries the **canonical** id (issue #214), so a key typed as
     /// a display name — `chat: "Engineering"` for a desk whose id is
     /// `engineering` — stores the canonical id, which is what the rail's
