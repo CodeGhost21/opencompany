@@ -241,7 +241,21 @@ pub fn user_slugs(users: &[UserRecord]) -> Vec<String> {
     let mut emitted: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(users.len());
     for user in users {
-        let base = mention_slug(&user_label(user));
+        let mut base = mention_slug(&user_label(user));
+        if base.is_empty() {
+            // A symbol-only display name ("🙂", "!!!") slugs to nothing, and an
+            // empty alias would match every `@` — but dropping the alias makes
+            // the person unmentionable while the picker still offers a row
+            // (`mentionableText` falls back to the label, and the host refuses
+            // the span because `opens_mention` needs a word char after `@`).
+            // Fall back to the email local part, the same handle `user_label`
+            // already uses when there is no display name, and then to the id,
+            // which is guaranteed non-empty and typable.
+            base = mention_slug(user.email.split('@').next().unwrap_or_default().trim());
+            if base.is_empty() {
+                base = user.id.clone();
+            }
+        }
         loop {
             let count = seen.entry(base.clone()).or_insert(0);
             *count += 1;
@@ -316,9 +330,22 @@ pub fn strip_code_regions(text: &str) -> String {
                             break bytes.len();
                         }
                         let indent = line_start + leading_spaces(bytes, line_start);
+                        // CommonMark: a closing fence may be followed only by
+                        // spaces or tabs (or a CR in a CRLF line ending), never
+                        // by text. A line like ```not-a-close stays inside the
+                        // block, so blanking must not stop there and unmask a
+                        // later `@` the renderer still shows as code. The same
+                        // line also has to be the same character
+                        // (`bytes[indent] == ch`) and at least as long, which
+                        // `run_len` already enforces.
+                        let close_run = run_len(bytes, indent, ch);
+                        let after = indent + close_run;
                         if indent < bytes.len()
                             && bytes[indent] == ch
-                            && run_len(bytes, indent, ch) >= run
+                            && close_run >= run
+                            && bytes[after..line_end(bytes, indent)]
+                                .iter()
+                                .all(|b| *b == b' ' || *b == b'\t' || *b == b'\r')
                         {
                             break line_end(bytes, indent);
                         }
@@ -694,7 +721,16 @@ fn is_valid_alias_for(mention: &Mention, dir: &[MentionAlias]) -> bool {
     // `"#engineering"`, which is nobody's alias and would fail every desk
     // mention the console's own picker can produce for that spelling.
     let body = mention.text.strip_prefix('@').unwrap_or(&mention.text);
-    let body = body.strip_prefix('#').unwrap_or(body);
+    // `@#…` is the desk-only spelling. `extract_with_known` narrows a hashed
+    // body to desk targets when scanning text, and revalidation must apply the
+    // same rule: without it, a user or agent whose label happens to start with
+    // `#` would pass the alias check below (the hash is stripped, leaving a
+    // plain word) with a visually desk-shaped mention that never names them.
+    let desk_spelling = body.strip_prefix('#');
+    if desk_spelling.is_some() && !matches!(mention.target, MentionTarget::Desk { .. }) {
+        return false;
+    }
+    let body = desk_spelling.unwrap_or(body);
     let body = body.to_lowercase();
     dir.iter()
         .any(|entry| entry.target == mention.target && entry.aliases.iter().any(|a| a == &body))
@@ -1084,6 +1120,32 @@ members = ["engineer", "ceo"]
         assert!(resolve_text(text).is_empty());
     }
 
+    /// A line like ```not-a-close is code, not a closing fence: CommonMark
+    /// only lets a fence be followed by spaces or tabs. Closing the mask there
+    /// would unmask a later `@engineer` the renderer still shows as code.
+    #[test]
+    fn a_false_closing_fence_does_not_unmask_a_later_mention() {
+        let text = "before\n```\ncode\n```not-a-close\n@engineer\n```\nafter";
+        assert!(resolve_text(text).is_empty());
+    }
+
+    /// Trailing whitespace on a closing fence is still a valid close
+    /// (CommonMark allows spaces or tabs), so the block keeps masking.
+    #[test]
+    fn a_fence_closed_with_trailing_whitespace_still_masks() {
+        let text = "before\n```\n@engineer\n```  \nafter";
+        assert!(resolve_text(text).is_empty());
+    }
+
+    /// A CRLF line ending is still a close — the `\r` is part of the ending,
+    /// not fence text, and must keep closing the block as it did before the
+    /// suffix was restricted.
+    #[test]
+    fn a_fence_closed_over_crlf_still_masks() {
+        let text = "before\n```\n@engineer\n```\r\nafter";
+        assert!(resolve_text(text).is_empty());
+    }
+
     /// The reason [`strip_code_regions`] blanks rather than removes: a mention
     /// *after* a code span must still land on its real byte offset.
     #[test]
@@ -1114,6 +1176,20 @@ members = ["engineer", "ceo"]
     #[test]
     fn an_unclosed_backtick_does_not_mask_the_rest() {
         let found = resolve_text("weird ` tick then @engineer");
+        assert_eq!(targets(&found), vec![&agent("engineer")]);
+    }
+
+    /// A longer closing run cannot close a shorter opener: CommonMark only lets
+    /// a *whole* run of exactly the opening length close a span, so
+    /// `` `code @engineer here`` `` (one opener, two trailing) is not code and
+    /// the mention — which opens after a space and closes before one — must
+    /// resolve. The console's mask has to agree with this or it would suppress
+    /// a mention the renderer still shows. (`` `@engineer`` `` does *not*
+    /// resolve either side: an `@` right after a backtick is not a
+    /// mention-opening position.)
+    #[test]
+    fn a_longer_backtick_run_does_not_close_a_shorter_opener() {
+        let found = resolve_text("`code @engineer here``");
         assert_eq!(targets(&found), vec![&agent("engineer")]);
     }
 
@@ -1224,6 +1300,21 @@ members = ["engineer", "ceo"]
         assert_eq!(mention_slug("Ana  M. Ruiz"), "ana-m-ruiz");
     }
 
+    /// A symbol-only display name ("🙂") slugs to nothing, which would leave
+    /// the person unmentionable while the picker still advertises a row. The
+    /// fallback must hand such a user a real, typable alias — the email local
+    /// part, then the id — so the picker can insert a spelling the host's
+    /// `opens_mention` accepts and the directory can resolve.
+    #[test]
+    fn a_symbol_only_display_name_still_gets_a_typable_slug() {
+        let users = vec![
+            user("u1", "smiley@acme.test", Some("🙂")),
+            user("u2", "no_name@acme.test", Some("!!!")),
+            user("u3", "plain@acme.test", Some("Ada")),
+        ];
+        assert_eq!(user_slugs(&users), vec!["smiley", "no-name", "ada"]);
+    }
+
     // -----------------------------------------------------------------------
     // Desks and everyone
     // -----------------------------------------------------------------------
@@ -1283,6 +1374,29 @@ members = ["engineer", "ceo"]
     fn a_hash_prefixed_non_desk_alias_does_not_resolve() {
         let found = resolve_text("@#engineer please");
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// The same desk-only rule applies when a structured caller supplies the
+    /// span: `@#engineer` paired with the agent target must not ping them.
+    /// `is_valid_alias_for` strips the hash for the alias comparison, so
+    /// without the kind check here the `#`-shaped mention would validate.
+    #[test]
+    fn a_hash_prefixed_non_desk_target_is_demoted_in_revalidation() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@#engineer".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let out = resolve(
+            "@#engineer please",
+            Some(supplied),
+            None,
+            &acme(),
+            &people(),
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].quiet, "{out:?}");
     }
 
     #[test]
