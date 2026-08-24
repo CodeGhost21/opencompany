@@ -108,9 +108,7 @@ const MAX_ARCHIVED_TRACES: usize = TRACE_RETENTION_LIMIT;
 /// Responses map through the same camelCase [`TraceEntry`] DTO as
 /// [`list_traces`], so a client that reads `cycleId`/`atMillis` from one gets
 /// them from the other.
-async fn archived_traces(
-    company: ScopedCompany,
-) -> Result<Json<Vec<TraceEntry>>, ApiError> {
+async fn archived_traces(company: ScopedCompany) -> Result<Json<Vec<TraceEntry>>, ApiError> {
     let mut traces = company.runtime.archived_traces().await?.ok_or_else(|| {
         // The route is registered for every company, but only a provider-backed
         // engine has an archive tier. A 500 would read as a server fault (and
@@ -1630,12 +1628,9 @@ mod route_tests {
                 },
             ],
         });
-        let state = state_over_with_scopes(
-            home.path(),
-            ScriptedContext::with_labels(&[]),
-            Some(scopes),
-        )
-        .await;
+        let state =
+            state_over_with_scopes(home.path(), ScriptedContext::with_labels(&[]), Some(scopes))
+                .await;
 
         let (status, body) = get_json(&state, "/api/v1/company/memory/archives").await;
 
@@ -1643,7 +1638,10 @@ mod route_tests {
         let rows = body.as_array().expect("a JSON array of traces");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["cycleId"], "c-old");
-        assert_eq!(rows[1]["cycleId"], "c-new", "newest last, like /memory/traces");
+        assert_eq!(
+            rows[1]["cycleId"], "c-new",
+            "newest last, like /memory/traces"
+        );
         assert_eq!(rows[1]["atMillis"], 300);
         assert_eq!(rows[1]["summary"], "newer");
         assert!(

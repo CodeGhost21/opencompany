@@ -116,7 +116,8 @@ pub use driver::{
 /// without rebuilding stores. Factored out of the struct field so
 /// `clippy::type-complexity` stays satisfied — the shape is deliberately the
 /// once-init + lock + map + arc composition.
-type ContextStoreCache = Arc<OnceLock<std::sync::Mutex<HashMap<String, Arc<ProviderContextStore>>>>>;
+type ContextStoreCache =
+    Arc<OnceLock<std::sync::Mutex<HashMap<String, Arc<ProviderContextStore>>>>>;
 
 /// A bound memory engine, and the only way to get a memory port out of one.
 ///
