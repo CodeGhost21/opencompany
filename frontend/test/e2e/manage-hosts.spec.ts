@@ -105,7 +105,7 @@ test("renaming a host keeps everything the console remembers about it", async ({
 
   await openTheManagePage(page);
   await page.getByTestId("manage-host-edit-conn-second").click();
-  await page.getByLabel("Name").fill("Acme staging");
+  await page.getByLabel("Name", { exact: true }).fill("Acme staging");
   await page.getByTestId("manage-host-save-conn-second").click();
 
   await expect(page.getByTestId("manage-host-conn-second")).toContainText("Acme staging");

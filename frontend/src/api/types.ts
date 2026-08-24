@@ -147,7 +147,7 @@ export interface OutboundMessage {
    * from a tool-backed one.
    */
   steps?: TurnStep[];
-  /** Channel-specific reply addressing (Telegram). Absent on operator messages. */
+  /** Channel-specific reply addressing. Absent on operator messages. */
   replyTo?: ReplyTo;
   /**
    * The board card this turn opened, when it opened one (issue #246). Drives
@@ -172,18 +172,6 @@ export interface OutboundMessage {
 export interface ReplyTo {
   /** The chat/thread id to deliver back to. */
   chatId: string;
-}
-
-/** Telegram channel configuration status (no secrets). */
-export interface TelegramChannelStatus {
-  /** Whether the channel is fully configured (both token + secret stored). */
-  configured: boolean;
-  /** Whether a bot token is stored (never the token itself). */
-  tokenSet: boolean;
-  /** Whether a webhook secret is stored (never the secret itself). */
-  secretSet: boolean;
-  /** The public webhook URL to register with setWebhook. */
-  webhookUrl: string;
 }
 
 /**
@@ -425,6 +413,8 @@ export interface ApprovalSummary {
    * field, no control, approve-once exactly as before.
    */
   broadly_grantable?: boolean;
+  /** Whether a time-bounded standing refusal can be created for this tool. */
+  broadly_deniable?: boolean;
   /**
    * What the effect will actually do — the tool call's arguments (#372).
    *
@@ -586,6 +576,7 @@ export interface StandingGrant {
   agent: string;
   /** The tool it admits, with any arguments. */
   tool: string;
+  verdict: Verdict;
   /** Who granted it: a signed-in user, or the platform credential. */
   granted_by: { kind: string; id: string };
   at_millis: number;
@@ -628,6 +619,8 @@ export interface FeedbackInput {
   note: string;
   work_ref?: string;
   preview?: boolean;
+  /** Confirm the previewed item by id (Send after Preview). */
+  item_id?: string;
 }
 
 /**
@@ -1145,7 +1138,7 @@ export interface McpHealth {
 
 /**
  * One roster agent named on a console coverage line — {@link
- * McpServer.reachableBy} ("Reachable by") and the repositories card's
+ * McpServer.reachableBy} ("Reachable by") and the console's other coverage lines'
  * `grantedAgents` ("Readable by"), both computed from one roster walk on the
  * host.
  *
@@ -1384,18 +1377,6 @@ export interface CapabilityStatusDto {
    */
   searchInBuild?: boolean;
   /** Whether a managed search credential is configured on this build (env-only). */
-  /**
-   * Which Smithery key the company's MCP **directory** browsing presents
-   * (issue #1287): `company` (its own), `environment` (one key set for the
-   * whole host and shared by every company on it), or `none` (Smithery is not
-   * queried, so the directory shows only the open registry's few hosted
-   * entries).
-   *
-   * Absent when the host could not determine it — an unknown answer is not
-   * `none`, and reporting a confident "no key" on a transient store failure
-   * would send an admin to paste one they already have.
-   */
-  mcpDirectoryCredential?: "company" | "environment" | "none";
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
@@ -1410,16 +1391,6 @@ export interface CapabilityStatusDto {
    * provider without finishing it is still on `managed`.
    */
   searchProvider?: string;
-  /**
-   * Bound repositories (issue #245, agent half): whether the company
-   * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
-   *
-   * The grant is only half the setup — the other half is whether anything is
-   * bound — so the repositories card reads this alongside the bindings list and
-   * names whichever half is missing. `undefined` is an older host that does not
-   * send the field, and must not be rendered as "not granted".
-   */
-  repoGranted?: boolean;
   /**
    * Publishing (issue #244, panel half #1192): whether the company's grants
    * confer `publish_artifact` — the only way a file an agent wrote becomes a
@@ -1545,7 +1516,11 @@ export interface TransactionDto {
  */
 export interface FinancesDto {
   balanceUsd: number;
-  budgetUsd: number;
+  /**
+   * The monthly budget cap. `null` when the manifest sets no `[budget]`;
+   * `0` when it is explicitly capped at zero — a hard cap, not an absence.
+   */
+  budgetUsd: number | null;
   spentUsd: number;
   revenueUsd: number;
   netUsd: number;

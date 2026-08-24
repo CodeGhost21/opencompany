@@ -161,7 +161,9 @@ export function Overview({ client, company, companyName }: Props) {
       const desks = desksResult.status === "fulfilled" ? desksResult.value : ([] as DeskDto[]);
       const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
       const memories =
-        memoriesResult.status === "fulfilled" ? memoriesResult.value : ([] as MemoryEntry[]);
+        memoriesResult.status === "fulfilled"
+          ? memoriesResult.value.items
+          : ([] as MemoryEntry[]);
       const flowList = flowListResult.status === "fulfilled" ? flowListResult.value : [];
 
       // `listWorkflows` answers with `{id,name,description,editable,enabled}`
@@ -269,7 +271,13 @@ export function Overview({ client, company, companyName }: Props) {
         </div>
       )}
       <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
-        <span className="truncate">
+        {/* Volatile: the timestamp is `now` relative to the host's clock, so
+            two runs of the same code land a minute apart and the label's
+            glyphs change — the graph's settle time depends on machine speed.
+            Masked via data-visual-volatile (visual.spec.ts) rather than
+            frozen, because a frozen client clock turns "just now" labels in
+            the list below into a distance that grows every day. */}
+        <span className="truncate" data-visual-volatile>
           {sources.fetchedAt === null
             ? loading
               ? "Loading…"

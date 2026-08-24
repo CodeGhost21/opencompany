@@ -41,6 +41,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
@@ -306,7 +307,10 @@ const REWRITE_RETIRED = (
   // detail sub-page (issue #264), it is what the org chart's rows and the chat
   // pane's chips link to, and it is deliberately a page so it can be linked.
   if (head === "team" && !sub) return ["company", null];
-  if (head === "connections") return ["settings", "connections"];
+  // `#/connections` predates the split into OAuth / MCP / Inference; the
+  // accounts it named are the OAuth page.
+  if (head === "connections") return ["settings", "oauth"];
+  if (head === "oauth") return ["settings", "oauth"];
   if (head === "mcp") return ["settings", "mcp"];
   if (head === "people") return ["settings", "people"];
   return null;
@@ -757,14 +761,14 @@ export function AppShell({
   const pending = feed.status.pending_approvals;
 
   // A legacy native OAuth callback may have left `connected` or `connect_error`
-  // in a bookmarked URL. Land the operator on Connections, say what happened,
+  // in a bookmarked URL. Land the operator on the OAuth page, say what happened,
   // then strip the params so a refresh does not re-fire them. The #838 callback
   // itself now terminates on its explanatory page and never writes a credential.
   // Runs once; StrictMode's double invoke is harmless because the first run
   // clears the params the second reads.
   //
-  // Connections is a page of the Settings section now (`#/settings/connections`),
-  // so the bounce-back lands there rather than on a top-level view.
+  // The accounts page is `#/settings/oauth` since the Connections split, so the
+  // bounce-back lands there rather than on a top-level view.
   //
   // Before issue #300 the host answered a cancelled or expired handshake with a
   // JSON body, which the browser rendered as the page — a dead end with no way
@@ -787,7 +791,7 @@ export function AppShell({
       "",
       window.location.pathname + (query ? `?${query}` : "") + stripLegacyConnectParams(window.location.hash),
     );
-    setView("settings", "connections");
+    setView("settings", "oauth");
     // The callback param carries the raw provider id (e.g. "slack"); show the
     // catalog display name ("Slack") when we know it, falling back to the id.
     const providerName = providerId
@@ -1408,7 +1412,7 @@ export function AppShell({
       // …and into the Chat workspace's transcripts, which is a *different*
       // store (issue #367). Chat became the nav-listed surface in #361 while
       // this injection kept writing only to the parked Conversation's threads,
-      // so anything the console did not POST for — an inbound Telegram turn, a
+      // so anything the console did not POST for — an inbound channel turn, a
       // background desk turn — reached Chat only on a page reload.
       //
       // The event names a thread; `chatChannelByThread` is the only thing that
@@ -2099,6 +2103,12 @@ export function AppShell({
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
+        {/* Every teammate's face in here is a way into who they are (issue
+            #1653): the panel is mounted once around the whole surface so a
+            click on an avatar in a transcript, a member list or a channel
+            header opens the same summary, over the page rather than instead of
+            it. */}
+        <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
@@ -2430,6 +2440,7 @@ export function AppShell({
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
         </ContentSurface>
+        </AgentProfileProvider>
 
         {/* Mobile only: dedicated chrome for the way back to navigation, not an
             overlay on top of it. A `fixed` trigger here used to float over

@@ -1,8 +1,7 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock, SquarePen } from "lucide-react";
+import { ChevronRight, CircleDot, Hash, Lock } from "lucide-react";
 
 import { TeammateAvatar } from "@/components/teammate-avatar";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
 
@@ -61,18 +60,8 @@ export function ChannelRail({
         className,
       )}
     >
-      <div className="flex items-center justify-between gap-2 px-3 py-3">
+      <div className="px-3 py-3">
         <h2 className="truncate text-sm font-semibold tracking-tight">Chat</h2>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7 text-muted-foreground"
-          aria-label="New message"
-          disabled
-          title="New message — coming soon"
-        >
-          <SquarePen className="size-4" />
-        </Button>
       </div>
 
       {sections.map((section) => (
