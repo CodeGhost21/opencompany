@@ -2405,6 +2405,7 @@ export function AppShell({
               threads={threads}
               activeId={activeThreadId}
               onSelect={setActiveThreadId}
+              onThreadViewed={onThreadViewed}
               setMessages={setThreadMessages}
               onReply={() => void feed.refresh()}
               taskEventTick={taskEventTick}
