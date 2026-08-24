@@ -26,7 +26,7 @@ describe("task-detail wait presentation", () => {
     ]);
     // The live wait on a parked card is `AwaitingApprovalRow`'s, not a timeline
     // band (issue #1354) — a `wait-live` row here would duplicate it.
-    expect(items.some((item) => item.live)).toBe(false);
-    expect(items.some((item) => item.key === "wait-live")).toBe(false);
+    expect(items.some((item) => item.row === "wait" && item.live)).toBe(false);
+    expect(items.map((item) => item.key)).not.toContain("wait-live");
   });
 });
