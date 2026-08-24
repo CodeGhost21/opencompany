@@ -198,6 +198,9 @@ function Section({
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
     : 0;
+  const hiddenMentions = !open
+    ? section.channels.reduce((n, c) => n + (mentions?.[c.id] ?? 0), 0)
+    : 0;
 
   return (
     <section className="group/section select-none px-2 pt-2">
