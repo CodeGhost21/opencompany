@@ -2021,15 +2021,18 @@ impl CompanyRuntime {
         // key through the same resolution as an un-prefixed desk, re-applying
         // the prefix only when it names a teammate.
         let bare = crate::runtime::assignee::dm_key(desk).unwrap_or(desk);
-        // A roster id, tried before the store load so a store that will not
-        // answer still badges the DM. The console's own keys are
-        // `dm:<teammate-id>`.
-        if users.iter().any(|u| u.id == bare) {
-            return format!("dm:{bare}");
-        }
         let Ok(Some(record)) = self.store().load(id).await else {
-            // Best-effort, same as the callers: a store that will not answer
-            // must not fail the message, and the bare id still renders a chip.
+            // Store will not answer; best-effort, same as the callers. A
+            // canonical `dm:<teammate-id>` still badges through the raw key
+            // (the fallthrough below), but a *noncanonical* roster key needs
+            // the directory to be re-keyed. This runs only on the store-down
+            // path, never ahead of `assignee::resolve`: a desk id that happens
+            // to match a human id must still file under the desk when the store
+            // answers, or a mention aimed at that desk would badge a
+            // nonexistent `dm:<id>` channel.
+            if users.iter().any(|u| u.id == bare) {
+                return format!("dm:{bare}");
+            }
             return desk.to_string();
         };
         match crate::runtime::assignee::resolve(&record, bare) {
