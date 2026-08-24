@@ -1094,10 +1094,14 @@ async fn run_issue_password(
         .unwrap_or_else(|| fs_ops.clone());
 
     let id = CompanyId::new(company);
-    // The manifest is the other source of a standing grant, so a company that
-    // is not there at all is a mistyped id rather than an empty admin list —
-    // worth saying, since the alternative is a confusing "not a standing admin".
-    let record = handles.company.load(&id).await?.ok_or_else(|| {
+    let record = if let Some(handles) = handles.as_ref() {
+        handles.company.load(&id).await?
+    } else {
+        opencompany::store::FsCompanyStore::new(home.clone())
+            .load(&id)
+            .await?
+    }
+    .ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(format!(
             "no company `{}` in this storage. Check the id — in shared-database mode it is the \
              namespaced `<tenant>--<id>` form.",
