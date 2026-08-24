@@ -874,23 +874,43 @@ impl MemoryStore for ProviderMemoryStore {
                 .collect(),
         };
         let mut evicted = 0u64;
-        for trace in doomed {
-            self.archive
-                .put(id, &trace.cycle_id, &trace, "trace")
-                .await?;
-            if self.traces.forget(id, &trace.cycle_id).await? {
-                evicted += 1;
+        let move_result = (async {
+            for trace in doomed {
+                self.archive
+                    .put(id, &trace.cycle_id, &trace, "trace")
+                    .await?;
+                if self.traces.forget(id, &trace.cycle_id).await? {
+                    evicted += 1;
+                }
             }
-        }
-        // Bound the archive on every eviction path. `KeepRecent` prunes to its
-        // own `n`; `OlderThan` has no `n` to bound by, so it prunes to the
-        // retention limit — the same window the live set is held to, which is
-        // what keeps the tier "the eviction history nearest to the live
-        // window" and the archive read bounded for any policy.
+            Ok::<(), OpenCompanyError>(())
+        })
+        .await;
+        // Bound the archive on every eviction path — the partial-failure path
+        // included. `KeepRecent` prunes to its own `n`; `OlderThan` has no `n`
+        // to bound by, so it prunes to the retention limit — the same window
+        // the live set is held to, which is what keeps the tier "the eviction
+        // history nearest to the live window" and the archive read bounded for
+        // any policy.
         let bound = match policy {
             EvictionPolicy::KeepRecent { n } => n,
             EvictionPolicy::OlderThan { .. } => TRACE_RETENTION_LIMIT,
         };
+        if let Err(move_err) = move_result {
+            // A provider failure mid-loop still leaves the traces already
+            // moved sitting in the archive, and a maintenance pass that keeps
+            // failing partway must not grow the tier past its bound across
+            // retries. Prune best-effort, then report the failure that
+            // actually happened.
+            if let Err(prune_err) = self.prune_archive(id, bound).await {
+                tracing::warn!(
+                    error = %prune_err,
+                    "archive prune failed after a partial eviction failure; the archive may exceed \
+                     its retention bound"
+                );
+            }
+            return Err(move_err);
+        }
         self.prune_archive(id, bound).await?;
         Ok(evicted)
     }
