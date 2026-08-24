@@ -158,8 +158,12 @@ export function stripCodeRegions(text: string): string {
   }
 
   const masked = out.join("");
-  // Inline spans, closed by a backtick run of equal length.
-  const span = /(`+)(?:(?!\1)[\s\S])*?\1/g;
+  // Inline spans, closed by a maximal backtick run of exactly equal length —
+  // CommonMark, like the Rust scanner, only lets a *whole* run close a span.
+  // Without the boundary guards, `@engineer`` (one opener, two trailing)
+  // would close on the first of the trailing pair, mask a mention the
+  // renderer still shows as visible text, and drop it from resolution.
+  const span = /(?<![`])(`+)(?!`)(?:(?!\1)[\s\S])*?(?<![`])\1(?!`)/g;
   for (const m of masked.matchAll(span)) {
     if (m.index !== undefined) blank(m.index, m.index + m[0].length);
   }
