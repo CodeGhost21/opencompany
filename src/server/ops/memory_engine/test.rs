@@ -306,6 +306,8 @@ fn switching_to_the_built_in_store_drops_endpoint_and_credential() {
 #[tokio::test]
 async fn the_default_host_reports_the_built_in_store_as_editable() {
     let dir = tempfile::tempdir().unwrap();
+    let guard = EnvVarGuard::capture(&MEMORY_ENV);
+    guard.remove("OPENCOMPANY_MEMORY");
     let state = state_at(dir.path()).await;
 
     let (status, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
