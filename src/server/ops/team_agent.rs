@@ -708,12 +708,13 @@ async fn edit_agent(
             .map(|acp| acp.transport.as_str())
             == Some("runner")
         {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
-                 `transport = \"runner\"`. Model overrides aren't supported for a runner \
-                 yet — the runner wire protocol doesn't carry them."
-            )))
-            .into_response());
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                     `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                     yet — the runner wire protocol doesn't carry them."
+                ),
+            ))));
         }
     }
 
