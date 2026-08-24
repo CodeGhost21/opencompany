@@ -2377,6 +2377,26 @@ prompt = "Lead decisively."
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     }
 
+    /// The same decompression bomb, reached through a hand-typed `blob:`
+    /// reference instead of the upload route: a node whose bytes are a real
+    /// image by signature but a 65535×65535 header is refused on the request
+    /// that named it, so a member cannot park it in the workspace and point
+    /// every avatar surface at it.
+    #[tokio::test]
+    async fn a_blob_reference_is_refused_when_the_bytes_are_a_decompression_bomb() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "bomb.png", "image/png", &bomb_png()).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
     /// A real image uploaded through the generic workspace route is accepted
     /// as a face when its declared type matches what its bytes sniff as. This
     /// is what keeps a face pickable from the Files tab.
