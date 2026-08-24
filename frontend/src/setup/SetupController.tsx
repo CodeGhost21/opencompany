@@ -418,6 +418,7 @@ export function SetupController({
       onDone={done}
       onRedesign={redesign}
       onRetry={retry}
+      onReplacementComplete={onReplacementComplete}
     />
   );
 }
