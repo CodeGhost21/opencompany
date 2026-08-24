@@ -5404,6 +5404,7 @@ mod test {
     /// exercised here against the real server.
     #[tokio::test]
     async fn deep_trace_prune_keeps_the_newest_runs_and_spares_a_refreshed_one() {
+        use crate::ports::deep_trace::DeepTraceStore;
         use crate::ports::deep_trace::{
             MAX_DEEP_RUNS_PER_COMPANY, RunStepDetailRecord, TurnStepDetail,
         };
