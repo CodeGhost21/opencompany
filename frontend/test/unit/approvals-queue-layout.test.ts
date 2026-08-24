@@ -159,4 +159,64 @@ describe("the approvals backlog queue (#1427)", () => {
     await act(async () => revoke.blur());
     expect(permissionHeading()).toBeUndefined();
   });
+
+  it("holds approval timestamps with the queue snapshot while interacting (#1593)", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+
+    const feedAt = (now: number): CompanyFeed => ({ ...feed, now });
+
+    await act(async () => {
+      root.render(
+        createElement(ApprovalsView, {
+          client,
+          company: null,
+          feed: feedAt(NOW),
+          onResolved: () => {},
+          onGoToConversation: () => {},
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // "soon" was parked at `NOW`, so its meta reads "just now" / "4m".
+    const card = () =>
+      [...container.querySelectorAll("[data-approval-id]")].find((row) =>
+        row.getAttribute("data-approval-id")?.startsWith("soon"),
+      )!;
+    expect(card().textContent).toContain("just now");
+
+    // Aim at the card's decide control to hold the interaction region.
+    await act(async () => {
+      card().querySelector("button")!.focus();
+    });
+
+    // A poll lands with a newer clock while the operator is still inside the
+    // queue. The card's age and deadline must not advance with it — the held
+    // snapshot is what the operator is looking at.
+    await act(async () => {
+      root.render(
+        createElement(ApprovalsView, {
+          client,
+          company: null,
+          feed: feedAt(NOW + 61_000),
+          onResolved: () => {},
+          onGoToConversation: () => {},
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(card().textContent).toContain("just now");
+
+    // Moving away releases the hold and reconciles to the newer clock.
+    await act(async () => {
+      (document.activeElement as HTMLElement).blur();
+    });
+    expect(card().textContent).not.toContain("just now");
+  });
 });
