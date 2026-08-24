@@ -62,8 +62,9 @@ pub struct PolicyGql {
     /// The always-ask list actually in force. The operator's real lever: it
     /// wins over every tier, `full` included.
     pub always_approve: Vec<String>,
-    /// Spend strictly under this amount is auto-approved without an approval;
-    /// `null` means no spend cap is in force.
+    /// The spend cap actually in force — console override where one sets it,
+    /// the committed manifest otherwise. A higher cap is looser; `null` is the
+    /// strictest setting — no spend is auto-approved, so every spend parks.
     pub auto_approve_under_usd: Option<f64>,
     /// How long an undecided approval remains actionable, in hours.
     pub approval_ttl_hours: f64,
