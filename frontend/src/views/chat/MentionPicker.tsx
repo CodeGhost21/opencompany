@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { AtSign, Hash, Users } from "lucide-react";
+import { Hash, Users } from "lucide-react";
 
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
