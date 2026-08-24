@@ -76,8 +76,8 @@ export function OperatorOverview({
    * failed attempt that finished after the previous visit out of the answer —
    * and the since-visit panel's empty state would then print "No failed
    * attempts were recorded" while one existed. Failures get a page of their
-   * own, read at the host's default cap so the boundary filter below is
-   * exhaustive over a real history rather than a sample of it.
+   * own, read at the host's widest cap ([`FAILED_READ_LIMIT`]) so the boundary
+   * filter below is as exhaustive as a single creation-ordered read can be.
    */
   const fetchRuns = useCallback(async () => {
     const [stopped, failed] = await Promise.all([
