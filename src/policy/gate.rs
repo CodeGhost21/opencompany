@@ -1032,12 +1032,10 @@ mod test {
 
         // The catch-all still exists, and still fails safe, for a word that is
         // not a tier at all.
-        assert!(ManifestApprovalGate::mode_decision(
-            &policy("moderately", None),
-            "moderately",
-            &probe
-        )
-        .is_none());
+        assert!(
+            ManifestApprovalGate::mode_decision(&policy("moderately", None), "moderately", &probe)
+                .is_none()
+        );
         let unknown = ManifestApprovalGate::new(policy("moderately", None));
         assert_eq!(
             decide(&unknown, &probe).await,
