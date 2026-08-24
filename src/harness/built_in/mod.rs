@@ -3670,6 +3670,54 @@ mod tests {
         );
     }
 
+    /// An overlay teammate's routing binding has to move the same axis: a
+    /// model/harness change is not a persona edit, but the roster the harness
+    /// builds consumes it (`overlay_agent_to_manifest` carries both straight
+    /// through), so a re-bind that moved nothing would be ignored until the
+    /// process restarted (issue #1676 review note).
+    #[test]
+    fn overlay_fingerprint_moves_on_a_model_or_harness_change() {
+        let one = |model: Option<&str>, harness: Option<&str>| {
+            vec![OverlayAgent {
+                id: "a".into(),
+                name: "A".into(),
+                role: "r".into(),
+                description: None,
+                tools: Vec::new(),
+                model: model.map(str::to_string),
+                harness: harness.map(str::to_string),
+            }]
+        };
+        let none = one(None, None);
+        let model = one(Some("chat-v2"), None);
+        let model_again = one(Some("chat-v2"), None);
+        let harness = one(None, Some("acp"));
+        let cleared = one(Some(""), None);
+
+        assert_ne!(
+            overlay_fingerprint(&none, &[], &[]),
+            overlay_fingerprint(&model, &[], &[]),
+            "binding an overlay to a model must move the fingerprint or the re-bind is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&model, &[], &[]),
+            overlay_fingerprint(&harness, &[], &[]),
+            "binding an overlay to a harness must move the fingerprint too"
+        );
+        // The stored `Some("")` "cleared" form is a distinct routing state from
+        // `None` ("never edited"), the same discriminant the resolver uses.
+        assert_ne!(
+            overlay_fingerprint(&none, &[], &[]),
+            overlay_fingerprint(&cleared, &[], &[]),
+            "an explicit clear must not hash like an untouched overlay"
+        );
+        // The same binding twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            overlay_fingerprint(&model, &[], &[]),
+            overlay_fingerprint(&model_again, &[], &[])
+        );
+    }
+
     /// An edit of a **manifest** teammate has to move the same axis, and for the
     /// same reason: a persona is assembled once per roster, so a rename that
     /// moved nothing would read back correctly on the Team page and be invisible
