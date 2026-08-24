@@ -103,14 +103,22 @@ export function Conversation({
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
   // On mobile, the list and the chat share the pane — track which is showing.
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("chat");
+  // The transcript is on screen on desktop (both panes render side by side)
+  // and on mobile only while the chat pane is the active one. A view report
+  // from a hidden pane — the operator opened the thread list, or resized down
+  // after selecting one — would clear a mention whose text was never visible.
+  const isMobile = useIsMobile();
+  const chatVisible = !isMobile || mobilePane === "chat";
 
   // A thread view is the mention-badge's read path on this surface (see the
   // prop doc): report it when the thread changes and as its transcript grows,
   // so a mention whose subject just loaded can clear the moment it is on
-  // screen rather than waiting for another visit.
+  // screen rather than waiting for another visit. Never report a thread whose
+  // transcript is hidden (Codex P1).
   useEffect(() => {
+    if (!chatVisible) return;
     onThreadViewed?.(active.id, new Set(active.messages.map((m) => m.id)));
-  }, [active.id, active.messages.length, onThreadViewed]);
+  }, [active.id, active.messages.length, onThreadViewed, chatVisible]);
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
