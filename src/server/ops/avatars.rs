@@ -40,7 +40,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::AppState;
-use crate::company::avatar::{MAX_AVATAR_BYTES, sniff_image};
+use crate::company::avatar::{MAX_AVATAR_BYTES, check_image_dimensions, sniff_image};
 use crate::company::workspace_names::kebab_name_or;
 use crate::error::OpenCompanyError;
 use crate::ports::generate_id;
