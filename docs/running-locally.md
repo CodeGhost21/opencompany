@@ -34,14 +34,16 @@ export TINYHUMANS_API_KEY="th-..."
 # 1. Pull in the OpenHuman + TinyAgents runtimes
 git submodule update --init --recursive
 
-# 2. Build the host (the one configurable backend)
-cargo build
+# 2. Build the host (the one configurable backend). `--features medulla`
+#    compiles in the hosted Medulla brain that `TINYHUMANS_API_KEY` unlocks;
+#    drop it for the small default build.
+cargo build --features medulla
 
 # 3. Check a company definition before you launch it
 cargo run --bin opencompany -- check companies/agentic_marketing_agency
 
 # 4. Launch that company. Point --company at any folder under companies/
-cargo run --bin opencompany -- serve --company companies/agentic_marketing_agency
+cargo run --features medulla --bin opencompany -- serve --company companies/agentic_marketing_agency
 ```
 
 The host is one configurable backend; each folder under
