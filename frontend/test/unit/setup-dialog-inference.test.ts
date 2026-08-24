@@ -293,6 +293,11 @@ describe("the finished build-out points at what would actually help", () => {
     // The company now carries the standard team, so the next build-out must
     // replace it — the notice makes that consequence visible before answering.
     expect(find("setup-redesign-notice")).toBeTruthy();
+    // The retry must be allowed through the build-out guard a second time:
+    // without the reset in tryRedesign the dialog stalls on "Creating your
+    // team…" with no effect entering to build anything.
+    await runFlow();
+    expect(find("setup-finish")).toBeTruthy();
   });
 });
 
