@@ -912,6 +912,14 @@ export class OpenCompanyClient {
        * collect instructions changes nothing.
        */
       instructions?: string;
+      /**
+       * The job shape that decides this teammate's tool belt (issue #1674),
+       * carried by the first-run setup build-out. Sent as the validated wire
+       * spelling the roster proposal returned (`research`, `writing`, …); the
+       * host derives the belt from it, so the console never chooses a
+       * permission boundary. Omitted on every other add path.
+       */
+      focus?: string;
     },
     company?: string | null,
   ): Promise<TeamMemberDto> {

@@ -49,7 +49,7 @@ path = "src/main.rs"
 #
 # Deliberately NOT here, and each for a reason rather than an oversight:
 #
-# * `tinycortex` / `tinymemory*` — the in-pod memory engines. They carry
+# * `tinycortex` / `tinymemory-embedded` — the in-pod memory engines. They carry
 #   tinycortex, `tinyagents/sqlite` and a second bundled SQLite build into the
 #   bundle for a surface the desktop does not offer; the runtime keeps its
 #   fs-backed memory stores.
@@ -60,7 +60,15 @@ path = "src/main.rs"
 #   and compiles without it; turning it on would additionally wire
 #   `RuntimeBuilder::with_acp_agents`, which is a separate decision from having
 #   a harness at all.
-opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp"] }
+#
+# `tinymemory` IS here, in the features below. It is the cheap half of the
+# memory seam — the hosted/remote driver registry (Supermemory, Mem0, Cognee,
+# "No memory"), pure Rust and already in the lockfile — and the memory-engine
+# catalog is a console surface the desktop serves too. Without it four of its
+# tiles render disabled with "this build was compiled without the `tinymemory`
+# feature", an instruction no desktop user can follow. Only the in-pod engines
+# above are excluded.
+opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp", "tinymemory"] }
 
 tauri = { version = "2", features = [] }
 # The OS credential store, so a device session token never has to live in the

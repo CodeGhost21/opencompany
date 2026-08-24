@@ -39,8 +39,29 @@ tool the gate refuses is the exact failure this single-source rule prevents.
 
 ### Levels in detail
 
-**Company — `[tools].allow`.** The ceiling. Defaults to
-`["*", "media", "composio"]`.
+**Company — `[tools].allow`.** The ceiling, and **the one place a capability is
+turned off for a whole company**. It defaults to `globals/globals.toml`'s
+`default_allow`:
+
+```toml
+default_allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+```
+
+Every capability in the list above is on by default, and dropping an entry from
+this list is how it comes off — for every teammate at once, whatever their own
+`tools` line asks for. `allow` **replaces** the default rather than extending
+it, so a company that means to withhold one namespace writes the rest of the
+list out and leaves that one off.
+
+The default withholds the credential-gated `chargebee`, `hosting` and `paypal`
+integrations, and `repo`. The first three are opt-in by name because each is a
+company-specific third-party integration — `hosting` publishes the workspace to
+the public internet and provisions databases the company pays for. `repo` is
+withheld for a different reason, and not as a preference: a host on filesystem
+storage refuses to boot a company whose allow-list names it, because a
+repository credential would sit on that filesystem in plaintext. A
+MongoDB-backed company that wants it adds `repo.*` here and on the teammates
+that need it.
 
 **Desk — `[[group_chat]].tools`.** A department's ceiling. A company organises
 its teammates into desks — a finance desk, a creative desk — and this is where
@@ -69,13 +90,18 @@ company grant itself — but it is not the intuitive one.
 ## The wildcard does not mean everything
 
 `*` covers `files`, `docs`, `shell`, `code`, `web` and `subagent`. It
-deliberately does **not** confer four namespaces, each of which must be named:
+deliberately does **not** confer the explicit opt-in namespaces, each of which
+must be named:
 
 | Namespace | Why it must be named |
 | --- | --- |
 | `media` | Spends real money per generated image or video. |
 | `composio` | Reaches the tenant's connected third-party accounts and moves real side effects — sends email, opens PRs. |
 | `search` | The queries leave the building, and a call is billed — to the managed platform, or to the company's own provider account. See [search.md](search.md). |
+| `mcp:*` | Reaches every `[[mcp_server]]` the company wired, each holding its own endpoint and credentials; a bare `*` must not hand a third-party server's tools to every teammate. |
+| `chargebee` | Billing API, wired only against the company's own Chargebee credentials. |
+| `paypal` | Wallet reads — a business's private figure, not a `*` wildcard's business. |
+| `hosting` | Publishes the workspace to the public internet and provisions databases the company pays for. |
 | `repo` | Materializes a third party's source inside a sandbox where the agent may also hold `shell`. |
 
 `repo.write` is tighter still: only the exact string confers it. A bare `repo`
@@ -87,7 +113,15 @@ Each rule has its own predicate beside the manifest types
 (`grants_media_explicit` and siblings in `src/company/types.rs`). Nothing may
 re-derive these answers from the generic glob matcher: it reports `*` as
 covering everything, which is right for the ordinary families and wrong for
-these four.
+every opt-in namespace above.
+
+The predicates accept two spellings — the bare namespace (`search`) or a
+`namespace.`-descendant (`search.web`) — plus, for the workspace pair, the exact
+`workspace.write` token. A `*` **glued** to the namespace (`search*`,
+`workspace.write*`) is neither: the write path stores a request glob verbatim,
+and no predicate accepts the glued form, so the coverage check and the card
+preview both report it as not applying. Write the broken form instead
+(`search.*`, or `search.web`) when a sub-grant ask is meant.
 
 ## The catalog
 
