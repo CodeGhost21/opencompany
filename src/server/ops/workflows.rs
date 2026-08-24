@@ -6944,8 +6944,8 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body[0]["latestVersion"], 2, "{body}");
-            assert_eq!(body[0]["updatedAtMillis"], 6, "{body}");
+            assert_eq!(body["files"][0]["latestVersion"], 2, "{body}");
+            assert_eq!(body["files"][0]["updatedAtMillis"], 6, "{body}");
         }
 
         /// `workspaceNodeId` rides through from the newest revision when the
