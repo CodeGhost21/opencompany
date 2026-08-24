@@ -213,7 +213,18 @@ interface Props {
    * cannot yet prove is on screen, which is exactly the case where this is
    * `true`.
    */
-  onChannelViewed?: (channelId: string, historyPending: boolean, mentionFeedRevision?: number) => void;
+  onChannelViewed?: (
+    channelId: string,
+    historyPending: boolean,
+    mentionFeedRevision?: number,
+    /**
+     * The loaded transcript's thread replies (`reply id → parent id`), so the
+     * reader can defer a thread-reply mention until its thread is open.
+     */
+    replyParents?: ReadonlyMap<string, string>,
+    /** The thread panel currently open, or `null`. */
+    openThreadId?: string | null,
+  ) => void;
   /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
