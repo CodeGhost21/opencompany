@@ -461,6 +461,8 @@ function CompactApprovalRow({
   // A mixed batch has no one glyph that is true of it, so it wears the neutral
   // one rather than the first item's, just as `BatchHeadline` does.
   const Icon = sameKind ? approvalIcon(lead.kind) : ShieldCheck;
+  const consequences = batchConsequences(approvals);
+  const uniform = uniformConsequence(approvals);
 
   return (
     <div className="px-4 py-1.5">
