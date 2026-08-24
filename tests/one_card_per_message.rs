@@ -132,9 +132,11 @@ fn persona_line(system_prompt: &str) -> String {
 fn persona_line_skips_the_tool_policy_boundary_for_both_persona_forms() {
     let base = "\
 ## Tool Policy Boundary
-
-- The agent may call any tool.
-- Tool use is governed by the operator.
+- Agent: ceo
+- Channel: web
+- Entry point: chat
+- Allowed permission: supervised
+- Risk: low
 
 ";
     let unnamed = format!("{base}You are the Chief Executive at Acme. Speak in the first person as this role.");
