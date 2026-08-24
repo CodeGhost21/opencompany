@@ -511,6 +511,11 @@ fn apng_animation_cost(bytes: &[u8]) -> Option<u64> {
 /// header that would make every decoder that touches it allocate a buffer
 /// nobody needs. A payload too short to announce a size is refused as not an
 /// image: a truncated avatar would not decode anywhere either.
+///
+/// GIF, animated WebP and APNG are deliberately allowed to move, so their
+/// single-frame size does not bound what a viewer decodes — every frame is
+/// repainted each cycle. Each format's walker counts how much painting that
+/// is, and a cycle over [`MAX_AVATAR_ANIMATED_PIXELS`] is a bomb too.
 pub fn check_image_dimensions(bytes: &[u8]) -> Result<()> {
     let Some((w, h)) = image_dimensions(bytes) else {
         return Err(not_an_image());
@@ -524,19 +529,27 @@ pub fn check_image_dimensions(bytes: &[u8]) -> Result<()> {
              {MAX_AVATAR_DIMENSION}×{MAX_AVATAR_DIMENSION}."
         )));
     }
-    // A GIF is deliberately allowed to move, so it is the one format whose
-    // single-frame size does not bound what a viewer decodes: every frame is
-    // repainted each cycle. The walk above the byte ceiling counts how much
-    // painting that is, and a cycle far over the cap is a bomb too.
-    if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89) {
-        if let Some(cost) = gif_animation_cost(bytes) {
-            if cost > MAX_AVATAR_ANIMATED_PIXELS {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "that GIF animates {cost} pixels per cycle — an avatar's \
-                     animation may total at most {MAX_AVATAR_ANIMATED_PIXELS}."
-                )));
-            }
-        }
+    // The three formats browsers can animate each carry a per-frame table the
+    // walkers above read; a still has nothing to count and is bounded by the
+    // single-frame check already done. Each walker answers `None` for a format
+    // it is not, or for a file of its format that never reaches a frame.
+    let animated_cost = if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89)
+    {
+        gif_animation_cost(bytes)
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        webp_animation_cost(bytes)
+    } else if bytes.starts_with(PNG_SIGNATURE) {
+        apng_animation_cost(bytes)
+    } else {
+        None
+    };
+    if let Some(cost) = animated_cost
+        && cost > MAX_AVATAR_ANIMATED_PIXELS
+    {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "that image animates {cost} pixels per cycle — an avatar's \
+             animation may total at most {MAX_AVATAR_ANIMATED_PIXELS}."
+        )));
     }
     Ok(())
 }
