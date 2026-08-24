@@ -41,6 +41,7 @@ import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsCon
 import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
+import { absorbHubSetupHandoff } from "@/setup/state";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 import { AddHostPage } from "@/views/setup/AddHostPage";
 import { cn } from "@/lib/utils";
@@ -389,7 +390,15 @@ function Console() {
   // Now that any credential is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
-    if (hubToken || hubFailed) clearHubResultFromUrl();
+    if (hubToken || hubFailed) {
+      clearHubResultFromUrl();
+      // A hub sign-in that was asked to land on setup's destination carries it
+      // as a query parameter (`?from=setup`) — the host put it there so the
+      // OAuth round trip could carry it. Translate it into the hash marker the
+      // shell consumes, so the sign-in lands on the roster setup just built
+      // with the welcome suppressed, exactly as a setup link would have.
+      absorbHubSetupHandoff();
+    }
   }, [magicLink, hubToken, hubFailed]);
 
   /**
