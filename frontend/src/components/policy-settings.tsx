@@ -394,8 +394,22 @@ export function PolicySettings({ client, company }: Props) {
 
   const saveSpendCap = async () => {
     if (!status || saving) return;
+    if (noSpendCap) {
+      setSaving(true);
+      try {
+        apply(
+          await setPolicy(client, company, { autoApproveUnderUsd: null }),
+          "Spend cap updated",
+        );
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not save the spend cap.");
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     const cap = Number(draftSpend);
-    if (!noSpendCap && (draftSpend.trim() === "" || !Number.isFinite(cap) || cap < 0)) {
+    if (draftSpend.trim() === "" || !Number.isFinite(cap) || cap < 0) {
       toast.error("Enter a non-negative amount, or choose no cap.");
       return;
     }
