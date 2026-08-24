@@ -80,6 +80,24 @@ describe("mentionCountsByChannel", () => {
   });
 
   /**
+   * `mainChannelId` may be `undefined` while the desk list has not resolved,
+   * or for a company with no desks at all. A general-chat spelling then has
+   * nowhere to badge — it must be dropped, not placed under a `""` channel the
+   * rail never has (which would render nowhere and could never be cleared).
+   * Direct desk/DM ids are unaffected: they badge from the rendered set.
+   */
+  it("drops general-chat spellings when there is no rendered main channel", () => {
+    const feed = [
+      note({ id: "main", context: "main" }),
+      note({ id: "general", context: "General" }),
+      note({ id: "dm", context: "dm:teammate" }),
+    ];
+    expect(mentionCountsByChannel(feed, undefined, new Set(["dm:teammate"]))).toEqual({
+      "dm:teammate": 1,
+    });
+  });
+
+  /**
    * A company can name a desk `general` (or `main`) and not put it first. The
    * host then stores the *canonical* desk id under that name, and the id is a
    * real rendered channel — so the exact match must win over the
