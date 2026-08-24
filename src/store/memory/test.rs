@@ -887,7 +887,9 @@ fn scoped_context_cache_stays_bounded() {
     // because entries are `Arc`-backed — this proves the map cannot outgrow it
     // no matter how many distinct scopes are asked for.
     let mem = engine();
-    let cache = mem.context_stores.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let cache = mem
+        .context_stores
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()));
 
     let overflow = super::SCOPED_CONTEXT_CACHE_CAPACITY + 64;
     for i in 0..overflow {

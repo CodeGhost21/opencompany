@@ -284,10 +284,7 @@ impl BoundMemory {
             let victim = cache.keys().next().expect("non-empty cache").clone();
             cache.remove(&victim);
         }
-        cache
-            .entry(key)
-            .or_insert_with(|| Arc::new(make()))
-            .clone()
+        cache.entry(key).or_insert_with(|| Arc::new(make())).clone()
     }
 
     /// Provisional working-out, unreachable from durable recall.
