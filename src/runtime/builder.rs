@@ -3002,10 +3002,7 @@ impl RuntimeBuilder {
         // is exempt: it carries its own policy/TTL on purpose (e.g. a zero-TTL
         // gate for expiry tests).
         if !gate_injected {
-            gate.apply_effective_policy(effective_policy(
-                &self.manifest.policy,
-                overlay_policy.as_ref(),
-            ));
+            gate.apply_effective_policy(effective_policy);
         }
 
         // Economy: an injected economy wins; otherwise the `tinyplace` feature
