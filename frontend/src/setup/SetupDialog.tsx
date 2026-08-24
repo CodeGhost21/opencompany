@@ -871,6 +871,7 @@ function BuildOut({
   finished,
   fallback,
   harnessReachable,
+  canManage,
   onDone,
   onRedesign,
   onTryAgain,
@@ -889,6 +890,13 @@ function BuildOut({
    * harness-less binary on the design path, so the CTA is omitted.
    */
   harnessReachable: boolean;
+  /**
+   * Whether the operator may wire or check the company's model. The Settings
+   * links below render only under management authority — the Connections card
+   * is read-only for a member — so an operator who cannot land the action is
+   * told to ask an admin instead of being handed a link that can only 403.
+   */
+  canManage: boolean;
   onDone: () => void;
   /**
    * The completion screen's "Add a model in Settings" action: close and send the
