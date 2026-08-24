@@ -524,6 +524,12 @@ fn company_builder(
     }
     if let Some(overlay) = state.memory_overlay() {
         builder = builder.with_memory_overlay(&overlay);
+    } else {
+        // The engine is (now) the base backend. On a live rebuild this must
+        // clear the outgoing provider engine's ports rather than inherit them —
+        // a company switched to `store` must not keep reading the provider it
+        // just deselected. See `RuntimeBuilder::with_memory_overlay_cleared`.
+        builder = builder.with_memory_overlay_cleared();
     }
     #[cfg(feature = "smtp")]
     if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
