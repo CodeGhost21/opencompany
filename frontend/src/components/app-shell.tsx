@@ -1967,6 +1967,18 @@ export function AppShell({
       // would be N round trips per run for a list that has not changed yet.
       setWorkflowRunEvents((prev) => [...prev, event].slice(-WORKFLOW_EVENT_WINDOW));
       if (event.type === "workflow_run_finished") setWorkflowRunTick((n) => n + 1);
+      // The Observatory's live refresh is a separate tick fed by node
+      // boundaries, not the run-history tick above: a node starting or settling
+      // is exactly when a watching operator's attempt trace changes, and the
+      // Workflows history must not pay a refetch per node. A node's turn
+      // streams no frames of its own, so the boundary events are the signal.
+      if (
+        event.type === "workflow_run_started" ||
+        event.type === "workflow_node_started" ||
+        event.type === "workflow_node_finished"
+      ) {
+        setBackgroundTurnTick((n) => n + 1);
+      }
     }, []),
     // Issue #384. The picker is refreshed from the host rather than patched
     // from the frame: the frame carries no graph body by design, and a console
