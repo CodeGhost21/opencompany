@@ -187,8 +187,10 @@ describe("stripCodeRegions", () => {
    * A closing backtick run must be a whole run of exactly the opening length.
    * `` `@engineer`` `` (one opener, two trailing) is not a code span — the
    * two-backtick run can never close a one-backtick opener — so CommonMark
-   * and the Rust scanner both render `@engineer` as visible text. Masking it
-   * here would suppress a mention the renderer still shows.
+   * renders `@engineer` as visible text and the Rust scanner leaves it
+   * unmasked. Blanking it here would make the console disagree with the
+   * renderer and, for a mention that *does* open (see `resolvableMentions`
+   * below), drop a ping the host would have delivered.
    */
   it("does not close a span on a prefix of a longer backtick run", () => {
     const text = "`@engineer``";
