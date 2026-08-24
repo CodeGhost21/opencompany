@@ -251,15 +251,7 @@ pub fn user_slugs(users: &[UserRecord]) -> Vec<String> {
             // Fall back to the email local part, the same handle `user_label`
             // already uses when there is no display name, and then to the id,
             // which is guaranteed non-empty and typable.
-            base = mention_slug(
-                &user
-                    .email
-                    .split('@')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string(),
-            );
+            base = mention_slug(user.email.split('@').next().unwrap_or_default().trim());
             if base.is_empty() {
                 base = user.id.clone();
             }
