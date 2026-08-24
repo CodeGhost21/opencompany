@@ -136,6 +136,7 @@ mod tests {
                 classes: Vec::new(),
                 ledgers: None,
                 can_declare_ledgers: true,
+                model: None,
             },
             Agent {
                 global: false,
@@ -155,6 +156,7 @@ mod tests {
                 classes: Vec::new(),
                 ledgers: None,
                 can_declare_ledgers: true,
+                model: None,
             },
         ];
         let overlay = vec![OverlayAgent {
@@ -163,6 +165,8 @@ mod tests {
             role: "Creative".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         }];
         let map = roster_display_names(&agents, &overlay);
         assert_eq!(map.get("strategy").unwrap(), "Strategy desk");

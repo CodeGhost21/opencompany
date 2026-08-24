@@ -68,3 +68,109 @@ export function clearSetupSkipped(scope: LocalScope): void {
     /* nothing to clear */
   }
 }
+
+// ---------------------------------------------------------------------------
+// The sign-in hand-off marker
+// ---------------------------------------------------------------------------
+
+/**
+ * The hash-query key a setup hand-off link carries, so a sign-in that
+ * navigates the whole document away (setup's button sets `window.location.href`)
+ * still lands knowing setup just finished: `…code=…#/company?from=setup`.
+ *
+ * `useHashView`'s segment parsing strips everything from `?` onward, so the
+ * flag never reaches the router; AppShell consumes it on the landing mount to
+ * apply the same welcome suppression a same-mount completion gets, then removes
+ * it so a reload or a copied link cannot re-apply it.
+ */
+export const SETUP_HANDOFF_FLAG = "from";
+
+/**
+ * The landing fragment a setup hand-off link carries. The wizard hands this to
+ * the host so a *mailed* link lands the same way the loopback link does.
+ */
+export const SETUP_HANDOFF_FRAGMENT = `#/company?${SETUP_HANDOFF_FLAG}=setup`;
+
+/** A fragment marker scoped to one connection and company. */
+export function setupHandoffFragment(scope: SetupHandoffScope): string {
+  const company = scope.company ?? "single";
+  return `#/company?${SETUP_HANDOFF_FLAG}=setup&connection=${encodeURIComponent(scope.connection)}&company=${encodeURIComponent(company)}`;
+}
+
+export interface SetupHandoffScope {
+  connection: string;
+  company: string | null;
+}
+
+/** Whether the current address arrived from setup's sign-in hand-off. */
+export function arrivedViaSetupHandoff(scope?: SetupHandoffScope): boolean {
+  const [, query = ""] = window.location.hash.split("?");
+  const params = new URLSearchParams(query);
+  if (params.get(SETUP_HANDOFF_FLAG) !== "setup") return false;
+  if (!scope) return true;
+  return (
+    params.get("connection") === scope.connection &&
+    params.get("company") === (scope.company ?? "single")
+  );
+}
+
+/**
+ * Whether the current address rode in on a hub sign-in that was asked to land
+ * on setup's destination.
+ *
+ * The host puts the destination on the hub's return URI as a *query* parameter
+ * (`?company=…&from=setup`), because a fragment cannot cross the OAuth round
+ * trip — the hub appends its own `token=` to whatever it was given, and
+ * anything after a `#` there would swallow it.
+ */
+export function arrivedViaHubSetupHandoff(scope?: SetupHandoffScope): boolean {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get(SETUP_HANDOFF_FLAG) !== "setup") return false;
+  if (!scope) return true;
+  return (
+    params.get("connection") === scope.connection &&
+    params.get("company") === (scope.company ?? "single")
+  );
+}
+
+/**
+ * Consumes a hub-carried setup destination, translating it into the same
+ * one-shot hash marker a setup hand-off link carries.
+ *
+ * An ecosystem sign-in returns to `/?company=…&from=setup`; the token
+ * redemption strips the hub's own params but leaves `from`. This reads it,
+ * takes it out of the query, and writes `#/company?from=setup` — the exact
+ * landing a setup link would have produced — so the shell applies the same
+ * welcome suppression and route, then clears the marker like any other
+ * hand-off. A reload after the conversion has neither the query flag nor the
+ * hash marker, so it cannot re-apply either.
+ */
+export function absorbHubSetupHandoff(scope?: SetupHandoffScope): void {
+  if (!arrivedViaHubSetupHandoff(scope)) return;
+  const params = new URLSearchParams(window.location.search);
+  params.delete(SETUP_HANDOFF_FLAG);
+  const qs = params.toString();
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+  );
+  window.location.hash = scope ? setupHandoffFragment(scope) : SETUP_HANDOFF_FRAGMENT;
+}
+
+/**
+ * Removes the hand-off flag from the address.
+ *
+ * One-shot: the suppression it enables belongs to the arrival it rode in on,
+ * not to a later reload. Other hash-query keys (`?host=`, for instance) are
+ * preserved.
+ */
+export function clearSetupHandoff(): void {
+  const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+  const params = new URLSearchParams(query);
+  if (!params.has(SETUP_HANDOFF_FLAG)) return;
+  params.delete(SETUP_HANDOFF_FLAG);
+  const qs = params.toString().replace(/=(?=&|$)/g, "");
+  const next = `#${path}${qs ? `?${qs}` : ""}`;
+  if (next !== window.location.hash) window.history.replaceState(null, "", next);
+}

@@ -2519,6 +2519,13 @@ impl CompanyRuntime {
                 // Read before the field moves below (issue #880): the answer
                 // needs the task link *and* the effect together.
                 workflow_run_id: workflow_run_of(&p),
+                // Issue #1098's gate id, projected as a fact rather than read
+                // out of the display payload — role redaction (issue #618)
+                // strips the payload from a member, and the run link (which
+                // needs this id) has to survive for the member holding the
+                // stalled workflow up.
+                workflow_id: crate::runtime::workflow_resume::gate_workflow_id(&p.effect)
+                    .map(str::to_owned),
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
