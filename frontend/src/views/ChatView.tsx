@@ -781,6 +781,7 @@ export function ChatView({
     onChannelViewed,
     replyParents,
     openThreadId,
+    loadedMessageIds,
   ]);
 
   // Three ways to have no channel on screen, which used to be one blank pane.
