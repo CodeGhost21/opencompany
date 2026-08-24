@@ -810,7 +810,11 @@ export function ApprovalCard({
           </Button>
           <Button
             size="sm"
-            aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — request ${a.at_millis}${
+            aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — ${
+              scope.kind === "tool"
+                ? `let this teammate use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
+                : "just this once"
+            } — request ${a.at_millis}${
               batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
             }`}
             disabled={deciding !== null}
