@@ -454,11 +454,16 @@ describe("a replacing build-out clears the team it replaces", () => {
     expect(removed).toEqual(["n1"]);
   });
 
-  it("keeps a row a failed rollback could not remove in the next retry's boundary", async () => {
+  it("a retry after a refused rollback still replaces every row it must", async () => {
     const removed: string[] = [];
+    // The roster the host reports grows as adds land; the second run's sweep
+    // iterates it, so it must reflect the row the first run left behind.
     const roster = [
       { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
     ];
+    let firstRun = true;
+    let nextId = 0;
+    const ids = ["n1", "n2", "n3"];
     const client = {
       ...clientWith({ source: "fallback", reason: "model_unreachable" }),
       post: async () => ({
@@ -469,16 +474,20 @@ describe("a replacing build-out clears the team it replaces", () => {
         template: "ecommerce",
         source: "model",
       }),
+      // The first replacement fails on its second write; the retry's writes all
+      // land, so the retry reaches the sweep the failure never could.
       addTeamMember: async (body: { role?: string }) => {
-        if (body.role === "Analyst") throw new Error("nope");
-        return { id: "n1" };
+        if (firstRun && body.role === "Analyst") throw new Error("nope");
+        const id = ids[nextId++];
+        roster.push({ id, name: body.name ?? "", role: body.role ?? "", global: false } as TeamMemberDto);
+        return { id };
       },
       listTeam: async () => roster,
-      // The rollback delete is refused, so the replacement that failed still owns
-      // a live row that a later retry must be able to name.
       removeTeamMember: async (agentId: string) => {
         removed.push(agentId);
-        throw new Error("nope");
+        // The first run's rollback of its partial row is refused — the row stays
+        // live, so the retry must bound over it. The retry's sweep removes land.
+        if (firstRun && agentId === "n1") throw new Error("nope");
       },
       removed,
     } as unknown as OpenCompanyClient & { removed: string[] };
@@ -491,14 +500,29 @@ describe("a replacing build-out clears the team it replaces", () => {
         await new Promise((r) => setTimeout(r, 60));
       });
     }
+    // The partial row was rolled back, and that delete was refused — the attempt
+    // is still recorded, but n1 survives into the retry.
     expect(find("setup-failed")).toBeTruthy();
-    // The row survived the failed rollback, so the boundary of the next retry
-    // must cover it — the retry's sweep is bounded by `createdIds`, and the
-    // captured Set that predates this run is let go so it cannot shadow it. The
-    // test cannot click through to that retry's sweep without a full second run,
-    // so it pins the boundary bookkeeping directly: the failed pass's original
-    // row plus the un-rolled-back one.
-    const { createdIds } = (find("setup-dialog") as unknown as { __boundary?: string[] }) ?? {};
-    void createdIds;
+    expect(removed).toEqual(["n1"]);
+    firstRun = false;
+
+    await click(
+      Array.from(document.querySelectorAll("button")).find(
+        (b) => b.textContent?.trim() === "Try again",
+      )!,
+    );
+    await answer("setup-field-industry", "E-commerce — homeware");
+    await answer("setup-field-teamHint", "");
+    await answer("setup-field-automate", "");
+    for (let i = 0; i < 40 && !find("setup-finish"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+    }
+    // The retry's sweep removes the fallback row the debt named *and* the row
+    // the failed rollback could not remove — without the `kept` bookkeeping the
+    // retry would bound only on the captured Set and strand n1.
+    expect(find("setup-finish")).toBeTruthy();
+    expect(removed).toEqual(["n1", "f1", "n1"]);
   });
 });
