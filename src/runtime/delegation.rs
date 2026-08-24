@@ -2760,21 +2760,29 @@ impl<'a> DelegationRunner<'a> {
         orchestrator::orchestrator_id(&self.record.effective_agents()).unwrap_or_default()
     }
 
-    /// Whether `responder` can reach at least one of the specifically mentioned
-    /// teammates. The orchestrator can reach every roster teammate; ordinary
+    /// Which of the specifically mentioned teammates `responder` can actually
+    /// reach. The orchestrator can reach every roster teammate; ordinary
     /// responders are constrained by desk peers and their `delegates_to` list.
-    fn responder_can_reach_mentioned(&self, responder: &str) -> bool {
+    ///
+    /// The partition matters, not just whether it is empty: a responder that
+    /// can reach one named teammate but not another must not be told to "hand
+    /// work to them" as though everyone named were in play, nor told it has
+    /// "no way to hand off" when it can reach some — the wording names who is
+    /// out of reach.
+    fn reachable_mentioned(&self, responder: &str) -> Vec<String> {
         if responder == self.orchestrator_id() {
-            return true;
+            return self.also_mentioned.clone();
         }
         let Some(agent) = self.record.effective_agent(responder) else {
-            return false;
+            return Vec::new();
         };
         let reachable =
             delegation_tools::teammate_targets(self.record, responder, &agent.delegates_to);
         self.also_mentioned
             .iter()
-            .any(|target| reachable.contains(target))
+            .filter(|target| reachable.contains(target))
+            .cloned()
+            .collect()
     }
 
     /// The voice a note this drain appends is recorded under.
