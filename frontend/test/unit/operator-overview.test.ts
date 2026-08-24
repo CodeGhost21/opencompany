@@ -179,4 +179,66 @@ describe("the operator overview landing page (#1321)", () => {
     await settle();
     expect(calls).toBeGreaterThan(afterBoot);
   });
+
+  it("does not let a slower initial snapshot overwrite a fresher tick re-read", async () => {
+    // The tick refresh added in #1015 races the initial load when a run parks
+    // or fails while the first snapshot is still outstanding. The generation
+    // ticket must make the *latest* read win even when the initial answer
+    // lands last — otherwise the fresher lists get overwritten by stale ones.
+    window.localStorage.setItem("oc.overview.last-visit:test-host::acme", "1700000000000");
+    const tickFailed = run({ id: "tick-failed", finishedAtMillis: 1_700_000_000_100 });
+    const initialFailed = run({ id: "initial-failed", finishedAtMillis: 1_700_000_000_100 });
+    const stoppedResolvers: Array<(runs: RunSummary[]) => void> = [];
+    const failedResolvers: Array<(runs: RunSummary[]) => void> = [];
+    const host: OpenCompanyClient = {
+      scopeFor: () => "/api/v1/company/acme",
+      get: (url) =>
+        new Promise<RunSummary[]>((resolve) => {
+          const u = String(url);
+          (u.includes("status=failed,paused") ? stoppedResolvers : failedResolvers).push(resolve);
+        }),
+    } as unknown as OpenCompanyClient;
+
+    await render(host, readyFeed, 0);
+    await settle();
+    expect(stoppedResolvers).toHaveLength(1);
+    expect(failedResolvers).toHaveLength(1);
+
+    // A run status change lands while the initial snapshot is outstanding.
+    await render(host, readyFeed, 1);
+    await settle();
+    expect(stoppedResolvers).toHaveLength(2);
+    expect(failedResolvers).toHaveLength(2);
+
+    // The tick re-read answers first with a fresh failure…
+    await act(async () => {
+      failedResolvers[1]!([tickFailed]);
+      stoppedResolvers[1]!([]);
+    });
+    expect(container.textContent).toContain("Task tick-failed");
+
+    // …then the stale initial snapshot lands; it must not overwrite it.
+    await act(async () => {
+      failedResolvers[0]!([initialFailed]);
+      stoppedResolvers[0]!([]);
+    });
+    expect(container.textContent).toContain("Task tick-failed");
+    expect(container.textContent).not.toContain("Task initial-failed");
+  });
+
+  it("does not claim no failures since the visit when the failed read came back capped", async () => {
+    // The host clamps the run list read, so a full page of failures cannot
+    // prove the absence of older ones that finished after the visit. The
+    // empty state must say it is looking at the newest cap, not claim the
+    // whole history was read.
+    window.localStorage.setItem("oc.overview.last-visit:test-host::acme", "1700000000000");
+    const capped = Array.from({ length: 200 }, (_, i) =>
+      run({ id: `old-${i}`, finishedAtMillis: 1_600_000_000_000 }),
+    );
+    await render(client(Promise.resolve(capped)), readyFeed);
+    await settle();
+
+    expect(container.textContent).toContain("the host caps the read here");
+    expect(container.textContent).not.toContain("No failed attempts were recorded since the previous visit.");
+  });
 });
