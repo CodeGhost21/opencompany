@@ -9,12 +9,7 @@ import type { TeamMemberDto } from "@/api/types";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import type { ConnectionId, LocalScope } from "@/connections/types";
 import { SetupController } from "@/setup/SetupController";
-import {
-  markSetupRedesign,
-  markSetupSkipped,
-  setupRedesign,
-  setupResuming,
-} from "@/setup/state";
+import { markSetupRedesign, markSetupSkipped, setupRedesign, setupResuming } from "@/setup/state";
 
 /**
  * The way back into setup after leaving it to wire a model.
@@ -33,25 +28,11 @@ import {
  */
 
 /** One connection's view of a single-company host. */
-const SCOPE: LocalScope = {
-  connection: "test-connection" as ConnectionId,
-  company: null,
-};
+const SCOPE: LocalScope = { connection: "test-connection" as ConnectionId, company: null };
 
 /** The baseline every company carries — present, and not "staffed". */
-const BASELINE: TeamMemberDto[] = [
-  "operations",
-  "page_builder",
-  "researcher",
-  "writer",
-].map(
-  (id) =>
-    ({
-      id,
-      role: "Analyst",
-      inboxEnabled: false,
-      global: true,
-    }) as TeamMemberDto,
+const BASELINE: TeamMemberDto[] = ["operations", "page_builder", "researcher", "writer"].map(
+  (id) => ({ id, role: "Analyst", inboxEnabled: false, global: true }) as TeamMemberDto,
 );
 
 const STAFFED: TeamMemberDto[] = [
@@ -65,11 +46,7 @@ function clientWith(roster: TeamMemberDto[]): OpenCompanyClient {
     listTeam: async () => roster,
     // The dialog's own readiness check; `echo` keeps the notice on screen.
     get: async () => ({ cognition: "echo" }),
-    post: async () => ({
-      agents: [],
-      template: "ecommerce",
-      source: "fallback",
-    }),
+    post: async () => ({ agents: [], template: "ecommerce", source: "fallback" }),
   } as unknown as OpenCompanyClient;
 }
 
@@ -77,9 +54,7 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
-  (
-    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   localStorage.clear();
   window.location.hash = "#/overview";
   container = document.createElement("div");
@@ -98,24 +73,17 @@ async function mount(client: OpenCompanyClient, deepLinked = false) {
     root.render(
       createElement(ConnectionScopeProvider, {
         scope: SCOPE,
-        children: createElement(SetupController, {
-          client,
-          company: null,
-          deepLinked,
-        }),
+        children: createElement(SetupController, { client, company: null, deepLinked }),
       }),
     );
   });
 }
 
 const dialog = () => document.querySelector('[data-testid="setup-dialog"]');
-const find = (testId: string) =>
-  document.querySelector(`[data-testid="${testId}"]`);
+const find = (testId: string) => document.querySelector(`[data-testid="${testId}"]`);
 
 const modelLink = () =>
-  Array.from(document.querySelectorAll("a")).find(
-    (a) => a.textContent?.trim() === "Set up a model",
-  );
+  Array.from(document.querySelectorAll("a")).find((a) => a.textContent?.trim() === "Set up a model");
 
 const addModelLink = () =>
   Array.from(document.querySelectorAll("a")).find(
@@ -134,7 +102,9 @@ async function goTo(hash: string) {
 async function runFlow() {
   const setField = async (testId: string, value: string) => {
     const field = document.querySelector(`[data-testid="${testId}"]`) as
-      HTMLInputElement | HTMLTextAreaElement | null;
+      | HTMLInputElement
+      | HTMLTextAreaElement
+      | null;
     expect(field, `no field ${testId}`).toBeTruthy();
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(
@@ -147,9 +117,7 @@ async function runFlow() {
       field!.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await act(async () => {
-      (
-        document.querySelector('[data-testid="setup-next"]') as HTMLElement
-      ).click();
+      (document.querySelector('[data-testid="setup-next"]') as HTMLElement).click();
     });
   };
   await setField("setup-field-industry", "E-commerce — homeware");
@@ -200,10 +168,7 @@ describe("leaving to wire a model", () => {
 
     await goTo("#/overview");
 
-    expect(
-      dialog(),
-      "the flow they went to enable is unreachable",
-    ).toBeTruthy();
+    expect(dialog(), "the flow they went to enable is unreachable").toBeTruthy();
     expect(find("setup-question")).toBeTruthy();
   });
 
@@ -227,20 +192,14 @@ describe("leaving to wire a model", () => {
     // `#/settings/connections` is a named view, so nothing opens unprompted and
     // the resume is the only thing that could.
     await mount(clientWith(BASELINE), true);
-    expect(
-      dialog(),
-      "reloaded on the settings page — they have not returned yet",
-    ).toBeNull();
+    expect(dialog(), "reloaded on the settings page — they have not returned yet").toBeNull();
 
     window.location.hash = "#/overview";
     await act(async () => root.unmount());
     root = createRoot(container);
     await mount(clientWith(BASELINE), true);
 
-    expect(
-      dialog(),
-      "a reload back on the console should resume setup",
-    ).toBeTruthy();
+    expect(dialog(), "a reload back on the console should resume setup").toBeTruthy();
   });
 
   it("does not reopen over a company someone else staffed meanwhile", async () => {
@@ -252,11 +211,10 @@ describe("leaving to wire a model", () => {
     window.location.hash = "#/overview";
     await mount(clientWith(STAFFED), true);
 
-    expect(
-      dialog(),
-      "a setup dialog over a team that already exists",
-    ).toBeNull();
-    expect(setupResuming(SCOPE), "debt should be dropped").toBe(false);
+    expect(dialog(), "a setup dialog over a team that already exists").toBeNull();
+    expect(setupResuming(SCOPE), "debt should be dropped").toBe(
+      false,
+    );
   });
 
   it("re-reads the roster on a hash-change return instead of trusting the old answer", async () => {
@@ -270,11 +228,7 @@ describe("leaving to wire a model", () => {
     await mount(client);
     await leaveForModelSettings();
 
-    roster.push({
-      id: "ada",
-      role: "Operations",
-      inboxEnabled: false,
-    } as TeamMemberDto);
+    roster.push({ id: "ada", role: "Operations", inboxEnabled: false } as TeamMemberDto);
 
     await goTo("#/overview");
 
@@ -302,9 +256,7 @@ describe("leaving to wire a model", () => {
     failing = true;
     await goTo("#/overview");
     expect(dialog(), "unknown roster — must stay shut").toBeNull();
-    expect(setupResuming(SCOPE), "debt must survive the failed read").toBe(
-      true,
-    );
+    expect(setupResuming(SCOPE), "debt must survive the failed read").toBe(true);
 
     // The next return reads successfully: the debt pays out and setup reopens.
     failing = false;
@@ -342,11 +294,7 @@ describe("leaving to wire a model", () => {
         root.render(
           createElement(ConnectionScopeProvider, {
             scope: SCOPE,
-            children: createElement(SetupController, {
-              client,
-              company,
-              deepLinked: false,
-            }),
+            children: createElement(SetupController, { client, company, deepLinked: false }),
           }),
         );
       });
@@ -368,10 +316,7 @@ describe("leaving to wire a model", () => {
       resolveAcme([...BASELINE]);
     });
 
-    expect(
-      dialog(),
-      "stale return read reopened setup over the new company",
-    ).toBeNull();
+    expect(dialog(), "stale return read reopened setup over the new company").toBeNull();
   });
 
   it('drops the debt when the operator then says "I\'ll do this later"', async () => {
@@ -409,9 +354,7 @@ describe("leaving the completion screen to wire a model", () => {
       listTeam: async () => [...BASELINE],
       get: async () => ({ cognition: "echo" }),
       post: async () => ({
-        agents: [
-          { name: "Ada", role: "Operations", description: "Runs the desk." },
-        ],
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
         source: "fallback",
         reason: "no_model",
@@ -433,10 +376,7 @@ describe("leaving the completion screen to wire a model", () => {
     await goTo("#/overview");
 
     expect(dialog(), "the redesign they were owed never reopened").toBeTruthy();
-    expect(
-      find("setup-redesign-notice"),
-      "not reopened in replacing mode",
-    ).toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
   });
 
   it("replaces only the fallback team when another operator staffs someone meanwhile", async () => {
@@ -470,11 +410,7 @@ describe("leaving the completion screen to wire a model", () => {
         for (let suffix = 2; roster.some((m) => m.id === id); suffix++) {
           id = `${base}-${suffix}`;
         }
-        const member = {
-          id,
-          role: input.role,
-          inboxEnabled: false,
-        } as TeamMemberDto;
+        const member = { id, role: input.role, inboxEnabled: false } as TeamMemberDto;
         roster.push(member);
         return member;
       },
@@ -493,29 +429,16 @@ describe("leaving the completion screen to wire a model", () => {
     expect(setupRedesign(SCOPE)).toBe(true);
 
     // A colleague staffs a teammate while the settings page is open.
-    roster.push({
-      id: "bob",
-      role: "Support",
-      inboxEnabled: false,
-    } as TeamMemberDto);
+    roster.push({ id: "bob", role: "Support", inboxEnabled: false } as TeamMemberDto);
 
     // Return: the redesign reopens, and the second build-out must replace only
     // the fallback team — ada and cara — leaving bob, someone else's work, alone.
     await goTo("#/overview");
-    expect(
-      find("setup-redesign-notice"),
-      "not reopened in replacing mode",
-    ).toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
     await runFlow();
 
-    expect(removed, "the fallback team should be replaced").toEqual([
-      "ada",
-      "cara",
-    ]);
-    expect(
-      removed,
-      "a teammate staffed while settings were open must survive",
-    ).not.toContain("bob");
+    expect(removed, "the fallback team should be replaced").toEqual(["ada", "cara"]);
+    expect(removed, "a teammate staffed while settings were open must survive").not.toContain("bob");
   });
 
   it("keeps the redesign debt across a reload after the return reopens it", async () => {
@@ -529,9 +452,7 @@ describe("leaving the completion screen to wire a model", () => {
       listTeam: async () => [...BASELINE],
       get: async () => ({ cognition: "echo" }),
       post: async () => ({
-        agents: [
-          { name: "Ada", role: "Operations", description: "Runs the desk." },
-        ],
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
         source: "fallback",
         reason: "no_model",
@@ -554,14 +475,9 @@ describe("leaving the completion screen to wire a model", () => {
     expect(setupRedesign(SCOPE)).toBe(true);
 
     await goTo("#/overview");
-    expect(
-      find("setup-redesign-notice"),
-      "not reopened in replacing mode",
-    ).toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
     // The debt outlived the reopen.
-    expect(setupRedesign(SCOPE), "the return paid the redesign debt").toBe(
-      true,
-    );
+    expect(setupRedesign(SCOPE), "the return paid the redesign debt").toBe(true);
 
     // A fresh mount stands in for the reload mid-redesign. The kept debt is the
     // only thing that can reopen replacing mode: `deepLinked` suppresses the
@@ -570,14 +486,8 @@ describe("leaving the completion screen to wire a model", () => {
     root = createRoot(container);
     await mount(client, true);
 
-    expect(
-      dialog(),
-      "the owed redesign did not come back after a reload",
-    ).toBeTruthy();
-    expect(
-      find("setup-redesign-notice"),
-      "not reopened in replacing mode",
-    ).toBeTruthy();
+    expect(dialog(), "the owed redesign did not come back after a reload").toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
     expect(setupRedesign(SCOPE)).toBe(true);
   });
 
@@ -589,9 +499,7 @@ describe("leaving the completion screen to wire a model", () => {
       listTeam: async () => [...BASELINE],
       get: async () => ({ cognition: "echo" }),
       post: async () => ({
-        agents: [
-          { name: "Ada", role: "Operations", description: "Runs the desk." },
-        ],
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
         source: "fallback",
         reason: "no_model",
@@ -612,19 +520,14 @@ describe("leaving the completion screen to wire a model", () => {
     expect(setupRedesign(SCOPE)).toBe(true);
 
     await goTo("#/overview");
-    expect(
-      find("setup-redesign-notice"),
-      "not reopened in replacing mode",
-    ).toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
 
     await act(async () => {
       (find("setup-skip") as HTMLElement).click();
     });
 
     expect(dialog()).toBeNull();
-    expect(setupRedesign(SCOPE), "skip should cancel the owed redesign").toBe(
-      false,
-    );
+    expect(setupRedesign(SCOPE), "skip should cancel the owed redesign").toBe(false);
   });
 
   it("clears the redesign debt when the replacement is designed, so a reload cannot reopen it", async () => {
@@ -639,18 +542,12 @@ describe("leaving the completion screen to wire a model", () => {
       listTeam: async () => [...roster],
       get: async () => ({ cognition: "echo" }),
       post: async () => ({
-        agents: [
-          { name: "Ada", role: "Operations", description: "Runs the desk." },
-        ],
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
         source: "model",
       }),
       addTeamMember: async () => {
-        const member = {
-          id: "ada",
-          role: "Operations",
-          inboxEnabled: false,
-        } as TeamMemberDto;
+        const member = { id: "ada", role: "Operations", inboxEnabled: false } as TeamMemberDto;
         roster.push(member);
         return member;
       },
@@ -661,25 +558,20 @@ describe("leaving the completion screen to wire a model", () => {
 
     // Seed the debt the operator is owed: a fallback pass shipped f1 and they
     // left to wire a model, naming that row as the replacement's boundary.
-    roster.push({
-      id: "f1",
-      role: "Operations",
-      inboxEnabled: false,
-    } as TeamMemberDto);
+    roster.push({ id: "f1", role: "Operations", inboxEnabled: false } as TeamMemberDto);
     markSetupRedesign(SCOPE, ["f1"]);
 
     await mount(client);
 
     // The debt reopens the dialog in replacing mode, without any force flag.
     expect(dialog(), "the owed redesign did not reopen").toBeTruthy();
-    expect(
-      find("setup-redesign-notice"),
-      "not reopened in replacing mode",
-    ).toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
 
     const setField = async (testId: string, value: string) => {
       const field = document.querySelector(`[data-testid="${testId}"]`) as
-        HTMLInputElement | HTMLTextAreaElement | null;
+        | HTMLInputElement
+        | HTMLTextAreaElement
+        | null;
       expect(field, `no field ${testId}`).toBeTruthy();
       await act(async () => {
         const setter = Object.getOwnPropertyDescriptor(
@@ -692,9 +584,7 @@ describe("leaving the completion screen to wire a model", () => {
         field!.dispatchEvent(new Event("input", { bubbles: true }));
       });
       await act(async () => {
-        (
-          document.querySelector('[data-testid="setup-next"]') as HTMLElement
-        ).click();
+        (document.querySelector('[data-testid="setup-next"]') as HTMLElement).click();
       });
     };
     await setField("setup-field-industry", "E-commerce — homeware");
@@ -706,18 +596,10 @@ describe("leaving the completion screen to wire a model", () => {
       });
     }
 
-    expect(
-      find("setup-finish"),
-      "designed build-out never finished",
-    ).toBeTruthy();
-    expect(removed, "the fallback row the debt named should be swept").toEqual([
-      "f1",
-    ]);
+    expect(find("setup-finish"), "designed build-out never finished").toBeTruthy();
+    expect(removed, "the fallback row the debt named should be swept").toEqual(["f1"]);
     // The whole record is gone — redesign, resuming and skip all cleared.
-    expect(
-      setupRedesign(SCOPE),
-      "the designed replacement should pay the debt",
-    ).toBe(false);
+    expect(setupRedesign(SCOPE), "the designed replacement should pay the debt").toBe(false);
     expect(setupResuming(SCOPE)).toBe(false);
   });
 });
