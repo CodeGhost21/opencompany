@@ -475,6 +475,7 @@ export function mentionablesFor(
       d.memberIds.length === 1
         ? `${d.name} — 1 teammate`
         : `${d.name} — ${d.memberIds.length} teammates`,
+    memberIds: d.memberIds,
   }));
   const everyone: Mentionable = {
     target: { kind: "everyone" },
