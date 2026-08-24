@@ -63,7 +63,7 @@ import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { VIEWS, type View } from "@/lib/console-routes";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
