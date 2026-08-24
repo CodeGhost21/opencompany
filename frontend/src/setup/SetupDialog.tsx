@@ -167,6 +167,15 @@ export function SetupDialog({
    */
   const redesignRoster = useRef<Set<string> | null>(null);
   /**
+   * The host ids of the rows this run's build-out has created so far.
+   *
+   * Handed to the completion screen's "Add a model in Settings" action so the
+   * redesign debt can name the exact team to replace. Reset at the start of
+   * each build-out, so a redesign's own creations become the next redesign's
+   * boundary rather than accumulating the pass they replaced.
+   */
+  const createdIds = useRef<string[]>([]);
+  /**
    * Guards the build-out against a second run.
    *
    * StrictMode double-invokes effects and the build-out effect creates
@@ -178,10 +187,13 @@ export function SetupDialog({
 
   useEffect(() => {
     if (!redesign) return;
-    void client.listTeam(company).then((roster) => {
-      redesignRoster.current = new Set(staffedTeam(roster).map((member) => member.id));
-    });
-  }, [client, company, redesign]);
+    // The boundary of a redesign is the team the first pass actually created,
+    // captured when the operator left — NOT a re-read of the roster now, which
+    // would sweep up teammates other operators added while model settings were
+    // open and then delete them below. An empty list (a pass that created
+    // nothing) means there is no fallback team to replace.
+    redesignRoster.current = new Set(fallbackIds ?? []);
+  }, [redesign, fallbackIds]);
   // above covers the return from wiring a model. This is a belt-and-braces
   // catch for a prop flip while mounted — it cannot reopen anything on its own.
   useEffect(() => {
