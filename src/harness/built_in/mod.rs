@@ -5941,6 +5941,65 @@ description = "Builds the product."
         );
     }
 
+    /// The codex P1 regression (commit 11a1f12ed): a manifest `[policy]` edit
+    /// with no stored override must still move the roster's policy fingerprint.
+    ///
+    /// `ensure_with_policy` previously fingerprinted the *synthesized relative
+    /// override* against the manifest. When effective == manifest — the
+    /// no-override case, or a redundant override a rebuild carried and then
+    /// cleared — that synthesis is all-`None`, the empty fingerprint, so the
+    /// cache key never moved and the next `ensure` reused the cached roster
+    /// (with its old `ApprovalPolicy`) while the native gate already enforced
+    /// the new tier. Fingerprinting the effective policy values closes it.
+    #[tokio::test]
+    async fn a_manifest_policy_edit_rebuilds_the_roster_with_no_override() {
+        let live_store = Arc::new(LiveStore::default());
+        let mut rec = record();
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        // First cycle: manifest `[policy] mode = "full"`, no override. The
+        // snapshot equals the manifest's own policy.
+        let snapshot = rec.effective_policy();
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("first ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // A redundant ensure with the same snapshot is a no-op — the stability
+        // direction the manifest edit below is read against.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("redundant ensure");
+        assert_eq!(pool.policy_fingerprint_of(&rec.id).await, Some(pinned));
+
+        // Version control edits the manifest tier to `readonly`. No override is
+        // stored, so the effective policy IS the manifest itself.
+        let mut edited = rec.clone();
+        edited.manifest.policy.mode = "readonly".to_string();
+        live_store.save(&edited).await.unwrap();
+
+        // The next cycle captures the new effective policy: the fingerprint
+        // must move, or the cached roster's `ApprovalPolicy` (still `full`)
+        // keeps governing harness tool calls while the native gate already
+        // enforces `readonly`.
+        let next = edited.effective_policy();
+        pool.ensure_with_policy(&edited, &fx.deps, &next)
+            .await
+            .expect("next cycle");
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "a manifest [policy] edit must move the fingerprint even with no override"
+        );
+    }
+
     // --- Capability-budget freshness (issue #108) ---------------------------
 
     /// A manifest that grants every tool namespace, so the roster actually builds
