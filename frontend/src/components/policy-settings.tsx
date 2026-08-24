@@ -746,6 +746,7 @@ export function PolicySettings({ client, company }: Props) {
                 tierAwaitingConfirmation !== null || resetAwaitingConfirmation
               }
               onOpenChange={(open) => {
+                console.log("DEBUG onOpenChange", open, "saving", saving);
                 if (!open) {
                   if (saving) return;
                   setTierAwaitingConfirmation(null);
