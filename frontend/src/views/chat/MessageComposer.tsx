@@ -21,7 +21,18 @@ import { cn } from "@/lib/utils";
 interface Props {
   placeholder: string;
   disabled?: boolean;
-  onSend: (text: string, intent?: MessageIntent, attachments?: AttachmentDto[]) => void;
+  /**
+   * May return whether the send actually journaled (issue #1682, codex
+   * review finding): `true`/`false` lets the composer know whether an
+   * attachment it carried was durably claimed or must be cleaned up rather
+   * than left orphaned. `void` (the thread and copilot composers, which
+   * never attach) is treated as "nothing to reconcile."
+   */
+  onSend: (
+    text: string,
+    intent?: MessageIntent,
+    attachments?: AttachmentDto[],
+  ) => void | Promise<boolean>;
   /** A new revision replaces the draft and focuses the composer. */
   prefill?: { text: string; revision: number };
   /**
@@ -110,6 +121,18 @@ export function MessageComposer({
   // Mirrors `pending` for the unmount cleanup below, which needs the latest
   // value inside a closure captured once at mount.
   const pendingRef = useRef<AttachmentDto | null>(null);
+  // Whether this instance is still mounted, checked after every `await`
+  // (issue #1682, codex review finding). Without it, an upload that lands
+  // after the operator has already navigated away resolves into a
+  // continuation on a dead component: the unmount cleanup below ran and saw
+  // nothing pending, so nothing would ever free the node that upload just
+  // charged against the quota.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // The upload is in flight: the paperclip spins and Send waits, so a message
   // cannot post ahead of the bytes it references.
   const [uploading, setUploading] = useState(false);
@@ -172,13 +195,30 @@ export function MessageComposer({
     // so a send never references bytes that have not landed.
     if (!text || disabled || uploading) return;
     setDraft("");
-    onSend(text, deliverableChoice ? intent : undefined, pending ? [pending] : undefined);
+    const inFlightNodeId = pendingRef.current?.nodeId;
+    const result = onSend(
+      text,
+      deliverableChoice ? intent : undefined,
+      pending ? [pending] : undefined,
+    );
     setIntent(undefined);
-    // The attachment is now claimed by the sent message — clear the local
-    // reference WITHOUT deleting the node (unlike `clearPending`).
+    // The reference is cleared from the composer's own state immediately —
+    // the shell's optimistic bubble already carries it — WITHOUT deleting the
+    // node yet (unlike `clearPending`): whether it is actually claimed is
+    // still pending on `result` below.
     pendingRef.current = null;
     setPending(null);
     setAttachError(undefined);
+    // If the caller reports whether the send journaled (issue #1682, codex
+    // review finding), an attachment it carried that did NOT — the request
+    // threw before the host ever saw it — must not stay orphaned against the
+    // quota. A caller that returns `void` (nothing to attach to) has nothing
+    // to reconcile here.
+    if (inFlightNodeId && result instanceof Promise) {
+      void result.then((sent) => {
+        if (!sent) deleteAttachment?.(inFlightNodeId);
+      });
+    }
   }
 
   /** Upload the picked file and stage its reference as the pending chip. */
@@ -194,14 +234,23 @@ export function MessageComposer({
     setAttachError(undefined);
     try {
       const reference = await uploadAttachment(file);
+      if (!mountedRef.current) {
+        // The operator navigated away while this upload was in flight —
+        // there is no chip left to hold the reference and no unmount left
+        // to fire, so this continuation is the only place that can still
+        // free the node it just landed (codex review finding on #1682).
+        deleteAttachment?.(reference.nodeId);
+        return;
+      }
       pendingRef.current = reference;
       setPending(reference);
     } catch (err) {
+      if (!mountedRef.current) return;
       // The filename is operator content — the message says an upload failed
       // without echoing what it was called.
       setAttachError(err instanceof Error ? err.message : "Couldn't attach that file.");
     } finally {
-      setUploading(false);
+      if (mountedRef.current) setUploading(false);
     }
   }
 

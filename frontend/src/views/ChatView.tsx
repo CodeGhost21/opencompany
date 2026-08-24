@@ -808,14 +808,22 @@ export function ChatView({
    * dropped from the request rather than sent as a local counter the host
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
+   *
+   * Returns whether the POST reached the host and journaled — `true` for
+   * every outcome where it did (a normal reply, a detached turn, or a stale
+   * response the caller discards), `false` only when the request itself
+   * threw. The composer uses this to decide whether an attachment this send
+   * carried is now durably claimed or was never journaled and so must be
+   * cleaned up rather than left orphaned (codex review finding on #1682) —
+   * see `deleteAttachment` and `MessageComposer.send`.
    */
   async function send(
     text: string,
     intent?: MessageIntent,
     parentId?: string,
     attachments?: AttachmentDto[],
-  ) {
-    if (sending) return;
+  ): Promise<boolean> {
+    if (sending) return false;
     const scopeAtSend = {
       connection: scope.connection,
       company: scope.company,
@@ -867,7 +875,10 @@ export function ChatView({
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
-        return;
+        // The POST itself succeeded and journaled — this branch only
+        // discards the reply because the scope moved on, so anything the
+        // request carried (an attachment among them) is durably claimed.
+        return true;
       }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
@@ -886,7 +897,7 @@ export function ChatView({
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
         if (chatId) onSendDetached?.(chatId, answer.turnId);
-        return;
+        return true;
       }
       const reply = answer;
       const replies = reply.responses.length
@@ -902,6 +913,7 @@ export function ChatView({
         : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
       onReply?.();
+      return true;
     } catch (err) {
       outcome = "failed";
       const latestScope = scopeRef.current;
@@ -913,7 +925,11 @@ export function ChatView({
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
-        return;
+        // Unlike the try-block's stale branch above, the request THREW here —
+        // the POST never journaled, so anything it would have carried (an
+        // attachment among them) was not claimed and must not be treated as
+        // sent.
+        return false;
       }
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
@@ -922,6 +938,7 @@ export function ChatView({
       // the turn goes on to produce.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
+      return false;
     } finally {
       // A detached turn ends when its row settles, not when this POST resolves.
       // Calling `onSendEnd` here would clear the live step timeline and take the
@@ -1312,9 +1329,11 @@ export function ChatView({
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
               prefill={composerPrefill ?? undefined}
-              onSend={(text, intent, attachments) =>
-                void send(text, intent, undefined, attachments)
-              }
+              // Not voided (unlike the thread composer below): the composer
+              // awaits this to know whether an attachment it carried actually
+              // journaled, so it can clean up one that did not (codex review
+              // finding on #1682) — see `deleteAttachment` and `send`'s doc.
+              onSend={(text, intent, attachments) => send(text, intent, undefined, attachments)}
               // Issue #1682: only the channel/DM composer attaches — the paperclip
               // is present exactly because this prop is.
               uploadAttachment={uploadAttachment}

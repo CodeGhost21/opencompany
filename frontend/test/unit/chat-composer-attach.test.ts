@@ -179,5 +179,79 @@ describe("composer paperclip (issue #1682)", () => {
 
       expect(del).not.toHaveBeenCalled();
     });
+
+    // Codex review finding, round 2: `onSend` is fire-and-forget from the
+    // composer's side, and acceptance is asynchronous — the request can
+    // still fail (a paused company, an expired session, a node that
+    // disappeared) after the chip is already gone. `onSend` may report the
+    // outcome by returning a promise; `false` means the send never
+    // journaled, so the attachment it carried must not stay orphaned.
+    it("deletes the attachment when onSend reports the send did not journal", async () => {
+      sent = vi.fn().mockResolvedValue(false);
+      await render();
+      await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+      await type("here is the diagram");
+
+      await act(async () => {
+        (container.querySelector('[aria-label="Send"]') as HTMLButtonElement).click();
+      });
+      // Let the returned promise's `.then` continuation run.
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(del).toHaveBeenCalledExactlyOnceWith("node-1");
+    });
+
+    it("does not delete when onSend reports the send DID journal", async () => {
+      sent = vi.fn().mockResolvedValue(true);
+      await render();
+      await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+      await type("here is the diagram");
+
+      await act(async () => {
+        (container.querySelector('[aria-label="Send"]') as HTMLButtonElement).click();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(del).not.toHaveBeenCalled();
+    });
+
+    // Codex review finding, round 2: unmounting used to check only the
+    // synchronous `pending` state. An upload still in flight at unmount time
+    // has no chip yet — the unmount cleanup sees nothing pending — and if it
+    // then lands on a dead component, nothing was left to free the node it
+    // just charged against the quota.
+    it("deletes an upload that lands after the composer has already unmounted", async () => {
+      let resolveUpload!: (value: AttachmentDto) => void;
+      upload = vi.fn(
+        () =>
+          new Promise<AttachmentDto>((resolve) => {
+            resolveUpload = resolve;
+          }),
+      );
+      await render();
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      const file = new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" });
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      act(() => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      // Navigate away while the upload is still pending — no chip exists yet
+      // for the ordinary unmount cleanup to see.
+      await act(async () => root.unmount());
+      expect(del).not.toHaveBeenCalled();
+
+      await act(async () => {
+        resolveUpload(reference);
+        await Promise.resolve();
+      });
+
+      expect(del).toHaveBeenCalledExactlyOnceWith("node-1");
+    });
   });
 });
