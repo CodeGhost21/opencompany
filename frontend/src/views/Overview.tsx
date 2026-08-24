@@ -151,17 +151,21 @@ export function Overview({ client, company, companyName }: Props) {
     } else {
       shell.removeAttribute("inert");
       if (outageWasShowingRef.current) {
-        console.log("[probe] dismissal branch, refresh disabled:", refreshButtonRef.current?.disabled, "loading:", loading);
         outageWasShowingRef.current = false;
         // The overlay that held focus unmounts with the very render that
-        // clears the outage, so focus must land somewhere right now. The
-        // graph shell is stable, visible and — with `inert` lifted — already
-        // interactive; landing there beats <body>, which would make a
-        // keyboard user restart their whole tab order. Refresh is still
-        // disabled mid-read, so the upgrade to it is deferred below.
-        shell.focus();
+        // clears the outage, so focus must land somewhere right now. When the
+        // retried read already answered (its last await can batch with this
+        // render), Refresh is enabled and is the natural landing spot. When it
+        // is still in flight, Refresh is disabled — land on the graph shell,
+        // stable and (with `inert` lifted) already interactive, and upgrade to
+        // Refresh once the load answers below. Either way focus never falls to
+        // <body>, which would make a keyboard user restart their whole tab
+        // order (issue #1314).
         if (refreshButtonRef.current?.disabled) {
+          shell.focus();
           restoreFocusToRefreshRef.current = true;
+        } else {
+          refreshButtonRef.current?.focus();
         }
       }
     }
