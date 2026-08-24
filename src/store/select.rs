@@ -258,6 +258,7 @@ impl MemoryOverlay {
             facts: None,
             inbound_context,
             scratch: None,
+            scopes: None,
             descriptor: MemoryDescriptor {
                 backend: MemoryBackend::Store,
                 driver_id: "test".into(),
