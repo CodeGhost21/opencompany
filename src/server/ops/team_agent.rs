@@ -663,6 +663,7 @@ async fn edit_agent(
     // console had just offered.
     if let Some(Some(id)) = &harness
         && record.manifest.harness_by_id(id).is_none()
+        && !(state.acp_agents().is_some() && ACP_AGENTS.contains(&id.as_str()))
     {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "no harness named `{id}` is available for this company."
