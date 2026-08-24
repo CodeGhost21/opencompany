@@ -56,11 +56,15 @@ export function mentionCountsByChannel(
 export function mentionsToClear(
   notifications: readonly NotificationDto[],
   channelId: string,
+  mainChannelId = MAIN_THREAD_ID,
 ): string[] {
   return notifications
     .filter(
       (n) =>
-        n.readAt === undefined && n.kind === "mention" && n.context === channelId,
+        n.readAt === undefined &&
+        n.kind === "mention" &&
+        (n.context === channelId ||
+          (channelId === mainChannelId && n.context === MAIN_THREAD_ID)),
     )
     .map((n) => n.id);
 }
