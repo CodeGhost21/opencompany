@@ -8,6 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
   type ApprovalSummary,
+  GRANT_DURATIONS,
   type GrantScope,
   type StandingGrant,
   type Verdict,
@@ -34,7 +35,9 @@ import {
 import { approvalsByDeadline } from "@/lib/approval-order";
 import {
   approvalSummary,
+  decisionLabel,
   grantHeadline,
+  grantSubject,
   timeAgo,
   toolAction,
   untilLabel,
@@ -366,6 +369,41 @@ export function ApprovalsView({
     }
   }
 
+  // Bulk decisions for the whole visible queue.
+  //
+  // Client-side and sequential on purpose, rather than a new batch route: each
+  // call goes through the existing, validated resolve path, and the host already
+  // serialises decisions behind its per-company lock. Sending them one at a time
+  // respects that lock, reuses the per-row drop-safety, and keeps the view honest
+  // if one fails partway - the rows that landed drop out, the rest stay.
+  //
+  // Scope is always `once`: a bulk action never mints a standing grant - that
+  // stays a deliberate per-tool choice.
+  //
+  // Approve is not terminal: each approval resumes the agent, so approving many
+  // at once starts several follow-up turns. Hence the confirm copy. Decline is
+  // terminal and lighter.
+  const [bulkInFlight, setBulkInFlight] = useState(false);
+
+  async function decideAll(verdict: Verdict) {
+    if (bulkInFlight || rows.length === 0) return;
+    const n = rows.length;
+    const question =
+      verdict === "approve"
+        ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the teammate, so this may start several tasks at once.`
+        : `Decline ${n} ${n === 1 ? "request" : "requests"}? This is final; the work behind them moves on without them.`;
+    if (!window.confirm(question)) return;
+    setBulkInFlight(true);
+    try {
+      for (const a of [...rows]) {
+        if (inFlight.has(a.id)) continue;
+        await decide(a, verdict, { kind: "once" });
+      }
+    } finally {
+      setBulkInFlight(false);
+    }
+  }
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
@@ -413,11 +451,42 @@ export function ApprovalsView({
                 only the first one. The opaque background makes the header a
                 real reading boundary over cards that scroll beneath it. */}
             <div className="sticky top-0 z-10 -mx-4 mb-3 border-b bg-background px-4 py-3">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                {rows.length === 1
-                  ? "1 thing needs your approval"
-                  : `${rows.length} things need your approval`}
-              </h2>
+              <div className="flex items-baseline justify-between gap-3">
+                <h2 className="text-sm font-medium text-muted-foreground">
+                  {rows.length === 1
+                    ? "1 thing needs your approval"
+                    : `${rows.length} things need your approval`}
+                </h2>
+                {rows.length > 1 && (
+                  <div className="flex shrink-0 items-center gap-2 self-center">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={bulkInFlight || inFlight.size > 0}
+                      onClick={() => void decideAll("deny")}
+                    >
+                      {bulkInFlight ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <X className="size-4" />
+                      )}
+                      Decline all
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={bulkInFlight || inFlight.size > 0}
+                      onClick={() => void decideAll("approve")}
+                    >
+                      {bulkInFlight ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Check className="size-4" />
+                      )}
+                      Approve all
+                    </Button>
+                  </div>
+                )}
+              </div>
               {/* #971: nothing may vanish unannounced. Requests now age out on
                   their own, so the queue says so once, up front. Each card
                   carries its own deadline; this is the sentence that stops
@@ -611,7 +680,7 @@ function useStandingGrants(
  * that has no grants route at all, which reads back as an empty list. The
  * section appearing is itself the signal that something is open.
  */
-function StandingPermissions({
+export function StandingPermissions({
   grants,
   now,
   askerNames,
@@ -650,7 +719,7 @@ function StandingPermissions({
         expires on its own; you can end it sooner.
       </p>
       <div className="flex flex-col gap-2">
-        {grants.map((g) => {
+        {grants.map((g, index) => {
           const busy = revoking.has(g.id);
           const expired = g.expires_at_millis <= now;
           return (
@@ -662,10 +731,11 @@ function StandingPermissions({
                     {grantHeadline(g)}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    {askerNames.get(g.agent) ?? g.agent} ·{" "}
+                    {grantSubject(g, askerNames)} ·{" "}
                     {expired
                       ? "expired"
                       : `expires ${untilLabel(g.expires_at_millis, now)}`}{" "}
+                    · grant {index + 1} of {grants.length}{" "}
                     ·{g.verdict === "deny" ? "declined" : "granted"}{" "}
                     {timeAgo(g.at_millis, now)} by{" "}
                     {granterLabel(g, granterNames)}
@@ -674,6 +744,20 @@ function StandingPermissions({
                 <Button
                   variant="outline"
                   size="sm"
+                  /* The subject, not just the grant: two teammates holding the
+                     same tool and scope read identically in grantHeadline — and
+                     a workflow grant carries no agent at all — so button-only
+                     navigation would hear identical "Remove" buttons and could
+                     take back the wrong one (#1411). `grantSubject` resolves
+                     the workflow subject for that second kind. The accessible
+                     name leads with the visible "Remove" verb so speech-input
+                     users can say the control's label (WCAG 2.5.3 label in
+                     name). */
+                  aria-label={`Remove ${grantSubject(g, askerNames)}'s permission: ${grantHeadline(g)} — ${
+                    g.expires_at_millis <= now
+                      ? "expired"
+                      : `expires ${untilLabel(g.expires_at_millis, now)}`
+                  } — grant ${index + 1} of ${grants.length}`}
                   disabled={busy}
                   onClick={() => {
                     mark(g.id, true);
@@ -734,6 +818,13 @@ function granterLabel(
  * leaving its generic headline alone would not distinguish one request from
  * another.
  */
+function grantDurationLabel(expiresInMillis: number): string {
+  return (
+    GRANT_DURATIONS.find((duration) => duration.millis === expiresInMillis)?.label ??
+    `${Math.round(expiresInMillis / 86_400_000)} days`
+  );
+}
+
 export function ApprovalCard({
   approval: a,
   now,
@@ -847,6 +938,22 @@ export function ApprovalCard({
           <Button
             variant="outline"
             size="sm"
+            /* `decisionLabel`, not `approvalAction`: two same-kind cards read
+               identically from the kind alone, and button-only screen-reader
+               navigation never hears the card body (#1411). */
+            aria-label={`Decline: ${decisionLabel(a, askerNames, now)} — ${
+              declineScope.kind === "tool"
+                ? `don't ask again for this tool for ${grantDurationLabel(declineScope.expiresInMillis)}`
+                : "just this once"
+            }${
+              // Redacted cards already carry the exact timestamp in
+              // `decisionLabel`'s "composed … (…)"; appending the usual
+              // `request <timestamp>` suffix here too would announce the opaque
+              // epoch twice on every hidden card.
+              a.contents_hidden ? "" : ` — request ${a.at_millis}`
+            }${
+              batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
+            }`}
             disabled={deciding !== null}
             /* A decline never carries a scope — there is nothing to grant,
                and the host refuses the pairing anyway. */
@@ -861,6 +968,17 @@ export function ApprovalCard({
           </Button>
           <Button
             size="sm"
+            aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — ${
+              scope.kind === "tool"
+                ? `let this ${
+                    a.workflow_id ? "workflow" : "teammate"
+                  } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
+                : "just this once"
+            }${
+              a.contents_hidden ? "" : ` — request ${a.at_millis}`
+            }${
+              batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
+            }`}
             disabled={deciding !== null}
             onClick={() => onDecide("approve", scope)}
           >

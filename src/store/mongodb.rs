@@ -403,7 +403,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 36] = [
+        let plans: [(&str, IndexModel); 37] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -482,6 +482,12 @@ impl MongoStore {
             // the field is on every document by the time this index matters.
             ("runs", nonunique(doc! {"company_id": 1, "agent_id": 1})),
             ("runs", nonunique(doc! {"company_id": 1, "status": 1})),
+            // The workflow-run join: a node's attempt has no card and no
+            // conversation, so this is the only handle on it.
+            (
+                "runs",
+                nonunique(doc! {"company_id": 1, "workflow_run_id": 1}),
+            ),
             (
                 "run_steps",
                 unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
@@ -516,7 +522,7 @@ impl MongoStore {
         // is.
         const INDEX_CONCURRENCY: usize = 10;
 
-        let extra: [(&str, IndexModel); 9] = [
+        let extra: [(&str, IndexModel); 11] = [
             ("owners", unique(doc! {"company_id": 1})),
             // Issue #241: the cross-replica arbiter. This unique compound index
             // is what turns two replicas racing one schedule minute into one
@@ -533,6 +539,18 @@ impl MongoStore {
             ("run_outputs", unique(doc! {"company_id": 1, "run_id": 1})),
             (
                 "run_outputs",
+                nonunique(doc! {"company_id": 1, "at_ms": -1}),
+            ),
+            // The unredacted step detail. `(company_id, run_id, step_seq)` is
+            // unique because that pair IS the key — a reasoning run flushes
+            // twice under the same ordinal and must converge rather than
+            // duplicate. The recency index backs the newest-N-runs prune.
+            (
+                "run_step_details",
+                unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
+            ),
+            (
+                "run_step_details",
                 nonunique(doc! {"company_id": 1, "at_ms": -1}),
             ),
             // Issue #726: the runtime journal. `(company_id, seq)` is unique
@@ -1028,15 +1046,18 @@ impl MemoryStore for MongoStore {
         let traces = self.collection("memory_traces");
         let removed = match policy {
             EvictionPolicy::KeepRecent { n } => {
-                // Collect the seqs to keep (newest n), delete the rest.
-                //
                 // `KeepRecent { n: 0 }` keeps nothing, so there is no query to
                 // run — and must never become `find().limit(0)`, which would
                 // keep EVERYTHING and evict none of it. This arm is the old
                 // `if n > 0` guard, now stated in the shared vocabulary.
-                let mut keep = Vec::new();
                 match find_limit(n) {
-                    FindLimit::Empty => {}
+                    FindLimit::Empty => {
+                        traces
+                            .delete_many(doc! {"company_id": id.as_ref()})
+                            .await
+                            .map_err(mongo_err)?
+                            .deleted_count
+                    }
                     limit => {
                         let mut find = traces
                             .find(doc! {"company_id": id.as_ref()})
@@ -1045,19 +1066,35 @@ impl MemoryStore for MongoStore {
                             find = find.limit(n);
                         }
                         let mut cursor = find.await.map_err(mongo_err)?;
+                        // The n-th newest seq is the eviction cutoff, and the
+                        // delete is `seq < cutoff` rather than `$nin` of the
+                        // snapshot. `next_seq` hands out strictly increasing
+                        // sequences per company, so a trace saved AFTER this
+                        // read has a seq larger than every seq seen here and
+                        // can never satisfy `seq < cutoff`. The `$nin` form
+                        // deleted any doc whose seq was not in the snapshot, so
+                        // a `save_trace` landing between the find and the
+                        // delete was evicted the same pass it was written — and
+                        // the sweep runs every minute, silently dropping the
+                        // newest completed cycle from inspection and export.
+                        let mut cutoff: Option<i64> = None;
                         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-                            keep.push(get_i64(&doc, "seq")?);
+                            let seq = get_i64(&doc, "seq")?;
+                            cutoff = Some(cutoff.map_or(seq, |smallest| smallest.min(seq)));
                         }
+                        let Some(cutoff) = cutoff else {
+                            return Ok(0); // the company has no traces to evict
+                        };
+                        traces
+                            .delete_many(doc! {
+                                "company_id": id.as_ref(),
+                                "seq": {"$lt": cutoff},
+                            })
+                            .await
+                            .map_err(mongo_err)?
+                            .deleted_count
                     }
                 }
-                traces
-                    .delete_many(doc! {
-                        "company_id": id.as_ref(),
-                        "seq": {"$nin": keep},
-                    })
-                    .await
-                    .map_err(mongo_err)?
-                    .deleted_count
             }
             EvictionPolicy::OlderThan { before_millis } => {
                 traces
@@ -2309,21 +2346,31 @@ impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
         // Prune to the cap: collect this company's run ids newest-first and delete
         // everything past `MAX`. Two statements, like the revision prune — Mongo
         // has no "delete all but the newest N" operator; the recency index keeps
-        // the read cheap.
+        // the read cheap. Each run owns at most one row here (this method
+        // upserts by run id), so a row a concurrent writer refreshes mid-scan
+        // carries a newer `at_ms` than the cap row — conditioning the delete on
+        // `at_ms <= cutoff` spares exactly the refreshed outputs, closing the
+        // scan-to-delete race the deep prune beside it re-verifies in full.
         let mut cursor = coll
             .find(doc! {"company_id": company.as_ref()})
             .sort(doc! {"at_ms": -1, "run_id": -1})
             .await
             .map_err(mongo_err)?;
-        let mut ids: Vec<String> = Vec::new();
+        let mut ranked: Vec<(String, i64)> = Vec::new();
         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            ids.push(get_str(&doc, "run_id")?);
+            ranked.push((get_str(&doc, "run_id")?, get_i64(&doc, "at_ms")?));
         }
-        if ids.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
-            let stale: Vec<&String> = ids.iter().skip(MAX_RUN_OUTPUTS_PER_COMPANY).collect();
+        if ranked.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
+            let cutoff = ranked[MAX_RUN_OUTPUTS_PER_COMPANY - 1].1;
+            let stale: Vec<&str> = ranked
+                .iter()
+                .skip(MAX_RUN_OUTPUTS_PER_COMPANY)
+                .map(|(id, _)| id.as_str())
+                .collect();
             coll.delete_many(doc! {
                 "company_id": company.as_ref(),
                 "run_id": {"$in": stale},
+                "at_ms": {"$lte": cutoff},
             })
             .await
             .map_err(mongo_err)?;
@@ -2345,6 +2392,194 @@ impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
             Some(doc) => Ok(Some(serde_json::from_str(&get_str(&doc, "output_json")?)?)),
             None => Ok(None),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DeepTraceStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::deep_trace::DeepTraceStore for MongoStore {
+    async fn append_step_detail(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::deep_trace::RunStepDetailRecord,
+    ) -> Result<()> {
+        use crate::ports::deep_trace::MAX_DEEP_RUNS_PER_COMPANY;
+        let coll = self.collection("run_step_details");
+        // Upsert: last-write-wins per `(company, run_id, step_seq)`, so a
+        // reasoning run that flushes partway and again at close converges.
+        coll.update_one(
+            doc! {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "step_seq": record.step_seq as i64,
+            },
+            doc! {"$set": {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "step_seq": record.step_seq as i64,
+                "at_ms": record.at_millis as i64,
+                "detail_json": serde_json::to_string(&record.detail)?,
+            }},
+        )
+        .with_options(UpdateOptions::builder().upsert(true).build())
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap by RUN, not by row: ranking rows would leave a
+        // surviving run holding a torn half of its own trace. A run's recency is
+        // the newest `at_ms` any of its rows carries, so a long run is ranked by
+        // when it last wrote. Ranking and deleting are two statements (Mongo has
+        // no "delete all but the newest N" operator), and a run a concurrent
+        // writer refreshes between them must survive — so the delete is
+        // conditional on the recency the ranking observed, not on the run id
+        // alone. `at_ms` is monotone per run, so "still the recency we saw" is
+        // exactly "still ranks past the cap"; a run written to since is spared.
+        let mut cursor = coll
+            .aggregate(vec![
+                doc! {"$match": {"company_id": company.as_ref()}},
+                doc! {"$group": {"_id": "$run_id", "newest": {"$max": "$at_ms"}}},
+                doc! {"$sort": {"newest": -1, "_id": -1}},
+                doc! {"$skip": MAX_DEEP_RUNS_PER_COMPANY as i64},
+            ])
+            .await
+            .map_err(mongo_err)?;
+        let mut stale: Vec<(String, i64)> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            stale.push((get_str(&doc, "_id")?, get_i64(&doc, "newest")?));
+        }
+        if !stale.is_empty() {
+            let candidate_ids: Vec<&str> = stale.iter().map(|(id, _)| id.as_str()).collect();
+            // Re-verify in one pass: the newest `at_ms` each candidate carries
+            // *now*, then delete only the candidates that did not move since
+            // the ranking read them. A candidate another prune already removed
+            // has no current row, so deleting it is a no-op.
+            let mut verify = coll
+                .aggregate(vec![
+                    doc! {
+                        "$match": {
+                            "company_id": company.as_ref(),
+                            "run_id": {"$in": candidate_ids},
+                        }
+                    },
+                    doc! {"$group": {"_id": "$run_id", "newest": {"$max": "$at_ms"}}},
+                ])
+                .await
+                .map_err(mongo_err)?;
+            let mut newest: std::collections::HashMap<String, i64> = Default::default();
+            while let Some(doc) = verify.try_next().await.map_err(mongo_err)? {
+                newest.insert(get_str(&doc, "_id")?, get_i64(&doc, "newest")?);
+            }
+            let doomed: Vec<(&str, i64)> = stale
+                .iter()
+                .filter(|(id, seen)| newest.get(id.as_str()).is_none_or(|now| now <= seen))
+                .map(|(id, seen)| (id.as_str(), *seen))
+                .collect();
+            if !doomed.is_empty() {
+                // The ranking promised a run written to since is spared WHOLE,
+                // so recency is re-checked one final time, at the delete: a
+                // candidate holding any row newer than the `seen` the ranking
+                // recorded was refreshed after the verification pass, and it
+                // survives entire — deleting its older rows while keeping the
+                // new one would leave exactly the torn trace the run-level
+                // ranking exists to prevent. The delete predicate below still
+                // excludes rows newer than `seen`, so a write that lands after
+                // this check cannot lose the data it just wrote either.
+                let mut live = coll
+                    .aggregate(vec![
+                        doc! {
+                            "$match": {
+                                "company_id": company.as_ref(),
+                                "$or": doomed
+                                    .iter()
+                                    .map(|(id, seen)| {
+                                        doc! {
+                                            "run_id": id,
+                                            "at_ms": {"$gt": seen},
+                                        }
+                                    })
+                                    .collect::<Vec<_>>(),
+                            }
+                        },
+                        doc! {"$group": {"_id": "$run_id"}},
+                    ])
+                    .await
+                    .map_err(mongo_err)?;
+                let mut refreshed: std::collections::HashSet<String> = Default::default();
+                while let Some(row) = live.try_next().await.map_err(mongo_err)? {
+                    refreshed.insert(get_str(&row, "_id")?.to_string());
+                }
+                let doomed: Vec<(&str, i64)> = doomed
+                    .into_iter()
+                    .filter(|(id, _)| !refreshed.contains(*id))
+                    .collect();
+                if doomed.is_empty() {
+                    return Ok(());
+                }
+                // The delete is itself conditional on the recency the ranking
+                // observed, not just on the run id: a writer that refreshes one
+                // of these runs after the freshness check above but before this
+                // delete would otherwise have its brand-new detail rows removed
+                // by a `delete_many` keyed on `run_id` alone. `at_ms` is
+                // monotone per run, so "row is at or below the recency we saw"
+                // is exactly "this row was already stale when we ranked" — a
+                // row written since has a larger `at_ms` and survives.
+                let stale_row = doomed
+                    .iter()
+                    .map(|(id, seen)| {
+                        doc! {
+                            "run_id": id,
+                            "at_ms": {"$lte": seen},
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                coll.delete_many(doc! {
+                    "company_id": company.as_ref(),
+                    "$or": stale_row,
+                })
+                .await
+                .map_err(mongo_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_step_details(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Vec<crate::ports::deep_trace::RunStepDetailRecord>> {
+        let mut cursor = self
+            .collection("run_step_details")
+            .find(doc! {"company_id": company.as_ref(), "run_id": run_id})
+            .sort(doc! {"step_seq": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(crate::ports::deep_trace::RunStepDetailRecord {
+                run_id: run_id.to_string(),
+                step_seq: get_i64(&doc, "step_seq")? as u32,
+                at_millis: get_i64(&doc, "at_ms")? as u64,
+                detail: serde_json::from_str(&get_str(&doc, "detail_json")?)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn purge_deep_trace(&self, company: &CompanyId, run_id: Option<&str>) -> Result<u64> {
+        let filter = match run_id {
+            Some(id) => doc! {"company_id": company.as_ref(), "run_id": id},
+            None => doc! {"company_id": company.as_ref()},
+        };
+        let result = self
+            .collection("run_step_details")
+            .delete_many(filter)
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count)
     }
 }
 
@@ -2382,6 +2617,8 @@ impl crate::ports::runs::RunStore for MongoStore {
             task_id: spec.task_id,
             agent_id: spec.agent_id,
             chat_id: spec.chat_id,
+            workflow_run_id: spec.workflow_run_id,
+            node_id: spec.node_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2411,6 +2648,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
                 "task_id": run.task_id.as_deref(),
+                "workflow_run_id": run.workflow_run_id.as_deref(),
                 "agent_id": run.agent_id.as_str(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
@@ -2448,6 +2686,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
                     "task_id": run.task_id.as_deref(),
+                    "workflow_run_id": run.workflow_run_id.as_deref(),
                     "agent_id": run.agent_id.as_str(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
@@ -2469,6 +2708,9 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut query = doc! {"company_id": company.as_ref()};
         if let Some(task_id) = &filter.task_id {
             query.insert("task_id", task_id.as_str());
+        }
+        if let Some(workflow_run_id) = &filter.workflow_run_id {
+            query.insert("workflow_run_id", workflow_run_id.as_str());
         }
         if let Some(agent_id) = &filter.agent_id {
             query.insert("agent_id", agent_id.as_str());
@@ -4497,6 +4739,8 @@ mod test {
                 task_id: None,
                 agent_id: agent.to_string(),
                 chat_id: None,
+                workflow_run_id: None,
+                node_id: None,
                 attempt: 1,
                 status: crate::ports::runs::RunStatus::Succeeded,
                 trigger_event_seq: None,
@@ -4523,6 +4767,8 @@ mod test {
             task_id: None,
             agent_id: "engineer".to_string(),
             chat_id: None,
+            workflow_run_id: None,
+            node_id: None,
             attempt: 1,
             status: crate::ports::runs::RunStatus::Pending,
             trigger_event_seq: None,
@@ -4994,6 +5240,65 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// KeepRecent eviction deletes strictly-older-than-the-n-th-newest traces,
+    /// so a trace saved after the eviction snapshot can never be evicted by the
+    /// sweep that means to keep it. The old `$nin` predicate deleted any doc
+    /// whose seq was not in the keep set, so a `save_trace` landing between
+    /// evict's find and delete was dropped the same pass it was written — the
+    /// race this delete-by-cutoff form removes.
+    #[tokio::test]
+    async fn evict_keep_recent_spares_a_trace_saved_after_its_snapshot() {
+        let Some(s) = store().await else { return };
+        let id = CompanyId::new("acme");
+        // 33 traces: `next_seq` hands out 0..=32 in save order.
+        for i in 0..=32 {
+            s.save_trace(&id, CompressedTrace::now(format!("c{i}"), format!("s{i}")))
+                .await
+                .unwrap();
+        }
+        // Keeps the newest 32 (seqs 1..=32), evicting exactly seq 0.
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 32 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let kept = s.recent_traces(&id, usize::MAX).await.unwrap();
+        assert_eq!(kept.len(), 32);
+        assert_eq!(kept.first().unwrap().cycle_id, "c1");
+        assert_eq!(kept.last().unwrap().cycle_id, "c32");
+
+        // A trace written after the sweep's snapshot has seq 33, above the
+        // cutoff (1): it must survive the retention policy. This is the write
+        // the `$nin` predicate deleted when it landed between evict's find and
+        // delete.
+        s.save_trace(&id, CompressedTrace::now("c33", "s33"))
+            .await
+            .unwrap();
+        let after = s.recent_traces(&id, usize::MAX).await.unwrap();
+        assert_eq!(after.len(), 33);
+        assert_eq!(after.last().unwrap().cycle_id, "c33");
+
+        // KeepRecent{0} keeps nothing: every trace goes.
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 0 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 33);
+        assert!(s.recent_traces(&id, usize::MAX).await.unwrap().is_empty());
+
+        // KeepRecent above the current count is a no-op.
+        s.save_trace(&id, CompressedTrace::now("c34", "s34"))
+            .await
+            .unwrap();
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 10 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+
+        drop_db(&s).await;
+    }
+
     #[tokio::test]
     async fn conformance_inbox_store() {
         let Some(s) = store().await else { return };
@@ -5217,6 +5522,100 @@ mod test {
             Some(7),
             "first-write-wins still holds for the fields that were present"
         );
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_deep_trace_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_deep_trace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The prune ranks by RUN and keeps the newest `MAX` runs whole — and a run
+    /// that fell past the cap survives once it is written to again. The
+    /// conformance suite never crosses the cap, so the aggregation the prune
+    /// uses to rank, and the re-verification that spares a refreshed run, are
+    /// exercised here against the real server.
+    #[tokio::test]
+    async fn deep_trace_prune_keeps_the_newest_runs_and_spares_a_refreshed_one() {
+        use crate::ports::deep_trace::DeepTraceStore;
+        use crate::ports::deep_trace::{
+            MAX_DEEP_RUNS_PER_COMPANY, RunStepDetailRecord, TurnStepDetail,
+        };
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("pruner");
+        let detail = |run: &str, seq: u32, at: u64, reasoning: &str| RunStepDetailRecord {
+            run_id: run.to_string(),
+            step_seq: seq,
+            at_millis: at,
+            detail: TurnStepDetail {
+                reasoning: Some(reasoning.to_string()),
+                ..TurnStepDetail::default()
+            },
+        };
+        // Fill past the cap with two rows per run, so the prune must drop whole
+        // runs rather than tear them.
+        let cap = MAX_DEEP_RUNS_PER_COMPANY;
+        for i in 0..cap + 2 {
+            let run = format!("r{i:03}");
+            s.append_step_detail(&company, &detail(&run, 0, (i * 2) as u64, "first"))
+                .await
+                .unwrap();
+            s.append_step_detail(&company, &detail(&run, 1, (i * 2 + 1) as u64, "second"))
+                .await
+                .unwrap();
+        }
+        // The two oldest runs fell past the cap and are gone whole…
+        assert!(
+            s.list_step_details(&company, "r000")
+                .await
+                .unwrap()
+                .is_empty(),
+            "r000 ranked oldest and must be pruned"
+        );
+        assert!(
+            s.list_step_details(&company, "r001")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // …and every surviving run kept both rows.
+        for i in 2..cap + 2 {
+            let run = format!("r{i:03}");
+            assert_eq!(
+                s.list_step_details(&company, &run).await.unwrap().len(),
+                2,
+                "{run} must survive whole"
+            );
+        }
+        // A run that already ranked stale is written to again — the concurrent
+        // refresh the delete's re-verification exists to protect. The next
+        // append's prune must keep it, not delete what it just received.
+        s.append_step_detail(
+            &company,
+            &detail("r000", 2, 1_000_000, "refreshed after ranking stale"),
+        )
+        .await
+        .unwrap();
+        let refreshed = s.list_step_details(&company, "r000").await.unwrap();
+        assert_eq!(
+            refreshed.len(),
+            1,
+            "a refreshed run is not deleted by the prune that follows"
+        );
+        assert_eq!(
+            refreshed[0].detail.reasoning.as_deref(),
+            Some("refreshed after ranking stale"),
+            "the refreshed detail is the one that survives"
+        );
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_run_store_workflow_join() {
+        let Some(s) = store().await else { return };
+        conformance::assert_run_store_workflow_join(s.clone()).await;
         drop_db(&s).await;
     }
 

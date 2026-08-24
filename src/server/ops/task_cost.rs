@@ -216,6 +216,8 @@ mod tests {
                 ..TokenUsage::default()
             },
             step_count: 0,
+            workflow_run_id: None,
+            node_id: None,
         }
     }
 

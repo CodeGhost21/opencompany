@@ -184,6 +184,14 @@ enum NodeProgress {
         status: WorkflowNodeStatus,
         elapsed_ms: u64,
         output: Value,
+        /// What the harness did inside this node, in order — empty for every
+        /// non-agent node and for a turn with no steps to fold.
+        ///
+        /// Rides this channel exactly as `output` does, and for the same reason:
+        /// it is per-node content the run response and the output snapshot want,
+        /// not a scalar the journal carries. Bounded per entry by the engine's
+        /// `TranscriptEntry::bounded` before it ever reaches here.
+        transcript: Vec<tinyflows::transcript::TranscriptEntry>,
         /// Issue #1014: the config paths of this node's null-resolved
         /// `=`-expressions — the engine's own broken-wiring list, lifted off
         /// `ExecutionStep.diagnostics`. Paths only (each
@@ -256,6 +264,10 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
             // `Value::Null`. This clone rides the same channel as the scalars
             // and never touches the journal.
             output: step.output.clone(),
+            // The engine copied this off the `AgentRunOutcome` the harness
+            // returned. Cloned like `output` beside it; the observer must stay
+            // allocation-cheap but must not borrow past the callback.
+            transcript: step.transcript.clone(),
         });
     }
 }
@@ -400,6 +412,15 @@ async fn run_workflow_inner(
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
+    // Owned out here like `blocks` and `approvals`: the journal write that needs
+    // it happens in the collector task, which outlives the capability bundle the
+    // engine future drops.
+    let attempts = super::caps::RunAttempts::default();
+    // Read before `deps` moves into the builder below. A dry run records
+    // nothing: it makes no effects, so an attempt row would be a receipt for
+    // work that never happened.
+    let attempt_runs = (!dry_run).then(|| deps.workflow_runs.clone()).flatten();
+    let attempt_deep = (!dry_run).then(|| deps.deep_trace.clone()).flatten();
     // Issue #617: one per-run record of every child the resolver gates. The
     // resolver (invoked by the engine mid-run) writes it; the parking path
     // (after the engine returns) reads it to name a child pause. Created out
@@ -419,6 +440,11 @@ async fn run_workflow_inner(
             board: board.clone(),
             blocks: blocks.clone(),
             approvals: approvals.clone(),
+            // A dry run records nothing: it makes no effects, so an attempt row
+            // for it would be a receipt for work that never happened.
+            runs: attempt_runs,
+            deep: attempt_deep,
+            attempts: attempts.clone(),
             child_gates: child_gates.clone(),
         },
     )
@@ -474,12 +500,16 @@ async fn run_workflow_inner(
         let company = record.id.clone();
         let workflow_id = workflow.id.clone();
         let run_id = run_id.clone();
+        let collector_attempts = attempts.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
             // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
             // the console's `parseNodeMessages` reads it exactly like a clean
             // run's `outcome.output["nodes"]`.
             let mut partial_nodes = serde_json::Map::new();
+            let attempts = collector_attempts;
+            // node_id -> the ordered transcript entries that node produced.
+            let mut node_transcripts = serde_json::Map::new();
             while let Some(progress) = rx.recv().await {
                 match progress {
                     // Issue #382: the node's opening bracket. Journaled only when
@@ -511,6 +541,7 @@ async fn run_workflow_inner(
                         status,
                         elapsed_ms,
                         output,
+                        transcript,
                         diagnostics,
                     } => {
                         if let Some(events) = journal_nodes.as_ref() {
@@ -525,6 +556,10 @@ async fn run_workflow_inner(
                                 // from the journal) shows the same diagnostics
                                 // the synchronous response did.
                                 diagnostics: diagnostics.clone(),
+                                // The join, on the durable event: a console
+                                // folding this run from the journal reaches the
+                                // node's step trace without a second lookup.
+                                agent_run_id: attempts.get(&node_id),
                             };
                             if let Err(err) = events.append(&company, event).await {
                                 tracing::warn!(
@@ -550,6 +585,18 @@ async fn run_workflow_inner(
                         };
                         partial_nodes
                             .insert(node_id.clone(), serde_json::json!({ "items": items }));
+                        // Kept beside the output map rather than inside it: a
+                        // clean settle persists the ENGINE's `outcome.output`,
+                        // not this map, so the transcripts have to survive
+                        // separately and be merged in at each persist site.
+                        // Folding them in here would land them on the failure
+                        // arms only — which is the whole bug this avoids.
+                        if !transcript.is_empty() {
+                            node_transcripts.insert(
+                                node_id.clone(),
+                                serde_json::to_value(&transcript).unwrap_or(Value::Null),
+                            );
+                        }
                         // Collected for the response on every path — status is
                         // `Copy`, `node_id` moves in after its clone (if any)
                         // went to the event.
@@ -566,7 +613,7 @@ async fn run_workflow_inner(
                     }
                 }
             }
-            (rows, partial_nodes)
+            (rows, partial_nodes, node_transcripts)
         }
     });
 
@@ -662,8 +709,9 @@ async fn run_workflow_inner(
     // on the failure/blocked arms below; `nodes` stays the output-free row list
     // the journal and `WorkflowRun.nodes` carry. A drain failure yields an empty
     // map, so a persist on that path simply records "produced none".
-    let (nodes, partial_nodes): (
+    let (nodes, partial_nodes, node_transcripts): (
         Vec<crate::ports::WorkflowRunNodeRow>,
+        serde_json::Map<String, Value>,
         serde_json::Map<String, Value>,
     ) = match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
         Ok(Ok(collected)) => collected,
@@ -675,7 +723,7 @@ async fn run_workflow_inner(
                 %err,
                 "workflow: the node-progress collector did not shut down cleanly"
             );
-            (Vec::new(), serde_json::Map::new())
+            (Vec::new(), serde_json::Map::new(), serde_json::Map::new())
         }
         Err(_) => {
             tracing::warn!(
@@ -685,7 +733,7 @@ async fn run_workflow_inner(
                 "workflow: node progress events did not drain in time; the run's finished \
                  record may be journaled ahead of them"
             );
-            (Vec::new(), serde_json::Map::new())
+            (Vec::new(), serde_json::Map::new(), serde_json::Map::new())
         }
     };
 
@@ -715,7 +763,8 @@ async fn run_workflow_inner(
             // genuine-failure and the blocked branches — before #1008 both threw
             // it away, so the inspector wrongly reported "this run predates output
             // capture" for every failed or blocked run.
-            let partial_output = Value::Object(partial_nodes);
+            let partial_output =
+                merge_transcripts(&Value::Object(partial_nodes), &node_transcripts);
             if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
@@ -848,6 +897,10 @@ async fn run_workflow_inner(
         // fall back to the observer's accumulated capture. A failed write adds an
         // operator notice (Part 6), since this arm returns a `WorkflowRun`.
         let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+        // The transcripts the observer collected are not in the engine's run state,
+        // so a clean settle would otherwise persist a snapshot that says what every
+        // node emitted and nothing about what its agent did.
+        let raw_nodes = merge_transcripts(&raw_nodes, &node_transcripts);
         if !persist_run_output(
             run_output_store.as_deref(),
             &record.id,
@@ -1351,6 +1404,37 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
 /// `WorkflowRun`) use `false` to add an operator-facing notice; the genuine-`Err`
 /// caller has no `WorkflowRun` to hang one on and lets the `warn!` stand alone
 /// (issue #1008, Part 3).
+/// Folds the observer's per-node transcripts into a run-output `nodes` map.
+///
+/// The two halves arrive from different places and only meet here. A clean
+/// settle's `nodes` map is the ENGINE's own run state (`outcome.output`), which
+/// knows what each node emitted but nothing about what a harness did inside one;
+/// the transcripts come off `ExecutionStep.transcript`, which the progress
+/// observer collected. Merging at the persist site is what puts them on the same
+/// record on every arm — a clean run, a failed one, and a blocked one alike.
+///
+/// Non-destructive by construction: it only ever adds a `transcript` key to a
+/// node object that already exists in `nodes`, so a node the engine did not
+/// report cannot be invented here, and nothing the engine wrote is overwritten.
+/// A non-object `nodes` (or a node whose slot is not an object) passes through
+/// untouched rather than being coerced into one.
+fn merge_transcripts(nodes: &Value, transcripts: &serde_json::Map<String, Value>) -> Value {
+    if transcripts.is_empty() {
+        return nodes.clone();
+    }
+    let Value::Object(map) = nodes else {
+        return nodes.clone();
+    };
+    let mut merged = map.clone();
+    for (node_id, transcript) in transcripts {
+        let Some(Value::Object(slot)) = merged.get_mut(node_id) else {
+            continue;
+        };
+        slot.insert("transcript".to_string(), transcript.clone());
+    }
+    Value::Object(merged)
+}
+
 async fn persist_run_output(
     store: Option<&dyn crate::ports::run_output::WorkflowRunOutputStore>,
     company: &CompanyId,
@@ -1949,6 +2033,8 @@ description = "Runs Acme."
             search: None,
             tenant_search: None,
             workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
         }
     }
 
@@ -5799,5 +5885,87 @@ to = "done"
             journal.is_empty(),
             "a dry run journals nothing at all: {journal:?}"
         );
+    }
+
+    // ---- merging harness transcripts into the run-output snapshot ----------
+
+    mod transcript_merge {
+        use super::super::merge_transcripts;
+        use serde_json::{Map, Value, json};
+
+        fn transcripts(pairs: &[(&str, Value)]) -> Map<String, Value> {
+            pairs
+                .iter()
+                .map(|(id, v)| ((*id).to_string(), v.clone()))
+                .collect()
+        }
+
+        #[test]
+        fn no_transcripts_leaves_the_map_identical() {
+            // The overwhelmingly common case — every workflow with no agent node.
+            let nodes = json!({ "cost": { "items": [] } });
+            assert_eq!(merge_transcripts(&nodes, &Map::new()), nodes);
+        }
+
+        #[test]
+        fn a_transcript_lands_beside_the_nodes_items() {
+            let nodes = json!({ "solve": { "items": [{ "json": { "answer": 837799 } }] } });
+            let merged = merge_transcripts(
+                &nodes,
+                &transcripts(&[(
+                    "solve",
+                    json!([{ "atMs": 0, "kind": "tool_call", "text": "shell" }]),
+                )]),
+            );
+            // The engine's own data survives untouched...
+            assert_eq!(merged["solve"]["items"][0]["json"]["answer"], 837799);
+            // ...and the transcript joins it.
+            assert_eq!(merged["solve"]["transcript"][0]["kind"], "tool_call");
+        }
+
+        #[test]
+        fn only_the_named_nodes_are_touched() {
+            let nodes = json!({
+                "restate": { "items": [1] },
+                "solve": { "items": [2] },
+            });
+            let merged =
+                merge_transcripts(&nodes, &transcripts(&[("solve", json!([{ "kind": "x" }]))]));
+            assert!(merged["restate"].get("transcript").is_none());
+            assert!(merged["solve"].get("transcript").is_some());
+        }
+
+        #[test]
+        fn a_transcript_for_an_unknown_node_is_dropped() {
+            // Never invent a node the engine did not report: the snapshot is a
+            // record of the run, and a node that appears only because a stray
+            // transcript named it would be a lie about what executed.
+            let nodes = json!({ "solve": { "items": [] } });
+            let merged =
+                merge_transcripts(&nodes, &transcripts(&[("ghost", json!([{ "kind": "x" }]))]));
+            assert!(merged.get("ghost").is_none());
+            assert_eq!(merged.as_object().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn a_non_object_nodes_map_passes_through() {
+            // A failed drain yields `Value::Null`; coercing it into an object
+            // here would fabricate a snapshot for a run that captured none.
+            for nodes in [Value::Null, json!([]), json!("nope")] {
+                assert_eq!(
+                    merge_transcripts(&nodes, &transcripts(&[("solve", json!([]))])),
+                    nodes
+                );
+            }
+        }
+
+        #[test]
+        fn a_non_object_node_slot_is_left_alone() {
+            let nodes = json!({ "solve": "not-an-object" });
+            assert_eq!(
+                merge_transcripts(&nodes, &transcripts(&[("solve", json!([]))])),
+                nodes
+            );
+        }
     }
 }

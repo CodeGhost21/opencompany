@@ -859,6 +859,8 @@ pub(crate) fn agent_deps(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
+        workflow_runs: None,
+        deep_trace: None,
     }
 }
 

@@ -50,10 +50,15 @@ export type View =
   | "workspace"
   | "approvals"
   | "workflows"
+  | "observatory"
   | "pages"
   | "finances"
   | "settings"
-  | "feedback";
+  | "feedback"
+  /** The first-run setup dialog, opened from a direct address or Settings. */
+  | "setup"
+  /** The explanation shown when an address names no console surface. */
+  | "not-found";
 
 /**
  * Every routable view, one entry per member of `View` — the compiler enforces
@@ -105,6 +110,18 @@ const ROUTABLE: Record<View, true> = {
   approvals: true,
   workflows: true,
   /**
+   * The run observatory: what a company's agents actually did, run by run.
+   *
+   * A view of its own rather than a fourth lens inside `workflows`, which is an
+   * *authoring and operating* surface — create, edit, arm, run, cancel, decide
+   * approvals. This one is read-only, cross-run and agent-centric, and the DAG
+   * is one lens on it rather than the subject.
+   *
+   * Addresses past the second segment are query keys, because `useHashView`
+   * carries only head/sub: `#/observatory/<runId>?agent=&turn=&step=`.
+   */
+  observatory: true,
+  /**
    * No nav row (issues #1171, #1172) — and this entry is the half of that
    * removal which went missing until issue #1311. Pages is the agent-authored
    * dashboard surface: a sandboxed iframe, a per-document capability and the
@@ -127,6 +144,10 @@ const ROUTABLE: Record<View, true> = {
   settings: true,
   /** No nav row: linked from the sidebar footer instead. */
   feedback: true,
+  /** No nav row: opens SetupController over Overview (issue #1417). */
+  setup: true,
+  /** No nav row: the explicit destination for an unrecognized address (#1417). */
+  "not-found": true,
 };
 
 /**
