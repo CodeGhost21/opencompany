@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
-    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_ledgers,
-    load_dir_skills, parse_workflow, walk_workspace,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
+    grants_workspace_write_explicit, load_dir_ledgers, load_dir_skills, parse_workflow,
+    walk_workspace,
 };
-use crate::runtime::builder::effective_grants;
+use crate::runtime::builder::{agent_scoped_grants, effective_grants};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -102,28 +103,58 @@ fn every_company_skill_and_workspace_parses() {
 /// Whether a template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
-const SEARCH_GRANTED_COMPANIES: [&str; 9] = [
+const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
+    "agentic_accounting_firm",
     "agentic_consultation_firm",
+    "agentic_customer_support",
     "agentic_design_studio",
+    "agentic_enterprise_sales",
+    "agentic_game_business",
+    "agentic_game_studio",
+    "agentic_influencer_business",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_pharma_startup",
     "agentic_product_team",
+    "agentic_realestate_company",
+    "agentic_recruiting_company",
     "agentic_research_lab",
     "agentic_software_company",
+    "agentic_venture_capital",
+    "agentic_venture_studio",
     "signals_opportunity_studio",
+    "startup_accelerator",
 ];
 
 /// Templates that must NEVER reach the metered search backend: `e2e_harness` and
 /// `e2e_setup` are deterministic fixtures (a priced network call would make them
-/// non-hermetic and flaky), and `openhuman_demo` is a walkthrough nobody opted
-/// into spend for.
-const SEARCH_DENIED_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhuman_demo"];
+/// non-hermetic and flaky), `openhuman_demo` is a walkthrough nobody opted
+/// into spend for, and `agentic_math_lab` is denied for a reason of its own —
+/// its whole claim is that it *computes* an exact answer, and a lab that can
+/// search can look one up. A run that looked the answer up passes the lab's
+/// end-to-end spec while proving nothing about whether the roster can solve
+/// anything, so withholding the network is what makes the number evidence.
+const SEARCH_DENIED_COMPANIES: [&str; 4] = [
+    "agentic_math_lab",
+    "e2e_harness",
+    "e2e_setup",
+    "openhuman_demo",
+];
 
 /// Templates that simply do not grant `search` today. Unlike
 /// [`SEARCH_DENIED_COMPANIES`] there is no rule keeping them off the priced
 /// path — nobody has decided their roster needs the web. Moving one into
 /// [`SEARCH_GRANTED_COMPANIES`] is an ordinary product call, not a violation.
+///
+/// **Empty, and kept anyway.** `search` is in the global `default_allow` now,
+/// so a company that declares no `[tools]` section inherits it: the twelve
+/// templates that used to sit here were never *deciding* against search, they
+/// had simply never been edited, and their agents reported the tool as not
+/// enabled. They moved to the granted list unchanged. The bucket stays because
+/// the partition is the mechanism — the next template that genuinely wants to
+/// leave search off, without the hermetic-fixture argument that puts a company
+/// in [`SEARCH_DENIED_COMPANIES`], is declared here.
 ///
 /// This list exists so the posture is a *partition* rather than an allow-list.
 /// An allow-list asserts a decision someone remembered, so it cannot notice a
@@ -132,20 +163,7 @@ const SEARCH_DENIED_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhum
 /// [`every_company_declares_a_search_posture`] asserts this list plus the other
 /// two covers `companies/` exactly, so a new template fails CI until whoever
 /// adds it writes the decision down here.
-const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
-    "agentic_accounting_firm",
-    "agentic_customer_support",
-    "agentic_enterprise_sales",
-    "agentic_game_business",
-    "agentic_game_studio",
-    "agentic_influencer_business",
-    "agentic_pharma_startup",
-    "agentic_realestate_company",
-    "agentic_recruiting_company",
-    "agentic_venture_capital",
-    "agentic_venture_studio",
-    "startup_accelerator",
-];
+const SEARCH_UNGRANTED_COMPANIES: [&str; 0] = [];
 
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
@@ -349,19 +367,27 @@ fn every_company_declares_a_search_posture() {
 }
 
 /// The footgun this suite exists to catch: `[tools].allow` **replaces** the
-/// default (`["*", "media", "composio"]`), it never extends it. A reviewer
-/// "simplifying" a grant to `allow = ["search"]` would silently strip
-/// files/docs/shell/code/web/subagent, `media` and `composio` from every agent
-/// in the company — no parse error, no warning, just a company that quietly
-/// lost its tool belt. This asserts both halves: the shipped form keeps the
-/// inherited entries, and the reduced form provably loses them.
+/// default (`globals/globals.toml`'s `default_allow`), it never extends it. A
+/// reviewer "simplifying" a grant to `allow = ["search"]` would silently strip
+/// files/docs/shell/code/web/subagent, workspace writes, `media`, `composio`
+/// and the MCP grants from every agent in the company — no parse error, no
+/// warning, just a company that quietly lost its tool belt. This asserts both
+/// halves: the shipped form keeps the inherited entries, and the reduced form
+/// provably loses them.
+///
+/// It used to open by asserting the default belt was search-free, which is no
+/// longer true — `search` ships in `default_allow`, so these templates now
+/// restate the default rather than restating-and-extending it. The invariant
+/// that mattered survives the change untouched: whatever the default carries,
+/// a template that writes its own `allow` must carry all of it.
 #[test]
 fn granting_search_never_strips_the_inherited_default_belt() {
     let default_allow = Tools::default().allow;
     assert!(
-        !grants_search_explicit(&default_allow),
-        "the default belt is expected to stay search-free (opt-in per #238); \
-         if that changed, these templates no longer need to restate it"
+        grants_search_explicit(&default_allow),
+        "`search` is expected to ship in the default belt now; if it was made \
+         opt-in again, these templates have to restate-and-extend once more \
+         and this test's premise needs rewriting rather than deleting"
     );
 
     for name in FULL_BELT_PLUS_SEARCH {
@@ -456,7 +482,7 @@ fn the_repo_skill_registry_parses() {
 /// ref is on that company's roster.
 ///
 /// Gated on `openhuman` because `translate` and `namespace_of` live behind that
-/// feature; the `Rust (openhuman, tinycortex)` CI lane runs it.
+/// feature; the `Rust (openhuman, tinymemory)` CI lane runs it.
 #[cfg(feature = "openhuman")]
 #[test]
 fn every_bundled_workflow_is_runnable_against_its_roster() {
@@ -603,6 +629,69 @@ fn the_marketing_campaign_preset_is_runnable() {
     assert_eq!(research.config["on_error"], "continue");
 
     assert_eq!(node("publish").config["agent_ref"], "copywriter");
+}
+
+/// The marketing agency's creative desk ceiling must not strip the company's
+/// workspace-write grant.
+///
+/// The desk states `["*", "workspace.write"]`, and the `*` half deliberately
+/// confers no workspace writes — [`grants_workspace_write_explicit`] matches
+/// only the bare `workspace` or the exact `workspace.write` token — so the
+/// write token has to be restated in the ceiling for the desk's agents to hold
+/// it. Their own AGENTS.md promises the `agents/<id>/` folder is always
+/// writable, and `agent_scoped_grants` would silently strip that promise with
+/// a `["*"]`-only ceiling. Pinned through the *three-level* narrowing (the
+/// `effective_grants` the search-posture tests use ignores desks, which is
+/// precisely how this gap shipped) so a future edit cannot quietly reintroduce
+/// the stripping.
+#[test]
+fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
+    let manifest = load_company("agentic_marketing_agency");
+    let creative = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "creative")
+        .expect("the marketing agency declares the creative desk");
+    assert!(
+        !creative.tools.is_empty(),
+        "the creative desk must state a ceiling or this test asserts nothing"
+    );
+
+    for id in ["creative_director", "copywriter", "landing_page_builder"] {
+        let agent = manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .unwrap_or_else(|| panic!("{id} is a member of the creative desk"));
+        let desk_refs: Vec<&[String]> = manifest
+            .group_chats
+            .iter()
+            .filter(|chat| chat.members.iter().any(|member| member == id))
+            .map(|chat| chat.tools.as_slice())
+            .collect();
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+
+        assert!(
+            grants_workspace_write_explicit(&grants),
+            "{id}: the creative desk ceiling ({:?}) must keep the company's \
+             workspace write grant; effective grants: {grants:?}",
+            creative.tools
+        );
+        // The desk still deliberately withholds the billed / third-party
+        // opt-ins the company grants at the top level.
+        assert!(
+            !grants_search_explicit(&grants),
+            "{id}: the creative desk must stay searchless; effective grants: {grants:?}"
+        );
+        assert!(
+            !grants_media_explicit(&grants),
+            "{id}: the creative desk must stay media-less; effective grants: {grants:?}"
+        );
+        assert!(
+            !grants_composio_explicit(&grants),
+            "{id}: the creative desk must stay composio-less; effective grants: {grants:?}"
+        );
+    }
 }
 
 /// Every seeded `output` node names a destination its own manifest can resolve,
@@ -882,6 +971,252 @@ fn every_company_ledger_can_be_closed_and_says_why() {
                     company.display(),
                     spec.slug
                 );
+            }
+        }
+    }
+}
+
+/// The bundles that ship a vertical's own setup cards and tool servers.
+///
+/// Together with [`FIXTURE_COMPANIES`] this is a **partition** of `companies/`,
+/// asserted by [`every_company_declares_a_setup_posture`]. A partition rather
+/// than an allow-list for the reason [`every_company_declares_a_search_posture`]
+/// gives: an allow-list is satisfied by a new template nobody classified, and
+/// "the board is empty because this vertical has no setup work" and "the board
+/// is empty because whoever added this bundle forgot" are indistinguishable
+/// afterwards.
+const SETUP_SEEDED_COMPANIES: [&str; 22] = [
+    "agentic_accounting_firm",
+    "agentic_consultation_firm",
+    "agentic_customer_support",
+    "agentic_design_studio",
+    "agentic_enterprise_sales",
+    "agentic_game_business",
+    "agentic_game_studio",
+    "agentic_influencer_business",
+    "agentic_law_firm",
+    "agentic_marketing_agency",
+    "agentic_math_lab",
+    "agentic_media_company",
+    "agentic_pharma_startup",
+    "agentic_product_team",
+    "agentic_realestate_company",
+    "agentic_recruiting_company",
+    "agentic_research_lab",
+    "agentic_software_company",
+    "agentic_venture_capital",
+    "agentic_venture_studio",
+    "signals_opportunity_studio",
+    "startup_accelerator",
+];
+
+/// The bundles that deliberately ship neither, because they are fixtures.
+///
+/// A fixture proves a mechanism and is asserted against exactly — `e2e_harness`
+/// and `openhuman_demo` also declare their own `[[mcp_server]]` inline — so
+/// seeded cards and a second declaration of `deepwiki` would both perturb what
+/// they exist to pin down.
+const FIXTURE_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhuman_demo"];
+
+/// Every company is either a vertical that ships setup content or a fixture that
+/// deliberately does not — and the classification is re-derived from the files
+/// on disk, so it cannot be made true by editing the lists alone.
+#[test]
+fn every_company_declares_a_setup_posture() {
+    use std::collections::BTreeSet;
+
+    let seeded: BTreeSet<&str> = SETUP_SEEDED_COMPANIES.iter().copied().collect();
+    let fixtures: BTreeSet<&str> = FIXTURE_COMPANIES.iter().copied().collect();
+    assert_eq!(
+        seeded.len(),
+        SETUP_SEEDED_COMPANIES.len(),
+        "SETUP_SEEDED_COMPANIES lists a company twice"
+    );
+    assert_eq!(
+        fixtures.len(),
+        FIXTURE_COMPANIES.len(),
+        "FIXTURE_COMPANIES lists a company twice"
+    );
+    let overlap: Vec<&&str> = seeded.intersection(&fixtures).collect();
+    assert!(
+        overlap.is_empty(),
+        "a company cannot be both a vertical and a fixture: {overlap:?}"
+    );
+
+    let on_disk: BTreeSet<String> = subdirs(&repo_root().join("companies"))
+        .iter()
+        .filter_map(|dir| dir.file_name()?.to_str().map(str::to_string))
+        .collect();
+    let classified: BTreeSet<String> = seeded
+        .union(&fixtures)
+        .map(|name| (*name).to_string())
+        .collect();
+    assert_eq!(
+        on_disk, classified,
+        "every company under `companies/` must be classified as a vertical or a fixture — \
+         add it to SETUP_SEEDED_COMPANIES or FIXTURE_COMPANIES"
+    );
+
+    // The classification has to match the files, not merely the lists.
+    for name in &seeded {
+        let dir = repo_root().join("companies").join(name);
+        assert!(
+            super::has_mcp_file(&dir),
+            "{name} is listed as a vertical but ships no `mcp.json`"
+        );
+        assert!(
+            super::has_task_file(&dir),
+            "{name} is listed as a vertical but ships no `tasks.toml`"
+        );
+    }
+    for name in &fixtures {
+        let dir = repo_root().join("companies").join(name);
+        assert!(
+            !super::has_task_file(&dir),
+            "{name} is a fixture and must not seed cards onto its board"
+        );
+    }
+}
+
+/// Every shipped `mcp.json` parses cleanly, and every server it declares is safe
+/// to hand an agent unattended: HTTP, credential-free, and either answering or
+/// deliberately off pending a token.
+///
+/// `every_company_manifest_is_valid` already runs each file through the real
+/// merge, so a malformed one fails there. This adds the rules that are about
+/// *shipping* a server to everyone who runs the bundle rather than about the
+/// declaration being well-formed.
+#[test]
+fn every_shipped_mcp_server_is_safe_to_ship() {
+    for company in subdirs(&repo_root().join("companies")) {
+        let name = company.file_name().unwrap().to_str().unwrap().to_string();
+        if !super::has_mcp_file(&company) {
+            continue;
+        }
+        let (servers, problems) = super::load_dir_mcp_servers(&company);
+        assert!(problems.is_empty(), "{name}/mcp.json: {problems:?}");
+        assert!(
+            !servers.is_empty(),
+            "{name} ships an `mcp.json` that declares nothing"
+        );
+
+        let readme = std::fs::read_to_string(company.join("README.md"))
+            .unwrap_or_else(|err| panic!("{name}/README.md: {err}"));
+
+        for server in &servers {
+            assert!(
+                server.endpoint.starts_with("https://"),
+                "{name}/mcp.json: `{}` must be https — a shipped template must not send an \
+                 agent's traffic in the clear",
+                server.name
+            );
+            assert!(
+                server
+                    .description
+                    .as_deref()
+                    .is_some_and(|d| !d.trim().is_empty()),
+                "{name}/mcp.json: `{}` has no `description` — JSON carries no comments, so the \
+                 description is the only place this choice can be explained",
+                server.name
+            );
+            // A server that needs a credential must ship off. Enabled plus a
+            // credential means it fails at an agent's first tool call, on every
+            // install, until somebody notices why.
+            if server.auth_secret.is_some() {
+                assert!(
+                    !server.enabled,
+                    "{name}/mcp.json: `{}` names an `authSecret` and ships enabled — it would \
+                     fail at the first tool call; ship it disabled",
+                    server.name
+                );
+            }
+            assert!(
+                readme.contains(&format!("`{}`", server.name)),
+                "{name}/README.md does not mention `{}` — an undocumented server is one nobody \
+                 can decide whether to enable",
+                server.name
+            );
+        }
+    }
+}
+
+/// Every shipped `tasks.toml` parses, and every card on it is one an agent can
+/// actually pick up.
+#[test]
+fn every_shipped_setup_card_is_pickable() {
+    use std::collections::BTreeSet;
+
+    let mut companies: Vec<(String, PathBuf)> = subdirs(&repo_root().join("companies"))
+        .into_iter()
+        .map(|dir| {
+            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+            (name, dir)
+        })
+        .collect();
+    // The baseline is held to exactly the same rules as a vertical's own file.
+    companies.push(("globals".to_string(), repo_root().join("globals")));
+
+    for (name, dir) in companies {
+        if !super::has_task_file(&dir) {
+            continue;
+        }
+        let cards =
+            super::load_dir_tasks(&dir).unwrap_or_else(|err| panic!("{name}/tasks.toml: {err}"));
+        assert!(
+            !cards.is_empty(),
+            "{name} ships a `tasks.toml` that seeds nothing"
+        );
+
+        let manifest =
+            (name != "globals").then(|| CompanyManifest::from_path(&dir).expect("manifest"));
+        let known: BTreeSet<String> = manifest
+            .as_ref()
+            .map(|m| {
+                m.agents
+                    .iter()
+                    .map(|a| a.id.clone())
+                    .chain(m.group_chats.iter().map(|g| g.id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for card in &cards {
+            let rendered = card.to_record(0);
+            // The safety property, asserted against the shipped content and not
+            // only against the parser: nothing seeded can enter the column that
+            // dispatches a run or the one that bills a planning pass.
+            assert_eq!(
+                rendered.column,
+                crate::ports::tasks::COLUMN_TODO,
+                "{name}/tasks.toml: `{}` is not To-do",
+                card.id
+            );
+            assert!(
+                card.note.as_deref().is_some_and(|n| !n.trim().is_empty()),
+                "{name}/tasks.toml: `{}` has no note — a card that does not say what done looks \
+                 like gets handed back as an essay",
+                card.id
+            );
+            // A baseline card ships to every vertical and can know no roster, so
+            // it must name no owner; a vertical's card may, but only one that
+            // exists — seeding writes below `resolve_assignee`, so a typo would
+            // persist and only surface as a card that refuses to dispatch.
+            match card.assignee.as_deref().map(str::trim) {
+                None | Some("") => {}
+                Some(assignee) => {
+                    assert!(
+                        name != "globals",
+                        "globals/tasks.toml: `{}` names an assignee, but the baseline ships to \
+                         every company and can know no roster",
+                        card.id
+                    );
+                    assert!(
+                        known.contains(assignee),
+                        "{name}/tasks.toml: `{}` is assigned to `{assignee}`, which is neither a \
+                         teammate nor a desk in this company",
+                        card.id
+                    );
+                }
             }
         }
     }

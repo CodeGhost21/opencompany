@@ -115,7 +115,7 @@ const CURL_DEST_SUBDIR: &str = "downloads";
 /// The canonical list lives in [`crate::company::GATEABLE_NAMESPACES`] (always
 /// compiled, so manifest validation can see it in the default build); this is a
 /// re-export for the harness call sites that key off it.
-pub const GATEABLE_NAMESPACES: [&str; 8] = crate::company::GATEABLE_NAMESPACES;
+pub const GATEABLE_NAMESPACES: [&str; 7] = crate::company::GATEABLE_NAMESPACES;
 
 /// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
 /// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
@@ -153,13 +153,14 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
         // `web_search` compiles under the plain `openhuman` feature, which is
         // what CI actually builds and tests.
         "web_search" => Some("search"),
-        // Bound repositories (issue #245, agent half). Lives in
-        // [`repo`](crate::harness::repo) rather than this module because it
-        // reaches a host-owned mirror and a forge, not the agent's own sandbox —
-        // but it is namespaced here for the same reason `search` is, and like
-        // `search` the arm is never inert: both tools compile under the plain
-        // `openhuman` feature, which is what CI builds and tests.
-        "repo_checkout" | "repo_pr" => Some("repo"),
+        // The same namespace under a company's OWN provider (the BYO half of
+        // #238). `web_search` above is the canonical slot whichever provider
+        // serves it — these are the provider extras that ride beside it. Mapped
+        // here for the same reason: a company that budgets `search` must budget
+        // every search tool, not only the metered one, or a capability ceiling
+        // set on one provider evaporates when the operator switches to another.
+        "exa_find_similar" | "exa_get_contents" | "brave_news_search" | "brave_image_search"
+        | "brave_video_search" => Some("search"),
         _ => None,
     }
 }
@@ -399,6 +400,104 @@ pub fn shell_tools(
     ]
 }
 
+/// The sandbox brief: what the agent's own working directory is, which tools
+/// reach it, and the path confinement the file/code tools enforce there.
+///
+/// # Why this exists
+///
+/// Every other granted surface on this belt names itself in the prompt —
+/// [`workspace_brief`](crate::harness::workspace_tools::workspace_brief) for the
+/// shared note tree, [`ledger_brief`](crate::harness::ledger_tools::ledger_brief)
+/// for the company's own records,
+/// [`publish_brief`](crate::harness::publish::publish_brief) for handing a file
+/// over. The agent's **sandbox** did not. `publish_brief` mentioned it in
+/// passing, as the place a deliverable comes from, and only when an artifact
+/// store happened to be wired; it named no tool, and it said nothing at all
+/// about `shell`.
+///
+/// The observed failure is the one issue #237's brief exists to prevent, one
+/// surface over: asked to *write* something, an agent that has never been told
+/// it holds `file_write` records a task about writing it instead. It is not
+/// refusing — it is picking the surface it was told about. A granted tool that
+/// goes unmentioned is, for prompt purposes, a tool that was never granted, and
+/// the `shell` namespace was in exactly that state: wired since Cell A, named
+/// nowhere.
+///
+/// # Why it is assembled from flags rather than written once
+///
+/// `files`, `shell` and `code` are three independent grant namespaces
+/// ([`build_agent`](crate::harness::build::build_agent) gates each separately),
+/// so a single fixed paragraph would describe tools some agents do not hold —
+/// the precise mistake `publish_brief`'s own comment warns about, and one that
+/// costs a turn per hallucinated call. Each clause is therefore emitted only
+/// under the flag that wired its tools, and an agent holding none of the three
+/// gets the empty string and no section at all.
+///
+/// The confinement sentence is not decoration, and it is scoped on purpose.
+/// [`exec_security`] sets `workspace_only`, so the **file** and `code` tools
+/// refuse an absolute path or a `../` escape by policy rather than by the
+/// model's judgement; an agent that does not know this spends its turns
+/// discovering it one refusal at a time. The **shell** is deliberately not
+/// described that way: `action_dir` only sets the command's current directory,
+/// and a same-uid command can read anywhere the server can
+/// (`docs/spec/security/agent-isolation.md`). The shell clause says the
+/// directory is where commands *start*, never that they cannot leave it.
+pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
+    if !files && !shell && !code {
+        return String::new();
+    }
+    let mut brief = String::from(
+        "\n\n## Your sandbox\n\
+         You have a real working directory of your own — a private folder on disk, separate from \
+         the company workspace (the shared note tree the `workspace_*` tools read). It is where \
+         your own files live.\n\
+         Every path you give these tools is relative to that directory, so write `report.md` or \
+         `drafts/report.md`, never `/tmp/report.md` or `~/report.md`.\n",
+    );
+    if files {
+        brief.push_str(
+            "Read and write it with `file_read`, `file_write`, `edit`, `list`, `glob` and \
+             `grep`. Subdirectories are created for you on write, and an absolute path or a \
+             `../` escape is refused by these tools.\n",
+        );
+    }
+    if shell {
+        brief.push_str(
+            "Run commands with `shell`. It starts in that same directory, so write a command \
+             against relative paths like any other tool call. `read_workspace_state` gives you \
+             a read-only overview of what is there. Every command is recorded to an audit log \
+             the operator can read.\n",
+        );
+    }
+    if code {
+        brief.push_str(
+            "`apply_patch` applies a structured multi-file edit, `git_operations` runs \
+             status/diff/log/commit inside the directory, and `csv_export` writes a CSV into \
+             `exports/`.\n",
+        );
+    }
+    if shell {
+        brief.push_str(
+            "When you are asked to write, produce, build or run something, do it here — \
+             actually write the file or run the command.",
+        );
+    } else {
+        brief.push_str(
+            "When you are asked to write, produce or build something, do it here — actually \
+             write the file.",
+        );
+    }
+    brief.push_str(
+        " Recording a task about the work, or pasting \
+         the finished text into your reply, is not the same as producing it, and leaves nothing \
+         on disk for anyone to open.\n\
+         A command or write that touches something consequential may be held for operator \
+         approval before it runs. That is a pause, not a failure: you will be told the outcome. \
+         Until you are, do not report the work as done.",
+    );
+    brief
+}
+
 /// The `code` namespace tools, sharing the exec-grade `security` policy and
 /// pinned to the agent's `workspace`. Disjoint from [`shell_tools`] (see there
 /// for why the split is a security boundary, not just cosmetics). Unlike shell,
@@ -611,6 +710,22 @@ pub fn filter_by_capabilities(
     }
 }
 
+/// Whether a [`CapabilityFilter`] denies a given namespace — the same test
+/// [`filter_by_capabilities`] applies per tool, exposed standalone so a
+/// caller that needs the outcome without a tool vector in hand (the sandbox
+/// brief, built before tools are filtered) can ask it directly.
+///
+/// [`CapabilityFilter::AllowAll`] denies nothing; a name outside
+/// [`GATEABLE_NAMESPACES`] cannot be denied by construction (`DenyNamespaces`
+/// is only ever populated from that set), so this returns `false` for those
+/// too rather than requiring the caller to special-case them.
+pub fn namespace_denied(filter: &CapabilityFilter, namespace: &str) -> bool {
+    match filter {
+        CapabilityFilter::AllowAll => false,
+        CapabilityFilter::DenyNamespaces(denied) => denied.contains(namespace),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,6 +734,119 @@ mod tests {
 
     fn names(tools: &[Box<dyn Tool>]) -> Vec<&str> {
         tools.iter().map(|t| t.name()).collect()
+    }
+
+    /// The brief must name every tool the flag it rides on actually wires, or
+    /// it re-creates the bug it exists to fix one namespace at a time. Each
+    /// list is read off the matching constructor above rather than retyped, so
+    /// a belt that grows a tool fails here instead of shipping a brief that
+    /// silently omits it.
+    #[test]
+    fn each_flag_names_exactly_the_tools_its_constructor_wires() {
+        let ws = Path::new("/tmp/agent-ws");
+        let security = test_security(ws, PolicyMode::Full);
+
+        let shell = sandbox_brief(false, true, false);
+        for tool in names(&shell_tools(
+            security.clone(),
+            native_runtime(),
+            Some(ShellAudit::disabled()),
+            ws,
+        )) {
+            assert!(shell.contains(tool), "the shell brief never names `{tool}`");
+        }
+
+        let code = sandbox_brief(false, false, true);
+        for tool in names(&code_tools(security, ws)) {
+            assert!(code.contains(tool), "the code brief never names `{tool}`");
+        }
+
+        // `file_tools` lives in `build` (behind the same feature as this
+        // module), so its belt is named literally here and pinned by
+        // `build::file_tools_are_sandboxed_to_the_workspace` on the other side.
+        let files = sandbox_brief(true, false, false);
+        for tool in ["file_read", "file_write", "edit", "list", "glob", "grep"] {
+            assert!(files.contains(tool), "the file brief never names `{tool}`");
+        }
+    }
+
+    /// A brief that describes an ungranted namespace costs a turn per
+    /// hallucinated call, so each clause must be absent when its flag is.
+    #[test]
+    fn a_clause_is_absent_when_its_namespace_is_not_granted() {
+        let files_only = sandbox_brief(true, false, false);
+        assert!(!files_only.contains("`shell`"), "{files_only}");
+        assert!(!files_only.contains("apply_patch"), "{files_only}");
+
+        let shell_only = sandbox_brief(false, true, false);
+        assert!(!shell_only.contains("file_write"), "{shell_only}");
+        assert!(!shell_only.contains("csv_export"), "{shell_only}");
+    }
+
+    /// An agent holding none of the three gets no section at all — not an empty
+    /// heading, which would read as a surface it has and cannot find.
+    #[test]
+    fn an_agent_with_no_sandbox_namespace_gets_no_section() {
+        assert_eq!(sandbox_brief(false, false, false), "");
+    }
+
+    /// The two things the sandbox brief exists to say, both of which the belt
+    /// enforces whether or not the agent knows them: file/code paths are
+    /// confined (`exec_security` sets `workspace_only`), and producing the
+    /// thing means writing it rather than recording a task about it.
+    #[test]
+    fn the_brief_states_the_confinement_and_the_write_it_instruction() {
+        let brief = sandbox_brief(true, true, true);
+        assert!(
+            brief.contains("../"),
+            "the escape rule must be shown: {brief}"
+        );
+        assert!(
+            brief.contains("actually write the file"),
+            "the instruction that motivates this brief is missing: {brief}"
+        );
+        assert!(
+            brief.contains("Recording a task about the work"),
+            "the observed failure must be named: {brief}"
+        );
+    }
+
+    /// The confinement claim must be scoped to the tools that enforce it.
+    /// `workspace_only` refuses an absolute path or a `../` escape for the
+    /// file/code tools, but `action_dir` only sets the shell's *working
+    /// directory* — a same-uid command can read anywhere the server can
+    /// (docs/spec/security/agent-isolation.md). So the shell clause must
+    /// describe the directory as where commands start, never as a jail.
+    #[test]
+    fn the_shell_clause_does_not_claim_confinement() {
+        let shell_only = sandbox_brief(false, true, false);
+        assert!(!shell_only.contains("cannot leave"), "{shell_only}");
+        assert!(!shell_only.contains("nothing outside"), "{shell_only}");
+        assert!(
+            shell_only.contains("starts in that same directory"),
+            "{shell_only}"
+        );
+
+        // The refusal sentence stays with the file tools that enforce it.
+        let files_only = sandbox_brief(true, false, false);
+        assert!(
+            files_only.contains("`../` escape is refused"),
+            "{files_only}"
+        );
+    }
+
+    /// "Run the command" is a command-running instruction, and the only tool
+    /// that runs arbitrary commands is `shell`. A belt without `shell` must
+    /// not be told to run anything — that re-creates the unavailable-tool
+    /// prompt mismatch the namespace filtering exists to prevent.
+    #[test]
+    fn the_run_instruction_is_gated_on_shell() {
+        let files_only = sandbox_brief(true, false, false);
+        assert!(!files_only.contains("run the command"), "{files_only}");
+        assert!(!files_only.contains("or run"), "{files_only}");
+
+        let with_shell = sandbox_brief(true, true, false);
+        assert!(with_shell.contains("run the command"), "{with_shell}");
     }
 
     fn test_security(workspace: &Path, mode: PolicyMode) -> Arc<SecurityPolicy> {
@@ -755,10 +983,6 @@ mod tests {
         // Metered web search (issue #238) maps to the `search` namespace, so a
         // token-budget plan can shed it under spend pressure.
         assert_eq!(namespace_of("web_search"), Some("search"));
-        // Bound repositories (issue #245) map to the `repo` namespace, so a
-        // token-budget plan can shed a checkout under spend pressure.
-        assert_eq!(namespace_of("repo_checkout"), Some("repo"));
-        assert_eq!(namespace_of("repo_pr"), Some("repo"));
         // Intrinsic tools are unmapped (always kept by the filter).
         assert_eq!(namespace_of("memory_store"), None);
         assert_eq!(namespace_of("memory_recall"), None);
@@ -791,8 +1015,15 @@ mod tests {
             "composio_authorize",
             "composio_execute",
             "web_search",
-            "repo_checkout",
-            "repo_pr",
+            // The BYO search extras (issue #238 follow-up). Listed by name
+            // rather than spliced in from `BYO_SEARCH_TOOLS` so this test keeps
+            // saying what it checks: every tool a belt can carry is mapped onto
+            // a gateable namespace.
+            "exa_find_similar",
+            "exa_get_contents",
+            "brave_news_search",
+            "brave_image_search",
+            "brave_video_search",
         ];
         for tool in mapped {
             let ns = namespace_of(tool).expect("mapped tool has a namespace");
@@ -816,10 +1047,6 @@ mod tests {
         assert!(
             GATEABLE_NAMESPACES.contains(&"search"),
             "the metered search namespace must be gateable (issue #238)"
-        );
-        assert!(
-            GATEABLE_NAMESPACES.contains(&"repo"),
-            "the bound-repository namespace must be gateable (issue #245)"
         );
     }
 
@@ -1174,5 +1401,25 @@ mod tests {
             vec!["file_read"],
             "only the intrinsic tool must survive a full deny: {kept_names:?}"
         );
+    }
+
+    /// [`namespace_denied`] must agree with [`filter_by_capabilities`] on every
+    /// case: it is the standalone check `build_agent` uses to keep the sandbox
+    /// brief from describing a namespace the filter is about to strip from the
+    /// tool vector, so a mismatch between the two would let the brief and the
+    /// live belt disagree again — the exact bug this function exists to close.
+    #[test]
+    fn namespace_denied_agrees_with_filter_by_capabilities() {
+        assert!(!namespace_denied(&CapabilityFilter::AllowAll, "shell"));
+        assert!(!namespace_denied(&CapabilityFilter::AllowAll, "code"));
+
+        let deny: HashSet<&'static str> = ["shell"].into_iter().collect();
+        let filter = CapabilityFilter::DenyNamespaces(deny);
+        assert!(namespace_denied(&filter, "shell"));
+        assert!(!namespace_denied(&filter, "code"));
+
+        // A namespace outside `DenyNamespaces`' set is simply not denied — it
+        // is never asked to special-case a name it does not recognize.
+        assert!(!namespace_denied(&filter, "web"));
     }
 }

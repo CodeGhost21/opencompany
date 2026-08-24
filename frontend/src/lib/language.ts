@@ -3,7 +3,11 @@
 // "checkpoint", "A2A"). Everything a person sees goes through this layer.
 
 import type { TaskApprovalStatus } from "../api/tasks";
-import type { ApprovalSummary, FeedbackCategory, StandingGrant } from "../api/types";
+import type {
+  ApprovalSummary,
+  FeedbackCategory,
+  StandingGrant,
+} from "../api/types";
 
 /**
  * A company's lifecycle state, in plain language, with a status tone.
@@ -159,7 +163,8 @@ const EFFECT_DONE_LABELS = {
  */
 export function effectDone(kind: string, amountUsd?: number | null): string {
   const action = labelFor(EFFECT_DONE_LABELS, kind);
-  if (action) return amountUsd != null ? `${action} of ${money(amountUsd)}` : action;
+  if (action)
+    return amountUsd != null ? `${action} of ${money(amountUsd)}` : action;
   return amountUsd != null
     ? `Did something that cannot be undone, involving ${money(amountUsd)}`
     : "Did something that cannot be undone";
@@ -205,13 +210,6 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // `pages_read` never reach an approval card.
   pages_write: "Publish a dashboard page",
   pages_delete: "Delete a dashboard page",
-  // Issue #245's pair. Both park per call, so each reaches an operator on the
-  // approval card and again in the Standing permissions list — and both names
-  // read like reads, which is exactly when a label has to say what is actually
-  // happening. "One of the company's repositories" is load-bearing: it tells
-  // the operator the reach is what they bound, not the whole of GitHub.
-  repo_checkout: "Check out one of the company's repositories",
-  repo_pr: "Fetch a pull request from one of the company's repositories",
   memory_store: "Save something to its memory",
   memory_forget: "Discard one of its own saved memories",
   memory_recall: "Look something up in its memory",
@@ -347,6 +345,157 @@ export function approvalAction(a: ApprovalSummary): string {
   );
 }
 
+/**
+ * What the decide buttons are deciding on, told with enough of the request to
+ * tell two same-kind cards apart (#1411).
+ *
+ * {@link approvalSummary} names the *kind* — "Run a terminal command", "Send a
+ * payment — $40.00" — and the amount when there is one. A screen-reader user
+ * tabbing button-to-button hears only each button's accessible name, never the
+ * card body, so a queue holding two shell commands would offer two "Approve:
+ * Run a terminal command" buttons with no way to tell which request each one
+ * decides — and two payments of different sizes would read alike too.
+ * Appending the payload's lead argument — the command itself, the URL, the
+ * pattern — the follow-ups that tell two same-kind cards apart (two
+ * `http_request`s to one URL differ by `method`, two shell commands by `cwd`),
+ * and, when the card has one, the asker, makes each button name *this*
+ * request.
+ *
+ * A withheld card's contents are redacted to the same phrase for every hidden
+ * approval, so two hidden cards of the same kind from the same asker would
+ * read alike — the composition time (non-sensitive, already on the card body)
+ * rides in to keep their buttons distinguishable. The exact timestamp is the
+ * single exact-time discriminator for a redacted card: it is emitted here and
+ * the caller skips its usual `request <timestamp>` suffix on hidden cards, so
+ * a screen reader never announces the opaque epoch twice.
+ *
+ * Both halves degrade: a card with no payload (an approval with no arguments)
+ * omits the lead, and one with no `agent` (a native effect, or an old host)
+ * omits the asker — leaving exactly the {@link approvalSummary} phrase the
+ * card's headline already shows.
+ */
+export function decisionLabel(
+  a: ApprovalSummary,
+  askerNames: Map<string, string>,
+  now: number,
+): string {
+  const parts = [approvalSummary(a)];
+  const lead = payloadLead(a);
+  if (lead != null) parts.push(lead);
+  // Two hidden cards of the same kind from the same asker carry identical
+  // redaction phrases, so the composition time is what tells their buttons
+  // apart — the same non-sensitive number the card's meta line already shows.
+  // The relative phrase is intentionally bucketed; the exact timestamp rides
+  // along in parentheses as a stable discriminator when hidden requests share
+  // a bucket, and it is emitted nowhere else — the caller omits its usual
+  // `request <timestamp>` suffix on redacted cards — so a screen reader never
+  // announces the opaque epoch twice.
+  if (a.contents_hidden) {
+    parts.push(`composed ${timeAgo(a.at_millis, now)} (${a.at_millis})`);
+  }
+  const who = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
+  if (who != null) parts.push(`asked by ${who}`);
+  return parts.join(" — ");
+}
+
+/**
+ * The payload's lead argument — the command line, the URL, the pattern — plus
+ * just enough of the remaining arguments to tell two same-kind cards apart, or
+ * `null` when the card carries no payload.
+ *
+ * The lead value is bare, not `label: value`, when the first label is the
+ * kind's predictable one: for a shell card the label is always "command", so
+ * including it would read "command: command". When the first label is NOT
+ * predictable — an unmapped tool's arbitrary argument names — it is the very
+ * thing that can tell two cards apart (`{path: "/tmp/a"}` and
+ * `{destination: "/tmp/a"}` would otherwise collide), so it rides along. The
+ * follow-ups keep their labels, which is what makes them *distinguishing* —
+ * "DELETE" only means the method next to its `method` key, and two shell cards
+ * sharing a command still differ by `cwd`. The count is bounded so a large
+ * payload cannot turn the button's accessible name into a wall of text. When
+ * the bound drops a line, the dropped line's own start rides along as the
+ * discriminator — it is the argument that usually *is* the difference (two
+ * `http_request`s sharing url, method and headers differ in the body), and it
+ * is the same content the card body shows, so the button names what the
+ * operator can see. That first dropped line is placed LAST, so the clip below
+ * — which keeps the composed lead's start and end — never cuts it away. The
+ * composed lead is additionally clipped to {@link MAX_LEAD_CHARS}: the host
+ * bounds each value at 2,000 characters, so without the clip a single long
+ * command would still stretch the label into a wall of text. Values are
+ * already redacted and bounded host-side (`src/runtime/approval_display.rs`).
+ */
+function payloadLead(a: ApprovalSummary): string | null {
+  // Withheld contents have nothing to lead with, but the button still has to
+  // say *why*: two hidden cards must not read as ordinary no-argument
+  // approvals (issue #618), and the resolve route accepts any member, not just
+  // admins — so the name has to tell the reader the payload is gone rather
+  // than pretend it was never there.
+  if (a.contents_hidden) return "details hidden by your role";
+
+  const lines = payloadLines(a);
+  const first = lines[0];
+  if (!first) return null;
+  const rest = lines.slice(1, 1 + MAX_LEAD_LINES);
+  const dropped = lines.length - rest.length - 1;
+  // Bare when the first label is the kind's predictable one (the constant
+  // "command:" prefix on every shell card is noise); labelled when it is not,
+  // because an unmapped tool's argument names vary and the name is then the
+  // distinguishing bit. See the doc comment above for both halves.
+  const firstLead =
+    first.label === PAYLOAD_KEY_ORDER[a.kind]?.[0]
+      ? first.value
+      : `${first.label}: ${first.value}`;
+  const parts = [
+    firstLead,
+    ...rest.map((line) => `${line.label}: ${line.value}`),
+  ];
+  // A payload with more lines than the label carries can still collide: two
+  // `http_request`s sharing url, method and headers differ only in the body,
+  // which is exactly what the cap omits. The dropped lines' own starts are the
+  // discriminator — the argument that usually *is* the difference, in the same
+  // words the card body uses. (The internal approval id would also differ, but
+  // runtime ids stay out of operator-facing names.)
+  //
+  // Every omitted entry rides along, not just the first: two cards can share
+  // the first dropped line and still differ in a later one (arbitrary tool
+  // arguments have no fixed length). The first dropped line goes LAST of the
+  // omitted set — it is the argument that usually *is* the difference — so
+  // `clipMiddle` below, which keeps the composed lead's end, always retains
+  // it; the later entries sit before it for context and are only clipped when
+  // the label is genuinely long.
+  if (dropped > 0) {
+    const omitted = lines.slice(1 + MAX_LEAD_LINES);
+    parts.push(
+      ...omitted.slice(1).map((line) => `${line.label}: ${line.value}`),
+    );
+    const lead = omitted[0];
+    parts.push(`${lead.label}: ${lead.value}`);
+  }
+  return clipMiddle(parts.join(" — "), MAX_LEAD_CHARS);
+}
+
+/** How many follow-up payload lines a decision label may carry (#1411). */
+const MAX_LEAD_LINES = 2;
+
+/** How many characters the composed payload lead may run to (#1411). */
+const MAX_LEAD_CHARS = 120;
+
+/**
+ * Truncates `s` to at most `budget` characters, keeping its start and end and
+ * replacing the middle with "…".
+ *
+ * The end survives because in a payload lead the end is the dropped-line
+ * discriminator — the part that tells two same-kind cards apart. Counting code
+ * points rather than UTF-16 units so a multi-byte value never splits a
+ * surrogate pair.
+ */
+function clipMiddle(s: string, budget: number): string {
+  const chars = Array.from(s);
+  if (chars.length <= budget) return s;
+  const keep = Math.floor((budget - 1) / 2);
+  return `${chars.slice(0, keep).join("")}…${chars.slice(-keep).join("")}`;
+}
+
 /** The effect kind a paused workflow gate parks as — mirrors
  * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
 const WORKFLOW_APPROVE_KIND = "workflow.approve";
@@ -365,7 +514,8 @@ const WORKFLOW_APPROVE_KIND = "workflow.approve";
 function workflowGateTool(a: ApprovalSummary): string | null {
   if (a.kind !== WORKFLOW_APPROVE_KIND) return null;
   const payload = a.payload;
-  if (payload == null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  if (payload == null || typeof payload !== "object" || Array.isArray(payload))
+    return null;
   const tool = (payload as Record<string, unknown>).tool;
   return typeof tool === "string" && tool !== "" ? tool : null;
 }
@@ -381,7 +531,11 @@ function workflowGateTool(a: ApprovalSummary): string | null {
  * pretending to know which one.
  */
 export function toolAction(kind: string): string {
-  return labelFor(EFFECT_LABELS, kind) ?? labelFor(TOOL_LABELS, kind) ?? "Use one of its tools";
+  return (
+    labelFor(EFFECT_LABELS, kind) ??
+    labelFor(TOOL_LABELS, kind) ??
+    "Use one of its tools"
+  );
 }
 
 /**
@@ -404,7 +558,26 @@ export function toolAction(kind: string): string {
  */
 export function grantHeadline(g: StandingGrant): string {
   const action = toolAction(g.tool);
-  return g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  const target = g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  return g.verdict === "deny" ? `Don't allow ${target}` : target;
+}
+
+/**
+ * The subject of a standing permission as a person would read it (#1411).
+ *
+ * A teammate grant is the agent; a workflow grant (issue #1098) carries no
+ * agent — `agent` is empty — and names the authored workflow instead. Reading
+ * `agent` alone for that second kind yields `Remove 's permission: …`, so both
+ * halves have to resolve, and a revocation's accessible name must never read
+ * with an empty subject.
+ */
+export function grantSubject(
+  g: StandingGrant,
+  askerNames: Map<string, string>,
+): string {
+  if (g.workflow != null && g.workflow !== "")
+    return `the ${g.workflow} workflow`;
+  return askerNames.get(g.agent) ?? g.agent;
 }
 
 /**
@@ -491,8 +664,10 @@ export interface PayloadLine {
 export function payloadLines(a: ApprovalSummary): PayloadLine[] {
   const payload = a.payload;
   if (payload == null) return [];
-  if (typeof payload !== "object") return [{ label: "value", value: renderValue(payload) }];
-  if (Array.isArray(payload)) return [{ label: "items", value: renderValue(payload) }];
+  if (typeof payload !== "object")
+    return [{ label: "value", value: renderValue(payload) }];
+  if (Array.isArray(payload))
+    return [{ label: "items", value: renderValue(payload) }];
 
   const entries =
     a.kind === WORKFLOW_APPROVE_KIND
@@ -546,13 +721,17 @@ export function payloadLines(a: ApprovalSummary): PayloadLine[] {
  * silently hide new information, which is the failure mode this whole file is
  * written against; the denylist is closed and the allowlist is not.
  */
-function workflowGateEntries(payload: Record<string, unknown>): [string, unknown][] {
+function workflowGateEntries(
+  payload: Record<string, unknown>,
+): [string, unknown][] {
   const args = payload.args;
   const argEntries: [string, unknown][] =
     args != null && typeof args === "object" && !Array.isArray(args)
       ? Object.entries(args as Record<string, unknown>)
       : [];
-  const rest = Object.entries(payload).filter(([key]) => !WORKFLOW_GATE_HIDDEN.has(key));
+  const rest = Object.entries(payload).filter(
+    ([key]) => !WORKFLOW_GATE_HIDDEN.has(key),
+  );
   // The call first, then where and what stopped it. An operator decides on the
   // call; the node id is how they find it afterwards. This order survives
   // `payloadLines`' sort because no `PAYLOAD_KEY_ORDER` entry exists for this
@@ -593,6 +772,88 @@ const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
   git_operations: ["operation"],
 };
 
+/**
+ * Payload keys, past the lead, that change what approving the call does.
+ *
+ * `PAYLOAD_KEY_ORDER` promotes the argument an operator is consenting to, and
+ * for most tools the first alone is the whole decision — the shell command, the
+ * glob pattern, the fetch URL. `http_request` carries two consequential keys
+ * past the lead: its method is the difference between a read and a delete on
+ * the same URL, and its body is what a write *sends* — two POSTs to the same
+ * address are only the same decision if the payload is the same, so a row that
+ * shows only the URL cannot tell them apart. This is that list, and
+ * {@link payloadLeadLabel} appends these values ahead of the first line.
+ */
+const PAYLOAD_LEAD_EXTRA: Readonly<Record<string, string[]>> = {
+  http_request: ["method", "body"],
+};
+
+/** A promoted extra's longest render in the compact lead; past it, a preview. */
+const EXTRA_PREVIEW_MAX = 60;
+
+function preview(value: string): string {
+  return value.length > EXTRA_PREVIEW_MAX
+    ? `${value.slice(0, EXTRA_PREVIEW_MAX)}…`
+    : value;
+}
+
+/**
+ * The payload's lead line, with any consequential later keys in front — the
+ * per-item label for a batch row.
+ *
+ * `null` when the host sent no payload (an old host) or withheld it, so callers
+ * fall back to the action's own words rather than rendering blank. Unlisted
+ * arguments still follow the lead, exactly as in {@link payloadLines}: this
+ * promotes, it never hides.
+ *
+ * A promoted extra is previewed, not printed whole: `http_request`'s body can
+ * be a large document, and the row's job is to distinguish two requests, not
+ * to carry the file. The detailed view still shows the full payload.
+ */
+export function payloadLeadLabel(a: ApprovalSummary): string | null {
+  const lines = payloadLines(a);
+  const first = lines[0];
+  if (first == null) return null;
+  const extras = PAYLOAD_LEAD_EXTRA[a.kind] ?? [];
+  if (extras.length === 0) return first.value;
+  // The extra keys are past the lead by definition, so a line whose label IS
+  // the lead's label is the lead itself and must not be repeated before it.
+  const extraValues = lines
+    .filter((line) => line.label !== first.label && extras.includes(line.label))
+    .map((line) => preview(line.value));
+  return extraValues.length > 0
+    ? `${extraValues.join(" ")} ${first.value}`
+    : first.value;
+}
+
+/**
+ * Whether {@link payloadLeadLabel} had to cut a promoted extra to fit the
+ * compact lead.
+ *
+ * The compact row's job is to distinguish two requests, not to carry the file,
+ * so a long body is previewed — but a preview is not something an operator may
+ * authorize. `true` means the lead shows **less than the complete value**, so a
+ * caller with a one-click Approve must not offer it on that label: the operator
+ * has to see the full payload (the detailed view) before deciding.
+ *
+ * Mirrors {@link preview}'s bound exactly — same code-unit measure, same
+ * `EXTRA_PREVIEW_MAX` — so "would this label be cut?" can never drift from "was
+ * this label cut?".
+ */
+export function payloadLeadTruncated(a: ApprovalSummary): boolean {
+  const lines = payloadLines(a);
+  const first = lines[0];
+  if (first == null) return false;
+  const extras = PAYLOAD_LEAD_EXTRA[a.kind] ?? [];
+  if (extras.length === 0) return false;
+  return lines.some(
+    (line) =>
+      line.label !== first.label &&
+      extras.includes(line.label) &&
+      line.value.length > EXTRA_PREVIEW_MAX,
+  );
+}
+
 function renderValue(value: unknown): string {
   if (typeof value === "string") return value;
   return JSON.stringify(value) ?? String(value);
@@ -603,14 +864,15 @@ export function money(usd: number): string {
 }
 
 /** Feedback categories, phrased the way an operator would think about them. */
-export const FEEDBACK_CATEGORIES: { value: FeedbackCategory; label: string }[] = [
-  { value: "wrong-output", label: "This was wrong" },
-  { value: "bug", label: "Something broke" },
-  { value: "missing-capability", label: "It can't do something I need" },
-  { value: "approval-friction", label: "It asks too much / too little" },
-  { value: "template-gap", label: "The team is missing a role" },
-  { value: "docs", label: "The docs are unclear" },
-];
+export const FEEDBACK_CATEGORIES: { value: FeedbackCategory; label: string }[] =
+  [
+    { value: "wrong-output", label: "This was wrong" },
+    { value: "bug", label: "Something broke" },
+    { value: "missing-capability", label: "It can't do something I need" },
+    { value: "approval-friction", label: "It asks too much / too little" },
+    { value: "template-gap", label: "The team is missing a role" },
+    { value: "docs", label: "The docs are unclear" },
+  ];
 
 /** A short relative time like "2m ago", "3h ago", "just now". */
 /**
@@ -644,7 +906,10 @@ export function leavesTheCompany(a: ApprovalSummary): boolean {
  * IS queue latency, and labelling it everywhere would spend the emphasis where
  * it does not matter and dilute it where it does.
  */
-export function payloadAge(a: ApprovalSummary, now: number): { text: string; emphasise: boolean } {
+export function payloadAge(
+  a: ApprovalSummary,
+  now: number,
+): { text: string; emphasise: boolean } {
   const age = timeAgo(a.at_millis, now);
   return leavesTheCompany(a)
     ? { text: `Composed ${age}`, emphasise: true }
@@ -743,13 +1008,19 @@ export function approvalDeadline(
   // to delete. The host sweeps expired approvals once a minute, so a card can
   // legitimately sit here for a moment before it leaves the queue; that moment
   // is exactly when the operator most needs the card to explain itself.
-  if (left <= 0) return { text: "Past its deadline — declining itself", tone: "passed" };
-  if (left < 60_000) return { text: "Declines itself in under a minute", tone: "soon" };
+  if (left <= 0)
+    return { text: "Past its deadline — declining itself", tone: "passed" };
+  if (left < 60_000)
+    return { text: "Declines itself in under a minute", tone: "soon" };
   const mins = Math.floor(left / 60_000);
   if (mins < 60) return { text: `Declines itself in ${mins}m`, tone: "soon" };
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return { text: `Declines itself in ${hours}h`, tone: "normal" };
-  return { text: `Declines itself in ${Math.floor(hours / 24)}d`, tone: "normal" };
+  if (hours < 24)
+    return { text: `Declines itself in ${hours}h`, tone: "normal" };
+  return {
+    text: `Declines itself in ${Math.floor(hours / 24)}d`,
+    tone: "normal",
+  };
 }
 
 /**
@@ -759,10 +1030,16 @@ export function approvalDeadline(
  * this is the one place that widens them back to a lookup, so the widening is
  * deliberate rather than an annotation that quietly disables the check.
  */
-function labelFor(table: Readonly<Record<string, string>>, kind: string): string | undefined {
+function labelFor(
+  table: Readonly<Record<string, string>>,
+  kind: string,
+): string | undefined {
   return table[kind];
 }
 
 function titleCase(s: string): string {
-  return s.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+  return s.replace(
+    /\w\S*/g,
+    (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(),
+  );
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Globe, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -12,6 +12,17 @@ import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -69,7 +80,7 @@ export function HostingView({ client, company }: Props) {
   // typed-but-unsaved API key. `SettingsSection` renders this with
   // `key={company}` so a company switch remounts rather than carrying a key
   // typed for one company into another company's Save. See the same note in
-  // BillingView.
+  // the Finance section's provider forms.
   const load = useCallback(async () => {
     try {
       const next = await getHosting(client, company);
@@ -154,9 +165,7 @@ export function HostingView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto" data-testid="hosting-view">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div>
-          <h1 className="flex items-center gap-2 text-lg font-medium">
-            <Globe className="size-5" /> Hosting
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Hosting</h1>
           <p className="text-sm text-muted-foreground">
             Connect a hosting provider so your teammates can put a site from this
             company&rsquo;s workspace on the internet — with a managed database
@@ -252,14 +261,30 @@ export function HostingView({ client, company }: Props) {
                 Save
               </Button>
               {status.apiKeyConfigured ? (
-                <Button
-                  variant="outline"
-                  onClick={() => void onClear()}
-                  disabled={busy}
-                  data-testid="hosting-clear"
-                >
-                  Disconnect
-                </Button>
+                <AlertDialog>
+                  <AlertDialogTrigger
+                    render={
+                      <Button variant="outline" disabled={busy} data-testid="hosting-clear">
+                        Disconnect
+                      </Button>
+                    }
+                  />
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Disconnect {status.provider}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This clears the write-only hosting token and team setting. They cannot be
+                        recovered; reconnect with a new token before teammates can deploy again.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction variant="destructive" onClick={() => void onClear()}>
+                        Disconnect hosting
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
               ) : null}
             </div>
           </CardContent>

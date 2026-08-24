@@ -181,7 +181,7 @@ Three surfaces, all in `src/server/ops/runs.rs`, under both scope forms:
 
 | Route | Answers |
 |---|---|
-| `GET …/runs?task=&status=&limit=` | the company's attempts, newest first |
+| `GET …/runs?task=&agent=&status=&limit=` | the company's attempts, newest first |
 | `GET …/runs/{run_id}` | one attempt plus its full persisted step trace |
 | `GET …/tasks/{task_id}` → `runs[]` | the card's attempts, additive on the task detail read |
 
@@ -191,6 +191,33 @@ an event, and the sibling `GET …/workflows/runs` (which does fold, and says so
 is the cost being avoided. `?status=` takes a comma-separated list and refuses
 an unknown word with a `400`, because a typo'd filter answering `[]` is
 indistinguishable from "nothing matched".
+
+`?agent=` (issue #1573) narrows to one desk, and is what the console's
+per-teammate run history reads. It is a **store** predicate rather than a slice
+of a fetched page for the reason `limit` makes unavoidable: filtering in the
+console would make `limit` mean "the newest N attempts in the *company*, of
+which some happen to be this desk's", so a teammate who had been quiet while
+the rest of the company was busy would render as one who had never run. Unlike
+`?status=` it is not validated against the roster — a teammate can be removed
+while its attempts remain, and refusing to show that history would erase the
+record of work that did happen; an id nobody ran simply answers `[]`.
+
+Both indexed backends push it down, and both had to **backfill** to do so
+honestly. `agent_id` is a mirror of a field that has always been inside the
+stored record, so every row written before the column existed carries the desk
+in its blob and `NULL`/absent in its index — and a `NULL` never matches. Left
+alone, the new filter would have silently omitted precisely the history an
+operator opening a teammate for the first time most wants. sqlite copies it
+across in `heal_runs_agent_id` (an `ALTER`, one `UPDATE … WHERE agent_id IS
+NULL`, then the index — idempotent, and matching nothing on every open after
+the first); MongoDB does the same in `backfill_run_agent_ids` at connect,
+document by document, because the desk lives inside a *string* of JSON there
+and the server cannot reach it. The two differ in how a failure lands: sqlite
+runs the heal synchronously in `SqliteStore::from_conn` with a propagated
+error, so a backfill that cannot run prevents store initialization; MongoDB's
+is best-effort at its call site — a company that will not start is worse than
+one whose oldest rows are not yet filterable by desk, and the migration is
+spawned so a slow first boot never sits in front of `/healthz`.
 
 Three things the wire shape refuses to imply, each a state the write path really
 produces:
@@ -218,3 +245,32 @@ field names are the decode contract for already-journaled events.
 Run detail is **refresh-on-read**: steps persist incrementally, so re-reading a
 live attempt shows the progress since. Streaming would widen the harness turn
 stream for something a re-read already answers.
+
+## The workflow-run join
+
+`RunRecord` carries `workflow_run_id` and `node_id`, both optional.
+
+A workflow `agent` node's turn has **neither a card nor a conversation**, so
+before these existed `RunStore` — keyed on exactly those two — could not name the
+attempt at all. It was not that the join column was missing; the *row* was
+missing, because `run_background` took no `RunTraceSink` and the node therefore
+minted nothing. A node was green or red and that was the whole of what could be
+known about it.
+
+Both fields are additive in the same shape `task_id`/`chat_id` took: a row
+written before they existed loads with `None` and re-serializes byte-identically.
+**There is no backfill**, and that is not a shortcut — a pre-existing run
+genuinely belongs to no workflow, so `None` is true rather than tolerated.
+
+`RunFilter::for_workflow_run` selects one run's nodes; `GET {scope}/runs?workflow_run=`
+exposes it over REST, and `Company.agentRuns(workflowRunId:)` over GraphQL.
+
+### `begin_run_untriggered`
+
+`begin_run` stamps the seq of the journal event that drove the attempt. A
+workflow node is activated by the engine walking a graph, not by a
+`TaskDispatched` the journal recorded, so there is no seq to stamp.
+`trigger_event_seq` is already `Option`, so leaving it `None` is the record's own
+way of saying "nothing in the journal drove this" — passing a made-up seq (or
+`0`) would point every workflow attempt at an unrelated event and quietly corrupt
+any reader that follows it. Transition legality is identical.

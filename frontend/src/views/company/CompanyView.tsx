@@ -28,6 +28,7 @@
 //   `#/company`            the teammates
 //   `#/company/desks`      the org chart
 //   `#/company/<deskId>`   the org chart, arriving at that desk (issue #485)
+//   `#/company/graph`      the knowledge graph (issue #1321)
 //
 // which means the chart survives a reload, can be linked, and is reached by
 // asking for it rather than by flipping a switch and hoping.
@@ -40,6 +41,7 @@
 // `LedgersView.MANAGE_SEGMENT`.
 
 import type { OpenCompanyClient } from "@/api/client";
+import { Overview } from "@/views/Overview";
 import { OrgChartView } from "@/views/company/OrgChartView";
 import { TeamView } from "@/views/TeamView";
 
@@ -53,6 +55,19 @@ import { TeamView } from "@/views/TeamView";
  * (see `focusDeskId`), never an error or a missing page.
  */
 export const DESKS_SEGMENT = "desks";
+/**
+ * The declared-structure graph, moved off the operator landing page (#1321).
+ *
+ * Reserved like {@link DESKS_SEGMENT}, and with the same accepted collision:
+ * `graph` is a legal desk id (`[a-z0-9_]+`), so a company whose manifest
+ * declares a desk literally named `graph` cannot focus it through its
+ * `#/company/graph` link — the address renders the graph instead. That is the
+ * same tradeoff `desks` already makes, and resolving it would cost an async
+ * desk read in this routing switch (delaying every graph paint, or flashing
+ * the wrong page for the rare company that declares the id), so the collision
+ * is documented rather than engineered around.
+ */
+export const GRAPH_SEGMENT = "graph";
 
 interface Props {
   client: OpenCompanyClient;
@@ -79,6 +94,13 @@ interface Props {
   refreshKey?: number;
   /** Reopen first-run setup, so skipping it is not a dead end. */
   onRunSetup?: () => void;
+  /**
+   * The company's real name — `feed.status.name` in the shell (issue #1219).
+   * The graph's core node should name the company the way the rest of the
+   * console does, not fall back to the slug; optional so this component still
+   * stands alone, matching `Overview`'s own fallback chain.
+   */
+  companyName?: string;
 }
 
 export function CompanyView({
@@ -89,7 +111,12 @@ export function CompanyView({
   onOpenAgent,
   refreshKey,
   onRunSetup,
+  companyName,
 }: Props) {
+  if (sub === GRAPH_SEGMENT) {
+    return <Overview client={client} company={company} companyName={companyName} />;
+  }
+
   if (sub) {
     return (
       <OrgChartView
@@ -111,6 +138,9 @@ export function CompanyView({
       refreshKey={refreshKey}
       onRunSetup={onRunSetup}
       onManageDesks={() => onNavigate(DESKS_SEGMENT)}
+      // A desk chip on a card opens that desk's own address (issue #1440), the
+      // same destination as the chart's desk nodes.
+      onNavigateToDesk={(deskId) => onNavigate(deskId)}
     />
   );
 }

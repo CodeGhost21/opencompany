@@ -126,12 +126,54 @@ impl RosterBuilder {
     /// the honest trade.
     pub fn for_setup(
         env: &dyn crate::app::config::EnvSource,
+        provider: Option<&str>,
+        base_url: Option<&str>,
         credential: Option<&str>,
+        model: Option<&str>,
     ) -> Option<Self> {
         use crate::harness::provider::{
             DEFAULT_HOSTED_MODEL, DEFAULT_TINYHUMANS_INFERENCE_URL, HostedProvider,
             HostedProviderConfig, harness_inference_from_env,
         };
+
+        let selected_provider = provider.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(provider) = selected_provider.filter(|provider| *provider != "managed") {
+            let base_url = crate::company::inference::normalize_setup_base_url(provider, base_url)
+                .unwrap_or_else(|| crate::company::inference::effective_base_url(provider, None));
+            let credential = credential
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map_or(crate::company::Credential::None, |key| {
+                    crate::company::Credential::from_value(key.to_string())
+                });
+            let extra_headers =
+                if crate::company::inference::normalize_provider(provider) == "openrouter" {
+                    vec![
+                        (
+                            "HTTP-Referer".to_string(),
+                            "https://opencompany.ai".to_string(),
+                        ),
+                        ("X-Title".to_string(), "OpenCompany".to_string()),
+                    ]
+                } else {
+                    Vec::new()
+                };
+            let model_name = model
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .unwrap_or(DEFAULT_HOSTED_MODEL);
+            return Some(Self::new(
+                Arc::new(HostedProvider::new_direct(
+                    HostedProviderConfig {
+                        base_url,
+                        credential,
+                        extra_headers,
+                    },
+                    provider,
+                )),
+                model_name,
+            ));
+        }
 
         let typed = credential
             .map(str::trim)
@@ -151,7 +193,12 @@ impl RosterBuilder {
             });
 
         let (config, model_override) = typed.or_else(|| harness_inference_from_env(env))?;
-        let model_name = model_override.unwrap_or_else(|| DEFAULT_HOSTED_MODEL.to_string());
+        let model_name = model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .or(model_override)
+            .unwrap_or_else(|| DEFAULT_HOSTED_MODEL.to_string());
         Some(Self::new(Arc::new(HostedProvider::new(config)), model_name))
     }
 

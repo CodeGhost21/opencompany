@@ -2705,12 +2705,12 @@ export function WorkflowsView({
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 {runRefusal.code === "inference_required"
-                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Connections → Inference, then run again."
+                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Inference, then run again."
                   : runRefusal.message}
               </span>
               {runRefusal.code === "inference_required" && (
                 <a
-                  href="#/settings/connections"
+                  href="#/settings/oauth"
                   className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                   data-testid="workflow-run-inference-cta"
                 >
@@ -2804,7 +2804,7 @@ export function WorkflowsView({
           panel makes that structural: the index cannot grow run chrome by
           accident, because the slot it would mount in does not exist there. */}
       {!detailOpen ? (
-        <div className="relative flex-1">
+        <div className="relative flex-1 min-h-0">
           {!loadingList && workflows.length === 0 ? (
             // Issue #813's on-ramp, which used to live behind the canvas's
             // empty selection. An empty company now lands here instead, so this
@@ -2855,7 +2855,11 @@ export function WorkflowsView({
             <WorkflowIndex
               workflows={workflows}
               runsByWorkflow={runsByWorkflow}
-              onSelect={(id) => setSelectedId(id)}
+              onSelect={(id) => {
+                setSelectedId(id);
+                setHistoryOpen(true);
+                setCopilotOpen(true);
+              }}
               mode={indexMode}
               loading={loadingList}
               runsLoaded={indexRunsLoaded}

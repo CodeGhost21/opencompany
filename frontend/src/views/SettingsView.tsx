@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Compass,
   Flag,
@@ -12,7 +12,7 @@ import {
 import { toast } from "sonner";
 
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
-import { ApiError, type MemorySpec } from "@/api/types";
+import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -34,12 +34,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
+import { ExternalHarnesses } from "@/components/external-harnesses";
 import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
+import { withHostParam } from "@/hooks/use-host-route";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
 import { useLocalScope } from "@/connections/ConnectionContext";
@@ -64,10 +65,15 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
         {/* This sub-page draws no visible title of its own — the sub-nav rail
             beside it already says "Settings" (issue #1221). */}
-        <h1 className="sr-only">General settings</h1>
-        {/* Pairing this machine. Renders nothing in a browser, where the
-            session cookie already works. */}
-        <DevicePairing />
+        <h1 className="text-2xl font-semibold tracking-tight lg:sr-only">General settings</h1>
+        {/* Device pairing was here. Sessions are the frontend client's own
+            business now — the desktop app holds its session the same way the
+            browser does — so there is no machine for this page to pair. */}
+
+        {/* Every coding engine a teammate can be bound to, joined against
+            whether it can actually run on this machine (issue #1245). Works in
+            a browser; the installed-here half only fills in on the desktop. */}
+        <ExternalHarnesses client={client} company={company} />
 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings
@@ -113,8 +119,6 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
           </CardContent>
         </Card>
 
-        <MemoryEngineCard client={client} />
-
         {/* Lifecycle */}
         {scoped ? (
           <LifecycleControls client={client} company={scoped} feed={feed} />
@@ -129,8 +133,14 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
           </Card>
         )}
 
-        {/* Domain & email */}
-        <DomainSettings company={company} />
+        {/* Domain & email.
+
+            `key` is load-bearing, not cosmetic: this card holds a
+            typed-but-unsaved SMTP password in React state, and without a
+            remount a company switch would carry a credential typed for one
+            company into another company's Save. `SettingsSection` remounts
+            `BillingView`/`HostingView` for exactly this reason. */}
+        <DomainSettings key={company ?? "self"} client={client} company={company} />
 
         {/* Appearance.
 
@@ -153,22 +163,33 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Product tour</CardTitle>
-            <CardDescription>Replay the guided walkthrough of the console.</CardDescription>
+            <CardDescription>Replay the guided walkthrough or set up your company again.</CardDescription>
             <CardAction>
-              <Button
-                variant="outline"
-                // The tour's code is lazily loaded, so without this the download
-                // starts on the click and the button appears to do nothing until
-                // it lands. Pointing at it is intent enough to fetch.
-                onPointerEnter={preloadTour}
-                onFocus={preloadTour}
-                onClick={() => {
-                  restartTour(scope);
-                  toast.success("Starting the product tour.");
-                }}
-              >
-                <Compass className="size-4" /> Replay tour
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  // The tour's code is lazily loaded, so without this the download
+                  // starts on the click and the button appears to do nothing until
+                  // it lands. Pointing at it is intent enough to fetch.
+                  onPointerEnter={preloadTour}
+                  onFocus={preloadTour}
+                  onClick={() => {
+                    restartTour(scope);
+                    toast.success("Starting the product tour.");
+                  }}
+                >
+                  <Compass className="size-4" /> Replay tour
+                </Button>
+                {/* The route is `#/setup`, but the anchor has to say so with the
+                    host scope carried: a Ctrl/Cmd-click opens a new tab, and a
+                    tab has no `useHostAddress` repairer — it boots with the
+                    address as written. Without the param the new tab would pick
+                    its bootstrap/default host and setup could staff the wrong
+                    company in a multi-host console (issue #1417 review). */}
+                <Button variant="outline" render={<a href={withHostParam("setup")} />}>
+                  Set up company
+                </Button>
+              </div>
             </CardAction>
           </CardHeader>
         </Card>
@@ -369,75 +390,6 @@ function ConfirmAction({
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-  );
-}
-
-/**
- * Read-only: which memory engine this instance is bound to, from `/spec`.
- *
- * Deliberately carries no setter. Engine selection is instance-wide and
- * belongs to the infra operator — the `OPENCOMPANY_MEMORY*` variables, read
- * once at boot — so a console admin can see the engine but never repoint a
- * deployment's storage from here. The switch runbook lives in
- * `docs/spec/runtime/memory-engine.md`. Renders nothing on the `store`
- * default and on a host predating the `/spec` memory field.
- */
-function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
-  const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
-  useEffect(() => {
-    let live = true;
-    setEngine(undefined);
-    client
-      .spec()
-      .then((spec) => {
-        if (live) setEngine(spec.memory);
-      })
-      .catch(() => {
-        /* best-effort: the settings page works without /spec */
-      });
-    return () => {
-      live = false;
-    };
-  }, [client]);
-
-  if (!engine || engine.backend === "store") return null;
-  const discarding = engine.backend === "null";
-  return (
-    <Card data-testid="settings-memory-engine">
-      <CardHeader>
-        <CardTitle className="text-base">Memory engine</CardTitle>
-        <CardDescription>
-          Set by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>, read
-          at boot). Instance-wide; read-only here by design.
-          {discarding &&
-            " This engine accepts and discards every write — nothing this company is told will be remembered."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-0 divide-y">
-        <InfoRow label="Engine">
-          <span className="font-mono text-xs">{engine.driver_id ?? engine.backend}</span>
-        </InfoRow>
-        <InfoRow label="Mode">
-          <span className="font-mono text-xs">{engine.backend}</span>
-        </InfoRow>
-        <InfoRow label="Capabilities">
-          <span className="text-sm">
-            {engine.capabilities.length > 0
-              ? engine.capabilities.join(", ")
-              : "not negotiated"}
-          </span>
-        </InfoRow>
-        <InfoRow label="Boot probe">
-          <span className="text-sm">
-            {engine.healthy === true
-              ? "reachable"
-              : engine.healthy === false
-                ? "unreachable — check the endpoint and credential"
-                : "not probed"}
-          </span>
-        </InfoRow>
-      </CardContent>
-    </Card>
   );
 }
 

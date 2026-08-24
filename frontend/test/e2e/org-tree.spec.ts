@@ -270,7 +270,7 @@ async function mockApi(page: Page) {
         source: "manifest",
         editable: [],
         isOrchestrator: false,
-        tools: { requested: [], companyAllow: [], effective: [] },
+        tools: { requested: [], companyAllow: [], deskAllow: [], deskCeilingActive: false, effective: [] },
         desks: [],
         inboxEnabled: false,
       });
@@ -296,6 +296,11 @@ async function mockApi(page: Page) {
         body: "",
       });
     }
+    if (path.endsWith("/memory"))
+      // `GET /memory` answers with `{ items, totalContext, contextTruncated }`
+      // — the Overview's constellation reads the rows from `items`, and a bare
+      // array would leave it `undefined` and crash the graph render.
+      return json({ items: [], totalContext: 0, contextTruncated: false });
     if (path.endsWith("/me"))
       return json({ id: "op", email: "op@example.com", role: "admin" });
     return json([]);
@@ -473,7 +478,9 @@ test("#311 membership can be edited from the chart and survives a reload", async
 
   // Turing sits on no desk, so the chart accounts for him beside the tree
   // rather than dropping him.
-  const unplaced = page.getByRole("heading", { name: "Not on a desk" });
+  await expect(page.getByRole("heading", { name: "Desks", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "People outside desks", level: 2 })).toBeAttached();
+  const unplaced = page.getByRole("heading", { name: "Not on a desk", level: 3 });
   await expect(unplaced).toBeVisible();
   await expect(
     unplaced.locator("xpath=following-sibling::ul[1]"),
@@ -520,7 +527,7 @@ test("#839 creates a teammate on a selected desk and persists it", async ({
   // rather than an unlabelled icon button beside it.
   await growth.getByRole("button", { name: "Add teammate" }).click();
   await page
-    .getByRole("menuitem", { name: "Create teammate on Growth" })
+    .getByRole("menuitem", { name: "Add teammate to Growth" })
     .click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Babbage");
@@ -550,7 +557,7 @@ test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
   await mockApi(page);
   await openChart(page);
 
-  await page.getByRole("button", { name: "New teammate" }).click();
+  await page.getByRole("button", { name: "Add teammate" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("No Desk");
   await dialog.getByLabel("Role").fill("Roaming Engineer");
@@ -559,7 +566,12 @@ test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Not on a desk" }),
   ).toContainText("Not on a desk");
-  await expect(page.getByText("No Desk", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("heading", { name: "Not on a desk" })
+      .locator("xpath=following-sibling::ul[1]")
+      .getByRole("link", { name: "No Desk", exact: true }),
+  ).toBeVisible();
   expect(writes.some((write) => write.path.includes("/members"))).toBe(false);
 });
 
@@ -570,7 +582,7 @@ test("#839 refuses a company-page teammate add when the host has no team write p
   await mockApi(page);
   await openChart(page);
 
-  await page.getByRole("button", { name: "New teammate" }).click();
+  await page.getByRole("button", { name: "Add teammate" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Not Saved");
   await dialog.getByLabel("Role").fill("Unavailable");
@@ -586,7 +598,7 @@ test("#1099 a teammate added from the company page is confirmed by name", async 
   await mockApi(page);
   await openChart(page);
 
-  await page.getByRole("button", { name: "New teammate" }).click();
+  await page.getByRole("button", { name: "Add teammate" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Katherine");
   await dialog.getByLabel("Role").fill("Navigator");
@@ -612,7 +624,7 @@ test("#1099 a teammate the chart cannot read back is not confirmed as added", as
   await mockApi(page);
   await openChart(page);
 
-  await page.getByRole("button", { name: "New teammate" }).click();
+  await page.getByRole("button", { name: "Add teammate" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Grace Murray");
   await dialog.getByLabel("Role").fill("Compiler");
@@ -700,7 +712,7 @@ test("a desk offers one add control, and it stays usable when the roster is exha
   const menu = page.getByRole("menu");
   await expect(menu).toContainText("Everyone on the roster is already here.");
   await expect(
-    menu.getByRole("menuitem", { name: "Create teammate on Engineering" }),
+    menu.getByRole("menuitem", { name: "Add teammate to Engineering" }),
   ).toBeVisible();
 });
 
@@ -720,7 +732,7 @@ test("#839 a teammate created but not placed is still on the chart to place by h
   // rather than an unlabelled icon button beside it.
   await growth.getByRole("button", { name: "Add teammate" }).click();
   await page
-    .getByRole("menuitem", { name: "Create teammate on Growth" })
+    .getByRole("menuitem", { name: "Add teammate to Growth" })
     .click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Hopper");
@@ -880,7 +892,14 @@ test("#311 blueprint structure offers no control the host would refuse", async (
   await openChart(page);
 
   // A manifest desk cannot be deleted at runtime, so no delete is offered.
-  await expect(deskNode(page, "Engineering")).toContainText("Blueprint");
+  // Its blueprint provenance is a muted lock, not a word badge — the badge only
+  // survives on a mixed-provenance desk, where it distinguishes one member from
+  // the runtime-added one beside it.
+  await expect(
+    deskNode(page, "Engineering")
+      .getByRole("img", { name: "Part of the company blueprint" })
+      .first(),
+  ).toBeVisible();
   await expect(
     deskNode(page, "Engineering").getByRole("button", {
       name: "Delete Engineering",

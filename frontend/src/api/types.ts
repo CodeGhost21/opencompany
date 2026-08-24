@@ -147,7 +147,7 @@ export interface OutboundMessage {
    * from a tool-backed one.
    */
   steps?: TurnStep[];
-  /** Channel-specific reply addressing (Telegram). Absent on operator messages. */
+  /** Channel-specific reply addressing. Absent on operator messages. */
   replyTo?: ReplyTo;
   /**
    * The board card this turn opened, when it opened one (issue #246). Drives
@@ -160,6 +160,15 @@ export interface OutboundMessage {
    */
   taskId?: string;
   /**
+   * Who this reply names, as the host resolved them (issue #1645).
+   *
+   * Absent when it names nobody, and on a host that predates the field.
+   * When present the renderer can chip the resolved spans immediately
+   * rather than waiting for the history-rehydration path - the live POST
+   * response delivers the same mentions `chat/history` will later return.
+   */
+  mentions?: ChatMentionDto[];
+    /**
    * The durable id this reply was journaled under (issue #364) — the id
    * `chat/history` will return for it. Absent on a reply the host could not
    * journal, and on a host that predates the field; either way the console
@@ -172,18 +181,6 @@ export interface OutboundMessage {
 export interface ReplyTo {
   /** The chat/thread id to deliver back to. */
   chatId: string;
-}
-
-/** Telegram channel configuration status (no secrets). */
-export interface TelegramChannelStatus {
-  /** Whether the channel is fully configured (both token + secret stored). */
-  configured: boolean;
-  /** Whether a bot token is stored (never the token itself). */
-  tokenSet: boolean;
-  /** Whether a webhook secret is stored (never the secret itself). */
-  secretSet: boolean;
-  /** The public webhook URL to register with setWebhook. */
-  webhookUrl: string;
 }
 
 /**
@@ -260,6 +257,52 @@ export interface ChatHistoryMessageDto {
    * emoji. Absent when nobody has, and on a host that predates the field.
    */
   reactions?: ChatReactionDto[];
+  /**
+   * Who this message names, in reading order. Absent when it names nobody, and
+   * on a host that predates the field.
+   */
+  mentions?: ChatMentionDto[];
+}
+
+/**
+ * What a mention points at. Mirrors the Rust `MentionTarget`.
+ *
+ * `everyone` is a scope rather than an actor, which is why this is a union and
+ * not an `{ kind, id }` pair.
+ */
+export type MentionTarget =
+  | { kind: "agent"; id: string }
+  | { kind: "user"; id: string }
+  | { kind: "desk"; id: string }
+  | { kind: "everyone" };
+
+/**
+ * One mention as the composer *sends* it. Mirrors the Rust `Mention` input.
+ *
+ * Distinct from {@link ChatMentionDto}, which is what comes back: outgoing
+ * carries the target the picker resolved, incoming carries the label the host
+ * resolved it to. A client never sends a label and never receives a target.
+ */
+export interface ChatMentionInput {
+  target: MentionTarget;
+  /** The literal span typed, `@` included. */
+  text: string;
+  /** UTF-8 byte offset of `text` in the message body. */
+  offset: number;
+}
+
+/** One mention. Mirrors `ChatMentionDto` in `src/server/operator.rs`. */
+export interface ChatMentionDto {
+  /** The literal span the author typed, `@` included. */
+  text: string;
+  /** Byte offset of `text` in the message body. */
+  offset: number;
+  /** Who was named, as a display label — never a raw user id. */
+  label: string;
+  /** Whether the reading viewer is the one named (or was named by @everyone). */
+  mine: boolean;
+  /** Whether this mention renders but pinged nobody. */
+  quiet?: boolean;
 }
 
 /** One person's reaction. Mirrors `ChatReactionDto` in `src/server/operator.rs`. */
@@ -425,6 +468,8 @@ export interface ApprovalSummary {
    * field, no control, approve-once exactly as before.
    */
   broadly_grantable?: boolean;
+  /** Whether a time-bounded standing refusal can be created for this tool. */
+  broadly_deniable?: boolean;
   /**
    * What the effect will actually do — the tool call's arguments (#372).
    *
@@ -490,6 +535,24 @@ export interface ApprovalSummary {
    * schema camel-cases the same field, and this console reads REST.
    */
   workflow_run_id?: string | null;
+  /**
+   * Which **workflow** a parked `workflow.approve` gate is asking about
+   * (#1418) — the second half of the run address, beside {@link workflow_run_id}.
+   *
+   * A run id alone cannot name a console page, so this is what turns a native
+   * workflow approval into an "Open the run" link.
+   *
+   * **Deliberately not read from {@link payload}.** Payload is a redacted
+   * rendering, and role redaction (#618) strips it from a member reader
+   * entirely; the host projects this top-level field from the raw parked effect
+   * (`gate_workflow_id`) so it survives redaction the way `workflow_run_id`
+   * already does — a member holding up a stalled workflow keeps the address.
+   *
+   * Absent on every non-gate approval (a chat turn, a scheduler tick) and on a
+   * tool call parked *by* a workflow; only native `workflow.approve` effects
+   * carry it. Optional because an old host predates the field.
+   */
+  workflow_id?: string | null;
   /**
    * Which turn's gated calls this one belongs to (#842) — an opaque key shared
    * by every approval a single agent turn parked.
@@ -582,10 +645,16 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  */
 export interface StandingGrant {
   id: string;
-  /** The teammate it was granted to. */
+  /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
+   * which names its subject in `workflow` instead. */
   agent: string;
+  /** The authored workflow allowed to redeem it, when the grant is to a
+   * workflow rather than a teammate (issue #1098) — `agent` is empty then.
+   * Absent on every teammate grant. */
+  workflow?: string;
   /** The tool it admits, with any arguments. */
   tool: string;
+  verdict: Verdict;
   /** Who granted it: a signed-in user, or the platform credential. */
   granted_by: { kind: string; id: string };
   at_millis: number;
@@ -628,6 +697,8 @@ export interface FeedbackInput {
   note: string;
   work_ref?: string;
   preview?: boolean;
+  /** Confirm the previewed item by id (Send after Preview). */
+  item_id?: string;
 }
 
 /**
@@ -740,24 +811,6 @@ export interface BoardQuery {
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
-/** The bound memory engine, as `/spec` reports it. No endpoint, no credential. */
-export interface MemorySpec {
-  /** `store` | `embedded` | `remote` | `null`. */
-  backend: string;
-  /** The bound engine's own name, absent when the base store serves memory. */
-  driver_id?: string;
-  /** Capability families negotiated at bind time; empty = not negotiated. */
-  capabilities: string[];
-  /**
-   * Whether the boot-time reachability probe found the engine usable — ready
-   * or degraded (reachable, possibly reduced); only a down engine is `false`.
-   * A boot-time snapshot, not a live gauge: the provider can recover or fail
-   * after boot without this moving. Absent = not probed (base store, direct
-   * engine, or an older host) — treat as unknown, not unhealthy.
-   */
-  healthy?: boolean;
-}
-
 export interface AppSpec {
   name: string;
   version: string;
@@ -768,13 +821,6 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
-  /**
-   * The bound memory engine: mode, driver id, and the capability families it
-   * negotiated at bind time. Optional — a host predating the field omits it.
-   * The console shows this so an operator can see what a hosted engine does
-   * NOT support before a cycle discovers it.
-   */
-  memory?: MemorySpec;
   /**
    * Whether the first-run setup flow has been completed on this instance.
    *
@@ -928,6 +974,25 @@ export interface AgentDetailDto {
    */
   description?: string;
   /**
+   * The persona instructions **in force** for this teammate (issue #1530): the
+   * per-agent override when one is set, otherwise the blueprint seed. This is
+   * the text the agent actually runs with, and the draft an edit starts from.
+   */
+  instructions?: string | null;
+  /**
+   * The blueprint's own instructions — the manifest seed a manifest teammate
+   * was declared with, kept beside the effective value so the console can show
+   * what "Reset to blueprint" restores. Absent for a bare overlay teammate,
+   * which has no blueprint.
+   */
+  blueprintInstructions?: string;
+  /**
+   * Whether an override is currently masking the blueprint. The console shows
+   * the Reset-to-blueprint control exactly when this is true — an agent running
+   * on its blueprint has nothing to reset.
+   */
+  instructionsOverridden?: boolean;
+  /**
    * Which half of the roster this teammate comes from. `manifest` teammates are
    * declared in the version-controlled `company.toml`; `overlay` teammates were
    * added at runtime. Both are editable and both are removable — a manifest
@@ -945,6 +1010,21 @@ export interface AgentDetailDto {
   editable: string[];
   /** The declared cognition-tier hint, when the manifest sets one. */
   tier?: string;
+  /**
+   * Which declared harness this teammate runs on, by id (issue #1245's
+   * harness-picker follow-up). `undefined` means the harness marked
+   * `default = true` — read `GET {scope}/harnesses` ([`HarnessDto`]) for the
+   * full declared set, including which one that is.
+   */
+  harness?: string;
+  /**
+   * This teammate's own model override, when it has one (issue #1245's
+   * per-agent follow-up). Meaningful only when the teammate runs on an ACP
+   * harness (an operator's own coding CLI) — the host does not tell this
+   * response which harness that is, so the console shows it as informational
+   * rather than validating it against one.
+   */
+  model?: string;
   /**
    * Whether this teammate is the company's orchestrator. Resolved by the roster
    * rule (a tagged tier first, else the first declared agent), so it is NOT the
@@ -974,6 +1054,21 @@ export interface AgentDetailDto {
 export interface AgentToolsDto {
   requested: string[];
   companyAllow: string[];
+  /**
+   * The ceiling contributed by the desks this agent sits on — the union of
+   * their `tools`, already narrowed by `companyAllow`. **Empty means the
+   * narrowed ceiling grants nothing**, not "no desk narrows anything" — see
+   * `deskCeilingActive`, which tells those apart.
+   */
+  deskAllow: string[];
+  /**
+   * Whether any desk this agent sits on states a `tools` ceiling. Distinct
+   * from `deskAllow`: a ceiling can be active yet narrow to an empty list
+   * (a desk whose only grant the company does not allow), and the preview
+   * must keep the desk level as the gate in that case instead of falling
+   * back to `companyAllow`.
+   */
+  deskCeilingActive: boolean;
   effective: string[];
 }
 
@@ -999,6 +1094,32 @@ export interface EditAgentInput {
   name?: string;
   role?: string;
   description?: string | null;
+  /**
+   * The persona instructions, three-state exactly like `description` (issue
+   * #1530): `undefined` leaves the override untouched, `null` clears it —
+   * resetting the teammate to its blueprint — and a string sets it. The three
+   * are different on the wire (`JSON.stringify` keeps `null`, drops `undefined`)
+   * and must never be collapsed, or a partial save would silently reset a
+   * persona the operator did not touch.
+   */
+  instructions?: string | null;
+  /** The teammate's own model override. */
+  model?: string | null;
+  /** Which declared harness this teammate runs on. */
+  harness?: string | null;
+  /** The teammate's own tool-grant globs. */
+  tools?: string[];
+}
+
+/** One declared or detected harness. */
+export interface HarnessDto {
+  id: string;
+  kind: "built_in" | "acp";
+  default: boolean;
+  agent?: string;
+  runsHere?: boolean;
+  transport?: string;
+  detected: boolean;
 }
 
 /**
@@ -1042,7 +1163,7 @@ export interface InboxDto {
   name: string;
   /** The full address (`{key}@{domain}` when a domain is configured). */
   address: string;
-  /** Whether the inbox is enabled on the Team page. */
+  /** Whether the inbox is enabled on this teammate's detail page. */
   enabled: boolean;
   /** The number of unread received (inbound) messages. */
   unread: number;
@@ -1142,7 +1263,7 @@ export interface McpHealth {
 
 /**
  * One roster agent named on a console coverage line — {@link
- * McpServer.reachableBy} ("Reachable by") and the repositories card's
+ * McpServer.reachableBy} ("Reachable by") and the console's other coverage lines'
  * `grantedAgents` ("Readable by"), both computed from one roster walk on the
  * host.
  *
@@ -1381,31 +1502,20 @@ export interface CapabilityStatusDto {
    */
   searchInBuild?: boolean;
   /** Whether a managed search credential is configured on this build (env-only). */
-  /**
-   * Which Smithery key the company's MCP **directory** browsing presents
-   * (issue #1287): `company` (its own), `environment` (one key set for the
-   * whole host and shared by every company on it), or `none` (Smithery is not
-   * queried, so the directory shows only the open registry's few hosted
-   * entries).
-   *
-   * Absent when the host could not determine it — an unknown answer is not
-   * `none`, and reporting a confident "no key" on a transient store failure
-   * would send an admin to paste one they already have.
-   */
-  mcpDirectoryCredential?: "company" | "environment" | "none";
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
   /**
-   * Bound repositories (issue #245, agent half): whether the company
-   * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
+   * Which provider the company's searches actually reach: `managed` (the
+   * platform's own account, metered and daily-capped) or the slug it configured
+   * in Settings → Search.
    *
-   * The grant is only half the setup — the other half is whether anything is
-   * bound — so the repositories card reads this alongside the bindings list and
-   * names whichever half is missing. `undefined` is an older host that does not
-   * send the field, and must not be rendered as "not granted".
+   * Read beside `searchCredentialConfigured` rather than instead of it: the two
+   * disagree in both directions. A host with no platform credential still
+   * searches for a company that brought its own key, and a company that picked a
+   * provider without finishing it is still on `managed`.
    */
-  repoGranted?: boolean;
+  searchProvider?: string;
   /**
    * Publishing (issue #244, panel half #1192): whether the company's grants
    * confer `publish_artifact` — the only way a file an agent wrote becomes a
@@ -1531,7 +1641,11 @@ export interface TransactionDto {
  */
 export interface FinancesDto {
   balanceUsd: number;
-  budgetUsd: number;
+  /**
+   * The monthly budget cap. `null` when the manifest sets no `[budget]`;
+   * `0` when it is explicitly capped at zero — a hard cap, not an absence.
+   */
+  budgetUsd: number | null;
   spentUsd: number;
   revenueUsd: number;
   netUsd: number;
@@ -1694,4 +1808,76 @@ export interface ReadMarker {
 /** Response of `GET {scope}/chat/read-state`. */
 export interface ReadStateResponse {
   markers: ReadMarker[];
+}
+
+/** Response of `GET {scope}/presence`. */
+export interface PresenceListResponse {
+  /**
+   * Present people, most recently seen first.
+   *
+   * **This replica's view.** A second host serving the same tenant keeps its
+   * own map, so somebody connected there is simply absent here — which is why
+   * an absence reads as "no live signal" and never as a grey "offline" dot.
+   */
+  people: PresenceDto[];
+}
+
+/** One person's live presence. */
+export interface PresenceDto {
+  /** The user id, as `GET {scope}/chat/mentionables` already names them. */
+  userId: string;
+  status: "online" | "away" | "offline";
+  /** When their lease was last renewed, epoch millis. */
+  atMillis: number;
+}
+
+/**
+ * Response of `GET {scope}/chat/mentionables` — everything an `@` can name.
+ *
+ * Mirrors `MentionablesDto` in `src/server/ops/mentions.rs`.
+ */
+export interface MentionablesResponse {
+  agents: MentionableAgentDto[];
+  people: MentionablePersonDto[];
+  desks: MentionableDeskDto[];
+  everyone: MentionableEveryoneDto;
+}
+
+/** One teammate the picker can offer. */
+export interface MentionableAgentDto {
+  id: string;
+  name: string;
+  role: string;
+}
+
+/**
+ * One person the picker can offer.
+ *
+ * Id and label only, by design — this is deliberately not the admin user
+ * record, and must not grow toward it.
+ */
+export interface MentionablePersonDto {
+  id: string;
+  /** How this person is named to colleagues; never their login identity. */
+  label: string;
+  /** A short typable alias, disambiguated company-wide. Not a handle. */
+  slug: string;
+}
+
+/** One desk the picker can offer. */
+export interface MentionableDeskDto {
+  id: string;
+  name: string;
+  /** The teammates a mention of this desk expands to. */
+  memberIds: string[];
+}
+
+/**
+ * The broadcast token, described by the host rather than hard-coded here — a
+ * console that disagreed about the spellings would offer a row resolving to
+ * nothing.
+ */
+export interface MentionableEveryoneDto {
+  label: string;
+  aliases: string[];
 }

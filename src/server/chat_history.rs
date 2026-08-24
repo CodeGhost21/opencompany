@@ -10,10 +10,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
-    Actor, ActorKind, CompanyEvent, CompanyRecord, EventSeq, StoredEvent, TurnStep,
+    Actor, ActorKind, CompanyEvent, CompanyRecord, EventSeq, Mention, MentionTarget, StoredEvent,
+    TurnStep,
 };
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
@@ -230,6 +233,41 @@ pub struct MessageView {
     /// ever-increasing counter. Grouping rows into a count is the renderer's
     /// job; deriving names from a count is impossible.
     pub reactions: Vec<ReactionView>,
+    /// Who this message names, in reading order.
+    ///
+    /// Spans plus a **label**, never a target id: this is the surface a member
+    /// reads other members' messages through, and handing every reader the raw
+    /// user id of everyone ever mentioned would widen who-sees-what for no gain
+    /// the renderer can use. Same discipline as [`ReactionView::by_label`], and
+    /// the same reason.
+    ///
+    /// Empty for a message that mentions nobody, which is every message
+    /// journaled before mentions existed.
+    pub mentions: Vec<MentionView>,
+}
+
+/// One mention inside one message, as a reader sees it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MentionView {
+    /// The literal span the author typed, so the renderer highlights what is
+    /// actually in the text rather than what the target is called now.
+    pub text: String,
+    /// Byte offset of [`Self::text`] in the message body.
+    pub offset: usize,
+    /// Who was named, as a display label — a teammate's id, a person's label, a
+    /// desk's name, or `everyone`. Never a raw user id.
+    pub label: String,
+    /// Whether this mention is the viewer's own — what the console renders as a
+    /// highlighted chip and counts as "this message is for me". Relative to the
+    /// [`Viewer`], on the same terms [`MessageView::mine`] is.
+    ///
+    /// True for a direct mention of the viewer **and** for `@everyone`, because
+    /// a broadcast is addressed to them too.
+    pub mine: bool,
+    /// Whether this mention renders but does not ping — a duplicate, a mention
+    /// past the cap, or a target that has since left the company.
+    pub quiet: bool,
 }
 
 /// One person's reaction to one message, as a reader sees it.
@@ -369,6 +407,7 @@ impl MessageView {
                 steps,
                 task_id,
                 parent,
+                mentions,
                 ..
             } => MessageView {
                 id,
@@ -381,9 +420,14 @@ impl MessageView {
                 task_id,
                 parent_id: parent.map(|seq| seq.value().to_string()),
                 reactions: Vec::new(),
+                mentions: project_mentions(&mentions, authors, viewer),
             },
             CompanyEvent::OperatorMessage {
-                text, by, parent, ..
+                text,
+                by,
+                parent,
+                mentions,
+                ..
             } => {
                 let (author, mine) = match &by {
                     // Sent by a signed-in human.
@@ -410,6 +454,7 @@ impl MessageView {
                     task_id: None,
                     parent_id: parent.map(|seq| seq.value().to_string()),
                     reactions: Vec::new(),
+                    mentions: project_mentions(&mentions, authors, viewer),
                 }
             }
             // The dispatch terminal (issue #377), as the channel marker a
@@ -445,6 +490,7 @@ impl MessageView {
                 task_id: Some(task_id),
                 parent_id: None,
                 reactions: Vec::new(),
+                mentions: Vec::new(),
             },
             // `owns` never admits other variants into a history.
             other => MessageView {
@@ -458,9 +504,54 @@ impl MessageView {
                 task_id: None,
                 parent_id: None,
                 reactions: Vec::new(),
+                mentions: Vec::new(),
             },
         }
     }
+}
+
+/// Turns stored mentions into what a particular reader should see.
+///
+/// Two things happen here and nowhere else:
+///
+/// * **Ids become labels.** A [`MentionTarget::User`] carries a user id, which
+///   no member-facing surface hands out; it is resolved through the same
+///   `authors` map the byline above the message uses, so a chip and the author
+///   line can never disagree about what somebody is called. A target that
+///   resolves to nothing falls back to the literal text the author typed, minus
+///   its `@` — which is exactly what a reader would have seen anyway.
+/// * **`mine` is decided.** Per viewer, and `true` for `@everyone` as well as
+///   for a direct mention, because a broadcast is addressed to this reader too.
+pub(crate) fn project_mentions(
+    mentions: &[Mention],
+    authors: &HashMap<String, String>,
+    viewer: &Viewer,
+) -> Vec<MentionView> {
+    mentions
+        .iter()
+        .map(|mention| {
+            let fallback = || mention.text.trim_start_matches('@').to_string();
+            let (label, mine) = match &mention.target {
+                MentionTarget::Agent { id } => (id.clone(), false),
+                MentionTarget::Desk { id } => (id.clone(), false),
+                MentionTarget::User { id } => (
+                    authors.get(id).cloned().unwrap_or_else(fallback),
+                    *viewer == Viewer::User(id.clone()),
+                ),
+                // Addressed to the room, so it is addressed to whoever is
+                // reading — including the operator credential, which is a
+                // reader even though it is not a person.
+                MentionTarget::Everyone => ("everyone".to_string(), true),
+            };
+            MentionView {
+                text: mention.text.clone(),
+                offset: mention.offset,
+                label,
+                mine,
+                quiet: mention.quiet,
+            }
+        })
+        .collect()
 }
 
 /// The blast radius of issue #885, for one company.
@@ -844,6 +935,8 @@ mod test {
 
     fn agent_reply(chat_id: &str) -> CompanyEvent {
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: chat_id.to_string(),
@@ -856,6 +949,7 @@ mod test {
     /// `None` is the shape the chat route stores for an unaddressed post.
     fn operator_message(chat: Option<&str>) -> CompanyEvent {
         CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
@@ -940,6 +1034,7 @@ mod test {
     #[test]
     fn general_desk_owns_every_operator_message() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: Some(Actor {
@@ -958,6 +1053,7 @@ mod test {
     #[test]
     fn main_thread_owns_operator_messages_it_stored() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
@@ -975,6 +1071,7 @@ mod test {
     #[test]
     fn desk_addressed_operator_message_belongs_to_that_desk() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
@@ -1086,6 +1183,181 @@ mod test {
         assert!(!folded["4"][0].mine);
     }
 
+    fn mention(target: MentionTarget, text: &str, offset: usize) -> Mention {
+        Mention {
+            target,
+            text: text.to_string(),
+            offset,
+            quiet: false,
+        }
+    }
+
+    fn message_mentioning(mentions: Vec<Mention>) -> CompanyEvent {
+        CompanyEvent::OperatorMessage {
+            mentions,
+            parent: None,
+            text: "ping".to_string(),
+            by: None,
+            chat: Some("studio".to_string()),
+            deliverable: None,
+        }
+    }
+
+    /// A person's mention reaches a reader as a **label**, never as the user id
+    /// it is stored under — the same rule `by_label` follows for reactions.
+    #[test]
+    fn project_resolves_a_person_to_a_label_and_never_to_an_id() {
+        let view = MessageView::project(
+            at(
+                7,
+                message_mentioning(vec![mention(
+                    MentionTarget::User {
+                        id: "u1".to_string(),
+                    },
+                    "@Ada",
+                    0,
+                )]),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(view.mentions.len(), 1);
+        assert_eq!(view.mentions[0].label, "Ada");
+        assert_eq!(view.mentions[0].text, "@Ada");
+        assert_eq!(view.mentions[0].offset, 0);
+        assert!(
+            !view.mentions[0].label.contains("u1"),
+            "the stored id must not reach a reader"
+        );
+    }
+
+    /// `mine` is per viewer: the same stored row is the reader's own mention
+    /// for one person and somebody else's for everyone else.
+    #[test]
+    fn project_decides_mine_per_viewer() {
+        let event = at(
+            8,
+            message_mentioning(vec![mention(
+                MentionTarget::User {
+                    id: "u1".to_string(),
+                },
+                "@Ada",
+                0,
+            )]),
+        );
+        let ada = MessageView::project(event.clone(), &Viewer::User("u1".to_string()), &labels());
+        assert!(ada.mentions[0].mine);
+
+        let grace = MessageView::project(event, &Viewer::User("u2".to_string()), &labels());
+        assert!(!grace.mentions[0].mine);
+    }
+
+    /// A broadcast is addressed to whoever is reading, so it is everybody's own
+    /// mention — that is what makes it badge every recipient.
+    #[test]
+    fn everyone_is_mine_for_every_reader() {
+        let event = at(
+            9,
+            message_mentioning(vec![mention(MentionTarget::Everyone, "@everyone", 0)]),
+        );
+        for viewer in [
+            Viewer::Operator,
+            Viewer::User("u1".to_string()),
+            Viewer::User("u2".to_string()),
+        ] {
+            let view = MessageView::project(event.clone(), &viewer, &labels());
+            assert!(view.mentions[0].mine, "viewer: {viewer:?}");
+            assert_eq!(view.mentions[0].label, "everyone");
+        }
+    }
+
+    /// A person who has since been removed has no label to resolve to. The
+    /// literal text the author typed is the honest fallback — it is what a
+    /// reader would have seen anyway — and it must not be the raw id.
+    #[test]
+    fn a_mention_of_a_departed_person_falls_back_to_the_typed_text() {
+        let view = MessageView::project(
+            at(
+                10,
+                message_mentioning(vec![mention(
+                    MentionTarget::User {
+                        id: "gone".to_string(),
+                    },
+                    "@Bob",
+                    0,
+                )]),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(view.mentions[0].label, "Bob");
+    }
+
+    #[test]
+    fn a_teammate_and_a_desk_project_their_ids_as_labels() {
+        let view = MessageView::project(
+            at(
+                11,
+                message_mentioning(vec![
+                    mention(
+                        MentionTarget::Agent {
+                            id: "engineer".to_string(),
+                        },
+                        "@engineer",
+                        0,
+                    ),
+                    mention(
+                        MentionTarget::Desk {
+                            id: "engineering".to_string(),
+                        },
+                        "@engineering",
+                        10,
+                    ),
+                ]),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        let labels: Vec<&str> = view.mentions.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, vec!["engineer", "engineering"]);
+        assert!(
+            view.mentions.iter().all(|m| !m.mine),
+            "a teammate or a desk is never the human reader"
+        );
+    }
+
+    #[test]
+    fn a_quiet_mention_projects_as_quiet() {
+        let view = MessageView::project(
+            at(
+                12,
+                message_mentioning(vec![Mention {
+                    quiet: true,
+                    ..mention(
+                        MentionTarget::User {
+                            id: "u1".to_string(),
+                        },
+                        "@Ada",
+                        0,
+                    )
+                }]),
+            ),
+            &Viewer::User("u1".to_string()),
+            &labels(),
+        );
+        assert!(view.mentions[0].quiet);
+    }
+
+    #[test]
+    fn a_message_that_mentions_nobody_projects_an_empty_list() {
+        let view = MessageView::project(
+            at(13, message_mentioning(Vec::new())),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert!(view.mentions.is_empty());
+    }
+
     /// A thread parent survives projection on both halves of an exchange, as
     /// the message id a reader can resolve rather than a raw sequence number.
     #[test]
@@ -1094,6 +1366,7 @@ mod test {
             at(
                 12,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: Some(EventSeq::new(4)),
                     text: "a follow-up".to_string(),
                     by: None,
@@ -1110,6 +1383,8 @@ mod test {
             at(
                 13,
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: Some(EventSeq::new(4)),
                     task_id: None,
                     chat_id: "studio".to_string(),
@@ -1133,6 +1408,7 @@ mod test {
     #[test]
     fn legacy_operator_message_without_chat_stays_on_general() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
@@ -1308,6 +1584,8 @@ mod test {
             at(
                 seq,
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     chat_id: "engineering".to_string(),
                     agent_id: agent_id.to_string(),
                     text: "…".to_string(),
@@ -1506,6 +1784,7 @@ mod test {
                     at(
                         1,
                         CompanyEvent::OperatorMessage {
+                            mentions: Vec::new(),
                             text: "hello".to_string(),
                             by: None,
                             chat: None,
@@ -1561,6 +1840,8 @@ mod dead_card_test {
     /// A reply that opened a card, exactly as the dispatch path journals it.
     fn reply_naming(task_id: &str) -> CompanyEvent {
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: Some(task_id.to_string()),
             chat_id: MAIN_THREAD_ID.to_string(),
@@ -1691,6 +1972,8 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: MAIN_THREAD_ID.to_string(),

@@ -34,7 +34,13 @@ const ROSTER = [
     role: "Research Lead",
     description: "Tracks competitor moves and drafts the weekly brief.",
   },
-  { id: "ravi", name: "Ravi", role: "Analyst", description: "Digs through the numbers." },
+  {
+    id: "ravi",
+    name: "Ravi",
+    role: "Analyst",
+    description: "Digs through the numbers.",
+    global: true,
+  },
   { id: "priya", name: "Priya", role: "Writer", description: "Turns findings into words." },
 ];
 
@@ -108,6 +114,11 @@ async function mockApi(page: Page) {
           },
         ],
       });
+    if (path.endsWith("/memory"))
+      // `GET /memory` answers with `{ items, totalContext, contextTruncated }`
+      // — the Overview's constellation reads the rows from `items`, and a bare
+      // array would leave it `undefined` and crash the graph render.
+      return json({ items: [], totalContext: 0, contextTruncated: false });
     if (path.endsWith("/team")) return json(ROSTER);
     const agent = path.match(/\/team\/([^/]+)$/);
     if (agent) {
@@ -120,7 +131,7 @@ async function mockApi(page: Page) {
         // Edit a live control rather than a disabled explanation.
         editable: ["name", "role", "description"],
         isOrchestrator: false,
-        tools: { requested: [], companyAllow: ["web_search"], effective: ["web_search"] },
+        tools: { requested: [], companyAllow: ["web_search"], deskAllow: [], deskCeilingActive: false, effective: ["web_search"] },
         desks: [{ id: "research", name: "Research", lead: true }],
         inboxEnabled: false,
       });
@@ -183,6 +194,49 @@ test("#1141 a card carries the description, the status and the open count", asyn
   const priya = card(page, "Priya");
   await expect(priya.getByTestId("team-card-status")).toHaveText("Idle");
   await expect(priya.getByTestId("team-card-tasks")).toHaveText("0 open tasks");
+});
+
+test("#1436 the roster can search names, show working teammates, and identify the baseline", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+
+  // Ravi follows the company roster only because he belongs to the shared
+  // baseline. The badge explains the deliberate boundary in host ordering.
+  await expect(card(page, "Ravi").getByTestId("team-card-global")).toHaveText("Global baseline");
+
+  const search = page.getByTestId("team-roster-search");
+  await search.fill("priya");
+  await expect(card(page, "Priya")).toBeVisible();
+  await expect(card(page, "Maya")).toHaveCount(0);
+
+  await search.fill("");
+  await page.getByTestId("team-roster-working").click();
+  await expect(card(page, "Maya")).toBeVisible();
+  await expect(card(page, "Ravi")).toHaveCount(0);
+  await expect(card(page, "Priya")).toHaveCount(0);
+});
+
+test("#1436 a workload outage disables the Working filter instead of hiding the roster", async ({
+  page,
+}) => {
+  await mockApi(page);
+  // The two reads behind the workload status fail, so `workload` stays null
+  // and no card gets a fabricated status. The Working filter has no data to
+  // judge against — it must be disabled, so it cannot be switched on into a
+  // state that would hide the whole roster with nothing to uncheck.
+  await page.route("**/api/v1/companies/acme/tasks", (route) => route.abort());
+  await page.route("**/api/v1/companies/acme/ledgers", (route) => route.abort());
+  await page.goto("/#/company");
+
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+  // The roster is complete: no filter is silently swallowing rows, and no card
+  // claims a workload the host never reported.
+  await expect(card(page, "Ravi")).toBeVisible();
+  await expect(card(page, "Priya")).toBeVisible();
+  await expect(page.getByTestId("team-roster-working")).toBeDisabled();
 });
 
 test("the status line sits on one baseline across a row, whatever the description", async ({
@@ -301,7 +355,7 @@ test("#1193 desk management survives — a desk can still be created and reached
     timeout: 30_000,
   });
   await expect(page.getByRole("button", { name: "New desk" })).toBeEnabled({ timeout: 30_000 });
-  await expect(page.getByRole("button", { name: "New teammate" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Add teammate" }).first()).toBeEnabled();
 });
 
 test("#485 a desk address still opens the chart at that desk", async ({ page }) => {
@@ -369,7 +423,10 @@ test("#1190 the card carries no switch; the inbox lives on the teammate", async 
   // teammate, and the switch was one mis-click from a silent config change
   // while scanning thirteen of them.
   await expect(page.getByTestId("team-inbox-toggle")).toHaveCount(0);
-  await expect(page.getByRole("switch")).toHaveCount(0);
+  // Scoped to the cards, not the whole page: the roster's "Working" filter
+  // above the grid is also a switch, but it is a local view filter that writes
+  // nothing to the host — the thing #1190 removed from the cards.
+  await expect(page.getByTestId("team-card").getByRole("switch")).toHaveCount(0);
 
   // The capability is not gone — it moved to the page that already reported it.
   await card(page, "Maya").getByTestId("team-card-open").click();
@@ -407,6 +464,19 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await expect(page.getByTestId("agent-status")).toHaveText("Working");
   await expect(page.getByTestId("agent-tasks")).toHaveText("2 open tasks");
 
+  // The desk is identity, not a final detail section. Its chip goes to the
+  // desk's shareable chart address, and the workload names each open card so
+  // the count is not a dead end (issue #1433).
+  const desk = page.getByTestId("agent-desk-research");
+  await expect(desk).toContainText("Research");
+  await expect(desk).toContainText("(lead)");
+  await expect(desk).toHaveAttribute("href", "#/company/research");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveText("Scan competitor pricing");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveAttribute("href", "#/tasks/t1");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveText("Draft the weekly brief");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/tasks/t2");
+  await expect(page.getByTestId("agent-open-task-t3")).toHaveCount(0);
+
   // Edit is on the header row, not buried in a card halfway down, and this
   // teammate is an overlay so it is live.
   const edit = page.getByTestId("agent-edit");
@@ -418,4 +488,50 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await page.getByTestId("agent-breadcrumb-company").click();
   await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => page.url()).toContain("#/company");
+});
+
+test("#1433 switching teammates drops the previous one's open tasks", async ({ page }) => {
+  await mockApi(page);
+
+  // The board read, under the test's control. `AgentDetailView` stays mounted
+  // across a hash change — `TeamView` renders it without a `key` — so the
+  // agent-detail request for the teammate being opened races the board request
+  // independently. Stalling the board on the second read is what makes that
+  // race deterministic: it is the "and indefinitely if that request hangs" half
+  // of the failure, and it is the half a real slow host produces.
+  //
+  // Registered after `mockApi`, so it wins: Playwright gives the most recently
+  // added handler priority.
+  let stall = false;
+  await page.route("**/tasks", async (route) => {
+    // Deliberately neither fulfilled nor aborted — the board read never lands.
+    if (stall) return;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(TASKS),
+    });
+  });
+
+  await page.goto("/#/team/maya");
+  await expect(page.getByTestId("agent-open-task-t1")).toBeVisible({ timeout: 30_000 });
+
+  // Same-document navigation, which is what the operator's click does and what
+  // keeps the view mounted. A full `goto` would remount it and prove nothing.
+  stall = true;
+  await page.evaluate(() => {
+    window.location.hash = "#/team/ravi";
+  });
+
+  // Ravi's page is ready…
+  await expect(page.getByTestId("agent-name")).toHaveText("Ravi", { timeout: 30_000 });
+
+  // …and carries no reading of the board at all, rather than Maya's. Before the
+  // fix the previous teammate's task links and workload survived here, because
+  // the effect cleared them only when `company` went falsy — so Ravi rendered
+  // with links to cards that are not his, for as long as the board read took.
+  await expect(page.getByTestId("agent-open-tasks")).toHaveCount(0);
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveCount(0);
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveCount(0);
+  await expect(page.getByTestId("agent-tasks")).toHaveCount(0);
 });

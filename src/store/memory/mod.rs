@@ -35,8 +35,9 @@
 //!   comes back, so scratch cannot appear in a durable result even if a driver
 //!   ignores the filter.
 //! - **Archive on evict.** The contract has no archive tier, so eviction is a
-//!   move between namespaces rather than a delete. See
-//!   [`facades::ProviderMemoryStore::evict`].
+//!   move between namespaces rather than a delete — and a `KeepRecent` eviction
+//!   bounds the archive by the same policy, so the move cannot grow storage
+//!   without bound either. See [`facades::ProviderMemoryStore::evict`].
 //! - **Taint.** Inbound-channel writes are stamped
 //!   [`MemoryTaint::ExternalSync`] via [`BoundMemory::inbound_context`].
 //!   Note the contract's `MemoryCore::store` requires taint on every call and
@@ -85,7 +86,9 @@ use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::{CompanyId, ContextStore, FactStore, MemoryStore};
 
-pub use driver::{MemoryDriverConfig, MemoryDriverError, MemoryMode, open_driver};
+pub use driver::{
+    MemoryDriverConfig, MemoryDriverError, MemoryMode, RemoteDeployment, open_driver,
+};
 
 /// A bound memory engine, and the only way to get a memory port out of one.
 ///
@@ -144,7 +147,7 @@ impl BoundMemory {
         })
     }
 
-    /// The bound engine's own name (`tinycortex`, `supermemory`, `null`, …).
+    /// The bound provider's own name (`supermemory`, `mem0`, `cognee`, `null`, …).
     ///
     /// Safe to surface to an operator — unlike the endpoint and the credential,
     /// which are not.

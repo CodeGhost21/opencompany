@@ -63,11 +63,6 @@ mod composio_turn_test;
 /// about the company. See [`confine`].
 pub mod confine;
 pub mod cost;
-/// Hosted embeddings compute for the in-pod memory engine's meaning tier (188c2).
-/// Needs the `tinycortex` crate's `EmbeddingBackend` trait, so it links only when
-/// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
-#[cfg(feature = "tinycortex")]
-pub mod embeddings;
 /// Hosting (TinyHosts): the per-company connection and the agent tools over it.
 /// The keys it reads live in `company::hosting`, which is compiled in every
 /// build — the console's Hosting settings write them whether or not this
@@ -117,14 +112,14 @@ pub mod publish;
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
 mod publish_turn_test;
-/// Issue #245, agent half: `repo_checkout` / `repo_pr` behind an explicit
-/// `repo` grant — a **confined** working tree cloned out of the host's mirror
-/// (a full object copy, then every reference back to the mirror severed), plus
-/// the per-turn ledger that deletes it again. See [`repo`].
-pub mod repo;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
+/// A company's **own** search provider (the BYO half of issue #238): Brave,
+/// Exa, Querit or a self-hosted SearXNG, wired from that company's stored key
+/// through OpenHuman's own search tools. Falls back to [`search`]'s metered
+/// managed surface whenever nothing is configured.
+pub mod search_byo;
 /// End-to-end proof that the #238 `web_search` tool is reachable from a real
 /// turn — the harness, the grant gates, the approval policy, the cap and the
 /// meter are all real; only the model's choices and the search backend's
@@ -168,6 +163,7 @@ pub mod workspace_tools;
 #[cfg(test)]
 mod workspace_turn_test;
 
+use crate::harness::run_trace::RunTraceSink;
 pub use brain::HarnessBrain;
 
 use std::collections::{HashMap, HashSet};
@@ -192,8 +188,8 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk, OverlayDeskMember,
-    PolicyOverride, TurnStep,
+    AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk,
+    OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
@@ -233,6 +229,14 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// The company home's MCP store directory — `<home>/mcp`, the same one
+    /// [`McpRuntime`](crate::harness::mcp::McpRuntime) is built over.
+    ///
+    /// Carried because OpenHuman's `mcp_registry_*` tools take a config now
+    /// instead of reading a process global, and the toolbelt has to hand them
+    /// the config that selects *this* company's store. `None` leaves those two
+    /// tools off the belt, which is what a caller with no MCP home should get.
+    pub mcp_home: Option<PathBuf>,
     /// Whether each private agent workspace is initialized as a Git repository
     /// and checkpointed after tool calls. Host-level `[workspace]` config owns
     /// this switch; false preserves the pre-checkpoint behavior exactly.
@@ -395,6 +399,17 @@ pub struct HarnessDeps {
     /// every node produced. `None` (the default build, and every unwired test)
     /// degrades the persist to a no-op, exactly like [`Self::events`].
     pub run_output_store: Option<Arc<dyn crate::ports::run_output::WorkflowRunOutputStore>>,
+    /// Where a workflow `agent` node's turn is recorded as a first-class
+    /// attempt.
+    ///
+    /// A node's turn has neither a card nor a conversation, so before this it
+    /// minted no row at all and nothing could ask what its agent did. `None`
+    /// (the default build, and every unwired test) leaves each node behaving
+    /// exactly as it did then — the node still runs, it is simply not recorded.
+    pub workflow_runs: Option<Arc<dyn crate::ports::RunStore>>,
+    /// The unredacted companion of those attempts' steps — reasoning text and
+    /// raw tool I/O. `None` keeps only the scrubbed skeleton.
+    pub deep_trace: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     /// Issue #274's per-workflow snapshot ring, so the orchestrator's
     /// `update_workflow` / `delete_workflow` tools (issue #661, M7) write
     /// through the same undo-and-cascade path the console's `PUT`/`DELETE`
@@ -510,6 +525,22 @@ pub struct HarnessDeps {
     /// these deps across a roster gives every agent of the company one budget
     /// rather than one each.
     pub search: Option<search::SearchBackend>,
+    /// The company's **own** search provider connection, when it configured one
+    /// in the console (Brave / Exa / Querit / a self-hosted SearXNG).
+    ///
+    /// `None` — the default at every construction site — means "search through
+    /// the managed surface above", which is the fallback OpenHuman's own
+    /// registry takes for a BYO engine with no key. When `Some` **and** the
+    /// company **explicitly** grants `search`, [`build::build_agent`] wires
+    /// [`search_byo::byo_search_tools`] *instead of* the metered managed tool:
+    /// two "search the web" tools on one belt is how a model comes to spend the
+    /// platform's money by accident.
+    ///
+    /// Resolved from that company's own secret store and re-resolved each turn
+    /// like `composio` / `hosting`, so a key set or rotated in the console takes
+    /// effect on the next turn with no restart. Never from the environment: a
+    /// BYO key is billed to the company that pasted it.
+    pub tenant_search: Option<search_byo::TenantSearch>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
     /// running it (and installs the steer stop-hook over the slot's control), so
@@ -551,31 +582,6 @@ pub struct HarnessDeps {
     /// construction site but the production runtime builder) **fails closed**:
     /// no workspace tools are wired and agents behave exactly as before.
     pub workspace: Option<Arc<dyn crate::ports::WorkspaceStore>>,
-    /// Issue #245, agent half — the company's [`RepoManager`], so an agent that
-    /// explicitly grants `repo` can check a bound repository out and read a
-    /// pull request. `None` (the default at every construction site but the
-    /// production runtime builder) **fails closed**: no repository tools are
-    /// wired and agents behave exactly as before.
-    ///
-    /// [`RepoManager`]: crate::runtime::RepoManager
-    pub repos: Option<Arc<crate::runtime::RepoManager>>,
-    /// The company's bound repositories, resolved to **data** before deps
-    /// construction — the `mcp_servers` doctrine, and for the same reason:
-    /// [`build::build_agent`] is synchronous while reading the binding index is
-    /// async, and the tool descriptions name what is bound so a model does not
-    /// have to guess. Empty means nothing is bound, which is also what makes a
-    /// `repo` grant with no bindings wire nothing and warn.
-    pub repo_bindings: Vec<crate::runtime::repo_manager::types::RepoBinding>,
-    /// The shared per-turn ledger of checkouts and diff spills, so the
-    /// [`CheckoutJanitor`](brain::CheckoutJanitor) claimed at each entry point
-    /// can delete them however the turn ends.
-    ///
-    /// Same cheap-shared-handle pattern as [`Self::pending_publishes`], and for
-    /// the same structural reason: the tools are built **once per agent** while
-    /// the deletion boundary is **per turn**. Default is an empty ledger, which
-    /// simply means nothing is ever recorded for deletion — the boot sweep is
-    /// the backstop.
-    pub checkouts: repo::CheckoutLedger,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -823,6 +829,13 @@ impl CompanyAgent {
                     sink.record(&event).await;
                 }
                 events.push(event);
+            }
+            // A turn that *ends* mid-thought has no closing `TextDelta` or tool
+            // call, so the reasoning tail below the interim flush threshold
+            // would otherwise sit in the trace unpersisted — exactly the
+            // failed/interrupted turns worth diagnosing. Flush on drain.
+            if let Some(sink) = &run_sink {
+                sink.flush().await;
             }
             events
         });
@@ -1175,21 +1188,6 @@ pub struct HarnessPool {
     /// again to notice it. That was live for both integrations until the tools
     /// were observed missing from an agent whose settings page said "Connected".
     billing_fingerprints: RwLock<HashMap<CompanyId, u64>>,
-    /// Fingerprint of the company's bound-repository set the cached roster was
-    /// built from, keyed by company (issue #245). Drives repository freshness:
-    /// [`ensure`](Self::ensure) re-reads the binding index from the
-    /// [`SecretStore`] on every call and rebuilds the roster whenever it moves —
-    /// so a bind, a credential rotation and a revoke each reach the agent on the
-    /// company's **next** turn with no restart.
-    ///
-    /// All three have to move it, which is why the fingerprint is over
-    /// `(key, token_fingerprint, branches)` rather than over the key alone: a
-    /// rotation changes nothing about *which* repositories exist, and a roster
-    /// that kept a tool description naming a binding whose credential has since
-    /// been revoked would offer an agent a checkout that can no longer fetch.
-    /// With no secret store wired the set is the static
-    /// [`HarnessDeps::repo_bindings`], whose fingerprint never moves.
-    repo_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Fingerprint of the operator skill-delta set the cached roster was built
     /// from, keyed by company (issue #41). Drives skill-delta freshness:
     /// [`ensure`](Self::ensure) re-fetches the deltas from the
@@ -1216,6 +1214,20 @@ pub struct HarnessPool {
     /// A company that never sets an override keeps an empty set and a stable
     /// fingerprint — no rebuild, byte-identical to the pre-#343 behaviour.
     budget_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the operator per-agent persona-override set the cached
+    /// roster was built from, keyed by company (issue #1530). Drives persona
+    /// freshness: [`ensure`](Self::ensure) re-resolves the overrides from
+    /// [`HarnessDeps::store`] on every call and rebuilds the roster whenever a
+    /// persona is edited, cleared or reset — so an instructions edit on the
+    /// console Team page reaches the agent's system prompt on the company's
+    /// **next** turn, with no restart and no redeploy. Needed for the same reason
+    /// as [`Self::budget_fingerprints`]: the persona is assembled once per roster,
+    /// not once per call, so without this axis every other fingerprint is stable
+    /// on a persona-only change and the fast path would keep serving the old
+    /// instructions until the process restarted. A company that never edits a
+    /// persona keeps an empty set and a stable fingerprint — no rebuild,
+    /// byte-identical to the pre-#1530 behaviour.
+    override_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Per-company fingerprint of the operator `[policy]` override (issue #562),
     /// so a console tier change rebuilds the roster instead of waiting for a
     /// restart. Without this axis the override persists and is silently ignored:
@@ -1290,9 +1302,9 @@ impl HarnessPool {
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
             billing_fingerprints: RwLock::new(HashMap::new()),
-            repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
+            override_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
             context_fingerprints: RwLock::new(HashMap::new()),
@@ -1383,6 +1395,11 @@ impl HarnessPool {
         let overlay_fp =
             overlay_fingerprint(&overlay.agents, &overlay.agent_edits, &overlay.retired);
         let budget_fp = budget_fingerprint(&overlay.budgets);
+        // Issue #1530: the persona overrides ride the same store read, and go
+        // stale the same way a budget does — the persona is assembled once per
+        // roster, so an edit unseen by any fingerprint would not reach the
+        // system prompt until a restart.
+        let override_fp = override_fingerprint(&overlay.agent_edits);
         let policy_fp = policy_fingerprint(overlay.policy.as_ref());
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
@@ -1417,6 +1434,10 @@ impl HarnessPool {
         // The hosting credential is set from the same settings surface and goes
         // stale the same way, so it rides the same axis.
         let hosting_config = self.resolve_hosting(company, deps).await;
+        // The company's own search provider is set from that same settings
+        // surface and goes stale the same way, so it rides the same axis: a key
+        // pasted in the console must reach the next turn, not the next restart.
+        let tenant_search_config = self.resolve_tenant_search(company, deps).await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
@@ -1428,17 +1449,9 @@ impl HarnessPool {
             #[cfg(feature = "paypal")]
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
             hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
+            hasher.write_u64(search_byo::TenantSearch::fingerprint(&tenant_search_config));
             hasher.finish()
         };
-
-        // Re-read + fingerprint the company's bound repositories (issue #245):
-        // one index document, read live, so a bind / rotate / revoke reaches the
-        // agent on the next turn. Only companies that explicitly grant `repo`
-        // touch the store on this axis; everything else resolves to the static
-        // `deps.repo_bindings` (empty at every construction site but the
-        // production builder), whose fingerprint never moves.
-        let repo_bindings = self.resolve_repo_bindings(company, deps).await;
-        let repo_fp = repo_binding_fingerprint(&repo_bindings);
 
         // Re-fetch + fingerprint the operator skill deltas (issue #41) BEFORE the
         // fast-path check. A skills-only change leaves every other axis stable, so
@@ -1480,9 +1493,9 @@ impl HarnessPool {
             let capability_fingerprints = self.capability_fingerprints.read().await;
             let composio_fingerprints = self.composio_fingerprints.read().await;
             let billing_fingerprints = self.billing_fingerprints.read().await;
-            let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
+            let override_fingerprints = self.override_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
             let context_fingerprints = self.context_fingerprints.read().await;
@@ -1492,9 +1505,9 @@ impl HarnessPool {
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
                 && billing_fingerprints.get(&company.id) == Some(&billing_fp)
-                && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
+                && override_fingerprints.get(&company.id) == Some(&override_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
                 && desk_fingerprints.get(&company.id) == Some(&desk_fp)
                 && context_fingerprints.get(&company.id) == Some(&context_fp)
@@ -1525,10 +1538,9 @@ impl HarnessPool {
             fresh_deps.paypal = paypal_config;
         }
         fresh_deps.hosting = hosting_config;
-        // And the freshly-read bindings (issue #245), so a repository bound or
-        // revoked in the console is what the rebuilt agents' tools resolve
-        // against — including the descriptions that name what is bound.
-        fresh_deps.repo_bindings = repo_bindings;
+        // And the company's own search provider, so a key pasted (or cleared) in
+        // the console decides what the rebuilt agents search through.
+        fresh_deps.tenant_search = tenant_search_config;
         // Same treatment for the overlay-agent set: `company` may be a stale
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
@@ -1601,10 +1613,6 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), billing_fp);
-        self.repo_fingerprints
-            .write()
-            .await
-            .insert(company.id.clone(), repo_fp);
         self.skill_fingerprints
             .write()
             .await
@@ -1613,6 +1621,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), budget_fp);
+        self.override_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), override_fp);
         self.policy_fingerprints
             .write()
             .await
@@ -1711,7 +1723,7 @@ impl HarnessPool {
     ///
     /// A transient **read error** keeps that connection too, with a warning,
     /// rather than un-wiring the billing tools — the same direction
-    /// [`Self::resolve_repo_bindings`] and [`Self::resolve_effective_mcp`]
+    /// [`Self::resolve_effective_mcp`]
     /// degrade in, and the safe one here for a specific reason: a stale
     /// Chargebee credential is refused by Chargebee, which the agent surfaces as
     /// a tool error it can report, whereas a tool that has vanished is invisible
@@ -1778,6 +1790,41 @@ impl HarnessPool {
         }
     }
 
+    /// The company's own search provider, for the same reasons as `hosting`.
+    ///
+    /// Only companies that **explicitly** grant `search` read at all — the same
+    /// gate the metered managed tool passes, because this is the same namespace
+    /// wearing a different credential. A company that never opted into web
+    /// search does not get a store read per turn for a setting it cannot use.
+    ///
+    /// A transient read error keeps the last known connection with a warning,
+    /// like `hosting`: degrading to `None` would silently move the company's
+    /// searches back onto the platform's metered account — a bill moving between
+    /// two parties because a store hiccuped.
+    async fn resolve_tenant_search(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<search_byo::TenantSearch> {
+        if !crate::company::grants_search_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.tenant_search.clone();
+        };
+        match search_byo::TenantSearch::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[search] could not read the company's search provider; keeping the last known \
+                     connection: {err}"
+                );
+                deps.tenant_search.clone()
+            }
+        }
+    }
+
     /// The PayPal equivalent (issue #789), for the same reasons.
     #[cfg(feature = "paypal")]
     async fn resolve_paypal(
@@ -1800,41 +1847,6 @@ impl HarnessPool {
                      connection: {err}"
                 );
                 deps.paypal.clone()
-            }
-        }
-    }
-
-    /// Re-reads the company's bound repositories (issue #245) from the
-    /// [`RepoManager`](crate::runtime::RepoManager), so a bind, a credential
-    /// rotation or a revoke reaches the roster on the next turn.
-    ///
-    /// Only companies that **explicitly** grant `repo` read at all; everything
-    /// else answers empty without touching the store, mirroring
-    /// [`Self::resolve_composio`]. A transient read error degrades to the
-    /// boot-resolved [`HarnessDeps::repo_bindings`] with a warning rather than
-    /// dropping an agent's repository tools mid-session — the same direction
-    /// [`Self::resolve_effective_mcp`] degrades in, and the safe one: a stale
-    /// binding list still resolves against real bindings, while an empty one
-    /// un-wires the tools entirely.
-    async fn resolve_repo_bindings(
-        &self,
-        company: &CompanyRecord,
-        deps: &HarnessDeps,
-    ) -> Vec<crate::runtime::repo_manager::types::RepoBinding> {
-        if !crate::company::grants_repo_explicit(&company.manifest.tools.allow) {
-            return Vec::new();
-        }
-        let Some(repos) = deps.repos.as_ref() else {
-            return deps.repo_bindings.clone();
-        };
-        match repos.list().await {
-            Ok(bindings) => bindings,
-            Err(err) => {
-                tracing::warn!(
-                    company = %company.id,
-                    "[repo] could not read the repository bindings; keeping the last known set: {err}"
-                );
-                deps.repo_bindings.clone()
             }
         }
     }
@@ -2003,14 +2015,6 @@ impl HarnessPool {
             .copied()
     }
 
-    /// The current bound-repository fingerprint for a company (test-only), so a
-    /// bind / rotate / revoke freshness test can assert the roster was actually
-    /// rebuilt rather than inferring it (issue #245).
-    #[cfg(test)]
-    pub async fn repo_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
-        self.repo_fingerprints.read().await.get(company).copied()
-    }
-
     /// The current skill-delta fingerprint for a company (test-only), so a
     /// skill-freshness test can assert a rebuild happened (issue #41).
     #[cfg(test)]
@@ -2025,6 +2029,19 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn budget_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.budget_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current persona-override fingerprint for a company (test-only), so a
+    /// persona-freshness test can assert the roster was actually rebuilt after a
+    /// console instructions edit rather than inferring it (issue #1530). This is
+    /// the observable that makes "no restart" testable.
+    #[cfg(test)]
+    pub async fn override_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.override_fingerprints
+            .read()
+            .await
+            .get(company)
+            .copied()
     }
 
     /// The current billing-connection fingerprint for a company (test-only), so
@@ -2093,7 +2110,12 @@ impl HarnessPool {
         agent_id: &str,
         message: &str,
         deps: &HarnessDeps,
+        run_sink: Option<Arc<RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
+        // `LiveStream::Off` stays: the frames must not reach the console
+        // timeline. The sink is a different channel — a durable per-attempt
+        // trace keyed on its own run id, which cannot misattribute to a chat
+        // thread because it names none.
         self.run_inner(
             company,
             agent_id,
@@ -2101,7 +2123,7 @@ impl HarnessPool {
             deps,
             None,
             LiveStream::Off,
-            None,
+            run_sink,
         )
         .await
     }
@@ -2939,6 +2961,40 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
     hasher.finish()
 }
 
+/// A stable fingerprint of a company's operator persona-override set (issue
+/// #1530), used to detect a persona set / changed / cleared / reset between
+/// [`HarnessPool::ensure`] calls. Mirrors [`budget_fingerprint`]'s shape; an
+/// [`AgentOverride`] holds no secret.
+///
+/// **Sorted by `agent_id`** first, for the reason [`budget_fingerprint`]
+/// documents: the write routes push and retain rather than maintain an order, so
+/// an order-sensitive hash would rebuild the roster (dropping live agent
+/// sessions) on a save that changed nothing an agent can observe. The
+/// instructions text is hashed as an `Option` discriminant plus its bytes, so a
+/// stored `Some("")` stays distinct from `None` — the same distinction the
+/// resolver's reset-to-blueprint contract depends on.
+fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut ordered: Vec<&AgentOverride> = overrides.iter().collect();
+    ordered.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+    let mut hasher = DefaultHasher::new();
+    ordered.len().hash(&mut hasher);
+    for entry in ordered {
+        entry.agent_id.hash(&mut hasher);
+        match &entry.instructions {
+            Some(text) => {
+                1u8.hash(&mut hasher);
+                text.hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+    }
+    hasher.finish()
+}
+
 /// A stable fingerprint of a company's operator skill-delta set (issue #41),
 /// used to detect a skill authored / edited / enabled / disabled between
 /// [`HarnessPool::ensure`] calls. Mirrors [`mcp_fingerprint`]'s shape.
@@ -2995,37 +3051,6 @@ fn skill_delta_fingerprint(deltas: &[SkillState]) -> u64 {
 /// Over `(key, token_fingerprint, branches)`, sorted by key, because those are
 /// exactly the three things a rebuild has to notice:
 ///
-/// * **key** — a bind adds one, a revoke removes one, and either changes what
-///   `repo_checkout` can resolve and what its description names;
-/// * **token fingerprint** — a rotation leaves the key alone, and a *revoked*
-///   credential blanks it while the key survives, so keying on the set of
-///   repositories would leave an agent holding a tool over a binding that can no
-///   longer fetch;
-/// * **branches** — the set a checkout may name, and the only other field the
-///   tools read.
-///
-/// Deliberately not `size_bytes` or `last_fetched_millis`: both move on every
-/// fetch, and a fetch is something the agent's own tool does — folding them in
-/// would rebuild the roster after every checkout, for no change an agent can
-/// observe.
-fn repo_binding_fingerprint(bindings: &[crate::runtime::repo_manager::types::RepoBinding]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut ordered: Vec<&crate::runtime::repo_manager::types::RepoBinding> =
-        bindings.iter().collect();
-    ordered.sort_by(|a, b| a.key.cmp(&b.key));
-
-    let mut hasher = DefaultHasher::new();
-    ordered.len().hash(&mut hasher);
-    for binding in ordered {
-        binding.key.hash(&mut hasher);
-        binding.token_fingerprint.hash(&mut hasher);
-        binding.branches.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
 /// Build every roster agent for a company: every manifest `[[agent]]`, plus
 /// every operator- or orchestrator-added [`OverlayAgent`] (issue #71 — Active
 /// Runtime Teammates) that does not collide with a manifest agent id.
@@ -3113,6 +3138,12 @@ pub(crate) fn build_roster(
         // built below — the `ApprovalPolicy` arm and `CompanyAgent`'s copy that
         // the L1 dispatch gate reads — from this one call.
         let effective_budget = company.effective_budget(&manifest_agent.id);
+        // Issue #1530: the persona in force, not the one the manifest shipped
+        // with. `effective_instructions` is an operator override when one is
+        // stored and the manifest `prompt` otherwise, so a console persona edit
+        // reaches the system prompt this agent is built with — and it wins over
+        // the blueprint without cloning the borrowed `&ManifestAgent`.
+        let effective_instructions = company.effective_instructions(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
             .with_requests(deps.approval_requests.clone())
             // Issue #243: stamp who the parked effect belongs to, so approving it
@@ -3121,6 +3152,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the per-server read-only MCP declaration, so a
             // server-declared read-only bridge call does not park under `auto`.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(workspace) = deps.workspace.as_ref() {
+            agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
+        }
         // Issue #304: give the policy something to measure `budget_usd_daily`
         // against. Only wired when the host has a meter — without one the cap
         // arm stays inert and warns once, rather than parking every priced call
@@ -3148,6 +3182,7 @@ pub(crate) fn build_roster(
                 .get(&manifest_agent.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
+            effective_instructions.as_deref(),
             is_orchestrator,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -3180,6 +3215,11 @@ pub(crate) fn build_roster(
         // limitation" this lifts. `effective_budget` gives it a stored cap when
         // an operator set one, and `None` (as before) when nobody has.
         let effective_budget = company.effective_budget(&manifest_agent.id);
+        // Issue #1530: the same persona resolution as the manifest loop. A bare
+        // overlay teammate has no manifest `prompt`, so this is `None` unless an
+        // operator set an override for it — and an override wins uniformly, the
+        // one reason `overlay_agent_to_manifest` can keep `prompt: None`.
+        let effective_instructions = company.effective_instructions(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
             .with_requests(deps.approval_requests.clone())
             // An overlay teammate is a real roster agent and re-dispatches the
@@ -3188,6 +3228,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the same per-server read-only MCP declaration the
             // manifest agents get — an overlay teammate calls the same servers.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(workspace) = deps.workspace.as_ref() {
+            agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
+        }
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
@@ -3209,6 +3252,7 @@ pub(crate) fn build_roster(
                 .get(&manifest_agent.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
+            effective_instructions.as_deref(),
             /* is_orchestrator */ false,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -3244,10 +3288,11 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         name: Some(overlay.name.clone()),
         description: overlay.description.clone(),
         tier: None,
-        // An operator- or orchestrator-added teammate runs on the company's
-        // default harness. There is no console field to name one, and inventing
-        // a binding here would put a teammate on a harness nobody chose.
-        harness: None,
+        // Carried straight through — issue #1245's harness-picker follow-up
+        // gave overlay teammates the same `harness` binding a manifest agent
+        // has. `None` still means "the default harness", exactly as before
+        // this field existed.
+        harness: overlay.harness.clone(),
         // Issue #661 / L5: carry the overlay's own per-teammate grant. An empty
         // list here is unchanged behaviour — `agent_effective_grants` reads it as
         // the standard company-wide grant, exactly as the hardcoded empty did.
@@ -3260,12 +3305,23 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         delegates_to: Vec::new(),
         context: None,
         budget_usd_daily: None,
+        // Issue #1530: still `None`, and deliberately so. An overlay teammate's
+        // persona is carried by the record's per-agent override (resolved through
+        // `effective_instructions` and threaded into `build_agent` by the caller),
+        // not by this synthetic `ManifestAgent` — the same shape the budget cap
+        // takes, where the override rather than a manifest field is the source.
         prompt: None,
         prompt_files: Vec::new(),
         prompt_files_resolved: Vec::new(),
         classes: Vec::new(),
         ledgers: None,
         can_declare_ledgers: true,
+        // Issue #1245's per-agent follow-up: carried straight through, exactly
+        // like `tools`/`description` above. Meaningful only when the default
+        // harness this teammate lands on (see `harness: None` above) turns out
+        // to be an `acp` one — a `built_in` engine simply has no lever that
+        // reads it, the same as it ignores `AcpHarness::model`.
+        model: overlay.model.clone(),
     }
 }
 
@@ -3299,6 +3355,7 @@ pub(crate) fn workflow_wiring_deps(
         store: runtime.store.clone(),
         meter,
         workspace_root: std::env::temp_dir(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: std::env::temp_dir(),
         model_override: None,
@@ -3318,6 +3375,8 @@ pub(crate) fn workflow_wiring_deps(
         workflow_refs: workflow_refs::WorkflowRefQueue::default(),
         run_outputs: orchestrator::RunOutputCache::default(),
         run_output_store: None,
+        workflow_runs: None,
+        deep_trace: None,
         workflow_revisions: None,
         approval_requests: policy::ApprovalRequestQueue::default(),
         secrets: None,
@@ -3334,13 +3393,11 @@ pub(crate) fn workflow_wiring_deps(
         hosting: None,
         // The staging shape in issue #874: `searchCredentialConfigured: false`.
         search: None,
+        tenant_search: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: repo::CheckoutLedger::default(),
     }
 }
 
@@ -3455,6 +3512,8 @@ mod tests {
             role: "Researcher".into(),
             description: None,
             tools: vec!["docs.*".into(), "payment.send".into()],
+            model: None,
+            harness: None,
         };
         let manifest = overlay_agent_to_manifest(&scoped);
         assert_eq!(
@@ -3475,6 +3534,8 @@ mod tests {
             role: "Generalist".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         };
         let manifest = overlay_agent_to_manifest(&standard);
         assert!(manifest.tools.is_empty());
@@ -3497,12 +3558,14 @@ mod tests {
             role: "Content Writer".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         };
 
         let manifest = overlay_agent_to_manifest(&overlay);
         assert_eq!(manifest.name.as_deref(), Some("Alex"));
         // And it reaches the one place it has to: the persona the model reads.
-        let persona = crate::company::prompt::persona_prompt("Acme", &manifest);
+        let persona = crate::company::prompt::persona_prompt("Acme", &manifest, None);
         assert!(
             persona.contains("You are Alex, the Content Writer at Acme"),
             "{persona}"
@@ -3522,6 +3585,8 @@ mod tests {
                 role: "r".into(),
                 description: None,
                 tools,
+                model: None,
+                harness: None,
             }]
         };
         let standard = one(Vec::new());
@@ -3679,6 +3744,17 @@ mod tests {
             let mut guard = self.chunks.lock().unwrap();
             let before = guard.len();
             guard.retain(|(a, _)| a != addr);
+            Ok(guard.len() < before)
+        }
+        async fn delete_label(
+            &self,
+            _id: &CompanyId,
+            addr: &ChunkAddr,
+            label: &str,
+        ) -> crate::Result<bool> {
+            let mut guard = self.chunks.lock().unwrap();
+            let before = guard.len();
+            guard.retain(|(a, c)| !(a == addr && c.label == label));
             Ok(guard.len() < before)
         }
         async fn search(
@@ -3870,6 +3946,7 @@ description = "Builds the product."
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
+                mcp_home: None,
                 workspace_git_enabled: false,
                 audit_root: dir.path().to_path_buf(),
                 model_override: None,
@@ -3889,6 +3966,8 @@ description = "Builds the product."
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
                 run_output_store: None,
+                workflow_runs: None,
+                deep_trace: None,
                 workflow_revisions: None,
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
@@ -3907,10 +3986,8 @@ description = "Builds the product."
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
                 search: None,
+                tenant_search: None,
                 workspace: None,
-                repos: None,
-                repo_bindings: Vec::new(),
-                checkouts: crate::harness::repo::CheckoutLedger::default(),
             },
             store,
             meter,
@@ -4084,6 +4161,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -4103,6 +4181,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -4121,10 +4201,8 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
 
         let roster = build_roster(&record(), &deps, &[], &HashMap::new())
@@ -4156,6 +4234,8 @@ description = "Builds the product."
             role: "Growth Lead".into(),
             description: Some("Owns acquisition experiments.".into()),
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
@@ -4223,6 +4303,8 @@ description = "Builds the product."
             role: "Shadow CEO".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
@@ -4347,6 +4429,8 @@ description = "Builds the product."
             role: "Designer".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         pool.ensure(&rec, &fx.deps).await.expect("second ensure");
 
@@ -4851,6 +4935,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -4870,6 +4955,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -4888,10 +4975,8 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -5038,6 +5123,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5057,6 +5143,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
@@ -5075,10 +5163,8 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -5144,184 +5230,6 @@ description = "Builds the product."
     }
 
     // --- Bound-repository freshness (issue #245) ----------------------------
-
-    /// A bind, a credential **rotation** and a revoke each rebuild the roster on
-    /// the company's next turn, with no restart.
-    ///
-    /// All three are asserted because they fail differently, and the middle one
-    /// is the reason the fingerprint is over `(key, token_fingerprint,
-    /// branches)` rather than over the set of keys. A rotation changes nothing
-    /// about *which* repositories exist; a revoke blanks a credential while the
-    /// key survives for the moment before the entry is dropped. A roster keyed
-    /// on the key set alone holds through both, and an agent is left holding a
-    /// tool over a binding that can no longer fetch.
-    ///
-    /// The index is written straight into the live secret store rather than
-    /// through `bind`, because what is under test is the *staleness gate*, and
-    /// binding for real would drag a `git` fixture and a network-shaped code
-    /// path into a test about a hash.
-    #[tokio::test]
-    async fn ensure_rebuilds_when_a_repository_is_bound_rotated_or_revoked() {
-        use crate::runtime::repo_manager::types::RepoBinding;
-
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
-        let dir = tempfile::tempdir().unwrap();
-        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
-        deps.secrets = Some(secrets.clone());
-        deps.repos = Some(Arc::new(crate::runtime::RepoManager::new(
-            CompanyId::new("acme"),
-            dir.path().join("repos"),
-            secrets.clone(),
-        )));
-
-        // The grant is what opens this axis at all: a company that does not
-        // explicitly grant `repo` never reads the index, so its fingerprint can
-        // never move. That is the fast path every other company stays on.
-        let mut rec = record();
-        rec.manifest.tools.allow = vec!["repo".to_string()];
-
-        let pool = HarnessPool::new();
-        let write_index = |bindings: Vec<RepoBinding>| {
-            let secrets = secrets.clone();
-            async move {
-                let json = serde_json::to_string(&serde_json::json!({ "bindings": bindings }))
-                    .expect("index json");
-                secrets
-                    .set(
-                        &CompanyId::new("acme"),
-                        crate::runtime::repo_manager::REPO_INDEX_KEY,
-                        crate::ports::types::SecretValue(json),
-                    )
-                    .await
-                    .expect("write index");
-            }
-        };
-        let binding = |fingerprint: &str| RepoBinding {
-            key: "acme-widgets-000000000000".to_string(),
-            url: "https://github.com/acme/widgets".to_string(),
-            owner: "acme".to_string(),
-            repo: "widgets".to_string(),
-            branches: vec!["main".to_string()],
-            token_fingerprint: fingerprint.to_string(),
-            last_fetched_millis: None,
-            size_bytes: 0,
-            bound_at_millis: 1,
-            can_push: None,
-        };
-
-        pool.ensure(&rec, &deps).await.expect("first ensure");
-        let empty = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-
-        // Stability first, so every change assertion below cannot pass by
-        // coincidence.
-        pool.ensure(&rec, &deps).await.expect("redundant ensure");
-        assert_eq!(
-            pool.repo_fingerprint_of(&rec.id).await,
-            Some(empty),
-            "an unchanged binding set must not move the fingerprint"
-        );
-
-        // Bind.
-        write_index(vec![binding("0f1e2d3c4b5a")]).await;
-        pool.ensure(&rec, &deps).await.expect("post-bind ensure");
-        let bound = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-        assert_ne!(empty, bound, "a bind must move the staleness fingerprint");
-
-        // Rotate: same repository, same branches, new credential.
-        write_index(vec![binding("aaaaaaaaaaaa")]).await;
-        pool.ensure(&rec, &deps).await.expect("post-rotate ensure");
-        let rotated = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-        assert_ne!(
-            bound, rotated,
-            "a credential rotation must move the fingerprint even though the \
-             repository set is identical"
-        );
-
-        // Revoke.
-        write_index(Vec::new()).await;
-        pool.ensure(&rec, &deps).await.expect("post-revoke ensure");
-        let revoked = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-        assert_ne!(rotated, revoked, "a revoke must move the fingerprint");
-        assert_eq!(revoked, empty, "and must land back on the empty set");
-        assert_eq!(
-            pool.resident_companies().await,
-            1,
-            "same company, rebuilt in place — not a new residency"
-        );
-    }
-
-    /// A company that does not explicitly grant `repo` never reads the binding
-    /// index, so this axis is inert for it — the fast path every company that
-    /// does not use the feature stays on.
-    #[tokio::test]
-    async fn a_company_without_the_repo_grant_never_moves_on_this_axis() {
-        use crate::runtime::repo_manager::types::RepoBinding;
-
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
-        let dir = tempfile::tempdir().unwrap();
-        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
-        deps.secrets = Some(secrets.clone());
-        deps.repos = Some(Arc::new(crate::runtime::RepoManager::new(
-            CompanyId::new("acme"),
-            dir.path().join("repos"),
-            secrets.clone(),
-        )));
-
-        // A wildcard, deliberately: `*` does not confer `repo`, so even a
-        // broadly-permissioned company stays off this axis.
-        let mut rec = record();
-        rec.manifest.tools.allow = vec!["*".to_string()];
-
-        let pool = HarnessPool::new();
-        pool.ensure(&rec, &deps).await.expect("first ensure");
-        let before = pool
-            .repo_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprint");
-
-        let json = serde_json::to_string(&serde_json::json!({
-            "bindings": [RepoBinding {
-                key: "acme-widgets-000000000000".to_string(),
-                url: "https://github.com/acme/widgets".to_string(),
-                owner: "acme".to_string(),
-                repo: "widgets".to_string(),
-                branches: vec!["main".to_string()],
-                token_fingerprint: "0f1e2d3c4b5a".to_string(),
-                last_fetched_millis: None,
-                size_bytes: 0,
-                bound_at_millis: 1,
-                can_push: None,
-            }]
-        }))
-        .unwrap();
-        secrets
-            .set(
-                &CompanyId::new("acme"),
-                crate::runtime::repo_manager::REPO_INDEX_KEY,
-                crate::ports::types::SecretValue(json),
-            )
-            .await
-            .unwrap();
-
-        pool.ensure(&rec, &deps).await.expect("post-bind ensure");
-        assert_eq!(
-            pool.repo_fingerprint_of(&rec.id).await,
-            Some(before),
-            "an ungranted company must not read the index, let alone rebuild on it"
-        );
-    }
 
     // --- Billing-credential freshness (issues #788, #789) -------------------
 
@@ -5711,6 +5619,7 @@ description = "Builds the product."
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5730,6 +5639,8 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -5748,10 +5659,8 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
 
@@ -5778,6 +5687,8 @@ description = "Builds the product."
             role: "Growth Lead".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         live_store.save(&updated).await.unwrap();
 
@@ -5895,6 +5806,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5914,6 +5826,8 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -5932,10 +5846,8 @@ description = "Sets direction."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
@@ -6055,6 +5967,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -6073,6 +5986,8 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
@@ -6092,10 +6007,8 @@ description = "Sets direction."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 
@@ -6619,6 +6532,132 @@ description = "Builds the product."
         assert_eq!(pool.budget_fingerprint_of(&rec.id).await, Some(fp_cleared));
     }
 
+    /// `override_fingerprint` detects a persona edit, keeps `Some("")` distinct
+    /// from `None` (the reset-to-blueprint distinction), and does not depend on
+    /// the stored order — the `HashMap` the overrides come from has none, so an
+    /// order-sensitive hash would rebuild the roster (dropping live sessions) on
+    /// a save that changed nothing (issue #1530).
+    #[test]
+    fn override_fingerprint_detects_edits_and_ignores_order() {
+        use crate::ports::types::AgentOverride;
+        let entry = |id: &str, text: Option<&str>| AgentOverride {
+            agent_id: id.to_string(),
+            instructions: text.map(str::to_string),
+            ..Default::default()
+        };
+
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry("ceo", Some("x"))]),
+            "adding an override must move the fingerprint"
+        );
+        assert_ne!(
+            override_fingerprint(&[entry("ceo", Some("a"))]),
+            override_fingerprint(&[entry("ceo", Some("b"))]),
+            "editing the text must move the fingerprint"
+        );
+        assert_ne!(
+            override_fingerprint(&[entry("ceo", Some(""))]),
+            override_fingerprint(&[entry("ceo", None)]),
+            "an empty-string override and a cleared one must not hash alike"
+        );
+        let ab = [entry("ceo", Some("a")), entry("eng", Some("b"))];
+        let ba = [entry("eng", Some("b")), entry("ceo", Some("a"))];
+        assert_eq!(
+            override_fingerprint(&ab),
+            override_fingerprint(&ba),
+            "the fingerprint must not depend on the stored order"
+        );
+    }
+
+    /// A persona override written through the store reaches the roster on the
+    /// next dispatch — the cache-invalidation the whole feature turns on (#1530).
+    /// The pool is never reconstructed (`resident_companies()` stays 1), so the
+    /// only thing carrying the edit is `override_fingerprint` flipping and
+    /// `ensure` rebuilding the roster in place. Reset-to-blueprint returns the
+    /// fingerprint to its pre-edit value, proving the clear is a real change the
+    /// roster picks up too.
+    #[tokio::test]
+    async fn a_persona_override_written_through_the_store_rebuilds_the_roster() {
+        use crate::ports::types::AgentOverride;
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let rec = capped_record();
+
+        // A live store, so `ensure` re-resolves the overrides as production does.
+        let live_store = Arc::new(LiveStore::default());
+        live_store.save(&rec).await.unwrap();
+
+        let mut deps = deps_with_plan(dir.path(), context.clone(), None, None);
+        deps.store = live_store.clone();
+
+        // ONE pool for the whole test — nothing below reconstructs it, so nothing
+        // below can smuggle in a restart.
+        let pool = HarnessPool::new();
+
+        fn with_instructions(base: &CompanyRecord, text: Option<&str>) -> CompanyRecord {
+            let mut next = base.clone();
+            next.overlay_agent_edits = match text {
+                Some(text) => vec![AgentOverride {
+                    agent_id: "ceo".to_string(),
+                    instructions: Some(text.to_string()),
+                    ..Default::default()
+                }],
+                None => Vec::new(),
+            };
+            next
+        }
+
+        // A. Blueprint — the CEO runs on its manifest persona, no override.
+        pool.ensure(&rec, &deps).await.expect("ensure A");
+        let fp_blueprint = pool
+            .override_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // B. An operator edits the CEO's persona from the console.
+        live_store
+            .save(&with_instructions(&rec, Some("Answer only in haiku.")))
+            .await
+            .unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure B");
+        let fp_edited = pool
+            .override_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            fp_blueprint, fp_edited,
+            "editing a persona must move the override fingerprint, or the cached \
+             roster is reused and the edit never reaches the next turn"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "the same company, rebuilt in place — not a new process"
+        );
+
+        // C. Reset-to-blueprint clears the override; the persona returns to seed.
+        live_store
+            .save(&with_instructions(&rec, None))
+            .await
+            .unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure C");
+        let fp_reset = pool
+            .override_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(fp_edited, fp_reset, "clearing the override is a change");
+        assert_eq!(
+            fp_reset, fp_blueprint,
+            "reset-to-blueprint must return to the pre-edit fingerprint"
+        );
+
+        // An unchanged `ensure` is a no-op: the axis is not thrashing the roster.
+        pool.ensure(&rec, &deps).await.expect("ensure idempotent");
+        assert_eq!(pool.override_fingerprint_of(&rec.id).await, Some(fp_reset));
+    }
+
     /// An **overlay** teammate — one added from the console, with no manifest
     /// row — can be capped through the same override, and is refused when it has
     /// spent it. Before #343 an overlay teammate was unconditionally uncapped
@@ -6639,6 +6678,8 @@ description = "Builds the product."
             role: "Growth Lead".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let live_store = Arc::new(LiveStore::default());
         live_store.save(&rec).await.unwrap();
@@ -6818,37 +6859,6 @@ budget_usd_daily = 0.0
                 crate::company::credentials::Credential::from_value("managed-platform-token"),
                 crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             ));
-            // Issue #245: a repository manager AND a binding, because the tools
-            // are gated on both — with a manager and nothing bound the belt
-            // would be missing `repo_checkout` / `repo_pr` and this check would
-            // pass while never having looked at them, which is the exact way
-            // `describe_skill` stayed invisible here while parking in
-            // production.
-            // Issue #752 added a fourth gate: a backend that keeps the
-            // credential off this container's disk. Declared here for the same
-            // reason the binding below is — without it the belt would be
-            // missing `repo_checkout` / `repo_pr` and this check would pass
-            // while never having looked at them.
-            deps.repos = Some(Arc::new(
-                crate::runtime::RepoManager::new(
-                    CompanyId::new("acme"),
-                    dir.path().join("repos"),
-                    Arc::new(crate::store::FsSecretStore::new(dir.path())),
-                )
-                .with_storage_kind(crate::store::StorageKind::Mongodb),
-            ));
-            deps.repo_bindings = vec![crate::runtime::repo_manager::types::RepoBinding {
-                key: "acme-widgets-000000000000".to_string(),
-                url: "https://github.com/acme/widgets".to_string(),
-                owner: "acme".to_string(),
-                repo: "widgets".to_string(),
-                branches: vec!["main".to_string()],
-                token_fingerprint: "0f1e2d3c4b5a".to_string(),
-                last_fetched_millis: None,
-                size_bytes: 0,
-                bound_at_millis: 1,
-                can_push: None,
-            }];
             // A registered MCP server is what puts `mcp_list_servers`,
             // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
             // tools issue #443 is about. Without one the coverage check would
@@ -6897,6 +6907,7 @@ budget_usd_daily = 0.0
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -6909,6 +6920,7 @@ budget_usd_daily = 0.0
             &grants,
             &[],
             &[],
+            None,
             is_orchestrator,
         )
         .expect("agent builds");
@@ -6947,7 +6959,7 @@ budget_usd_daily = 0.0
             (&["*"][..], false, true),
             (&["*"][..], true, true),
             (
-                &["workspace", "search", "media", "composio", "repo"][..],
+                &["workspace", "search", "media", "composio"][..],
                 false,
                 true,
             ),
@@ -6962,7 +6974,6 @@ budget_usd_daily = 0.0
             "workspace_write",
             "file_read",
             "describe_skill",
-            "repo_checkout",
             #[cfg(feature = "mcp")]
             "mcp_list_servers",
             #[cfg(feature = "mcp")]
@@ -7018,6 +7029,7 @@ budget_usd_daily = 0.0
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),
@@ -7028,6 +7040,7 @@ budget_usd_daily = 0.0
             &["*".to_string()],
             &[],
             &[],
+            None,
             true,
         )
         .expect("agent builds");

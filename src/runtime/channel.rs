@@ -101,6 +101,13 @@ impl ChannelAdapter for DeskChannel {
                         .reply_to
                         .and_then(|reply| reply.chat_id.parse::<u64>().ok())
                         .map(EventSeq::new),
+                    // Workflow node output. This adapter holds no company
+                    // record, so it has nothing to resolve an `@name` against
+                    // — and a workflow bubble addresses the channel it posts
+                    // into, not a person in it. Left empty rather than
+                    // half-resolved.
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                 },
             )
             .await?;
@@ -170,7 +177,7 @@ impl std::fmt::Debug for OperatorChannel {
 /// assert is "how many times did the report reach the channel", and a refusal
 /// answers a different question. This carries an ordinary channel id so it
 /// clears the refusal, and keeps the buffer so the counting still works.
-// Every consumer of this lives behind `openhuman`/`tinycortex`, so a
+// Every consumer of this lives behind `openhuman`/`tinymemory`, so a
 // default-feature build compiles it and constructs it nowhere. That is a
 // feature-configuration fact, not dead code: the runner and delivery suites
 // that use it are simply not selected in that lane (issue #770).
@@ -287,6 +294,7 @@ mod test {
                 text: "hello".into(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             })
             .await
             .unwrap();
@@ -345,6 +353,7 @@ mod test {
                 text: "the weekly digest".into(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             })
             .await;
         assert!(result.is_err(), "an unwritable journal must fail the send");

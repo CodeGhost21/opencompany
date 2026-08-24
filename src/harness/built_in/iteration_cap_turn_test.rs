@@ -200,6 +200,7 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: None,
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         // Left unset so the turn runs on the tier the manifest resolves
@@ -242,10 +243,10 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         search: None,
+        tenant_search: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
+        workflow_runs: None,
+        deep_trace: None,
     }
 }
 
@@ -281,6 +282,7 @@ async fn company_agent(
         classes: Vec::new(),
         ledgers: None,
         can_declare_ledgers: true,
+        model: None,
     };
     // The manifest default. `file_read` reaches nothing outside the sandbox, so
     // it is auto-approved here — the point is that the turn is gated by the real
@@ -295,6 +297,7 @@ async fn company_agent(
         &["docs".to_string()],
         &[],
         &[],
+        None,
         false,
     )
     .expect("agent builds");

@@ -745,59 +745,6 @@ const DECLARED: &[Declared] = &[
         EffectGroup::Identity,
         Reach::Consequence,
     ),
-    // ---- Bound repositories -------------------------------------------------
-    // Issue #245's agent half. The classification is re-derived rather than
-    // borrowed from the nearest-looking neighbour, because both names read like
-    // reads and neither is one in the sense this table means.
-    //
-    // `Consequence`, not `Nothing`, for two reasons that hold independently:
-    //
-    //  1. **Both pull third-party-authored content into the agent's context.**
-    //     A repository's source and a pull request's diff are written by people
-    //     outside this company, and the agent is about to reason over them. That
-    //     is the same shape as `web_fetch` — which is `Consequence` for exactly
-    //     this reason — not the shape of reading the company's own notes.
-    //  2. **Both reach the forge host-side under the operator's credential.**
-    //     `repo_checkout` refreshes the mirror over the network before it
-    //     clones; `repo_pr` is a GitHub API call. An agent deciding when a
-    //     company's credential is used is a decision an operator would want to
-    //     have seen.
-    //
-    // `repo_checkout` additionally materializes thousands of files into a
-    // sandbox the same agent may hold `shell` over, which is why it is denied
-    // under `readonly` — a tier whose contract is that nothing changes cannot
-    // admit a tool whose whole purpose is to write a tree.
-    //
-    // `PerCall` for both, and this is the part a future edit is most likely to
-    // want to loosen: a standing grant here would be a week of unattended
-    // "check out anything bound, whenever you like", which is precisely the
-    // permission the `Standing` field refuses to describe. `EffectGroup::Other`
-    // because there is no consequence word for it — the label and the
-    // permission are separate answers (issue #444).
-    d("repo_checkout", EffectGroup::Other, Reach::Consequence),
-    d("repo_pr", EffectGroup::Other, Reach::Consequence),
-    // `repo_publish` (issue #735) is classified by what the CALL does, which is
-    // deliberately NOT what its approval settles. The call stages the agent's
-    // committed work onto a host-side `oc/<company>/<task>` ref in the mirror and
-    // records an operator approval. It reaches no counterparty, spends nothing,
-    // and the stage is reversible and never leaves the host — so `Nothing` at the
-    // tool layer. The irreversible push to the real remote is a separate native
-    // effect (`repo.publish`, `EffectGroup::Publish`) that the runtime performs
-    // ONLY on the operator's approval, so *that* effect is where the consequence
-    // and its gate live — see the `repo.publish` arm of `perform_effect`.
-    //
-    // `Nothing`, not `Consequence`, is load-bearing rather than a downgrade: a
-    // `Consequence` call PARKS under `supervised`, and a parked call whose
-    // `execute` never ran would have nothing to stage — the checkout it stages
-    // from is deleted at turn end. So the call must run in every mode, and it
-    // does no external harm in any of them: no agent-driven change reaches a
-    // remote without an operator approving the push, which is the property
-    // `readonly` actually promises, kept here by the approval rather than by
-    // refusing a harmless local stage. `EffectGroup::Publish` is the label the
-    // operator's approval card carries; `PerCall` because a standing "publish
-    // whenever" is exactly the grant the `Standing` field refuses to describe,
-    // and every push already parks as its own approval regardless.
-    d("repo_publish", EffectGroup::Publish, Reach::Nothing),
     // ---- Hosting (issue #1079) ---------------------------------------------
     //
     // The six `hosting_*` tools openhuman ships in `src/openhuman/hosting/`.
@@ -918,6 +865,10 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 ///   function cannot see. So the roster entry answers the fail-closed base
 ///   (`Reach::Consequence`), and the downgrade is applied by
 ///   [`mcp_call_reach`], which the policy calls with the declaration in hand.
+/// * `workspace_create` / `workspace_write` / `workspace_delete` /
+///   `workspace_rename` — #877, keyed on the resolved node's durable
+///   authorship. The company-scoped lookup lives at the policy seam, so this
+///   pure classifier deliberately returns the fail-closed table verdict.
 ///
 /// Every name here must be **lower-case**: [`consequence_of`] matches against a
 /// lower-cased tool name, so a mixed-case entry would be an entry that never
@@ -929,6 +880,10 @@ const ARGUMENT_GRADED: &[(&str, Grader)] = &[
     (GIT_OPERATIONS, git_operations_consequence),
     (MCP_CALL_TOOL, mcp_call_tool_consequence),
     (MCP_REGISTRY_TOOL_CALL, mcp_call_tool_consequence),
+    ("workspace_create", workspace_mutation_consequence),
+    ("workspace_write", workspace_mutation_consequence),
+    ("workspace_delete", workspace_mutation_consequence),
+    ("workspace_rename", workspace_mutation_consequence),
 ];
 
 /// The classifier that answers for `name`, or `None` when the table does.
@@ -1586,6 +1541,20 @@ const GIT_READ_ONLY_OPERATIONS: &[&str] = &["status", "diff", "log", "show", "br
 /// this tool, a missing or non-string `server`/`tool` argument, and a build
 /// whose policy carries no declaration all resolve here, never to a downgrade.
 fn mcp_call_tool_consequence(_args: &serde_json::Value) -> Consequence {
+    Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    }
+}
+
+/// The pure, fail-closed half of workspace authorship grading (issue #877).
+///
+/// A call only becomes safe once the live company tree confirms that the node
+/// was both created and last written by the calling agent. That lookup belongs
+/// to `ApprovalPolicy`, alongside the MCP declaration lookup; this function is
+/// what callers without that company context receive.
+fn workspace_mutation_consequence(_args: &serde_json::Value) -> Consequence {
     Consequence {
         group: EffectGroup::Other,
         reach: Reach::Consequence,
@@ -2555,11 +2524,6 @@ mod tests {
             // read and update siblings deliberately do NOT park (see `DECLARED`)
             // — naming the one that does is how that split stays a decision.
             "delete_workflow",
-            // Issue #245: both reach a forge under the company's credential and
-            // pull third-party-authored content into the agent's context, and
-            // one of them writes a tree.
-            "repo_checkout",
-            "repo_pr",
             "some_tool_nobody_declared",
         ] {
             assert!(
@@ -2656,8 +2620,6 @@ mod tests {
             "run_workflow",
             "mcp_call_tool",
             "mcp_registry_tool_call",
-            "repo_checkout",
-            "repo_pr",
         ] {
             assert_eq!(
                 c(tool).standing,
@@ -3281,6 +3243,7 @@ mod tests {
             agent: "ops".to_string(),
             workflow: None,
             tool: COMPOSIO_EXECUTE.to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,
                 id: "user-1".to_string(),

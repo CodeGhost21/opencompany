@@ -3,10 +3,13 @@ import { X } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
+import type { MessageIntent } from "@/api/tasks";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { MessageComposer } from "./MessageComposer";
+import { TypingLine } from "./TypingLine";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
+import { type Mention, type Mentionable } from "./mentions";
 
 interface Props {
   channel: Channel;
@@ -20,8 +23,30 @@ interface Props {
   parent: ChatMessage;
   replies: ChatMessage[];
   sending: boolean;
-  onSend: (text: string) => void;
+  /**
+   * Everything an `@` can name here (issue #1645). Drawn from the parent
+   * ChatView's directory so the thread composer shares the same roster.
+   * Absent when the host predates the route, or when the directory has not
+   * loaded — the composer degrades to plain-text typing.
+   */
+  mentionables?: Mentionable[];
+  /**
+   * The ids of the teammates on the channel this thread belongs to, for the
+   * composer's outside-channel warning. Absent when membership is unknown.
+   */
+  channelMemberIds?: string[];
+  onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
   onClose: () => void;
+  /**
+   * Who is typing *in this thread* — scoped by the parent's own id, never the
+   * channel's. Without this the thread panel had no typing signal at all: the
+   * wire and `useTyping` already carry `parentId`, but nothing upstream of
+   * this component filtered by it or rendered a line for it.
+   */
+  typingNames?: string[];
+  /** This console is typing here. Distinct from the main composer's callback
+   * so the ping this thread sends carries the thread's own `parentId`. */
+  onTyping?: () => void;
 }
 
 /**
@@ -31,7 +56,19 @@ interface Props {
  * channel apart. The parent message sits at the top under a rule, and the
  * panel carries its own composer scoped to the thread.
  */
-export function ThreadPanel({ channel, members, parent, replies, sending, onSend, onClose }: Props) {
+export function ThreadPanel({
+  channel,
+  members,
+  parent,
+  replies,
+  sending,
+  mentionables,
+  channelMemberIds,
+  onSend,
+  onClose,
+  typingNames = [],
+  onTyping,
+}: Props) {
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
@@ -57,11 +94,15 @@ export function ThreadPanel({ channel, members, parent, replies, sending, onSend
         ))}
       </div>
 
+      <TypingLine names={typingNames} />
       <MessageComposer
         compact
         placeholder="Reply…"
         disabled={sending}
+        mentionables={mentionables}
+        channelMemberIds={channelMemberIds}
         onSend={onSend}
+        onTyping={onTyping}
       />
     </aside>
   );
@@ -100,7 +141,7 @@ function Line({
             {formatTime(message.at)}
           </span>
         </div>
-        <Markdown className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+        <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
       </div>
     </div>
   );

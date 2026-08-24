@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { observatoryHref } from "@/views/observatory/hash";
 import { Button } from "@/components/ui/button";
 import type {
   DeliveryReport,
@@ -412,6 +413,20 @@ function RunHistoryRow({
             scheduled
           </Badge>
         )}
+        {/* The bridge to the Observatory: this panel says what each NODE did,
+            and that view says what each node's AGENT did — the steps, the tool
+            calls, the reasoning. Rendered only when the row carries a run id,
+            since a row journaled before #371 has none to address. */}
+        {run.runId && (
+          <a
+            href={observatoryHref(run.runId)}
+            className="text-2xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            data-testid="workflow-run-inspect"
+            onClick={(event) => event.stopPropagation()}
+          >
+            Inspect
+          </a>
+        )}
         <span
           className="text-2xs text-muted-foreground"
           title={new Date(run.atMillis).toLocaleString()}
@@ -519,8 +534,8 @@ function RunHistoryRow({
                 wrong name. */}
             <p className="text-2xs font-medium text-status-failed-text">
               {failedNode
-                ? `The “${nodeName(graph, failedNode)}” step failed.`
-                : "This run failed."}
+                ? `This run failed at “${nodeName(graph, failedNode)}”: ${errorMessage}`
+                : `This run failed: ${errorMessage}`}
             </p>
             <p className="mt-1 text-2xs text-muted-foreground">
               Review the error details, then correct the workflow and run it again.
@@ -530,7 +545,7 @@ function RunHistoryRow({
                 Details
               </summary>
               <pre className="mt-1 overflow-auto rounded border bg-muted/40 p-2 font-mono text-2xs leading-snug text-foreground">
-                {errorMessage}
+                {run.error}
               </pre>
             </details>
           </div>

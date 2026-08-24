@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
+import type { ChatMentionDto } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import type {
   DeliveryReport,
@@ -40,6 +41,14 @@ export type CompanyStreamEvent =
        * that predates persisted threads.
        */
       parentId?: string;
+      /**
+       * Who this reply names, as the host resolved them (issue #1645).
+       *
+       * Absent when the event predates the field, and on a host that does not
+       * project mentions onto the SSE feed. The same mentions are always
+       * available through `chat/history` (see {@link fromHistory}).
+       */
+      mentions?: ChatMentionDto[];
     }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
   | {
@@ -358,7 +367,29 @@ export type CompanyStreamEvent =
   // A coalesced "Thinking" run between tool calls — streamed so the live
   // timeline shows the same rows the final folded one does (else the count
   // jumps up when the reply lands).
-  | { type: "thinking"; seq: number; agentId?: string; chatId?: string };
+  | { type: "thinking"; seq: number; agentId?: string; chatId?: string }
+  // Somebody arrived, went idle, or left. Published on a CHANGE only — a
+  // console heartbeats every minute whether or not anything moved, and
+  // republishing that would be one frame per person per minute for no visible
+  // difference. Carries no label: the console already holds the directory that
+  // names people (`GET {scope}/chat/mentionables`).
+  | {
+      type: "presence";
+      userId: string;
+      status: "online" | "away" | "offline";
+      atMillis: number;
+    }
+  // Somebody is typing. Stored nowhere, on either side: the frame carries its
+  // own moment and the console expires it. There is deliberately no "stopped
+  // typing" frame — the absence of a renewal is the stop signal, so a console
+  // that closes mid-word clears itself with no teardown to get wrong.
+  | {
+      type: "typing";
+      userId: string;
+      chatId: string;
+      parentId?: string;
+      atMillis: number;
+    };
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {
@@ -383,6 +414,14 @@ export interface AgentReplyEvent {
    * `h` prefix.
    */
   parentId?: string;
+  /**
+   * Who this reply names, as the host resolved them (issue #1645).
+   *
+   * Absent when the event predates the field, and on a host that does not
+   * project mentions onto the SSE feed. The same mentions are always
+   * available through  (see {@link fromHistory}).
+   */
+  mentions?: ChatMentionDto[];
 }
 
 interface Options {
@@ -480,6 +519,15 @@ interface Options {
    */
   onTurnEvent?: (event: CompanyStreamEvent) => void;
   /**
+   * Called for each `presence` frame — somebody arrived, went idle, or left.
+   *
+   * Toast-free by construction: a dot moving is not news anybody needs
+   * interrupting for, and a company of ten would produce a stream of them.
+   */
+  onPresenceEvent?: (event: CompanyStreamEvent) => void;
+  /** Called for each `typing` frame. Toast-free for the same reason. */
+  onTypingEvent?: (event: CompanyStreamEvent) => void;
+  /**
    * Called for each `workflow_run_finished` event (issue #228) so the Workflows
    * view can refresh its run history live. Matters most for a *scheduled* run:
    * it fires with the tab already open and nothing else would tell the view a
@@ -566,6 +614,8 @@ export function useEvents(
     onDispatchTerminal,
     onWorkspaceEvent,
     onTurnEvent,
+    onPresenceEvent,
+    onTypingEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
@@ -599,6 +649,14 @@ export function useEvents(
   useEffect(() => {
     onTurnEventRef.current = onTurnEvent;
   }, [onTurnEvent]);
+  const onPresenceEventRef = useRef(onPresenceEvent);
+  useEffect(() => {
+    onPresenceEventRef.current = onPresenceEvent;
+  }, [onPresenceEvent]);
+  const onTypingEventRef = useRef(onTypingEvent);
+  useEffect(() => {
+    onTypingEventRef.current = onTypingEvent;
+  }, [onTypingEvent]);
   const onWorkflowRunEventRef = useRef(onWorkflowRunEvent);
   useEffect(() => {
     onWorkflowRunEventRef.current = onWorkflowRunEvent;
@@ -702,6 +760,8 @@ export function useEvents(
             onDispatchTerminal: onDispatchTerminalRef.current,
             onWorkspaceEvent: onWorkspaceEventRef.current,
             onTurnEvent: onTurnEventRef.current,
+            onPresenceEvent: onPresenceEventRef.current,
+            onTypingEvent: onTypingEventRef.current,
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
             onWorkflowChanged: onWorkflowChangedRef.current,
             onApprovalEvent: onApprovalEventRef.current,
@@ -754,6 +814,8 @@ export function handleEvent(
     onDispatchTerminal,
     onWorkspaceEvent,
     onTurnEvent,
+    onPresenceEvent,
+    onTypingEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
@@ -772,6 +834,14 @@ export function handleEvent(
     case "tool_result":
     case "thinking":
       onTurnEvent?.(event);
+      break;
+    // Awareness frames, alongside the turn frames above and toast-free for the
+    // same reason: they render inline, and a dot moving is not an interruption.
+    case "presence":
+      onPresenceEvent?.(event);
+      break;
+    case "typing":
+      onTypingEvent?.(event);
       break;
     case "mcp_call_failed":
       toast.error(`MCP ${event.server} failed`, {
@@ -844,12 +914,16 @@ export function handleEvent(
         // injected line and its later rehydrated twin share an identity.
         seq: event.seq,
         // Issue #246: a reply injected from the stream — one this console did
-        // not POST for, e.g. an inbound Telegram turn — carries its "card
+        // not POST for, e.g. an inbound channel turn — carries its "card
         // opened" chip too, rather than only the locally-awaited copy.
         taskId: event.taskId,
         // Issue #364: and lands in the same thread a reload would put it in,
         // rather than arriving in the channel and jumping on the next refresh.
         parentId: event.parentId,
+        // Issue #1645: who this reply names, projected from the stored event.
+        // Absent when the host's projection omits it; the same mentions are
+        // always available through `chat/history` (see {@link fromHistory}).
+        mentions: event.mentions,
       });
       break;
     // Issue #379. No toast: the rising-edge "needs a sign-off" toast off the

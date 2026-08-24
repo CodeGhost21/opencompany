@@ -5,7 +5,7 @@ states each must handle. Built on [Base UI](https://base-ui.com) via shadcn's
 `base-nova` style — so behaviour, focus management and ARIA come from the
 primitive, and this system supplies only the visual layer.
 
-Rendered reference for every state below: `#/styleguide`.
+Rendered reference for every shipped primitive below: `#/styleguide`.
 
 ---
 
@@ -147,7 +147,7 @@ platforms. An icon button still needs its `aria-label` regardless of tooltip.
 
 ---
 
-## Dialog, Sheet, AlertDialog, DropdownMenu, Select, Popover
+## Dialog, Sheet, AlertDialog, DropdownMenu, Select
 
 Floating surfaces. All render on `--popover` at `shadow-lg` — this is what
 elevation is *for*.
@@ -186,6 +186,15 @@ Never nest a modal inside a modal.
 - **Chart** — Recharts wrapper. Series use `--chart-1…5` in order. Axis labels,
   gridlines and legends use `--muted-foreground` and `--border`, never a series
   colour.
+
+## Stepper and Sidebar
+
+- **Stepper** — a horizontal progress indicator for a multi-step flow. The
+  active step has `aria-current="step"`; only completed steps may be clickable,
+  so validation cannot be bypassed.
+- **Sidebar** — the console shell's navigation primitive. `SidebarProvider`
+  owns expanded/collapsed state and the Cmd/Ctrl+B shortcut. The desktop shell
+  is transparent over `bg-chrome`; the mobile sidebar is a `Sheet` overlay.
 
 ---
 
@@ -289,9 +298,9 @@ permanently: no transition and no state change to notice.
 3. **Express every colour, size and radius as a token.** If a value has no
    token, add it to layer 2 of `index.css` — see
    [`README.md`](README.md#the-one-rule).
-4. **Add it to `#/styleguide`** with every variant and state, including
-   disabled and invalid. A state absent from the styleguide is a state nobody
-   will notice breaking.
+4. **Add it to `#/styleguide`** with its defined variants and states, including
+   disabled and invalid where it applies. A state absent from the styleguide is
+   a state nobody will notice breaking.
 5. **Write out class names in full.** Tailwind finds classes by scanning source
    text, so a template-assembled name like `` `bg-status-${key}` `` is never
    generated and fails silently at runtime.

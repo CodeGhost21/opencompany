@@ -1,5 +1,6 @@
-//! Memory-fact reads + writes: `GET /memory`, `GET /memory/stats`,
-//! `POST /memory`, `DELETE /memory/{fact_id}` under both scope forms.
+//! Memory-fact reads + writes: `GET /memory`, `GET /memory/traces`,
+//! `GET /memory/stats`, `POST /memory`, `DELETE /memory/{fact_id}` under both
+//! scope forms.
 //!
 //! Bodies mirror the console's `MemoryEntry` (`frontend/src/api/memory.ts`).
 //! Facts land in the [`FactStore`](crate::ports::FactStore) — the console's
@@ -10,15 +11,16 @@
 //! the `EventLog` per the Operator-rights section of
 //! `docs/spec/company-brain/memory.md`.
 //!
-//! ## Known limitation (flagged seam)
+//! ## The delete → reap seam
 //!
 //! Deleting a fact removes it from the `FactStore` AND reaps its mirrored
 //! `operator-fact/{id}` context chunk — the delete port this comment once
 //! said was missing landed with #1290, and leaving the reap unwired would
 //! have kept showing the operator "deleted" while agents still recalled it.
-//! The reap honors the shared-address rule: chunks are content-addressed, so
-//! a mirror whose byte-identical body is indexed under any OTHER label is
-//! left in place rather than deleting someone else's row.
+//! The reap is label-scoped since #1300: chunks are content-addressed, so a
+//! mirror whose byte-identical body is indexed under any OTHER label loses
+//! exactly the mirror's own claim — the other label keeps the body, and the
+//! body goes only with its last claim, atomically inside the port.
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -29,8 +31,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::facts::{FactKind, FactRecord};
-use crate::ports::types::{ChunkAddr, ChunkMeta, CompanyEvent, ContextChunk};
+use crate::ports::types::{ChunkAddr, ChunkMeta, CompanyEvent, CompressedTrace, ContextChunk};
 use crate::ports::{generate_id, now_millis};
+use crate::runtime::maintenance::TRACE_RETENTION_LIMIT;
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -62,8 +65,8 @@ mod label_lockstep_test {
 }
 
 /// Label prefix for the [`ContextStore`](crate::ports::ContextStore) mirror of
-/// an operator-authored fact. Keyed by fact id so a future delete port can reap
-/// the mirror when the fact is deleted (today it lingers — see the module doc).
+/// an operator-authored fact. Keyed by fact id so [`reap_fact_mirror`] can
+/// find and remove the mirror's claim when the fact is deleted.
 const OPERATOR_FACT_PREFIX: &str = "operator-fact";
 
 /// Label prefix under which the harness stores completed task outcomes.
@@ -76,6 +79,7 @@ const OUTCOME_LABEL_PREFIX: &str = "task-outcome";
 /// Builds the memory route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/memory", post(create_fact).get(list_facts))
+        .merge(scoped("/memory/traces", get(list_traces)))
         .merge(scoped("/memory/stats", get(memory_stats)))
         .merge(scoped("/memory/{fact_id}", delete(delete_fact)))
 }
@@ -88,6 +92,29 @@ const MAX_CONTEXT_ENTRIES: usize = 500;
 
 /// Max characters kept for a context entry's synthesised title (its first line).
 const CONTEXT_TITLE_MAX: usize = 120;
+
+/// A persisted cycle trace as exposed to an operator.
+///
+/// The route returns the full live retention window: maintenance retains at
+/// most [`TRACE_RETENTION_LIMIT`] traces, so this materialises no unbounded
+/// store read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceEntry {
+    cycle_id: String,
+    summary: String,
+    at_millis: u64,
+}
+
+impl From<CompressedTrace> for TraceEntry {
+    fn from(trace: CompressedTrace) -> Self {
+        Self {
+            cycle_id: trace.cycle_id,
+            summary: trace.summary,
+            at_millis: trace.at_millis,
+        }
+    }
+}
 
 /// Where a rendered [`MemoryEntry`] came from. The console keys "editable vs
 /// read-only" and the source label off this: only [`Fact`](MemoryOrigin::Fact)
@@ -195,8 +222,9 @@ fn split_title_body(body: &str) -> (String, String) {
 /// symptom reached by a second route, and past the cap the sort in
 /// [`capped_newest_first`] was the only thing keeping it out of the list at
 /// all. The console filters by origin client-side, so the grouping bought
-/// nothing. The `id` tie-break carries the addr, so chunks sharing a
-/// millisecond keep a total, call-stable order, as the cap's sort does.
+/// nothing. The `id` tie-break carries the addr AND the label, so chunks
+/// sharing a millisecond — including two labels claiming one address (#1300)
+/// — keep a total, call-stable order, as the cap's sort does.
 fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntry> {
     let needle = query.map(|q| q.to_lowercase());
     let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
@@ -261,7 +289,12 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
         entries.push(MemoryEntry {
             // Prefix so a context row's id can never collide with a fact id
             // (delete targets fact ids only; this keeps React keys unique too).
-            id: format!("ctx:{}", chunk.addr),
+            // The LABEL is part of the id, not just the address: chunks are
+            // content-addressed and one address carries one row per label
+            // claiming it (#1300), so two rows here can share an address —
+            // byte-identical text two agents both remembered. Keyed by address
+            // alone they would collide, and the console renders these by id.
+            id: format!("ctx:{}:{}", chunk.addr, chunk.label),
             kind: None,
             origin,
             // A document is material the operator supplied, so they may take
@@ -336,15 +369,46 @@ struct MemoryStats {
     /// — for any company whose operator had not hand-authored a fact, however
     /// much memory the agents had accumulated.
     last_updated_at_millis: u64,
-    /// Total agent-accessible context chunks — learned context, task outcomes,
-    /// and the operator-fact mirrors together.
-    agent_chunks: usize,
-    /// Of those chunks, how many are stored task outcomes.
+    /// Operator facts plus the non-mirrored context chunks displayed by the
+    /// Brain. This stays authoritative even when the list caps context rows.
+    total_items: usize,
+    /// Context chunks written by teammates, excluding task outcomes, the
+    /// mirrors of operator-authored facts, and operator-dropped documents.
+    teammate_memory: usize,
+    /// Context chunks produced by an operator-dropped document or link (the
+    /// `document/…` prefix), disjoint from teammate memory — the console
+    /// renders these as their own origin, and counting them as teammate memory
+    /// would attribute operator-supplied knowledge to an agent.
+    document_memory: usize,
+    /// Stored task outcomes, excluding operator-fact mirrors.
     task_outcomes: usize,
 }
 
+/// `GET /memory` — the rows together with the context-truncation metadata for
+/// the SAME read, so the console's "newest N of M" notice never compares the
+/// capped rows against a count taken at a different moment. The metadata
+/// describes the unqueried browse list; a `?query=` request returns search
+/// matches, not "the newest N", so it reports the metadata as not applicable.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryList {
+    items: Vec<MemoryEntry>,
+    /// The non-mirror context chunk population before the 500-row display
+    /// cap — the "M" in the console's "showing the newest N of M" notice.
+    /// Facts are never capped, so they are not counted here. `0` for a
+    /// `?query=` request, whose rows are search matches the metadata does not
+    /// describe.
+    total_context: usize,
+    /// Whether the context rows dropped any to [`MAX_CONTEXT_ENTRIES`], from
+    /// this same read. Always `false` for a `?query=` request.
+    context_truncated: bool,
+}
+
 /// `GET /memory` — everything the company remembers, so the console lists what
-/// the Brain header counts. Two sources, in this order:
+/// the Brain header counts. Returns `items` (the rows) with the context
+/// truncation metadata for the same read (`totalContext`, `contextTruncated`)
+/// so the console's "newest N of M" notice never compares the capped rows
+/// against a count taken at a different moment. Two sources, in this order:
 ///
 /// 1. **Operator facts** (FactStore) — newest-first, editable/deletable.
 /// 2. **Context rows** (ContextStore chunks that are not operator-fact
@@ -361,13 +425,18 @@ struct MemoryStats {
 async fn list_facts(
     company: ScopedCompany,
     Query(ListQuery { query, kind }): Query<ListQuery>,
-) -> Result<Json<Vec<MemoryEntry>>, ApiError> {
+) -> Result<Json<MemoryList>, ApiError> {
     let rows = company
         .runtime
         .facts()
         .list(company.id(), query.as_deref(), kind)
         .await?;
     let mut entries: Vec<MemoryEntry> = rows.into_iter().map(MemoryEntry::from).collect();
+
+    // The non-mirror context chunk population BEFORE the display cap — the "M"
+    // in the console's "newest N of M" notice. Facts are never capped, so this
+    // excludes them; a `?kind=` filter omits context entirely and leaves it 0.
+    let mut total_context = 0;
 
     // A fact-kind filter is inherently facts-only — context chunks carry no
     // `FactKind`, so skip them (and the reads) when one is set.
@@ -377,6 +446,16 @@ async fn list_facts(
         // the reads so a huge context store can't unbound this request.
         let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
         let metas = company.runtime.context.list(company.id(), "").await?;
+        // The truncation metadata describes the unqueried browse list — the
+        // "newest N of M" notice. With `?query=` the rows are search matches,
+        // not "the newest N", so the metadata is not applicable and stays 0/
+        // false rather than implying a search result was omitted by the cap.
+        if query.is_none() {
+            total_context = metas
+                .iter()
+                .filter(|m| !m.label.starts_with(&mirror_prefix))
+                .count();
+        }
         let metas = capped_newest_first(metas, &mirror_prefix, MAX_CONTEXT_ENTRIES);
         // One batched read for every surviving body — how few round trips
         // that really is, is the backend's business (see `peek_many`); what
@@ -425,7 +504,26 @@ async fn list_facts(
         entries.extend(context_entries(chunks, query.as_deref()));
     }
 
-    Ok(Json(entries))
+    Ok(Json(MemoryList {
+        items: entries,
+        total_context,
+        context_truncated: total_context > MAX_CONTEXT_ENTRIES,
+    }))
+}
+
+/// `GET /memory/traces` — the retained, newest-last cycle trace window.
+///
+/// Trace summaries are intentionally not injected into a cycle: current
+/// producers emit placeholders, and real compression/consumption needs its
+/// own design. This inspection surface makes the durable record visible while
+/// retention keeps the read bounded.
+async fn list_traces(company: ScopedCompany) -> Result<Json<Vec<TraceEntry>>, ApiError> {
+    let traces = company
+        .runtime
+        .memory
+        .recent_traces(company.id(), TRACE_RETENTION_LIMIT)
+        .await?;
+    Ok(Json(traces.into_iter().map(TraceEntry::from).collect()))
 }
 
 /// Drops the operator-fact mirrors, then keeps the newest `cap` chunks.
@@ -433,8 +531,10 @@ async fn list_facts(
 /// Every backend lists oldest-first, so capping the head would pin the Brain
 /// view to the oldest `cap` chunks forever — once a company crossed the cap, a
 /// new memory could never appear again. Sort newest-first BEFORE capping; the
-/// addr tie-break keeps the order total, so chunks stamped in the same
-/// millisecond cannot swap places between calls.
+/// (addr, label) tie-break keeps the order total, so chunks stamped in the
+/// same millisecond cannot swap places between calls. The label is part of
+/// that tie-break because one address carries one row per label claiming it
+/// (#1300), so the addr alone no longer separates two rows.
 fn capped_newest_first(metas: Vec<ChunkMeta>, mirror_prefix: &str, cap: usize) -> Vec<ChunkMeta> {
     let mut metas: Vec<ChunkMeta> = metas
         .into_iter()
@@ -444,6 +544,7 @@ fn capped_newest_first(metas: Vec<ChunkMeta>, mirror_prefix: &str, cap: usize) -
         b.stored_at_millis
             .cmp(&a.stored_at_millis)
             .then_with(|| a.addr.as_ref().cmp(b.addr.as_ref()))
+            .then_with(|| a.label.cmp(&b.label))
     });
     metas.truncate(cap);
     metas
@@ -459,24 +560,40 @@ async fn memory_stats(company: ScopedCompany) -> Result<Json<MemoryStats>, ApiEr
         .await?;
     // `list` is newest-first, so the head carries the freshest timestamp.
     let facts_updated_at_millis = facts.first().map(|f| f.updated_at_millis).unwrap_or(0);
-    // Prefix `""` lists every chunk; the task-outcome prefix narrows to stored
-    // outcomes (a subset of the total).
+    // Count the same disjoint context populations as `context_entries` without
+    // its display cap: operator-fact mirrors duplicate FactStore rows and must
+    // not inflate teammate memory, task outcomes get their own bucket, and
+    // document/link chunks are operator-supplied material with their own
+    // origin (never something a teammate learned).
     let chunks = company.runtime.context.list(company.id(), "").await?;
-    let agent_chunks = chunks.len();
     // Chunks list in insertion order, not freshness order, and a backend that
     // predates the stamp reports `0` — so take the max rather than the head.
     let chunks_stored_at_millis = chunks.iter().map(|m| m.stored_at_millis).max().unwrap_or(0);
-    let task_outcomes = company
-        .runtime
-        .context
-        .list(company.id(), OUTCOME_LABEL_PREFIX)
-        .await?
-        .len();
+    let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
+    let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
+    let document_prefix = format!("{}/", crate::ingest::DOCUMENT_LABEL_PREFIX);
+    let (teammate_memory, task_outcomes, document_memory) = chunks
+        .iter()
+        .filter(|chunk| !chunk.label.starts_with(&mirror_prefix))
+        .fold(
+            (0, 0, 0),
+            |(teammate_memory, task_outcomes, document_memory), chunk| {
+                if chunk.label.starts_with(&outcome_prefix) {
+                    (teammate_memory, task_outcomes + 1, document_memory)
+                } else if chunk.label.starts_with(&document_prefix) {
+                    (teammate_memory, task_outcomes, document_memory + 1)
+                } else {
+                    (teammate_memory + 1, task_outcomes, document_memory)
+                }
+            },
+        );
     Ok(Json(MemoryStats {
         facts: facts.len(),
         facts_updated_at_millis,
         last_updated_at_millis: facts_updated_at_millis.max(chunks_stored_at_millis),
-        agent_chunks,
+        total_items: facts.len() + teammate_memory + task_outcomes + document_memory,
+        teammate_memory,
+        document_memory,
         task_outcomes,
     }))
 }
@@ -545,7 +662,7 @@ async fn delete_fact(
                 fact_id = %fact_id,
                 error = %err,
                 "fact deleted but its context mirror could not be reaped; \
-                 recall may keep serving it until a retry or #1300's reaper"
+                 recall may keep serving it until a retry"
             );
         }
         // Journal the operator deletion to the event log (audit trail).
@@ -567,17 +684,15 @@ async fn delete_fact(
     }
 }
 
-/// Removes the `operator-fact/{fact_id}` mirror chunk(s), shared-address
-/// aware: an address also carrying any label OUTSIDE this mirror's own is
-/// skipped — deleting it would delete that other row too (content
-/// addressing; the same rule `memory_forget` enforces).
-///
-/// KNOWN RACE (#1300): the shared-label check is a snapshot; a write of
-/// byte-identical content landing between the check and the delete loses its
-/// row. The port has no conditional delete to close this — that is exactly
-/// the label-scoped-delete work item in #1300, which fixes it by
-/// construction. Until then the window is one operator HTTP call wide and
-/// requires an adversarially-timed identical-content write.
+/// Removes the `operator-fact/{fact_id}` mirror's claim on its chunk(s),
+/// label-scoped (`ContextStore::delete_label`, issue #1300): exactly the
+/// mirror's own index entry goes, and the body is reaped only when no other
+/// label claims it — decided atomically inside the port, so a write of
+/// byte-identical content landing mid-reap keeps its row by construction
+/// (this function used to snapshot-check for shared labels and then delete
+/// the whole address, which both raced that write and left a shared mirror's
+/// row behind forever; now the shared case removes the mirror's claim and
+/// the other label keeps the body).
 pub(crate) async fn reap_fact_mirror(
     context: &dyn crate::ports::ContextStore,
     company: &crate::ports::CompanyId,
@@ -586,12 +701,9 @@ pub(crate) async fn reap_fact_mirror(
     let mirror_label = format!("{OPERATOR_FACT_PREFIX}/{fact_id}");
     let all = context.list(company, "").await?;
     for meta in all.iter().filter(|m| m.label == mirror_label) {
-        let shared = all
-            .iter()
-            .any(|m| m.addr == meta.addr && m.label != mirror_label);
-        if !shared {
-            context.delete(company, &meta.addr).await?;
-        }
+        context
+            .delete_label(company, &meta.addr, &mirror_label)
+            .await?;
     }
     Ok(())
 }
@@ -604,10 +716,13 @@ mod reap_test {
     use crate::store::FsContextStore;
     use std::sync::Arc;
 
-    /// Deleting a fact reaps its mirror; a mirror whose content is shared
-    /// with another label survives (the other row must not vanish).
+    /// Deleting a fact reaps its mirror. A mirror whose content is shared
+    /// with another label loses exactly the mirror's own claim (label-scoped
+    /// delete, #1300): the other label keeps the body, and — unlike the old
+    /// shared-address skip — the mirror row itself no longer lingers in the
+    /// index serving a deleted fact.
     #[tokio::test]
-    async fn the_mirror_is_reaped_unless_its_address_is_shared() {
+    async fn the_mirror_is_reaped_and_a_shared_body_survives_under_its_other_label() {
         let dir = tempfile::tempdir().unwrap();
         let context: Arc<dyn ContextStore> =
             Arc::new(FsContextStore::new(dir.path().to_path_buf()));
@@ -631,7 +746,8 @@ mod reap_test {
             "the unshared mirror must be reaped"
         );
 
-        // Identical bodies share one address: the reap must leave it.
+        // Identical bodies share one address: the reap removes the mirror's
+        // claim, and the agent's row keeps the body.
         let shared = context
             .put(
                 &company,
@@ -658,7 +774,20 @@ mod reap_test {
         context
             .peek(&company, &shared, None)
             .await
-            .expect("a shared-address mirror must survive the reap");
+            .expect("the body must survive under the agent's label");
+        let labels: Vec<String> = context
+            .list(&company, "")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.addr == shared)
+            .map(|m| m.label)
+            .collect();
+        assert_eq!(
+            labels,
+            ["agent-memory/ceo/note"],
+            "the mirror's claim must be gone; only the agent's remains"
+        );
     }
 }
 
@@ -833,7 +962,35 @@ mod combined_list_tests {
             None,
         );
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["ctx:a", "ctx:z"]);
+        assert_eq!(
+            ids,
+            vec!["ctx:a:task-outcome/agent-1", "ctx:z:agent-1/z"],
+            "the id carries addr then label, so the tie-break stays addr-first"
+        );
+    }
+
+    /// One address, two labels — the #1300 shape — renders as two rows with
+    /// DISTINCT ids. Keyed by address alone they collided, and the console
+    /// renders these rows by id (React keys, row identity).
+    #[test]
+    fn two_labels_on_one_address_render_as_two_distinct_rows() {
+        let entries = context_entries(
+            vec![
+                chunk_at_addr("shared", "agent-memory/ann/note", "same text", 500),
+                chunk_at_addr("shared", "agent-memory/bob/note", "same text", 500),
+            ],
+            None,
+        );
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "ctx:shared:agent-memory/ann/note",
+                "ctx:shared:agent-memory/bob/note"
+            ],
+        );
+        let sources: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
+        assert_eq!(sources, vec!["ann", "bob"], "each row keeps its own author");
     }
 
     #[test]
@@ -991,6 +1148,27 @@ mod route_tests {
                 bulk_peeks: AtomicUsize::new(0),
             })
         }
+
+        fn with_labels(labels: &[&str]) -> Arc<Self> {
+            let mut metas = Vec::new();
+            let mut bodies = HashMap::new();
+            for (index, label) in labels.iter().enumerate() {
+                let addr = format!("addr-{index:04}");
+                metas.push(ChunkMeta {
+                    addr: ChunkAddr::new(addr.clone()),
+                    label: (*label).to_string(),
+                    len: 0,
+                    stored_at_millis: (index + 1) as u64,
+                });
+                bodies.insert(addr, format!("note {index}"));
+            }
+            Arc::new(Self {
+                metas,
+                bodies,
+                single_peeks: AtomicUsize::new(0),
+                bulk_peeks: AtomicUsize::new(0),
+            })
+        }
     }
 
     #[async_trait]
@@ -1049,6 +1227,15 @@ mod route_tests {
         async fn delete(&self, _id: &CompanyId, _addr: &ChunkAddr) -> crate::Result<bool> {
             Ok(false)
         }
+
+        async fn delete_label(
+            &self,
+            _id: &CompanyId,
+            _addr: &ChunkAddr,
+            _label: &str,
+        ) -> crate::Result<bool> {
+            Ok(false)
+        }
     }
 
     /// An [`AppState`] whose company runtime reads context from `context`,
@@ -1094,9 +1281,17 @@ mod route_tests {
     }
 
     async fn get_memory(state: &AppState) -> (StatusCode, Value) {
+        get_json(state, "/api/v1/company/memory").await
+    }
+
+    async fn get_stats(state: &AppState) -> (StatusCode, Value) {
+        get_json(state, "/api/v1/company/memory/stats").await
+    }
+
+    async fn get_json(state: &AppState, uri: &str) -> (StatusCode, Value) {
         let request = Request::builder()
             .method("GET")
-            .uri("/api/v1/company/memory")
+            .uri(uri)
             .header("cookie", crate::server::test_support::fixed_cookie("acme"))
             .body(Body::empty())
             .unwrap();
@@ -1105,6 +1300,145 @@ mod route_tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    async fn post_json(state: &AppState, uri: &str, body: Value) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn brain_stats_exclude_operator_fact_mirrors_from_the_display_partition() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_labels(&[
+            "agent-memory/ceo/note",
+            "task-outcome/ceo",
+            "operator-fact/fact-123",
+            "document/contract/0",
+        ]);
+        let state = state_over(home.path(), context).await;
+
+        let (created, _) = post_json(
+            &state,
+            "/api/v1/company/memory",
+            serde_json::json!({
+                "kind": "fact",
+                "title": "Operator note",
+                "body": "A durable fact",
+            }),
+        )
+        .await;
+        assert_eq!(created, StatusCode::OK);
+
+        let (status, stats) = get_stats(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["facts"], 1);
+        assert_eq!(stats["teammateMemory"], 1);
+        assert_eq!(stats["taskOutcomes"], 1);
+        assert_eq!(stats["documentMemory"], 1);
+        assert_eq!(stats["totalItems"], 4);
+        assert!(
+            stats.get("agentChunks").is_none(),
+            "the ambiguous all-chunks count must not reach the display"
+        );
+    }
+
+    /// The document-label contract (`ingest::chunk`): a dropped document or
+    /// link is operator-supplied material, so its chunks must never inflate
+    /// teammate memory. One multi-chunk upload is several `document/…` rows;
+    /// they get their own bucket while `totalItems` still counts them.
+    #[tokio::test]
+    async fn brain_stats_keep_document_chunks_out_of_teammate_memory() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_labels(&[
+            "document/contract/0",
+            "document/contract/1",
+            "document/contract/2",
+            "agent-memory/ceo/note",
+        ]);
+        let state = state_over(home.path(), context).await;
+
+        let (status, stats) = get_stats(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["facts"], 0);
+        assert_eq!(stats["teammateMemory"], 1);
+        assert_eq!(stats["documentMemory"], 3);
+        assert_eq!(stats["taskOutcomes"], 0);
+        assert_eq!(
+            stats["totalItems"], 4,
+            "document chunks stay in the display partition, just not under teammate memory"
+        );
+    }
+
+    /// The truncation notice must be decided from ONE server snapshot: the
+    /// list response carries `totalContext`/`contextTruncated` for the same
+    /// read that produced the rows, so the console never compares the capped
+    /// rows against an independently-timed count.
+    #[tokio::test]
+    async fn the_brain_list_reports_its_own_truncation() {
+        let home = tempfile::tempdir().unwrap();
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
+
+        let (status, list) = get_memory(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            list["contextTruncated"], true,
+            "past the 500-row list cap, the list read must say it truncated"
+        );
+        assert_eq!(
+            list["totalContext"], total as u64,
+            "the uncapped context count is the 'M' in the notice, from the same read"
+        );
+        assert_eq!(
+            list["items"].as_array().unwrap().len(),
+            MAX_CONTEXT_ENTRIES,
+            "the rows are capped to the newest 500"
+        );
+
+        // The stats counts are never capped — the display partition still
+        // reports the full store when the list truncates.
+        let (status, stats) = get_stats(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["totalItems"], total as u64);
+    }
+
+    /// A `?query=` request returns search matches, not "the newest N", so the
+    /// truncation metadata is not applicable — it must not claim a search
+    /// result was omitted by the cap, however far past it the store is.
+    #[tokio::test]
+    async fn the_brain_list_omits_truncation_metadata_for_queried_requests() {
+        let home = tempfile::tempdir().unwrap();
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
+
+        let (status, list) = get_json(&state, "/api/v1/company/memory?query=note").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            list["contextTruncated"], false,
+            "a query result is not 'the newest N', so nothing was 'truncated'"
+        );
+        assert_eq!(
+            list["totalContext"], 0,
+            "truncation metadata does not describe queried rows"
+        );
+        assert!(
+            list["items"].as_array().unwrap().len() <= MAX_CONTEXT_ENTRIES,
+            "the query still returns its (capped) matches"
+        );
     }
 
     /// #1488: with more chunks than the cap, the list must keep the NEWEST
@@ -1117,9 +1451,9 @@ mod route_tests {
         let total = MAX_CONTEXT_ENTRIES + 2;
         let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
 
-        let (status, rows) = get_memory(&state).await;
+        let (status, list) = get_memory(&state).await;
         assert_eq!(status, StatusCode::OK);
-        let rows = rows.as_array().expect("a JSON array");
+        let rows = list["items"].as_array().expect("a JSON items array");
         assert_eq!(rows.len(), MAX_CONTEXT_ENTRIES);
         let stamps: Vec<u64> = rows
             .iter()
@@ -1149,9 +1483,9 @@ mod route_tests {
         let context = ScriptedContext::with_chunks(3);
         let state = state_over(home.path(), context.clone()).await;
 
-        let (status, rows) = get_memory(&state).await;
+        let (status, list) = get_memory(&state).await;
         assert_eq!(status, StatusCode::OK);
-        let rows = rows.as_array().expect("a JSON array");
+        let rows = list["items"].as_array().expect("a JSON items array");
         assert_eq!(rows.len(), 3);
         // The bodies really flowed through the bulk read (newest first).
         assert_eq!(rows[0]["title"], "note 3");
