@@ -573,7 +573,7 @@ export function StandingPermissions({
                     g.expires_at_millis <= now
                       ? "expired"
                       : `expires ${untilLabel(g.expires_at_millis, now)}`
-                  }`}
+                  } — grant ${index + 1} of ${grants.length}`}
                   disabled={busy}
                   onClick={() => {
                     mark(g.id, true);
