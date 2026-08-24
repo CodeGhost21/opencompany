@@ -206,12 +206,12 @@ function extendsOnBoundary(name: string, prefix: string): boolean {
  * asymmetries worth knowing, because all of them look like bugs and are not:
  * `workspace.*` does **not** cover a bare `workspace` request (which is why
  * manifests list both); a grant with no trailing `*` matches only itself; and
- * `media`, `composio`, `search`, `repo` and the whole `mcp:` namespace are
- * explicit opt-ins that a catch-all `*` never confers — bare namespace or
- * dotted descendant alike — the host's `allow_covers` rejects them under a
- * bare `*`, so this hint must too, or the editor would suppress its "will not
- * apply" warning and save a request the returned detail immediately renders
- * as ineffective.
+ * `media`, `composio`, `chargebee`, `hosting`, `paypal`, `search` and the whole
+ * `mcp:` namespace are explicit opt-ins that a catch-all `*` never confers —
+ * bare namespace or dotted descendant alike — the host's `allow_covers` rejects
+ * them under a bare `*`, so this hint must too, or the editor would suppress its
+ * "will not apply" warning and save a request the returned detail immediately
+ * renders as ineffective.
  *
  * This is a *hint*, shown while an operator types. The host stays the
  * authority: it re-derives `effective` on every read, so a disagreement here
@@ -225,21 +225,28 @@ export function companyCovers(allow: string[], glob: string): boolean {
   // on the host: a catch-all `*` never covers them here, even though
   // `grantMatches` treats `*` as a generic match. A belt cannot reintroduce a
   // capability the company intentionally omitted. A dotted descendant ask
-  // (`search.web`, `media.image`) is as much an opt-in as the bare namespace,
-  // so it must not fall through to the generic matcher below either, or a
-  // wildcard would look like it covers a grant the host rejects. Likewise a
-  // bare `search` grant covers its sub-grant asks, matching `grants_search_explicit`.
+  // (`search.web`, `media.image`, `paypal.wallet`) is as much an opt-in as the
+  // bare namespace, so it must not fall through to the generic matcher below
+  // either, or a wildcard would look like it covers a grant the host rejects.
+  // Likewise a bare `search` grant covers its sub-grant asks, matching
+  // `grants_search_explicit`.
   if (literal === "media" || literal.startsWith("media.")) {
     return grantsExplicit(allow, "media");
   }
   if (literal === "composio" || literal.startsWith("composio.")) {
     return grantsExplicit(allow, "composio");
   }
+  if (literal === "chargebee" || literal.startsWith("chargebee.")) {
+    return grantsExplicit(allow, "chargebee");
+  }
+  if (literal === "hosting" || literal.startsWith("hosting.")) {
+    return grantsExplicit(allow, "hosting");
+  }
+  if (literal === "paypal" || literal.startsWith("paypal.")) {
+    return grantsExplicit(allow, "paypal");
+  }
   if (literal === "search" || literal.startsWith("search.")) {
     return grantsExplicit(allow, "search");
-  }
-  if (literal === "repo" || literal.startsWith("repo.")) {
-    return grantsExplicit(allow, "repo");
   }
 
   // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for an
