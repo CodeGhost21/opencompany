@@ -3947,6 +3947,118 @@ mod test {
         assert_eq!(runtime.archived_traces().await.unwrap(), Some(Vec::new()));
     }
 
+    /// A live engine swap must replace the outgoing engine's memory-family
+    /// ports, never inherit them. `with_handover` carries the outgoing
+    /// runtime's ports, and `build()` used to resolve those handover-first —
+    /// so a rebuild that re-applied the new selection kept the old engine's
+    /// scratch and scope partitions (issue #1113): provider→provider, the
+    /// successor read the engine the swap was replacing. The overlay-applied
+    /// marker makes the builder's own (new) handles authoritative whenever the
+    /// selection was re-applied.
+    #[tokio::test]
+    async fn a_rebuild_reapplying_the_engine_replaces_the_handover_ports() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        // Engine A: plain ports, no decorator (the pre-swap engine).
+        let home = tmp_home("opencompany-engine-swap-");
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .build()
+            .await
+            .unwrap();
+        assert!(first.scratch_context().is_none(), "engine A has no decorator");
+
+        // Engine B: adds scratch and scope partitions, so the swap is
+        // observable — the successor must carry B's, not A's (none).
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let mut overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        overlay_b.scratch = Some(Arc::new(FsContextStore::new(scratch.path().to_path_buf())));
+        overlay_b.scopes = Some(Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        }));
+
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay_b)
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            swapped.scratch_context().is_some(),
+            "the swapped engine's scratch partition must win over the handover's none"
+        );
+        assert!(
+            swapped.agent_context("cto").is_some(),
+            "the swapped engine's scope partition must win over the handover's none"
+        );
+    }
+
+    /// The mirror: switching to the base backend must drop the outgoing
+    /// provider's decorator, not inherit it. The handover carries the
+    /// provider's scratch and scope partitions, and a rebuild that applied no
+    /// overlay used to inherit them anyway — so a company switched to `store`
+    /// kept reading the provider it just deselected. The overlay-cleared marker
+    /// resolves the builder's own (absent) ports instead, which is the base
+    /// backend's honest answer.
+    #[tokio::test]
+    async fn a_rebuild_clearing_the_engine_drops_the_handover_decorator() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-engine-clear-");
+        let mem = tempfile::tempdir().unwrap();
+        let ctx = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let mut overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx.path().to_path_buf())),
+            None,
+        );
+        overlay.scratch = Some(Arc::new(FsContextStore::new(scratch.path().to_path_buf())));
+        overlay.scopes = Some(Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        }));
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+        assert!(first.scratch_context().is_some(), "engine A has a decorator");
+
+        let cleared = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay_cleared()
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            cleared.scratch_context().is_none(),
+            "the base backend has no scratch partition; the provider's must not be inherited"
+        );
+        assert!(
+            cleared.agent_context("cto").is_none(),
+            "the base backend has no scope partitions; the provider's must not be inherited"
+        );
+    }
+
     mod scoped_grants {
         use super::*;
 
