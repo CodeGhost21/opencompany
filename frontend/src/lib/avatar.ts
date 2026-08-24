@@ -255,27 +255,48 @@ export function resolveAvatarSrc(
     pending = client
       .getBlob(`${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(node)}`)
       .then((blob) => {
-        // Evicted while the fetch was in flight — the key came and went, so
-        // nothing will read this URL from the cache again. Revoke it rather
-        // than let it leak. Unreachable today (in-flight entries are skipped
-        // by eviction); kept as a guard against a future change of that rule.
-        if (!blobUrls.has(key)) {
+        // This request's entry is gone. Two ways that happens, both of which
+        // mean the bytes must not be published under a key this request no
+        // longer answers for: the key was evicted while the fetch was in
+        // flight (nothing reads a URL cached under a dropped key), or a newer
+        // request for the same node superseded it after `forgetAvatarNode`
+        // removed the old entry — the ABA race where the map merely *having*
+        // the key again is not proof it is this promise. Compare identity,
+        // not presence.
+        if (blobUrls.get(key) !== pending) {
           const orphan = URL.createObjectURL(blob);
           URL.revokeObjectURL(orphan);
           return null;
         }
-        // Make room before minting the URL: at the cap, drop the oldest
-        // resolved face. This entry is not in `blobUrlValues` yet, so it is
-        // never the one dropped — the URL being handed to the caller survives.
-        if (blobUrlValues.size >= MAX_BLOB_URLS) evictOldestBlobUrl();
         const url = URL.createObjectURL(blob);
-        blobUrlValues.set(key, url);
+        // Make room before caching. If every resolved entry is pinned by a
+        // mounted tile — a screen drawing more custom faces than the cap —
+        // nothing can be evicted, and the bound wins: the URL is handed to
+        // the caller but is not cache-owned, so the cache does not grow. It
+        // is revoked by `releaseAvatar` when the last tile unmounts. With no
+        // mounted tile waiting and nothing evictable, the face is simply
+        // revoked on the spot — nobody would ever read it.
+        if (blobUrlValues.size < MAX_BLOB_URLS || evictOldestBlobUrl()) {
+          blobUrlValues.set(key, url);
+        } else if ((blobUrlRefs.get(key) ?? 0) > 0) {
+          componentUrls.set(key, url);
+          // The fetch this promise answers is spent and its URL dies with the
+          // tile: drop the entry so a later mount fetches again instead of
+          // reusing a URL that will be revoked.
+          blobUrls.delete(key);
+        } else {
+          URL.revokeObjectURL(url);
+          blobUrls.delete(key);
+        }
         return url;
       })
       .catch(() => {
         // Not cached as a failure: a face that 404s because the workspace was
         // mid-write should be retried on the next mount, not remembered as
-        // missing for the life of the tab.
+        // missing for the life of the tab. A stale failure — this request's
+        // entry was superseded while it was in flight — must not delete the
+        // newer entry, so the identity is checked before the maps are touched.
+        if (blobUrls.get(key) !== pending) return null;
         blobUrls.delete(key);
         blobUrlValues.delete(key);
         return null;
