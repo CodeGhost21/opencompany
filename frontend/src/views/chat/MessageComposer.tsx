@@ -267,7 +267,9 @@ export function MessageComposer({
       sending = reconcileMentions(text, sending);
     }
     // On first send with outside-channel mentions, warn instead of sending.
-    const outside = mentionsOutsideChannel(sending, channelMemberIds);
+    // The directory rows carry each desk's membership, so a desk mention is
+    // judged by its blast radius, not skipped because its target is a desk.
+    const outside = mentionsOutsideChannel(sending, channelMemberIds, mentionables);
     if (outside.length > 0 && !outsideWarning) {
       setOutsideWarning(outside);
       return;
