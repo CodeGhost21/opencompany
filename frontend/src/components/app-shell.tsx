@@ -1313,8 +1313,13 @@ export function AppShell({
   }, [feed.now, refreshMentions]);
 
   const mentionCounts = useMemo(
-    () => mentionCountsByChannel(mentionFeed, chatChannelByThread.main),
-    [mentionFeed, chatChannelByThread.main],
+    () =>
+      mentionCountsByChannel(
+        mentionFeed,
+        chatChannelByThread.main,
+        new Set(Object.values(chatChannelByThread)),
+      ),
+    [mentionFeed, chatChannelByThread],
   );
   const mentionFeedRef = useRef(mentionFeed);
   mentionFeedRef.current = mentionFeed;
