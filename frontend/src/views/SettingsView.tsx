@@ -132,9 +132,7 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
           </CardContent>
         </Card>
 
-        <MemoryEngineCard client={client} />
-
-        <MemoryEngineCard client={client} />
+        <MemoryEngineCard client={client} company={company} />
 
         {/* Lifecycle */}
         {scoped ? (
