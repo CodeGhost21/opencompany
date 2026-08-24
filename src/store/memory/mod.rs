@@ -353,6 +353,17 @@ impl BoundMemory {
     ) -> Result<Vec<crate::ports::CompressedTrace>> {
         self.trace_store().archived_traces(company).await
     }
+
+    /// Restores traces directly into the archive namespace for bundle import.
+    pub async fn restore_archived_traces(
+        &self,
+        company: &CompanyId,
+        traces: &[crate::ports::CompressedTrace],
+    ) -> Result<()> {
+        self.trace_store()
+            .restore_archived_traces(company, traces)
+            .await
+    }
 }
 
 #[cfg(test)]
