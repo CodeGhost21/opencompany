@@ -97,4 +97,12 @@ describe("a hub-carried setup destination", () => {
     expect(window.location.search).toBe("?company=acme");
     expect(hash()).toBe("");
   });
+
+  it("recognizes the marker only for its originating connection and company", () => {
+    land("/", "?company=acme&from=setup&connection=conn-a");
+
+    expect(arrivedViaHubSetupHandoff({ connection: "conn-a", company: "acme" })).toBe(true);
+    expect(arrivedViaHubSetupHandoff({ connection: "conn-b", company: "acme" })).toBe(false);
+    expect(arrivedViaHubSetupHandoff({ connection: "conn-a", company: "other" })).toBe(false);
+  });
 });
