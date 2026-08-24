@@ -136,7 +136,7 @@ use crate::ports::bound_node_output;
 
 use crate::runtime::workflow_resume::{PerformedCall, performed_in_input};
 
-use crate::workflows::caps::resolver::{ChildGateRegistry, GATE_NAMESPACE, descend};
+use crate::workflows::caps::resolver::{ChildGateRegistry, GATE_NAMESPACE, child_id_of, descend};
 
 /// The host-private slug a replayed node invokes instead of its real tool.
 ///
