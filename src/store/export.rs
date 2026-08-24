@@ -45,6 +45,7 @@ const EVENTS_JSONL: &str = "events.jsonl";
 const LEDGER_JSONL: &str = "ledger.jsonl";
 const MEMORY_DIR: &str = "memory";
 const TRACES_JSONL: &str = "traces.jsonl";
+const ARCHIVES_JSONL: &str = "archives.jsonl";
 /// Operator facts, at the bundle ROOT — the same place the live fs bundle
 /// keeps them (`paths::Bundle::facts_jsonl`), so an export stays diffable
 /// against a live home and a direct reader finds them where the canonical
