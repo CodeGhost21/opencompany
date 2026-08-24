@@ -194,7 +194,8 @@ export function SetupController({
   const skip = useCallback(() => {
     markSetupSkipped(scope);
     setOpen(false);
-  }, [scope]);
+    if (routeOpen) onRouteDismiss?.();
+  }, [routeOpen, onRouteDismiss, scope]);
 
   const done = useCallback(() => {
     // Clear the skip so it cannot outlive what it was suppressing: an operator
