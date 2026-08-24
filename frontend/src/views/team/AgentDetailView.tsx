@@ -30,6 +30,7 @@ import {
   draftFrom,
   draftIsValid,
   emptyDraft,
+  grantCeiling,
   isEditable,
   parseToolGlobs,
   summarizeGrants,
