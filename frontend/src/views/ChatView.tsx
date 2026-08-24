@@ -760,6 +760,11 @@ export function ChatView({
         // below reads the response's shape and never this argument.
         true,
       );
+      if (scopeCompany !== company) {
+        outcome = "failed";
+        if (chatId) onSendStale?.(chatId);
+        return;
+      }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
       // journaled at accept time, so its durable id is a fact within
