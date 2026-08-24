@@ -627,10 +627,9 @@ async fn company_events(
     // map empty for the rest of the connection. A background task refreshes it
     // on an interval, and the guard above aborts that task when the stream
     // closes.
-    let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
-        Arc::new(std::sync::RwLock::new(
-            author_labels(&scope.runtime).await.unwrap_or_default(),
-        ));
+    let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> = Arc::new(
+        std::sync::RwLock::new(author_labels(&scope.runtime).await.unwrap_or_default()),
+    );
     let label_refresh = {
         let runtime = scope.runtime.clone();
         let shared = Arc::clone(&authors);
@@ -638,7 +637,9 @@ async fn company_events(
             loop {
                 tokio::time::sleep(LABEL_REFRESH_EVERY).await;
                 if let Ok(fresh) = author_labels(&runtime).await {
-                    *shared.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+                    *shared
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
                 }
             }
         })
@@ -650,7 +651,9 @@ async fn company_events(
     let durable = subscription.filter_map(move |item| {
         // Keep the teardown guard alive for the life of the stream.
         let _ = &guard;
-        let authors = authors.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let authors = authors
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let event = project_stream_item_for_viewer(&item, &authors, &viewer)
             .map(|value| Ok(Event::default().data(value.to_string())));
         std::future::ready(event)
