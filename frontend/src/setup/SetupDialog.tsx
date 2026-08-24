@@ -358,12 +358,12 @@ export function SetupDialog({
           return;
         }
       }
+      // This run's creations are the boundary of the next redesign's
+      // replacement; the previous run's are moot (replaced above, if this run
+      // is one).
+      createdIds.current = [];
       for (let i = 0; i < agents.length; i++) {
         const agent = agents[i];
-        // This run's creations are the boundary of the next redesign's
-        // replacement; the previous run's are moot (replaced above, if this run
-        // is one).
-        createdIds.current = [];
         try {
           const created = await client.addTeamMember(
             { name: agent.name, role: agent.role, description: agent.description },
