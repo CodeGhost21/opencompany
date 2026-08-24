@@ -20,6 +20,7 @@
 
 use axum::Json;
 use axum::Router;
+use axum::extract::State;
 use axum::routing::get;
 use serde::Serialize;
 
@@ -76,7 +77,10 @@ pub(super) struct HarnessDto {
 /// Carries **no readiness**: whether a CLI is installed and signed in is a
 /// fact about the operator's machine, not about this company, and this route
 /// answers for any client on any machine. See [`HarnessDto::detected`].
-async fn list_harnesses(company: ScopedCompany) -> Result<Json<Vec<HarnessDto>>, ApiError> {
+async fn list_harnesses(
+    State(state): State<AppState>,
+    company: ScopedCompany,
+) -> Result<Json<Vec<HarnessDto>>, ApiError> {
     let record = company
         .runtime
         .store()
@@ -85,8 +89,23 @@ async fn list_harnesses(company: ScopedCompany) -> Result<Json<Vec<HarnessDto>>,
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
 
     let declared = record.manifest.effective_harnesses();
+
+    // A coding CLI is only bindable where **this host** can spawn one, and
+    // that is a property of the host rather than of the company: only the
+    // embedded desktop wires an `AcpAgentFactory`, and `opencompany serve`
+    // builds `AppState` without one. Advertising `claude` and `codex` from a
+    // hosted host let an admin bind a teammate to a CLI on somebody else's
+    // machine — accepted by `PATCH`, then dead on the next rebuild, because
+    // the server has nothing to launch. `lanes.rs` already marks such a lane
+    // unavailable; this stops the binding being offered in the first place.
+    //
+    // Declared entries are untouched: a manifest that names a `[[harness]]`
+    // is stating what that deployment has, and this route does not get to
+    // second-guess it.
+    let can_run_local = state.acp_agents().is_some();
     let detected = ACP_AGENTS
         .iter()
+        .filter(|_| can_run_local)
         .filter(|id| !declared.iter().any(|h| h.id == **id))
         .map(|id| Harness::implicit_local(id));
 
@@ -206,19 +225,53 @@ mod test {
         assert_eq!(list[0]["detected"], false, "declared, not detected");
     }
 
-    /// Issue #1245's detected-harness follow-up: every coding CLI this build
-    /// drives is bindable without a `[[harness]]`, so the picker can offer it
-    /// — marked `detected` so the console knows its availability is a fact
-    /// about the operator's machine, which this route cannot answer.
+    /// A host that can spawn a coding CLI offers them; one that cannot does
+    /// not.
+    ///
+    /// Issue #1245's detected-harness follow-up made every CLI this build
+    /// drives bindable without a `[[harness]]`. That is true only where the
+    /// host has an `AcpAgentFactory`, which just the embedded desktop wires —
+    /// `opencompany serve` builds `AppState` without one. Offering them
+    /// anyway let an admin bind a hosted teammate to a CLI on somebody else's
+    /// machine: accepted by `PATCH`, then dead on the next rebuild.
     #[tokio::test]
-    async fn every_coding_cli_is_listed_as_detected_and_never_default() {
-        let home = home();
-        let state = state_with_manifest(home.path(), BASE).await;
+    async fn a_coding_cli_is_offered_only_where_this_host_can_run_one() {
+        // Two homes, not one: `state_with_manifest` seeds a fixed admin, and
+        // seeding the same address twice into one store is a conflict.
+        let hosted_home = home();
+        let desktop_home = home();
 
-        let (status, body) = get(&state, "/api/v1/company/harnesses").await;
+        // Without a factory — the hosted shape.
+        let hosted = state_with_manifest(hosted_home.path(), BASE).await;
+        let (status, body) = get(&hosted, "/api/v1/company/harnesses").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for id in ["claude", "codex"] {
+            assert!(
+                !body.as_array().unwrap().iter().any(|h| h["id"] == id),
+                "a host with nothing to spawn must not offer `{id}`: {body}"
+            );
+        }
+
+        // With one — the desktop shape.
+        struct StubFactory;
+        impl crate::ports::acp::AcpAgentFactory for StubFactory {
+            fn build(
+                &self,
+                _agent: &str,
+                _model: Option<&str>,
+                _agent_models: &std::collections::HashMap<String, String>,
+                _workspace_root: &std::path::Path,
+            ) -> crate::Result<std::sync::Arc<dyn crate::ports::acp::AcpAgent>> {
+                unreachable!("this route never builds an agent")
+            }
+        }
+        let desktop = state_with_manifest(desktop_home.path(), BASE)
+            .await
+            .with_acp_agents(std::sync::Arc::new(StubFactory));
+
+        let (status, body) = get(&desktop, "/api/v1/company/harnesses").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let list = body.as_array().unwrap();
-
         for id in ["claude", "codex"] {
             let found = list.iter().find(|h| h["id"] == id).expect("cli listed");
             assert_eq!(found["kind"], "acp", "{id}");

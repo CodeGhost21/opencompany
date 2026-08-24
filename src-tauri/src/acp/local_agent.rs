@@ -38,6 +38,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::acp::client::{AcpClient, AutoApprovingFiles, ClientHandler, ConfinedFiles};
 use crate::acp::confine::Confinement;
 use crate::acp::discovery::HARNESSES;
+use crate::acp::discovery::Harness;
 
 /// Per-CLI startup model env var, confirmed live against the real adapter
 /// (issue #1245's live smoke test) — not guessed. `None` means this build has
@@ -55,16 +56,16 @@ fn model_env_var(agent: &str) -> Option<&'static str> {
 /// One spawned local-transport ACP harness, serving every teammate bound to
 /// it.
 pub struct LocalAcpAgent {
-    /// The adapter to spawn, resolved the same way the readiness probe
-    /// resolves it: the copy this app installed first, then `PATH`.
+    /// The catalogue entry this agent drives.
     ///
-    /// Owned rather than `&'static str` because an app-owned install is an
-    /// absolute path under the data directory, not a name from the catalogue.
-    /// Spawning the catalogue name here — which is what this did — meant the
-    /// Install button produced an adapter the probe reported as `Ready` and
-    /// that no real turn ever used: the turn went to `PATH`, and on a machine
-    /// whose only adapter was the installed one it found nothing at all.
-    command: String,
+    /// Deliberately *not* a resolved path. Resolution happens in
+    /// [`Self::client`], at the moment of spawn, because the answer changes
+    /// while this value is alive: a runtime is built when the company boots,
+    /// the operator presses Install afterwards, and a path snapshotted at
+    /// construction would still name whatever was there before — so the probe
+    /// would report `Ready` off the newly installed adapter while every real
+    /// turn kept spawning the old one until a restart.
+    harness: &'static Harness,
     args: Vec<String>,
     env: Vec<(String, String)>,
     /// The desired model, kept regardless of whether an env var already
@@ -116,9 +117,7 @@ impl LocalAcpAgent {
         }
 
         Ok(Self {
-            command: crate::acp::discovery::resolve_adapter(def)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| def.command.to_string()),
+            harness: def,
             args: def.args.iter().map(|a| a.to_string()).collect(),
             env,
             model: model.map(str::to_string),
@@ -161,24 +160,26 @@ impl LocalAcpAgent {
                 .push(update);
         });
 
+        // Resolved here, not held: an install that happened since this
+        // company was built is picked up on the next turn rather than the next
+        // restart. Falls back to the catalogue name so the spawn failure is
+        // `NotOnPath` — which is what produces install advice — rather than a
+        // path that was never there.
+        let command = crate::acp::discovery::resolve_adapter(self.harness)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.harness.command.to_string());
+
         let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
         let env: Vec<(&str, &str)> = self
             .env
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let client = AcpClient::spawn(
-            &self.command,
-            &args,
-            &self.workspace_root,
-            &env,
-            handler,
-            sink,
-        )
-        .await
-        .map_err(|error| {
-            OpenCompanyError::Config(format!("could not start `{}`: {error}", self.command))
-        })?;
+        let client = AcpClient::spawn(&command, &args, &self.workspace_root, &env, handler, sink)
+            .await
+            .map_err(|error| {
+                OpenCompanyError::Config(format!("could not start `{command}`: {error}"))
+            })?;
         client
             .initialize()
             .await
