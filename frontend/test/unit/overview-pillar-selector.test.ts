@@ -31,7 +31,12 @@ const DESKS: DeptLite[] = [
   { deptId: "desk:gtm", teamId: "team:desk:gtm", name: "Go-to-Market", tagline: "", color: "var(--chart-3)" },
 ];
 
-function render(deptList: DeptLite[], currentTeamId: string | null, onNavDept: (id: string) => void = () => {}) {
+function render(
+  deptList: DeptLite[],
+  currentTeamId: string | null,
+  onNavDept: (id: string) => void = () => {},
+  emptyState = false,
+) {
   const currentDept = deptList.find((d) => d.teamId === currentTeamId) ?? null;
   act(() => {
     root.render(
@@ -40,6 +45,7 @@ function render(deptList: DeptLite[], currentTeamId: string | null, onNavDept: (
         currentTeamId,
         currentDept,
         toolWiki: null,
+        emptyState,
         onNavDept,
         onBack: () => {},
         // `children` is a required prop here, not a JSX convenience — passing
@@ -117,5 +123,16 @@ describe("the pillar selector", () => {
     expect(chips()).toHaveLength(0);
     expect(host.textContent).toContain("No desks yet");
     expect(host.textContent).not.toContain("Pick a pillar");
+  });
+
+  it("explains a loaded empty overview and sends the operator to create a desk", () => {
+    render([], null, () => {}, true);
+
+    expect(host.textContent).toContain("This graph shows how your company's desks, teammates, work, and workflows connect.");
+    const createDesk = host.querySelector('a[href="#/company/desks"]');
+    expect(createDesk?.textContent).toBe("Create a desk");
+    expect(host.querySelector('[aria-label="Previous department"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Next department"]')).toBeNull();
+    expect(host.querySelector("svg")).toBeNull();
   });
 });
