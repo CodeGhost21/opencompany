@@ -6879,8 +6879,8 @@ mod tests {
         }
 
         /// The contract difference from `output`'s 404: a run that opened no
-        /// cards (or whose cards published nothing) answers `200 []`, not a
-        /// 404. A fileless run is normal, not an error.
+        /// cards (or whose cards published nothing) answers `200 { files: [] }`,
+        /// not a 404. A fileless run is normal, not an error.
         #[tokio::test]
         async fn run_artifacts_empty_run_returns_200_empty() {
             let home_dir = home();
