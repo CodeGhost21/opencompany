@@ -222,6 +222,33 @@ describe("a host that cannot be reached at all", () => {
     expect(unreachable.get.mock.calls.length).toBeGreaterThan(readsBeforeRetry);
   });
 
+  it("returns focus to the graph's Refresh control after a successful retry", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // The outage overlay grabs focus so a keyboard user lands on the
+    // explanation and its retry control (issue #1314).
+    const outage = container.querySelector('[data-testid="overview-outage"]');
+    expect(outage).not.toBeNull();
+    expect(document.activeElement).toBe(outage);
+
+    // The host comes back; the retry now succeeds and the overlay unmounts.
+    goHealthy(unreachable);
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(container.querySelector('[data-testid="overview-outage"]')).toBeNull();
+    // Dismissing the outage removed the focused button; focus must land back
+    // on a control — the graph's Refresh — not drop to <body>.
+    expect(document.activeElement).toBe(
+      container.querySelector('[aria-label="Refresh the graph"]'),
+    );
+  });
+
   it("keeps the previous snapshot's time rather than re-stamping it", async () => {
     const mocks = fakeClient({
       desks: [desk({ id: "research", name: "Research Desk", members: ["maya"] })],
