@@ -1262,8 +1262,8 @@ export function AppShell({
   }, [feed.now, refreshMentions]);
 
   const mentionCounts = useMemo(
-    () => mentionCountsByChannel(mentionFeed),
-    [mentionFeed],
+    () => mentionCountsByChannel(mentionFeed, chatChannelByThread.main),
+    [mentionFeed, chatChannelByThread.main],
   );
   const mentionFeedRef = useRef(mentionFeed);
   mentionFeedRef.current = mentionFeed;
