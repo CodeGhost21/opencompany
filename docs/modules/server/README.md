@@ -78,10 +78,10 @@ channel fallback) answers. Responder selection is a property of the
 agent-harness brain, which runs the roster's turns; hosted and echo cognition
 reply through their own service, which does not select a roster responder, and
 the resolved mentions still render as chips on the returned message. Additional
-agent mentions, people, desks, and
-`@everyone` are context for that same turn; they do not start additional agent
-runs. A desk mention contributes that desk's context, while `@everyone` expands
-to the channel's visible audience for notification purposes. Clients should
+agent mentions, people, desks, and `@everyone` are context for that same turn;
+they do not start additional agent runs. A desk mention contributes that desk's
+context, while `@everyone` expands to the channel's visible audience for
+notification purposes. Clients should
 render the returned mention DTOs, including `label`, `mine`, and optional
 `quiet`, rather than re-resolving display text locally.
 
