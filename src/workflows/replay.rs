@@ -375,13 +375,9 @@ pub(crate) fn child_calls_to_repeat(
                 break;
             };
             if let Some(ancestor) = record.as_ref() {
-                for call in child_calls_preceding(
-                    &ancestor.graph,
-                    segment,
-                    &approved,
-                    &prefix,
-                    &prefix,
-                ) {
+                for call in
+                    child_calls_preceding(&ancestor.graph, segment, &approved, &prefix, &prefix)
+                {
                     if !out.contains(&call) {
                         out.push(call);
                     }
