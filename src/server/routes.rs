@@ -75,7 +75,7 @@ fn console_dir_from_env() -> Option<PathBuf> {
 /// Keyed on the response's own content type rather than the request path,
 /// because the SPA fallback serves the shell at paths that look like anything
 /// at all — including, in the failure above, paths under `/assets/`.
-fn cache_console_response(mut response: Response) -> Response {
+fn cache_console_response(path: &str, mut response: Response) -> Response {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
     let is_html = response
@@ -95,6 +95,14 @@ fn cache_console_response(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static(policy));
+    // The page shell is an opaque-origin iframe, so its ES module imports send
+    // `Origin: null` even though the console and host share a URL origin. The
+    // module graph therefore needs explicit CORS permission. These SDK files
+    // are only the fixed React/site runtime; the company-authenticated bundle
+    // receives the same headers in `ops::pages`.
+    if path.starts_with("/pages-sdk/") && !is_html {
+        crate::server::ops::pages::apply_page_module_cors_headers(response.headers_mut());
+    }
     response
 }
 
@@ -155,8 +163,9 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
                     if is_reserved_path(request.uri().path()) {
                         return StatusCode::NOT_FOUND.into_response();
                     }
+                    let path = request.uri().path().to_owned();
                     match serve.oneshot(request).await {
-                        Ok(response) => cache_console_response(response.into_response()),
+                        Ok(response) => cache_console_response(&path, response.into_response()),
                         Err(err) => match err {},
                     }
                 }
@@ -478,6 +487,12 @@ mod tests {
             "export const x = 1;\n",
         )
         .unwrap();
+        std::fs::create_dir(dir.path().join("pages-sdk")).unwrap();
+        std::fs::write(
+            dir.path().join("pages-sdk").join("react.mjs"),
+            "export const createElement = () => null;\n",
+        )
+        .unwrap();
         let path = dir.path().to_path_buf();
         (dir, path)
     }
@@ -567,6 +582,42 @@ mod tests {
         assert_eq!(
             cache_control(&response),
             "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[tokio::test]
+    async fn page_sdk_modules_allow_credentialed_imports_from_opaque_frames() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pages-sdk/react.mjs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            response.headers().get(axum::http::header::VARY).unwrap(),
+            "Origin"
         );
     }
 

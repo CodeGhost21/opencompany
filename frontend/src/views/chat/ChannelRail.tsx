@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock } from "lucide-react";
+import { ChevronRight, CircleDot, Hash, Lock, PanelRight } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
@@ -22,6 +23,13 @@ interface Props {
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
   onSelect: (id: string) => void;
+  collapsed?: boolean;
+  onExpand?: () => void;
+  /** Controlled section-disclosure state, shared across the desktop and
+   * sub-`lg` rail instances so crossing the breakpoint keeps the operator's
+   * folds (codex P2 review). Falls back to instance-local state. */
+  openSections?: Record<string, boolean>;
+  onToggleSection?: (id: string) => void;
   className?: string;
 }
 
@@ -34,7 +42,67 @@ interface Props {
  * screen — the app's own nav is to its left — so it stays visually quieter
  * than that one: no group headers in caps, no badges except unread.
  */
-export function ChannelRail({ sections, activeId, unread, onSelect, className }: Props) {
+export function ChannelRail({
+  sections,
+  activeId,
+  unread,
+  onSelect,
+  collapsed = false,
+  onExpand,
+  openSections,
+  onToggleSection,
+  className,
+}: Props) {
+  // Section disclosure lives here rather than inside `Section`, because the
+  // collapsed branch below unmounts every `Section`. Held inside them, folding
+  // a section and then collapsing the rail would reopen it on expand — the
+  // density toggle must not discard the operator's organization. Absent means
+  // "open": the default is a fully expanded list. `ChatView` passes the state
+  // in so both rail instances share one fold set across the `lg` breakpoint;
+  // a standalone rail (tests, other hosts) keeps it local to the instance.
+  const [internalOpenSections, setInternalOpenSections] = useState<Record<string, boolean>>({});
+  const resolvedOpenSections = openSections ?? internalOpenSections;
+  const toggleSection = (id: string) => {
+    if (onToggleSection) {
+      onToggleSection(id);
+    } else {
+      setInternalOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
+    }
+  };
+
+  if (collapsed) {
+    return (
+      <aside
+        className={cn(
+          "w-14 shrink-0 flex-col items-center overflow-y-auto border-r bg-sidebar/40 py-3",
+          className,
+        )}
+      >
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 text-muted-foreground"
+          onClick={onExpand}
+          aria-label="Expand channels"
+          title="Expand channels"
+        >
+          <PanelRight className="size-4" />
+        </Button>
+        <nav aria-label="Channels" className="mt-3 flex w-full flex-col items-center gap-1 px-2">
+          {sections.flatMap((section) => section.channels).map((channel) => (
+            <CompactChannelRow
+              key={channel.id}
+              channel={channel}
+              active={channel.id === activeId}
+              unread={unread[channel.id] ?? 0}
+              onSelect={onSelect}
+            />
+          ))}
+        </nav>
+      </aside>
+    );
+  }
+
   return (
     <aside
       className={cn(
@@ -53,9 +121,55 @@ export function ChannelRail({ sections, activeId, unread, onSelect, className }:
           activeId={activeId}
           unread={unread}
           onSelect={onSelect}
+          open={resolvedOpenSections[section.id] ?? true}
+          onToggle={() => toggleSection(section.id)}
         />
       ))}
     </aside>
+  );
+}
+
+function CompactChannelRow({
+  channel,
+  active,
+  unread,
+  onSelect,
+}: {
+  channel: Channel;
+  active: boolean;
+  unread: number;
+  onSelect: (id: string) => void;
+}) {
+  const hasUnread = unread > 0 && !active;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(channel.id)}
+      aria-current={active ? "page" : undefined}
+      // The compact row renders unread as a bare dot, so the count has to live
+      // in the accessible name — the expanded row says it in text, and
+      // collapsing the rail must not strip the same fact from the screen-reader
+      // tree. The dot itself stays a sighted-hover-only cue.
+      aria-label={
+        hasUnread ? `${channel.name}, ${unread > 99 ? "99+" : unread} unread` : channel.name
+      }
+      title={channel.name}
+      className={cn(
+        "relative flex size-9 shrink-0 items-center justify-center rounded-md transition-colors",
+        active
+          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
+      )}
+    >
+      <ChannelIcon channel={channel} />
+      {hasUnread && (
+        <span
+          title={UNREAD_IS_LOCAL}
+          className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary"
+        />
+      )}
+    </button>
   );
 }
 
@@ -64,13 +178,16 @@ function Section({
   activeId,
   unread,
   onSelect,
+  open,
+  onToggle,
 }: {
   section: ChannelSection;
   activeId: string | null;
   unread: Record<string, number>;
   onSelect: (id: string) => void;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [open, setOpen] = useState(true);
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
     : 0;
@@ -79,7 +196,7 @@ function Section({
     <section className="group/section select-none px-2 pt-2">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={onToggle}
         aria-expanded={open}
         className="flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
       >

@@ -227,5 +227,3 @@ export function uninstallMcpRegistryServer(
     `${client.scopeFor(company)}/mcp/registry/${encodeURIComponent(serverId)}`,
   );
 }
-
-

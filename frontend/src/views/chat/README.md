@@ -58,6 +58,7 @@ backend, and there is no per-channel routing on the host.
 |---|---|
 | Unread counts | Derived here from when this tab last looked at a channel — the host keeps no read receipts, so two consoles will disagree. The badge's tooltip says so. |
 | A console-only teammate's other half | A starter-roster teammate is not on the company, so nothing answers their DM. The transcript is still saved; a notice above the composer says which half is missing. |
+| Channel rail density | The desktop channel rail can collapse to an icon strip, preserving channel reachability while giving the transcript back its width. This is stored per browser connection and company; it is not a company-wide shell setting and does not change the full rail below `lg` (issue #1340). |
 
 Reactions are deliberately **not** on the SSE feed: the frame would have to
 carry the reacting person, and that stream has no per-viewer projection to turn

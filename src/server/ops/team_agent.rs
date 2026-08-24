@@ -72,7 +72,7 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::{self, MethodRouter};
 use serde::{Deserialize, Serialize};
 
@@ -511,7 +511,7 @@ async fn edit_agent(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
-) -> Result<Json<AgentDetailDto>, Response> {
+) -> Result<Json<AgentDetailDto>, crate::server::Rejection> {
     // Serialize with every other write to `overlay_agents`, so a console edit
     // and a concurrent `add_agent` cannot clobber one another's roster.
     let write_lock = company_write_lock(company.id());
@@ -521,11 +521,8 @@ async fn edit_agent(
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
-        })?;
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
 
     // Identity before validation, so an unknown id is a 404 rather than a
     // complaint about the shape of a body nobody could have applied anyway.
@@ -543,7 +540,8 @@ async fn edit_agent(
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         )))
-        .into_response());
+        .into_response()
+        .into());
     }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
 
@@ -683,12 +681,7 @@ async fn edit_agent(
         }
     }
 
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
 
     // The caller either passed `require_admin` above or sent no `tools`, so
     // re-resolve rather than assume: an admin editing only a name must still
@@ -696,7 +689,7 @@ async fn edit_agent(
     let is_admin = is_admin_actor(&headers, &state, &company, peer).await;
     detail(&company, &record, &agent_id, is_admin)
         .await
-        .map_err(|e| e.into_response())
+        .map_err(|e| e.into_response().into())
 }
 
 /// Rejects a field that was sent but is blank, and trims one that was sent.

@@ -88,7 +88,7 @@ type Surface = {
 };
 
 const SURFACES: Surface[] = [
-  { name: "overview", hash: "/#/overview", settle: settleKnowledgeGraph },
+  { name: "overview", hash: "/#/company/graph", settle: settleKnowledgeGraph },
   { name: "tasks", hash: "/#/ledgers/tasks" },
   { name: "workflows", hash: "/#/workflows" },
   { name: "company", hash: "/#/company" },
