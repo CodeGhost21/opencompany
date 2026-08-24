@@ -7533,12 +7533,49 @@ mode = "full"
         assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
     }
 
-    /// A threaded reply carries its parent onto the live frame (issue #364), so
-    /// a console watching the stream folds it under the same row a reload would
-    /// — otherwise a thread answer arrives live in the channel and then jumps
-    /// into the thread on the next refresh.
     #[test]
-    fn projects_agent_reply_with_its_thread_parent() {
+    fn projects_agent_reply_with_viewer_mention_metadata() {
+        use crate::ports::types::{Mention, MentionTarget};
+        let stored = stored(CompanyEvent::AgentReply {
+            mentions: vec![
+                Mention {
+                    target: MentionTarget::User { id: "u-1".into() },
+                    text: "@Ada".into(),
+                    offset: 0,
+                    quiet: false,
+                },
+                Mention {
+                    target: MentionTarget::Everyone,
+                    text: "@everyone".into(),
+                    offset: 5,
+                    quiet: true,
+                },
+            ],
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "@Ada @everyone".into(),
+            steps: Vec::new(),
+        });
+        let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
+        let value = super::project_event_for_viewer(
+            &stored,
+            &authors,
+            &Viewer::User("u-1".into()),
+        )
+        .expect("agent_reply is an attention signal");
+        assert_eq!(
+            value["mentions"],
+            serde_json::json!([
+                { "text": "@Ada", "offset": 0, "label": "Ada", "mine": true },
+                { "text": "@everyone", "offset": 5, "label": "everyone", "mine": true, "quiet": true },
+            ])
+        );
+    }
+
+
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
             mentions: Vec::new(),
             mention_depth: 0,
