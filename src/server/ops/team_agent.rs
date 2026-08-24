@@ -1203,6 +1203,10 @@ members = ["writer", "ceo"]
                 strings(&body["tools"]["deskAllow"]).is_empty(),
                 "{agent}: {body}"
             );
+            assert_eq!(
+                body["tools"]["deskCeilingActive"], false,
+                "no desk states a ceiling, so the desk level is not in play: {agent}: {body}"
+            );
         }
     }
 
