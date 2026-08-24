@@ -445,6 +445,13 @@ export function ChatView({
    * one attempt per bare-hash entry, so it can never fight a navigation.
    */
   const restoredFor = useRef<string | null | undefined>(undefined);
+  // The latest company, so an async completion started for one company can
+  // tell whether it still belongs to the active scope before writing a
+  // transcript (`send` and `react` both await a host round trip).
+  const companyRef = useRef(company);
+  useEffect(() => {
+    companyRef.current = company;
+  }, [company]);
   useEffect(() => {
     if (sub) {
       // A channel is named, so the next bare `#/chat` is a fresh re-entry.
