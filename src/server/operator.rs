@@ -25,6 +25,7 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::AppState;
@@ -38,8 +39,8 @@ use crate::ports::types::{
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer,
-    channel_attributed_replies, history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer, author_labels,
+    channel_attributed_replies, history_for_desk, project_mentions,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
@@ -578,13 +579,33 @@ async fn delete_desk(
 
 /// Logs SSE stream teardown when the subscriber disconnects. Held inside the
 /// projection closure so it drops exactly when the response body is dropped.
-struct SseStreamGuard(CompanyId);
+///
+/// Also owns the label-refresh task's handle, so the periodic roster re-read
+/// dies with its connection instead of leaking for the process's lifetime.
+struct SseStreamGuard {
+    company: CompanyId,
+    /// One-shot stop signal for the label-refresh task. Sent before the handle
+    /// is aborted so the loop exits at its next sleep boundary rather than
+    /// waking once more to write a roster map nobody will read.
+    cancel: Option<oneshot::Sender<()>>,
+    label_refresh: Option<JoinHandle<()>>,
+}
 
 impl Drop for SseStreamGuard {
     fn drop(&mut self) {
-        tracing::debug!(company = %self.0, "operator SSE stream closed");
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(handle) = self.label_refresh.take() {
+            handle.abort();
+        }
+        tracing::debug!(company = %self.company, "operator SSE stream closed");
     }
 }
+
+/// How often an open SSE stream re-reads the roster, so a mention chip for a
+/// user added or renamed after the stream opened picks up the new label.
+const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 /// `GET {scope}/events` — the company → operator attention feed (issue #66).
 ///
@@ -602,18 +623,58 @@ async fn company_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let company = scope.id().clone();
     tracing::debug!(company = %company, "operator SSE stream opening");
-    let guard = SseStreamGuard(company.clone());
-    let durable = scope
-        .runtime
-        .events()
-        .subscribe(&company)
-        .filter_map(move |item| {
-            // Keep the teardown guard alive for the life of the stream.
-            let _ = &guard;
-            let event = project_stream_item(&item)
-                .map(|value| Ok(Event::default().data(value.to_string())));
-            std::future::ready(event)
-        });
+    let viewer = scope
+        .actor
+        .as_ref()
+        .map(|actor| Viewer::User(actor.id.clone()))
+        .unwrap_or(Viewer::Operator);
+    let subscription = scope.runtime.events().subscribe(&company);
+    // Roster display labels for mention chips. Held in a shared lock rather
+    // than captured once: the stream outlives membership changes that can add
+    // or rename a user, and a transiently failed initial read must not fix the
+    // map empty for the rest of the connection. A background task refreshes it
+    // on an interval, and the guard above aborts that task when the stream
+    // closes.
+    let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> = Arc::new(
+        std::sync::RwLock::new(author_labels(&scope.runtime).await.unwrap_or_default()),
+    );
+    let (cancel, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let label_refresh = {
+        let runtime = scope.runtime.clone();
+        let shared = Arc::clone(&authors);
+        tokio::spawn(async move {
+            let mut cancel = cancel_rx;
+            loop {
+                // The guard's one-shot fires when the stream closes, so the
+                // loop stops at the next boundary instead of waking once more
+                // to attempt a write nobody will read.
+                tokio::select! {
+                    _ = tokio::time::sleep(LABEL_REFRESH_EVERY) => {}
+                    _ = &mut cancel => return,
+                }
+                if let Ok(fresh) = author_labels(&runtime).await {
+                    *shared
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+                }
+            }
+        })
+    };
+    let guard = SseStreamGuard {
+        company: company.clone(),
+        cancel: Some(cancel),
+        label_refresh: Some(label_refresh),
+    };
+    let durable = subscription.filter_map(move |item| {
+        // Keep the teardown guard alive for the life of the stream.
+        let _ = &guard;
+        let authors = authors
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let event = project_stream_item_for_viewer(&item, &authors, &viewer)
+            .map(|value| Ok(Event::default().data(value.to_string())));
+        std::future::ready(event)
+    });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
     // turn emits while it runs — see [`crate::turn_stream`]) onto the same feed.
     // These are ephemeral and never journaled; the console switches on `type`
@@ -664,9 +725,13 @@ fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&s
 
 /// Projects a live subscription item into the operator stream's safe wire
 /// shape. A gap is an unpersisted control frame, deliberately structural-only.
-fn project_stream_item(item: &EventStreamItem) -> Option<serde_json::Value> {
+fn project_stream_item_for_viewer(
+    item: &EventStreamItem,
+    authors: &std::collections::HashMap<String, String>,
+    viewer: &Viewer,
+) -> Option<serde_json::Value> {
     match item {
-        EventStreamItem::Event(stored) => project_event(stored),
+        EventStreamItem::Event(stored) => project_event_for_viewer(stored, authors, viewer),
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
             "missed": missed,
@@ -691,7 +756,16 @@ fn project_stream_item(item: &EventStreamItem) -> Option<serde_json::Value> {
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
+#[cfg(test)]
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
+    project_event_for_viewer(stored, &std::collections::HashMap::new(), &Viewer::Operator)
+}
+
+fn project_event_for_viewer(
+    stored: &StoredEvent,
+    authors: &std::collections::HashMap<String, String>,
+    viewer: &Viewer,
+) -> Option<serde_json::Value> {
     use serde_json::json;
 
     let envelope = |ty: &str| {
@@ -734,26 +808,15 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             if let Some(task_id) = task_id {
                 o["taskId"] = json!(task_id);
             }
-            // Mention spans, so a console watching live draws the same chips a
-            // reload would rather than rendering the reply flat and then
-            // re-rendering it on refresh.
-            //
-            // **Spans only — deliberately no targets.** A `Mention` carries an
-            // agent id or a *user* id, and this stream has no per-viewer
-            // projection to resolve either into a label; that is the same
-            // reason `ReactionToggled` is dropped here entirely (issue #364).
-            // A chip needs the range and whether it pings, and nothing else, so
-            // that is all this projects. `chat/history` remains the one surface
-            // that answers *who*, per viewer, with labels rather than ids.
-            if !mentions.is_empty() {
+            // Project the same viewer-relative metadata as chat/history. The
+            // stream must carry complete ChatMentionDto values because the live
+            // row is already durable and hydration intentionally skips it.
+            let projected = project_mentions(mentions, authors, viewer);
+            if !projected.is_empty() {
                 o["mentions"] = json!(
-                    mentions
-                        .iter()
-                        .map(|m| json!({
-                            "text": m.text,
-                            "offset": m.offset,
-                            "quiet": m.quiet,
-                        }))
+                    projected
+                        .into_iter()
+                        .map(ChatMentionDto::from)
                         .collect::<Vec<_>>()
                 );
             }
@@ -2062,6 +2125,7 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
+    let responses = report.responses.clone();
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -2070,7 +2134,7 @@ async fn chat_and_emit(
         // The operator's own message is the cycle's single input event, so its
         // sequence is the first the cycle journaled (issue #364).
         message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
-        responses: report.responses,
+        responses,
         // A chat turn is nobody's sign-off, so this stays absent here.
         still_awaiting: None,
         turn_id,
@@ -6590,6 +6654,7 @@ mode = "full"
                         text: SLOW_TURN_REPLY.into(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -6770,6 +6835,7 @@ mode = "full"
                         text: format!("answered: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -7525,8 +7591,12 @@ mode = "full"
 
     #[test]
     fn projects_a_gap_with_structural_fields_only() {
-        let value = super::project_stream_item(&EventStreamItem::Gap { missed: 44 })
-            .expect("a gap must reach the console");
+        let value = super::project_stream_item_for_viewer(
+            &EventStreamItem::Gap { missed: 44 },
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+        )
+        .expect("a gap must reach the console");
         assert_eq!(
             value,
             serde_json::json!({ "type": "stream_gap", "missed": 44 })
@@ -7567,10 +7637,43 @@ mode = "full"
         assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
     }
 
-    /// A threaded reply carries its parent onto the live frame (issue #364), so
-    /// a console watching the stream folds it under the same row a reload would
-    /// — otherwise a thread answer arrives live in the channel and then jumps
-    /// into the thread on the next refresh.
+    #[test]
+    fn projects_agent_reply_with_viewer_mention_metadata() {
+        use crate::ports::types::{Mention, MentionTarget};
+        let stored = stored(CompanyEvent::AgentReply {
+            mentions: vec![
+                Mention {
+                    target: MentionTarget::User { id: "u-1".into() },
+                    text: "@Ada".into(),
+                    offset: 0,
+                    quiet: false,
+                },
+                Mention {
+                    target: MentionTarget::Everyone,
+                    text: "@everyone".into(),
+                    offset: 5,
+                    quiet: true,
+                },
+            ],
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "@Ada @everyone".into(),
+            steps: Vec::new(),
+        });
+        let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
+        let value = super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()))
+            .expect("agent_reply is an attention signal");
+        assert_eq!(
+            value["mentions"],
+            serde_json::json!([
+                { "text": "@Ada", "offset": 0, "label": "Ada", "mine": true },
+                { "text": "@everyone", "offset": 5, "label": "everyone", "mine": true, "quiet": true },
+            ])
+        );
+    }
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
@@ -8890,6 +8993,7 @@ mode = "full"
                             text: format!("re-issued {approval_id}"),
                             steps: Vec::new(),
                             reply_to: None,
+                            mentions: Vec::new(),
                         });
                     }
                     _ => {}

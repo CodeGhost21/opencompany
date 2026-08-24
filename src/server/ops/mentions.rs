@@ -162,6 +162,14 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
             }),
     );
 
+    // The caller's own rows are dropped, for both kinds. A self-mention can
+    // never survive sending — `normalize` refuses it — so offering a row that
+    // names the caller would look pickable and then silently un-chip on
+    // reload. An operator token's id matches no user and no agent, so the
+    // filter is a no-op for it.
+    let self_id = company.actor.as_ref().map(|a| a.id.clone());
+    agents.retain(|a| self_id.as_ref().is_none_or(|s| a.id != *s));
+
     let mut desks: Vec<MentionableDeskDto> = record
         .manifest
         .group_chats
@@ -200,6 +208,7 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
     let people = users
         .iter()
         .zip(slugs)
+        .filter(|(u, _)| self_id.as_ref().is_none_or(|s| u.id != *s))
         .map(|(u, slug)| MentionablePersonDto {
             id: u.id.clone(),
             label: user_label(u),
@@ -296,11 +305,20 @@ mod tests {
     }
 
     async fn call(state: &AppState, signed_in: bool) -> (StatusCode, Value) {
+        let cookie = if signed_in {
+            Some(crate::server::test_support::fixed_cookie("acme"))
+        } else {
+            None
+        };
+        call_with_cookie(state, cookie).await
+    }
+
+    async fn call_with_cookie(state: &AppState, cookie: Option<String>) -> (StatusCode, Value) {
         let mut request = Request::builder()
             .method("GET")
             .uri("/api/v1/company/chat/mentionables");
-        if signed_in {
-            request = request.header("cookie", crate::server::test_support::fixed_cookie("acme"));
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
         }
         let response = router(state.clone())
             .oneshot(request.body(Body::empty()).unwrap())
@@ -348,11 +366,14 @@ mod tests {
             2
         );
 
-        // The seeded admin is a person, and is offered with a label and a slug.
+        // The seeded admin is a person — but the caller's own row is dropped,
+        // so with nobody else in the directory there is no person to offer.
+        // See `a_person_never_sees_their_own_row` for the two-person case.
         let people = body["people"].as_array().expect("people");
-        assert_eq!(people.len(), 1);
-        assert!(people[0]["label"].as_str().is_some_and(|l| !l.is_empty()));
-        assert!(people[0]["slug"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(
+            people.is_empty(),
+            "the caller must not be offered as a mention target: {people:?}"
+        );
 
         assert_eq!(body["everyone"]["label"], "everyone");
         let aliases = body["everyone"]["aliases"].as_array().expect("aliases");
@@ -366,6 +387,9 @@ mod tests {
     async fn a_person_row_carries_no_email_role_or_status() {
         let home = home();
         let state = state(home.path()).await;
+        // The caller's own row is dropped, so a second person is needed for the
+        // directory to have anyone to inspect.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
         let (_, body) = call(&state, true).await;
 
         let person = &body["people"][0];
@@ -378,6 +402,34 @@ mod tests {
         assert!(
             !person.to_string().contains("example.test"),
             "the login identity must never reach a member: {person}"
+        );
+    }
+
+    /// A self-mention can never survive sending (`normalize` refuses it), so a
+    /// row that names the caller is not offered — offering it would look
+    /// pickable and then silently un-chip on reload.
+    #[tokio::test]
+    async fn a_person_never_sees_their_own_row() {
+        let home = home();
+        let state = state(home.path()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let (status, body) = call_with_cookie(
+            &state,
+            Some(crate::server::test_support::fixed_cookie("acme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let labels: Vec<&str> = body["people"]
+            .as_array()
+            .expect("people")
+            .iter()
+            .map(|p| p["label"].as_str().expect("label"))
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["harness-member"],
+            "the caller's own row is dropped and the other person's is offered: {labels:?}"
         );
     }
 
@@ -404,6 +456,7 @@ mod tests {
 
         let home = home();
         let state = state(home.path()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
         let id = CompanyId::new("acme");
         let runtime = state.registry().get(&id).expect("registered");
         runtime
