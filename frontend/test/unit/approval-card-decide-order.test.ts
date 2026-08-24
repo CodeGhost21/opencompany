@@ -322,7 +322,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       `Approve: Send a payment — ${money(40)} — recipient: acme — request ${T0} — approval 1 of 2 — asked by Ops`,
     );
     expect(labelled).toContain(
-      `Approve: Send a payment — ${money(4000)} — recipient: acme — request ${T0 + 60_000} — asked by Ops`,
+      `Approve: Send a payment — ${money(4000)} — recipient: acme — request ${T0} — approval 2 of 2 — asked by Ops`,
     );
   });
 
