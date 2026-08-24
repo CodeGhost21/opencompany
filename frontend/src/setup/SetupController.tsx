@@ -307,6 +307,9 @@ export function SetupController({
 
   const skip = useCallback(() => {
     markSetupSkipped(scope);
+    // "I'll do this later" on a reopened redesign is an explicit decline of the
+    // owed replacement; the debt must not bring the dialog back after it.
+    clearSetupRedesign(scope);
     setOpen(false);
     setRedesigning(false);
     if (routeOpen) onRouteDismiss?.();
