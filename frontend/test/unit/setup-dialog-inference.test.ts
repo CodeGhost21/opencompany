@@ -94,7 +94,11 @@ afterEach(() => {
 
 async function show(
   client: OpenCompanyClient,
-  over: { redesign?: boolean; fallbackIds?: string[]; onRedesign?: () => void } = {},
+  over: {
+    redesign?: boolean;
+    fallbackIds?: string[];
+    onRedesign?: (fallbackIds: string[]) => void;
+  } = {},
 ) {
   await act(async () => {
     root.render(
