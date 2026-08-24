@@ -91,10 +91,27 @@ export const SETUP_HANDOFF_FLAG = "from";
  */
 export const SETUP_HANDOFF_FRAGMENT = `#/company?${SETUP_HANDOFF_FLAG}=setup`;
 
+/** A fragment marker scoped to one connection and company. */
+export function setupHandoffFragment(scope: SetupHandoffScope): string {
+  const company = scope.company ?? "single";
+  return `#/company?${SETUP_HANDOFF_FLAG}=setup&connection=${encodeURIComponent(scope.connection)}&company=${encodeURIComponent(company)}`;
+}
+
+export interface SetupHandoffScope {
+  connection: string;
+  company: string | null;
+}
+
 /** Whether the current address arrived from setup's sign-in hand-off. */
-export function arrivedViaSetupHandoff(): boolean {
+export function arrivedViaSetupHandoff(scope?: SetupHandoffScope): boolean {
   const [, query = ""] = window.location.hash.split("?");
-  return new URLSearchParams(query).get(SETUP_HANDOFF_FLAG) === "setup";
+  const params = new URLSearchParams(query);
+  if (params.get(SETUP_HANDOFF_FLAG) !== "setup") return false;
+  if (!scope) return true;
+  return (
+    params.get("connection") === scope.connection &&
+    params.get("company") === (scope.company ?? "single")
+  );
 }
 
 /**
@@ -106,8 +123,14 @@ export function arrivedViaSetupHandoff(): boolean {
  * trip — the hub appends its own `token=` to whatever it was given, and
  * anything after a `#` there would swallow it.
  */
-export function arrivedViaHubSetupHandoff(): boolean {
-  return new URLSearchParams(window.location.search).get(SETUP_HANDOFF_FLAG) === "setup";
+export function arrivedViaHubSetupHandoff(scope?: SetupHandoffScope): boolean {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get(SETUP_HANDOFF_FLAG) !== "setup") return false;
+  if (!scope) return true;
+  return (
+    params.get("connection") === scope.connection &&
+    params.get("company") === (scope.company ?? "single")
+  );
 }
 
 /**
@@ -122,8 +145,8 @@ export function arrivedViaHubSetupHandoff(): boolean {
  * hand-off. A reload after the conversion has neither the query flag nor the
  * hash marker, so it cannot re-apply either.
  */
-export function absorbHubSetupHandoff(): void {
-  if (!arrivedViaHubSetupHandoff()) return;
+export function absorbHubSetupHandoff(scope?: SetupHandoffScope): void {
+  if (!arrivedViaHubSetupHandoff(scope)) return;
   const params = new URLSearchParams(window.location.search);
   params.delete(SETUP_HANDOFF_FLAG);
   const qs = params.toString();
@@ -132,7 +155,7 @@ export function absorbHubSetupHandoff(): void {
     "",
     window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
   );
-  window.location.hash = SETUP_HANDOFF_FRAGMENT;
+  window.location.hash = scope ? setupHandoffFragment(scope) : SETUP_HANDOFF_FRAGMENT;
 }
 
 /**

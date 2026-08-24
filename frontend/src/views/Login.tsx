@@ -497,7 +497,11 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
               {hubProviders.map((provider) => (
                 <a
                   key={provider.id}
-                  href={provider.startUrl}
+                  href={
+                    arrivedViaSetupHandoff()
+                      ? `${provider.startUrl}${provider.startUrl.includes("?") ? "&" : "?"}from=setup`
+                      : provider.startUrl
+                  }
                   className={cn(buttonVariants({ variant: "outline", size: "lg" }), "w-full")}
                 >
                   Continue with {provider.label}

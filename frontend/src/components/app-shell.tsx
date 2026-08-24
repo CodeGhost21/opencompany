@@ -434,11 +434,12 @@ export function AppShell({
   // link carries a one-shot marker (`#/company?from=setup`); consume it here so
   // this fresh mount applies the same welcome suppression a same-mount
   // completion gets, and so a reload cannot re-apply it.
+  const setupScope = { connection: scope.connection, company };
   useEffect(() => {
-    if (!arrivedViaSetupHandoff()) return;
+    if (!arrivedViaSetupHandoff(setupScope)) return;
     setSetupCompleted(true);
     clearSetupHandoff();
-  }, []);
+  }, [scope.connection, company]);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
