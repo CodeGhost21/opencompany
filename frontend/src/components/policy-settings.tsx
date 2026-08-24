@@ -748,7 +748,6 @@ export function PolicySettings({ client, company }: Props) {
               onOpenChange={(open) => {
                 console.log("DEBUG onOpenChange", open, "saving", saving);
                 if (!open) {
-                  if (saving) return;
                   setTierAwaitingConfirmation(null);
                   setResetAwaitingConfirmation(false);
                 }
