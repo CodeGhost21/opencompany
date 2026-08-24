@@ -218,6 +218,83 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
+/// The total decoded area a GIF announces across all of its frames.
+///
+/// The logical screen size alone understates what a decoder does: an animation
+/// repaints some rectangle per frame, so the cost of one full cycle is the sum
+/// of every Image Descriptor's area. This walks the block stream — skipping
+/// extension blocks and color tables, never decompressing the LZW raster data —
+/// which is a header parse in the same spirit as [`image_dimensions`]: it
+/// answers "how much painting does a viewer do" without doing any of it.
+///
+/// Returns `None` when the bytes are not a GIF, or a GIF that never reaches an
+/// Image Descriptor (nothing to count).
+fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
+    if !(bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89)) {
+        return None;
+    }
+    // Signature (6) + Logical Screen Descriptor (7). The packed flags at
+    // offset 10 carry the global color table size in the low three bits.
+    let flags = *bytes.get(10)?;
+    let table_entries = 1 << ((flags & 0x07) + 1);
+    let mut i = 13 + 3 * table_entries;
+    let mut cost: u64 = 0;
+    let mut saw_descriptor = false;
+    loop {
+        let Some(&kind) = bytes.get(i) else {
+            return None;
+        };
+        i += 1;
+        match kind {
+            // Trailer — the stream is over, and we walked every frame in it.
+            0x3B => break,
+            // Extension: one label byte, then the same sub-block structure as
+            // the raster data. Its payload never contributes pixels.
+            0x21 => {
+                i += 1;
+                i = skip_sub_blocks(bytes, i)?;
+            }
+            // Image Descriptor: left/top/width/height (8) + packed flags (1).
+            0x2C => {
+                saw_descriptor = true;
+                let frame_w = u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?) as u32;
+                let frame_h = u16::from_le_bytes(bytes.get(i + 4..i + 6)?.try_into().ok()?) as u32;
+                cost = cost.saturating_add((frame_w as u64) * (frame_h as u64));
+                let packed = *bytes.get(i + 8)?;
+                i += 9;
+                // A local color table follows the descriptor when its flag is
+                // set; the table size is again the low three bits.
+                if packed & 0x80 != 0 {
+                    let local_entries = 1 << ((packed & 0x07) + 1);
+                    i += 3 * local_entries;
+                }
+                // LZW minimum code size byte, then the raster sub-blocks.
+                i += 1;
+                i = skip_sub_blocks(bytes, i)?;
+            }
+            // Any other block kind is malformed; stop rather than misread it.
+            _ => return None,
+        }
+    }
+    saw_descriptor.then_some(cost)
+}
+
+/// Advances `i` past a run of sub-blocks — each a one-byte length followed by
+/// that many bytes — ending at the zero-length terminator.
+fn skip_sub_blocks(bytes: &[u8], mut i: usize) -> Option<usize> {
+    loop {
+        let n = *bytes.get(i)? as usize;
+        i += 1;
+        if n == 0 {
+            return Some(i);
+        }
+        i = i.checked_add(n)?;
+        if i > bytes.len() {
+            return None;
+        }
+    }
+}
+
 /// The height and width a JPEG announces, from its SOF segment.
 ///
 /// The SOF marker carries the frame size, and it may sit after any number of
