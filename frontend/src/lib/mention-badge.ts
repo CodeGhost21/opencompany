@@ -40,7 +40,8 @@ export function mentionCountsByChannel(
     // A row with no channel cannot be placed on the rail. Counted nowhere
     // rather than counted somewhere arbitrary.
     if (!n.context) continue;
-    out[n.context] = (out[n.context] ?? 0) + 1;
+    const channelId = n.context === MAIN_THREAD_ID ? mainChannelId : n.context;
+    out[channelId] = (out[channelId] ?? 0) + 1;
   }
   return out;
 }
