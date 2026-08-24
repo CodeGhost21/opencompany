@@ -1644,6 +1644,12 @@ impl HarnessPool {
         // read that can only ever find its work already done.
         let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas, &routed_context)?;
 
+        // Keep the policy snapshot and the roster together for the entire turn.
+        // `ensure_with_policy` is called before dispatch, but a concurrent live
+        // `ensure` could otherwise replace this shared roster before `run_inner`
+        // clones its agent, making the harness gate disagree with the native gate.
+        // The cycle serial lock prevents this for cycle callers; retain the
+        // snapshot when installing the roster so direct callers cannot regress it.
         let mut agents = self.agents.write().await;
         agents.insert(company.id.clone(), roster);
         self.mcp_fingerprints
