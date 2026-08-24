@@ -166,4 +166,87 @@ describe("resolveAvatarSrc bounded cache", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("hands a face out uncached when every cache entry is pinned", async () => {
+    const { resolveAvatarSrc, retainAvatar, releaseAvatar } = await freshAvatar();
+    const { revokeObjectURL } = stubUrlApi();
+    const requested = stubFetch();
+    const c = client();
+    const ids = Array.from({ length: 65 }, (_, i) => node(i));
+
+    // A roster of mounted custom avatars: every entry is pinned, so past the
+    // cap nothing is evictable.
+    for (const id of ids.slice(0, 64)) {
+      retainAvatar(c, "acme", id);
+      await resolveAvatarSrc(c, "acme", `blob:${id}`);
+    }
+    retainAvatar(c, "acme", ids[64]);
+    const url = (await resolveAvatarSrc(c, "acme", `blob:${ids[64]}`)) as string;
+    expect(url).not.toBeNull();
+
+    // While the tile holds it, a second resolve shares the URL (no refetch).
+    const before = requested.length;
+    await expect(resolveAvatarSrc(c, "acme", `blob:${ids[64]}`)).resolves.toBe(url);
+    expect(requested).toHaveLength(before);
+
+    // Releasing the tile revokes it — it was component-owned, not cache-owned.
+    releaseAvatar(c, "acme", ids[64]);
+    expect(revokeObjectURL).toHaveBeenCalledWith(url);
+
+    // The cache entry went with it: the next resolve fetches again instead of
+    // answering a URL that is about to be dead.
+    const after = requested.length;
+    await resolveAvatarSrc(c, "acme", `blob:${ids[64]}`);
+    expect(requested).toHaveLength(after + 1);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not publish a superseded fetch under a newer request's key", async () => {
+    const { resolveAvatarSrc, forgetAvatarNode } = await freshAvatar();
+    const { revokeObjectURL } = stubUrlApi();
+    const requested: string[] = [];
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        requested.push(String(input));
+        if (requested.length === 1) await gateA;
+        return {
+          ok: true,
+          status: 200,
+          blob: async () => new Blob([String(input)]),
+        } as unknown as Response;
+      }),
+    );
+
+    const c = client();
+    const id = node(0);
+    // Request A starts and is held in flight.
+    const a = resolveAvatarSrc(c, "acme", `blob:${id}`);
+    // Its entry is deleted, then request B installs a fresh entry for the same
+    // node before A completes — the ABA shape where the key coming back is not
+    // proof the completing promise is still the map's.
+    forgetAvatarNode(c, "acme", id);
+    const b = resolveAvatarSrc(c, "acme", `blob:${id}`);
+    const bUrl = (await b) as string;
+    releaseA();
+    const aUrl = await a;
+
+    // A saw the map holding B's promise, not its own: it revoked its orphan
+    // URL and answered null rather than publishing under B's key.
+    expect(aUrl).toBeNull();
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).not.toHaveBeenCalledWith(bUrl);
+
+    // B's URL owns the key: resolving again is a hit, not another fetch.
+    const before = requested.length;
+    await expect(resolveAvatarSrc(c, "acme", `blob:${id}`)).resolves.toBe(bUrl);
+    expect(requested).toHaveLength(before);
+
+    vi.unstubAllGlobals();
+  });
 });
