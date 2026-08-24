@@ -123,8 +123,14 @@ export function arrivedViaSetupHandoff(scope?: SetupHandoffScope): boolean {
  * trip — the hub appends its own `token=` to whatever it was given, and
  * anything after a `#` there would swallow it.
  */
-export function arrivedViaHubSetupHandoff(): boolean {
-  return new URLSearchParams(window.location.search).get(SETUP_HANDOFF_FLAG) === "setup";
+export function arrivedViaHubSetupHandoff(scope?: SetupHandoffScope): boolean {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get(SETUP_HANDOFF_FLAG) !== "setup") return false;
+  if (!scope) return true;
+  return (
+    params.get("connection") === scope.connection &&
+    params.get("company") === (scope.company ?? "single")
+  );
 }
 
 /**
