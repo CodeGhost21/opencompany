@@ -18,6 +18,7 @@ import {
   aliasSet,
   insertMention,
   mentionsOutsideChannel,
+  mentionsOutsideRange,
   rankMentionables,
   reconcileMentions,
   reconcileWrap,
