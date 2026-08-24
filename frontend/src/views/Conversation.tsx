@@ -12,7 +12,7 @@
 // conversations, and the strip above the composer steers named in-flight runs
 // (issue #111) rather than cancelling the last reply.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 
