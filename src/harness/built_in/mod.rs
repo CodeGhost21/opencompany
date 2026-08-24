@@ -3816,28 +3816,31 @@ mod tests {
         );
     }
 
-    /// Attribution is deliberately NOT hashed.
+    /// Re-setting the same tier does not rebuild the roster.
     ///
-    /// Re-setting the same tier writes a fresh `set_by`/`at_millis`. If those
-    /// moved the fingerprint, every such save would rebuild the roster and drop
-    /// live agent sessions for a change no agent can observe — the same reason
-    /// `budget_fingerprint` omits them.
+    /// Attribution is structurally absent from `Policy` — a re-save of the same
+    /// tier writes the same effective values, so the fingerprint cannot move
+    /// and live agent sessions are not dropped for a change no agent can
+    /// observe (the same reason `budget_fingerprint` omits attribution). The
+    /// inverted guard lives in `a_manifest_policy_edit_rebuilds_the_roster_with_no_override`
+    /// below: a manifest `[policy]` edit with no override in between MUST move
+    /// the key.
     #[test]
     fn re_setting_the_same_tier_does_not_rebuild_the_roster() {
-        use crate::ports::types::{Actor, ActorKind};
-        let first = fp_entry(Some("auto"), Some(vec!["payment.send"]));
-        let second = PolicyOverride {
-            set_by: Actor {
-                kind: ActorKind::User,
-                id: "a-different-admin".to_string(),
-            },
-            at_millis: 1_900_000_000_000,
-            ..first.clone()
-        };
         assert_eq!(
-            policy_fingerprint(Some(&first)),
-            policy_fingerprint(Some(&second)),
-            "attribution must not move the fingerprint"
+            effective_policy_fingerprint(&fp_policy(
+                "auto",
+                &["payment.send"],
+                Some(25.0),
+                None
+            )),
+            effective_policy_fingerprint(&fp_policy(
+                "auto",
+                &["payment.send"],
+                Some(25.0),
+                None
+            )),
+            "re-setting the same tier must not move the fingerprint"
         );
     }
 
