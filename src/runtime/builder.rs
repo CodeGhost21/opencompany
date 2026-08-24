@@ -3912,6 +3912,22 @@ mod test {
             }
         }
 
+        /// The workspace write grant does not cover a read-glob request, in
+        /// either direction of the asymmetry the manifest pair documents.
+        ///
+        /// `workspace` is a *write* grant to the wiring predicate
+        /// ([`grants_workspace_write_explicit`]), while a `workspace.*` request
+        /// strips to `workspace.` and falls to the generic matcher, where an
+        /// unstarred grant matches only itself — so `allow_covers` answers
+        /// false, and `agent_effective_grants` drops the request from the
+        /// belt. The console's `companyCovers` mirror pins the same pair.
+        #[test]
+        fn a_write_grant_does_not_cover_a_read_glob_request() {
+            assert!(!allow_covers(&strings(&["workspace"]), "workspace.*"));
+            assert!(allow_covers(&strings(&["workspace", "workspace.*"]), "workspace.*"));
+            assert!(!allow_covers(&strings(&["*"]), "workspace.write"));
+        }
+
         /// A bare opt-in namespace grant covers its sub-grant requests, again
         /// matching the wiring predicate: `search.web` in the effective grants
         /// satisfies `grants_search_explicit` exactly as `search` does, so the
