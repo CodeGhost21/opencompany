@@ -160,7 +160,13 @@ function CompactChannelRow({
       // collapsing the rail must not strip the same fact from the screen-reader
       // tree. The dot itself stays a sighted-hover-only cue.
       aria-label={
-        hasUnread ? `${channel.name}, ${unread > 99 ? "99+" : unread} unread` : channel.name
+        [
+          channel.name,
+          hasMentions && `${mentions > 99 ? "99+" : mentions} mention${mentions === 1 ? "" : "s"}`,
+          hasUnread && `${unread > 99 ? "99+" : unread} unread`,
+        ]
+          .filter(Boolean)
+          .join(", ")
       }
       title={channel.name}
       className={cn(
