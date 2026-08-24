@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock } from "lucide-react";
+import { ChevronRight, CircleDot, Hash, Lock, PanelRight } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
@@ -21,18 +22,14 @@ interface Props {
   activeId: string | null;
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
-  /**
-   * Channel id → how many unread mentions name **this person** there.
-   *
-   * Deliberately separate from {@link unread}, and not a subset of it: the two
-   * are computed from different places and answer different questions. Unread
-   * is derived in this browser from what this tab has seen; a mention is a
-   * durable, host-side fact about *you*, and survives a reload, a new device,
-   * and a week away. Merging them would take the honest one and give it the
-   * other's caveat.
-   */
-  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
+  collapsed?: boolean;
+  onExpand?: () => void;
+  /** Controlled section-disclosure state, shared across the desktop and
+   * sub-`lg` rail instances so crossing the breakpoint keeps the operator's
+   * folds (codex P2 review). Falls back to instance-local state. */
+  openSections?: Record<string, boolean>;
+  onToggleSection?: (id: string) => void;
   className?: string;
 }
 
@@ -49,10 +46,63 @@ export function ChannelRail({
   sections,
   activeId,
   unread,
-  mentions,
   onSelect,
+  collapsed = false,
+  onExpand,
+  openSections,
+  onToggleSection,
   className,
 }: Props) {
+  // Section disclosure lives here rather than inside `Section`, because the
+  // collapsed branch below unmounts every `Section`. Held inside them, folding
+  // a section and then collapsing the rail would reopen it on expand — the
+  // density toggle must not discard the operator's organization. Absent means
+  // "open": the default is a fully expanded list. `ChatView` passes the state
+  // in so both rail instances share one fold set across the `lg` breakpoint;
+  // a standalone rail (tests, other hosts) keeps it local to the instance.
+  const [internalOpenSections, setInternalOpenSections] = useState<Record<string, boolean>>({});
+  const resolvedOpenSections = openSections ?? internalOpenSections;
+  const toggleSection = (id: string) => {
+    if (onToggleSection) {
+      onToggleSection(id);
+    } else {
+      setInternalOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
+    }
+  };
+
+  if (collapsed) {
+    return (
+      <aside
+        className={cn(
+          "w-14 shrink-0 flex-col items-center overflow-y-auto border-r bg-sidebar/40 py-3",
+          className,
+        )}
+      >
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 text-muted-foreground"
+          onClick={onExpand}
+          aria-label="Expand channels"
+          title="Expand channels"
+        >
+          <PanelRight className="size-4" />
+        </Button>
+        <nav aria-label="Channels" className="mt-3 flex w-full flex-col items-center gap-1 px-2">
+          {sections.flatMap((section) => section.channels).map((channel) => (
+            <CompactChannelRow
+              key={channel.id}
+              channel={channel}
+              active={channel.id === activeId}
+              unread={unread[channel.id] ?? 0}
+              onSelect={onSelect}
+            />
+          ))}
+        </nav>
+      </aside>
+    );
+  }
+
   return (
     <aside
       className={cn(
@@ -70,11 +120,56 @@ export function ChannelRail({
           section={section}
           activeId={activeId}
           unread={unread}
-          mentions={mentions}
           onSelect={onSelect}
+          open={resolvedOpenSections[section.id] ?? true}
+          onToggle={() => toggleSection(section.id)}
         />
       ))}
     </aside>
+  );
+}
+
+function CompactChannelRow({
+  channel,
+  active,
+  unread,
+  onSelect,
+}: {
+  channel: Channel;
+  active: boolean;
+  unread: number;
+  onSelect: (id: string) => void;
+}) {
+  const hasUnread = unread > 0 && !active;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(channel.id)}
+      aria-current={active ? "page" : undefined}
+      // The compact row renders unread as a bare dot, so the count has to live
+      // in the accessible name — the expanded row says it in text, and
+      // collapsing the rail must not strip the same fact from the screen-reader
+      // tree. The dot itself stays a sighted-hover-only cue.
+      aria-label={
+        hasUnread ? `${channel.name}, ${unread > 99 ? "99+" : unread} unread` : channel.name
+      }
+      title={channel.name}
+      className={cn(
+        "relative flex size-9 shrink-0 items-center justify-center rounded-md transition-colors",
+        active
+          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
+      )}
+    >
+      <ChannelIcon channel={channel} />
+      {hasUnread && (
+        <span
+          title={UNREAD_IS_LOCAL}
+          className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary"
+        />
+      )}
+    </button>
   );
 }
 
@@ -82,32 +177,26 @@ function Section({
   section,
   activeId,
   unread,
-  mentions,
   onSelect,
+  open,
+  onToggle,
 }: {
   section: ChannelSection;
   activeId: string | null;
   unread: Record<string, number>;
-  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [open, setOpen] = useState(true);
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
-    : 0;
-  // A mention hidden by a collapsed section is exactly the case a mention
-  // exists to cover: something arrived while you weren't looking. Aggregating
-  // it onto the header — same as unread already does — is what keeps that
-  // true when the section itself is closed.
-  const hiddenMentions = !open
-    ? section.channels.reduce((n, c) => n + (mentions?.[c.id] ?? 0), 0)
     : 0;
 
   return (
     <section className="group/section select-none px-2 pt-2">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={onToggle}
         aria-expanded={open}
         className="flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
       >
@@ -116,29 +205,12 @@ function Section({
           aria-hidden
         />
         <span className="truncate">{section.label}</span>
-        {(hiddenMentions > 0 || hiddenUnread > 0) && (
-          <span className="ml-auto flex items-center gap-1">
-            {hiddenMentions > 0 && (
-              <span
-                data-testid="section-mentions"
-                title={
-                  hiddenMentions === 1
-                    ? "1 mention of you in this section"
-                    : `${hiddenMentions} mentions of you in this section`
-                }
-                className="rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
-              >
-                @{hiddenMentions > 99 ? "99+" : hiddenMentions}
-              </span>
-            )}
-            {hiddenUnread > 0 && (
-              <span
-                title={UNREAD_IS_LOCAL}
-                className="rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
-              >
-                {hiddenUnread > 99 ? "99+" : hiddenUnread}
-              </span>
-            )}
+        {hiddenUnread > 0 && (
+          <span
+            title={UNREAD_IS_LOCAL}
+            className="ml-auto rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
+          >
+            {hiddenUnread > 99 ? "99+" : hiddenUnread}
           </span>
         )}
       </button>
@@ -151,7 +223,6 @@ function Section({
                 channel={channel}
                 active={channel.id === activeId}
                 unread={unread[channel.id] ?? 0}
-                mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
               />
             </li>
@@ -169,21 +240,14 @@ function ChannelRow({
   channel,
   active,
   unread,
-  mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
   unread: number;
-  mentions: number;
   onSelect: (id: string) => void;
 }) {
   const hasUnread = unread > 0 && !active;
-  // A mention badge shows even on the open channel, unlike the unread count.
-  // Unread means "you have not looked"; a mention means "somebody asked you
-  // something", and having the channel open is not an answer to that. It
-  // clears when the mention is marked read, not when the channel is viewed.
-  const hasMentions = mentions > 0;
 
   return (
     <button
@@ -206,22 +270,6 @@ function ChannelRow({
     >
       <ChannelIcon channel={channel} />
       <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-      {hasMentions && (
-        <span
-          data-testid="channel-mentions"
-          // Unlike unread, this is not a guess this browser made: the host
-          // recorded who was named. So it gets no "only in this tab" caveat —
-          // it means the same thing on every device.
-          title={
-            mentions === 1
-              ? "1 mention of you here"
-              : `${mentions} mentions of you here`
-          }
-          className="shrink-0 rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
-        >
-          @{mentions > 99 ? "99+" : mentions}
-        </span>
-      )}
       {hasUnread && (
         <span
           data-testid="channel-unread"
