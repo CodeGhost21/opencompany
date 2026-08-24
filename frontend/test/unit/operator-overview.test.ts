@@ -192,7 +192,7 @@ describe("the operator overview landing page (#1321)", () => {
     const failedResolvers: Array<(runs: RunSummary[]) => void> = [];
     const host: OpenCompanyClient = {
       scopeFor: () => "/api/v1/company/acme",
-      get: (url) =>
+      get: (url: string) =>
         new Promise<RunSummary[]>((resolve) => {
           const u = String(url);
           (u.includes("status=failed,paused") ? stoppedResolvers : failedResolvers).push(resolve);
