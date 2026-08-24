@@ -681,6 +681,16 @@ mod tests {
              showing a tier the gate was not running"
         );
 
+        for hours in [0, 8_761, u64::MAX] {
+            let (status, _) =
+                call(&state, "PUT", Some(json!({ "approvalTtlHours": hours }))).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "an invalid approval deadline must be refused before persistence"
+            );
+        }
+
         // Neither refusal stored anything.
         let (_, body) = call(&state, "GET", None).await;
         assert_eq!(body["overridden"], false);
