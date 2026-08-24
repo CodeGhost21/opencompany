@@ -2855,7 +2855,11 @@ export function WorkflowsView({
             <WorkflowIndex
               workflows={workflows}
               runsByWorkflow={runsByWorkflow}
-              onSelect={(id) => setSelectedId(id)}
+              onSelect={(id) => {
+                setSelectedId(id);
+                setHistoryOpen(true);
+                setCopilotOpen(true);
+              }}
               mode={indexMode}
               loading={loadingList}
               runsLoaded={indexRunsLoaded}
