@@ -1245,6 +1245,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     try {
       await deleteNodeApi(client, company, node.id);
       setNodes((all) => all.filter((n) => !removed.has(n.id)));
+      nodesRef.current = nodesRef.current.filter((n) => !removed.has(n.id));
       // A deleted node may be somebody's chosen face (`blob:<nodeId>`); drop
       // it from the avatar cache so the next render degrades to the tone
       // tile rather than keeping a face whose file just ceased to exist.
