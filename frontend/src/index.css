@@ -29,7 +29,7 @@
  * component needs a colour that layer 2 does not name, the fix is to name it
  * here — not to reach past it into a ramp or an arbitrary value.
  *
- * See `docs/design-system/tokens.md` for the full reference and
+ * See `docs/design-system/README.md` for the full reference and
  * `docs/brand/README.md` for why these values and not others.
  * ========================================================================== */
 
@@ -86,6 +86,7 @@
     --surface-light-2: oklch(0.9601 0.0093 286.22); /* #F1F1F8 */
     --surface-light-3: oklch(0.9339 0.0134 286.14); /* #E8E8F2 */
     --surface-light-4: oklch(0.8916 0.0149 286.09); /* #DADAE5 */
+    --surface-light-input: oklch(0.62 0.0149 286.09); /* #85858F  3.07:1 on light active */
     --surface-light-active: oklch(0.942 0.0256 293.15); /* #ECE9FC */
 
     --surface-dark-bg: oklch(0.1395 0.0048 262.8); /* #08090B */
@@ -164,19 +165,19 @@
        canvas), `-text` sets words (needs 4.5:1, so it is materially darker
        in light mode), and `-soft` is the tinted background a badge sits on.
        Every ratio is measured, not eyeballed — see docs/design-system/color.md. */
-    --green-mark: oklch(0.6221 0.1627 151.05); /* #12A150  3.28:1 */
+    --green-mark: oklch(0.60 0.1627 151.05); /* #009A49  3.08:1 on light active */
     --green-text: oklch(0.5175 0.1343 151.56); /* #0A7D3E  5.10:1 */
     --green-bright: oklch(0.7369 0.1603 156.57); /* #35C77F  dark mode */
 
-    --amber-mark: oklch(0.7819 0.1585 72.33); /* #F5A524  1.99:1 — mark only */
+    --amber-mark: oklch(0.62 0.1585 72.33); /* #BF7200  3.14:1 on light active */
     --amber-text: oklch(0.5538 0.1207 66.44); /* #A16207  4.80:1 */
     --amber-bright: oklch(0.8537 0.1572 84.13); /* #FFC53D  dark mode */
 
-    --red-mark: oklch(0.6256 0.1933 23.03); /* #E5484D  3.82:1 */
+    --red-mark: oklch(0.6256 0.1933 23.03); /* #E5484D  3.29:1 on light active */
     --red-text: oklch(0.5409 0.1916 25.1); /* #C62A2F  5.43:1 */
     --red-bright: oklch(0.7013 0.1901 21.2); /* #FF6369  dark mode */
 
-    --cyan-mark: oklch(0.6847 0.1479 237.32); /* #0EA5E9  2.70:1 — mark only */
+    --cyan-mark: oklch(0.61 0.1479 237.32); /* #008DD0  3.08:1 on light active */
     --cyan-text: oklch(0.5103 0.1085 236.98); /* #0A6E9C  5.50:1 */
     --cyan-bright: oklch(0.7535 0.139 232.66); /* #38BDF8  dark mode */
 
@@ -231,11 +232,11 @@
     --accent: var(--surface-light-active);
     --accent-foreground: var(--ink-light-primary);
 
-    --destructive: var(--red-mark);
+    --destructive: var(--red-text);
     --destructive-foreground: var(--surface-light-1);
 
     --border: var(--surface-light-4);
-    --input: var(--surface-light-4);
+    --input: var(--surface-light-input);
 
     /* The window chrome, and the hairline where the content card meets it.
        One value, painted exactly once — on the shell root — so the sidebar
@@ -767,6 +768,12 @@
        status hues would imply a health that they do not carry. */
     --kg-brain-1: var(--pink-mark);
     --kg-brain-2: var(--cyan-mark);
+    /* A workflow stage is declared structure, not a finished run, so it takes
+       an identity hue rather than a status one — the palette contract in
+       docs/brand/README.md keeps amber, green and red for the five run states.
+       tone-2 blue sits clear of the graph's cyan workflows and violet
+       AI teammates in both themes. */
+    --kg-stage: var(--tone-2);
     /* The travelling spark that fires along a memory link. A lightened
        brain-1 rather than its own hue, so the constellation stays one
        colour family however brain-1 is retuned. */
@@ -779,6 +786,7 @@
     --kg-warn: var(--status-blocked);
     --kg-brain-1: var(--pink-bright);
     --kg-brain-2: var(--cyan-bright);
+    --kg-stage: var(--tone-2);
     --kg-spark: color-mix(in oklab, var(--kg-brain-1) 65%, white);
 }
 
@@ -825,6 +833,7 @@
     --err: var(--destructive);
     --brain-1: var(--kg-brain-1);
     --brain-2: var(--kg-brain-2);
+    --stage: var(--kg-stage);
     --kg-tool: var(--kg-brain-2);
 }
 

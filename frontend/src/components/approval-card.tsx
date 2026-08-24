@@ -38,6 +38,7 @@ import {
 
 import type { OpenCompanyClient } from "@/api/client";
 import { GRANT_DURATIONS, type ApprovalSummary, type GrantScope } from "@/api/types";
+import { defaultDesks, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -46,7 +47,9 @@ import {
   payloadAge,
   payloadLines,
 } from "@/lib/language";
+import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
+import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -147,8 +150,8 @@ export function batchConsequences(approvals: ApprovalSummary[]): ApprovalConsequ
 
 /**
  * How much of a payload is shown before it is clamped. Past either bound the
- * block collapses behind a "Show everything" toggle — a queue of approvals has
- * to stay scannable, and a forty-line argument object buries the next card.
+ * block collapses behind a "Show everything" toggle — at a line boundary, so
+ * a queue of approvals stays scannable without clipping a line's glyphs.
  */
 const PREVIEW_LINES = 3;
 const PREVIEW_VALUE_CHARS = 160;
@@ -172,7 +175,7 @@ export function ApprovalHeadline({
   const Icon = approvalIcon(a.kind);
   const consequence = approvalConsequence(a.group);
   return (
-    <div className="flex items-start gap-4">
+    <div className="flex flex-wrap items-start gap-4">
       <div
         className={cn(
           "flex size-10 shrink-0 items-center justify-center rounded-lg",
@@ -181,7 +184,10 @@ export function ApprovalHeadline({
       >
         <Icon className="size-5" />
       </div>
-      <div className="min-w-0 flex-1">
+      {/* 12rem floor, capped at the card's own width: a chat column can be
+          narrower than the icon plus a 12rem title, and a hard floor would
+          overflow the card there instead of wrapping. */}
+      <div className="min-w-[min(12rem,100%)] flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <p className="font-medium">{approvalAction(a)}</p>
           {consequence && (
@@ -203,7 +209,11 @@ export function ApprovalHeadline({
           <p className="text-xs font-medium text-muted-foreground italic">Amount hidden</p>
         )}
       </div>
-      {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
+      {actions && (
+        <div data-approval-actions className="flex shrink-0 gap-2">
+          {actions}
+        </div>
+      )}
     </div>
   );
 }
@@ -216,11 +226,14 @@ export function ApprovalMeta({
   approval: a,
   now,
   askerNames,
+  thread,
   status,
 }: {
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  /** The chat channel that raised this request, when the host named one. */
+  thread?: ApprovalThreadLink | null;
   /** Trailing status text ("Waiting for the teammate…", "Approved"), if any. */
   status?: React.ReactNode;
 }) {
@@ -241,6 +254,25 @@ export function ApprovalMeta({
         <>
           <span>
             Asked by <span className="font-medium text-foreground">{asker}</span>
+          </span>
+          <span aria-hidden>·</span>
+        </>
+      )}
+      {thread && (
+        <>
+          <span>
+            Asked in{" "}
+            <a
+              // Written raw, not `encodeURIComponent`-ed: a DM's channel id is
+              // `dm:<agent-id>`, and the hash router splits `#/chat/…` on "/"
+              // without decoding, so an encoded `:` would look up a channel
+              // that does not exist. Every channel id is a slug or `dm:<uuid>`,
+              // which the hash already allows unescaped.
+              href={`#/chat/${thread.channelId}`}
+              className="font-medium text-foreground underline-offset-2 hover:underline"
+            >
+              {thread.label}
+            </a>
           </span>
           <span aria-hidden>·</span>
         </>
@@ -353,6 +385,17 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
     );
   }
 
+  // A named action can still be decided from its headline. The generic
+  // fallback cannot: without a payload it otherwise leaves the operator with
+  // no fact at all about what is being approved (#1419).
+  if (lines.length === 0 && approvalAction(approval) === "Do something that needs your sign-off") {
+    return (
+      <p className="text-xs text-muted-foreground">
+        No further details were supplied.
+      </p>
+    );
+  }
+
   if (lines.length === 0) return null;
 
   const clampable =
@@ -364,7 +407,7 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
       <div
         className={cn(
           "space-y-1 font-mono text-xs break-all whitespace-pre-wrap",
-          clampable && !expanded && "max-h-24 overflow-hidden",
+          clampable && !expanded && "line-clamp-3",
         )}
       >
         {shown.map((line) => (
@@ -386,6 +429,101 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
       )}
     </div>
   );
+}
+
+/** A resolved chat destination for an approval's host-side thread id. */
+export interface ApprovalThreadLink {
+  channelId: string;
+  /** A channel is written with `#`; a direct message is written as a name. */
+  label: string;
+}
+
+/**
+ * Resolve an approval's host thread id into the human-facing chat destination.
+ *
+ * The host calls desk channels by their desk id, while direct messages use an
+ * agent id. `channelIdForThread` is the one place that bridges those two id
+ * schemes; keeping this join here prevents the Approvals page from linking a
+ * DM to a URL no chat channel owns.
+ */
+export function approvalThreadLink(
+  approval: ApprovalSummary,
+  desks: Desk[],
+  members: TeamMember[],
+): ApprovalThreadLink | null {
+  if (!approval.thread) return null;
+  const channelId = channelIdForThread(approval.thread, desks, members);
+  if (!channelId) return null;
+
+  const desk = desks.find((candidate) => candidate.id === approval.thread);
+  if (desk) return { channelId, label: `#${desk.channel}` };
+
+  const member = members.find((candidate) => candidate.id === approval.thread);
+  return member ? { channelId: dmChannelId(member), label: member.name } : null;
+}
+
+/**
+ * Read the small amount of chat topology the Approvals page needs to link a
+ * parked request back to its conversation. An unreadable or older route simply
+ * leaves the existing card intact: an unresolved thread must not be guessed.
+ *
+ * The desks and roster are the slow-moving half of the join; the approvals
+ * themselves arrive on every poll. Keeping the two apart is what lets a
+ * freshly arrived card on an already-known thread get its "Asked in" link:
+ * an effect that rebuilt the map only when the *set of thread ids* changed
+ * would skip a new approval that shares its thread with one already pending.
+ */
+export function useApprovalThreadLinks(
+  client: OpenCompanyClient,
+  company: string | null,
+  approvals: ApprovalSummary[],
+): Map<string, ApprovalThreadLink> {
+  const threadKey = useMemo(
+    () =>
+      Array.from(new Set(approvals.map((approval) => approval.thread).filter(Boolean)))
+        .sort()
+        .join(","),
+    [approvals],
+  );
+  const [topology, setTopology] = useState<{ desks: Desk[]; members: TeamMember[] } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!threadKey) {
+      setTopology(null);
+      return;
+    }
+    let live = true;
+    void Promise.all([
+      // Same empty-response fallback as ChatView and AppShell: a company with
+      // no declared `[[group_chat]]` entries still has the default desks, and
+      // an approval raised in one of those (e.g. the `main` thread) must be
+      // resolvable even though `/desks` came back empty. The fallback lives in
+      // the success handler on purpose — a failed read must not be guessed at.
+      client
+        .listDesks(company)
+        .then((dtos) => (dtos.length ? dtos.map(deskFromDto) : defaultDesks()))
+        .catch(() => []),
+      client.listTeam(company).catch(() => []),
+    ]).then(([desks, roster]) => {
+      if (!live) return;
+      setTopology({ desks, members: roster.map(fromDto) });
+    });
+    return () => {
+      live = false;
+    };
+  }, [client, company, threadKey]);
+
+  return useMemo(() => {
+    if (!topology) return new Map();
+    return new Map(
+      approvals.flatMap((approval) => {
+        const link = approvalThreadLink(approval, topology.desks, topology.members);
+        return link ? [[approval.id, link] as const] : [];
+      }),
+    );
+  }, [approvals, topology]);
 }
 
 /**
@@ -478,6 +616,41 @@ export function ApprovalScopeControl({
           back from Standing permissions at any time.
         </p>
       )}
+    </fieldset>
+  );
+}
+
+/** The matching, opt-in scope for a refusal (issue #1458). */
+export function DeclineScopeControl({
+  approval: a,
+  scope,
+  onChange,
+  disabled,
+}: {
+  approval: ApprovalSummary;
+  scope: GrantScope;
+  onChange: (scope: GrantScope) => void;
+  disabled?: boolean;
+}) {
+  if (!a.broadly_deniable) return null;
+  const name = `decline-scope-${a.id}`;
+  return (
+    <fieldset disabled={disabled} className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60">
+      <legend className="px-1 text-xs text-muted-foreground">If you decline</legend>
+      <div className="flex flex-col gap-1.5">
+        <label className="flex items-center gap-2">
+          <input type="radio" name={name} checked={scope.kind === "once"} onChange={() => onChange({ kind: "once" })} className="size-3.5 accent-primary" />
+          <span>Just this once</span>
+        </label>
+        <label className="flex flex-wrap items-center gap-2">
+          <input type="radio" name={name} checked={scope.kind === "tool"} onChange={() => onChange({ kind: "tool", expiresInMillis: GRANT_DURATIONS[0].millis })} className="size-3.5 accent-primary" />
+          <span>Don't ask again for this tool for</span>
+          <select value={scope.kind === "tool" ? scope.expiresInMillis : GRANT_DURATIONS[0].millis} disabled={scope.kind !== "tool"} onChange={(e) => onChange({ kind: "tool", expiresInMillis: Number(e.target.value) })} aria-label="How long this refusal lasts" className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50">
+            {GRANT_DURATIONS.map((d) => <option key={d.millis} value={d.millis}>{d.label}</option>)}
+          </select>
+        </label>
+      </div>
+      {scope.kind === "tool" && <p className="mt-1.5 px-1 text-xs text-muted-foreground">It won't ask again for this tool until then. You can take it back from Standing permissions at any time.</p>}
     </fieldset>
   );
 }
