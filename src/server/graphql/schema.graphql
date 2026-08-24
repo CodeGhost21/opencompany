@@ -709,6 +709,8 @@ type Policy {
 	wins over every tier, `full` included.
 	"""
 	alwaysApprove: [String!]!
+	autoApproveUnderUsd: Float
+	approvalTtlHours: Float!
 	"""
 	The manifest's tier, so a client can see what a reset would restore.
 	"""
@@ -717,6 +719,8 @@ type Policy {
 	The manifest's always-ask list, for the same reason.
 	"""
 	manifestAlwaysApprove: [String!]!
+	manifestAutoApproveUnderUsd: Float
+	manifestApprovalTtlHours: Float
 	"""
 	Whether an operator override is in force.
 	
