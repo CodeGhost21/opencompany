@@ -74,6 +74,10 @@ pub struct RunTraceSink {
     usage: StdMutex<TokenUsage>,
     /// How many step rows were actually written.
     persisted: StdMutex<u32>,
+    /// Accumulated reasoning by step ordinal. `StepTrace` emits only the newly
+    /// accumulated chunk after each threshold flush; the store record must still
+    /// contain the complete prefix because each write replaces the prior row.
+    deep_reasoning: StdMutex<std::collections::HashMap<u32, String>>,
     /// Where the unredacted companion of each step goes, when this host keeps
     /// one.
     ///
