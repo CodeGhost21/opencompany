@@ -415,7 +415,7 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<
         // grant.
         grants.push((
             roster_agent(&overlay.id),
-            agent_effective_grants(allow, &overlay.tools),
+            desk_narrowed(&overlay.id, &overlay.tools),
         ));
     }
     grants
