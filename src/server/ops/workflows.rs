@@ -1506,7 +1506,7 @@ async fn run_workflow(
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into(),
         );
     }
 
@@ -2120,7 +2120,7 @@ async fn fix_from_run(
     // escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response().into(),
         );
     }
 
