@@ -1054,6 +1054,7 @@ async fn run_issue_password(
     require_change: bool,
     home: Option<PathBuf>,
 ) -> Result<()> {
+    use opencompany::ports::CompanyStore;
     use opencompany::server::users::bootstrap;
 
     // stdin when not passed, so the value stays out of shell history and out of
