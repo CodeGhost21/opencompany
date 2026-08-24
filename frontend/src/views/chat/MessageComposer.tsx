@@ -61,6 +61,17 @@ interface Props {
    * `ChatView`.
    */
   uploadAttachment?: (file: File) => Promise<AttachmentDto>;
+  /**
+   * Delete a staged attachment's stored node once it is no longer going to be
+   * sent (issue #1682, codex review finding).
+   *
+   * An upload lands — and is charged against the workspace quota — the
+   * instant it succeeds, before the operator has sent anything. Called when
+   * the pending chip's Remove is clicked, when a fresh pick replaces it, and
+   * when the composer unmounts still holding one — every path that drops the
+   * local reference without a send ever claiming the node.
+   */
+  deleteAttachment?: (nodeId: string) => void;
 }
 
 /** The markdown a toolbar button wraps the selection in. */
@@ -88,6 +99,7 @@ export function MessageComposer({
   deliverableChoice,
   onTyping,
   uploadAttachment,
+  deleteAttachment,
 }: Props) {
   const [draft, setDraft] = useState("");
   // The single file staged for the next send (issue #1682). v1 carries one
@@ -95,6 +107,9 @@ export function MessageComposer({
   // appending — the wire (`Vec<Attachment>`) already allows more when the UI
   // grows to it.
   const [pending, setPending] = useState<AttachmentDto | null>(null);
+  // Mirrors `pending` for the unmount cleanup below, which needs the latest
+  // value inside a closure captured once at mount.
+  const pendingRef = useRef<AttachmentDto | null>(null);
   // The upload is in flight: the paperclip spins and Send waits, so a message
   // cannot post ahead of the bytes it references.
   const [uploading, setUploading] = useState(false);
@@ -127,6 +142,29 @@ export function MessageComposer({
     input.current?.focus();
   }, [prefill]);
 
+  // Deletes a staged attachment that never made it onto a sent message (issue
+  // #1682, codex review finding): removing it, replacing it with a fresh
+  // pick, or leaving the composer all drop the local reference while the
+  // upload stays live on the server, charged against the workspace quota
+  // forever. Centralized here so every one of those paths — not just the
+  // Remove button — clears the same way.
+  function clearPending() {
+    if (pendingRef.current) deleteAttachment?.(pendingRef.current.nodeId);
+    pendingRef.current = null;
+    setPending(null);
+  }
+
+  // Unmounting still holding a pending attachment (closing the thread panel,
+  // switching channels) is the same leak as clicking Remove — clean it up on
+  // the way out. Reads through the ref rather than `pending` because an
+  // unmount-only cleanup must not re-run on every state change.
+  useEffect(() => {
+    return () => {
+      if (pendingRef.current) deleteAttachment?.(pendingRef.current.nodeId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only, see above
+  }, []);
+
   function send() {
     const text = draft.trim();
     // A message must carry text; an attachment rides an operator's words, it is
@@ -136,6 +174,9 @@ export function MessageComposer({
     setDraft("");
     onSend(text, deliverableChoice ? intent : undefined, pending ? [pending] : undefined);
     setIntent(undefined);
+    // The attachment is now claimed by the sent message — clear the local
+    // reference WITHOUT deleting the node (unlike `clearPending`).
+    pendingRef.current = null;
     setPending(null);
     setAttachError(undefined);
   }
@@ -146,10 +187,14 @@ export function MessageComposer({
     // Reset the input so re-picking the same file fires `change` again.
     e.target.value = "";
     if (!file || !uploadAttachment) return;
+    // A fresh pick replaces the staged one (v1 carries a single attachment) —
+    // the replaced upload must be cleaned up, not silently orphaned.
+    if (pendingRef.current) clearPending();
     setUploading(true);
     setAttachError(undefined);
     try {
       const reference = await uploadAttachment(file);
+      pendingRef.current = reference;
       setPending(reference);
     } catch (err) {
       // The filename is operator content — the message says an upload failed
@@ -224,7 +269,7 @@ export function MessageComposer({
               className="ml-auto size-6 shrink-0 text-muted-foreground"
               aria-label={`Remove ${pending.name}`}
               title="Remove attachment"
-              onClick={() => setPending(null)}
+              onClick={clearPending}
             >
               <X className="size-3.5" />
             </Button>

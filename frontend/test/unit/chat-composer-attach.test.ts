@@ -27,6 +27,7 @@ let container: HTMLDivElement;
 let root: Root;
 let sent: ReturnType<typeof vi.fn>;
 let upload: ReturnType<typeof vi.fn>;
+let del: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -35,6 +36,7 @@ beforeEach(() => {
   root = createRoot(container);
   sent = vi.fn();
   upload = vi.fn(async () => reference);
+  del = vi.fn();
 });
 
 afterEach(() => {
@@ -49,6 +51,7 @@ async function render(withUpload = true) {
         placeholder: "Message engineering",
         onSend: sent,
         uploadAttachment: withUpload ? upload : undefined,
+        deleteAttachment: del,
       }),
     );
   });
@@ -115,5 +118,66 @@ describe("composer paperclip (issue #1682)", () => {
     // The chip is gone after send — a stale attachment must not ride the next
     // message.
     expect(container.textContent).not.toContain("diagram.png");
+  });
+
+  // Codex review finding on #1682: an upload lands on the server the instant
+  // it succeeds, before the operator has sent anything. Removing, replacing
+  // or abandoning it used to just drop the local reference and leave the
+  // node behind, orphaned against the workspace quota forever.
+  describe("cleaning up a staged upload that never sends", () => {
+    it("deletes the stored node when the operator clicks Remove", async () => {
+      await render();
+      await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+
+      await act(async () => {
+        (
+          container.querySelector('[aria-label="Remove diagram.png"]') as HTMLButtonElement
+        ).click();
+      });
+
+      expect(del).toHaveBeenCalledExactlyOnceWith("node-1");
+    });
+
+    it("deletes the replaced upload, not the new one, when a fresh pick supersedes it", async () => {
+      const second: AttachmentDto = {
+        nodeId: "node-2",
+        name: "photo.png",
+        mime: "image/png",
+        size: 4096,
+      };
+      upload = vi
+        .fn()
+        .mockResolvedValueOnce(reference)
+        .mockResolvedValueOnce(second);
+      await render();
+      await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+      await pick(new File([new Uint8Array([4, 5, 6])], "photo.png", { type: "image/png" }));
+
+      expect(del).toHaveBeenCalledExactlyOnceWith("node-1");
+      // The new chip is the one that survives.
+      expect(container.textContent).toContain("photo.png");
+      expect(container.textContent).not.toContain("diagram.png");
+    });
+
+    it("deletes a still-pending attachment when the composer unmounts", async () => {
+      await render();
+      await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+
+      await act(async () => root.unmount());
+
+      expect(del).toHaveBeenCalledExactlyOnceWith("node-1");
+    });
+
+    it("does NOT delete the attachment a send just claimed", async () => {
+      await render();
+      await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+      await type("here is the diagram");
+
+      await act(async () => {
+        (container.querySelector('[aria-label="Send"]') as HTMLButtonElement).click();
+      });
+
+      expect(del).not.toHaveBeenCalled();
+    });
   });
 });

@@ -18,7 +18,7 @@ import { deleteTask, type MessageIntent } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
-import { fetchBlobUrl } from "@/api/workspace";
+import { deleteNode, fetchBlobUrl } from "@/api/workspace";
 import {
   ApiError,
   type ApprovalSummary,
@@ -960,6 +960,27 @@ export function ChatView({
   );
 
   /**
+   * Delete an uploaded-but-never-sent attachment's workspace node (issue
+   * #1682, codex review finding).
+   *
+   * A staged file is uploaded (and charged against the workspace quota) the
+   * moment it lands, before the operator has sent anything — replacing it,
+   * removing it, or leaving the composer used to just drop the local
+   * reference, leaving the binary node on the server forever. Bound the same
+   * way `uploadAttachment` is; best-effort, since a failed cleanup here must
+   * never block the operator from continuing to compose.
+   */
+  const deleteAttachment = useCallback(
+    (nodeId: string) => {
+      void deleteNode(client, company, nodeId).catch(() => {
+        // Best-effort: an orphaned node here is a quota nuisance, not a
+        // correctness bug, and the operator has already moved on.
+      });
+    },
+    [client, company],
+  );
+
+  /**
    * Set or clear the operator's own reaction on a message (issue #364).
    *
    * Optimistic, then reconciled by failure: the chip flips at once because a
@@ -1297,6 +1318,9 @@ export function ChatView({
               // Issue #1682: only the channel/DM composer attaches — the paperclip
               // is present exactly because this prop is.
               uploadAttachment={uploadAttachment}
+              // Cleans up a staged upload that never got sent (codex review
+              // finding on #1682) — see `deleteAttachment`.
+              deleteAttachment={deleteAttachment}
               // Every keystroke asks; the hook throttles to one ping per
               // channel per few seconds and skips entirely while the event
               // stream is down.
