@@ -2065,16 +2065,9 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let viewer = by
-        .as_ref()
-        .filter(|actor| actor.kind == ActorKind::User)
-        .map(|actor| Viewer::User(actor.id.clone()))
-        .unwrap_or(Viewer::Operator);
-    let authors = author_labels(&runtime).await.unwrap_or_default();
     let responses = report
         .responses
         .into_iter()
-        .map(|response| response)
         .collect();
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
