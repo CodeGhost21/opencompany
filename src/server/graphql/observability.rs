@@ -304,6 +304,12 @@ pub(crate) async fn resolve_runs(
 ) -> async_graphql::Result<Vec<AgentRunGql>> {
     let auth = ctx.data::<GqlAuth>()?;
     let may_read_deep = approval_visibility::may_read_deep_trace(auth);
+    // The deep half is read only when the selection actually asks for it. The
+    // console's list query polls on 4/30-second intervals and deliberately
+    // selects no `deep` bodies, so materializing up to `limit` runs × hundreds
+    // of detail rows for a read nothing uses would be gigabytes of store I/O
+    // and memory per poll — the lookahead is what keeps that from happening.
+    let wants_deep = ctx.look_ahead().field("steps").field("deep").exists();
     let filter = RunFilter {
         task_id,
         workflow_run_id,
