@@ -124,9 +124,9 @@ struct MarkReadDto {
     unread: u64,
 }
 
-async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, Response> {
+async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     let rows = company
         .runtime
@@ -153,9 +153,9 @@ async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, Response> {
 async fn mark_read(
     company: ScopedCompany,
     body: axum::body::Bytes,
-) -> Result<Json<MarkReadDto>, Response> {
+) -> Result<Json<MarkReadDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     // Read from raw bytes rather than through `Json`, so an **empty** body is
     // "mark everything" whatever the caller's `Content-Type` says.
@@ -178,7 +178,8 @@ async fn mark_read(
                         "code": "invalid_request",
                     })),
                 )
-                    .into_response());
+                    .into_response()
+                    .into());
             }
         }
     };
