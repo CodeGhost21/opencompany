@@ -604,6 +604,37 @@ async fn edit_agent(
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
 ) -> Result<Json<AgentDetailDto>, crate::server::Rejection> {
+    // A submitted face is resolved *before* the write lock below is taken.
+    //
+    // A `blob:` avatar streams up to 4 MiB from the workspace backend, and the
+    // bytes it resolves to do not depend on the record — so holding the
+    // per-company write lock across that I/O would let a slow or stalled remote
+    // store block every other roster and policy write, on a request any member
+    // can repeat. The immutable reference is resolved here instead, and the
+    // lock below is held only for the load-mutate-save of the record.
+    //
+    // `None` is "field absent" (no change), `Some(None)` is "clear it back to
+    // the hashed default", `Some(Some(ref))` is the stored reference.
+    let resolved_avatar: Option<Option<String>> = match &body.avatar {
+        None => None,
+        Some(avatar) => {
+            let value = avatar.as_deref().map(str::trim).filter(|v| !v.is_empty());
+            match value {
+                Some(value) => {
+                    let stored = crate::company::avatar::resolve(
+                        company.runtime.workspace().as_ref(),
+                        company.id(),
+                        value,
+                    )
+                    .await
+                    .map_err(|e| ApiError(e).into_response())?;
+                    Some(Some(stored))
+                }
+                None => Some(None),
+            }
+        }
+    };
+
     // Serialize with every other write to `overlay_agents`, so a console edit
     // and a concurrent `add_agent` cannot clobber one another's roster.
     let write_lock = company_write_lock(company.id());
