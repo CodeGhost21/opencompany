@@ -215,6 +215,25 @@ pub trait DeepTraceStore: Send + Sync {
         run_id: &str,
     ) -> Result<Vec<RunStepDetailRecord>>;
 
+    /// Every detail for every run in one call, keyed by run id.
+    ///
+    /// The provided implementation loops the per-run read. The filesystem
+    /// backend overrides this for the same reason [`RunStore`]'s bulk steps
+    /// read does: a per-run call rescans the whole company-wide JSONL, so the
+    /// Observatory index would pay that scan once per listed run. See
+    /// [`RunStore::list_run_steps_for_runs`](crate::ports::runs::RunStore::list_run_steps_for_runs).
+    async fn list_step_details_for_runs(
+        &self,
+        company: &CompanyId,
+        run_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<RunStepDetailRecord>>> {
+        let mut out = std::collections::HashMap::with_capacity(run_ids.len());
+        for id in run_ids {
+            out.insert(id.clone(), self.list_step_details(company, id).await?);
+        }
+        Ok(out)
+    }
+
     /// Destroys detail bodies: one run's when `run_id` is `Some`, the whole
     /// company's when `None`. Returns how many records went.
     ///
