@@ -210,15 +210,20 @@ pub(crate) fn agent_scoped_grants(
 pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
 
-    // These namespaces are intentionally opt-in: the generic matcher treats
+    // These capabilities are intentionally opt-in: the generic matcher treats
     // `*` as covering every literal, but these grants reach metered services,
-    // tenant credentials, or third-party source. Keep narrowing consistent with
-    // the wiring predicates so an agent cannot ask for one of them through a
-    // catch-all company grant. The predicates accept the bare namespace or any
-    // dotted descendant (`search` and `search.*` both satisfy them), so the
-    // request check must too — `search.*` or `media.image` is as much an opt-in
-    // ask as the bare namespace, and letting it fall through to the generic
-    // match below would hand a wildcard-only company the whole namespace on a
+    // tenant credentials, third-party source, or operator-owned workspace
+    // guidance. Keep narrowing consistent with the wiring predicates so an
+    // agent cannot ask for one of them through a catch-all company grant.
+    if literal == "workspace.write" {
+        return crate::company::grants_workspace_write_explicit(allow);
+    }
+
+    // The namespace predicates accept the bare namespace or any dotted
+    // descendant (`search` and `search.*` both satisfy them), so the request
+    // check must too — `search.*` or `media.image` is as much an opt-in ask as
+    // the bare namespace, and letting it fall through to the generic match
+    // below would hand a wildcard-only company the whole namespace on a
     // sub-grant request.
     if literal == "media" || literal.starts_with("media.") {
         return crate::company::grants_media_explicit(allow);
