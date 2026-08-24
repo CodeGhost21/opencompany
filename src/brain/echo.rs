@@ -54,6 +54,7 @@ impl Brain for EchoBrain {
                     text: format!("You said: {text}"),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 });
             }
             if let CompanyEvent::WebhookReceived { channel, .. } = event {
@@ -66,6 +67,7 @@ impl Brain for EchoBrain {
                     text,
                     steps: Vec::new(),
                     reply_to,
+                    mentions: Vec::new(),
                 });
             }
         }
@@ -78,6 +80,7 @@ impl Brain for EchoBrain {
                 text: "Acknowledged.".to_string(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             });
         }
 

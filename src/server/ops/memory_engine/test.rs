@@ -327,6 +327,12 @@ async fn the_default_host_reports_the_built_in_store_as_editable() {
     );
 }
 
+#[test]
+fn an_env_owned_engine_is_detected_from_an_injected_source() {
+    let env = crate::app::config::MapEnv::new([("OPENCOMPANY_MEMORY", "store")]);
+    assert!(crate::store::StorageSettings::memory_is_env_owned_by(&env));
+}
+
 /// A health answer is useful only if it is current. The engine route is
 /// operator-authenticated and re-probes its overlay for each read, while the
 /// unauthenticated `/spec` handshake carries no memory block at all.
