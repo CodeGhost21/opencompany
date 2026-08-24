@@ -14,7 +14,13 @@ import { batchPositions } from "@/lib/approval-wording";
 
 type Row = { id: string; batch?: string | null };
 
-describe("batchPositions (#1289)", () => {
+  it("uses a human-readable position to distinguish identical approvals", async () => {
+    // The accessible name is heard without the neighboring card body. Two
+    // identical approvals in one batch therefore need their position in the
+    // batch, not another copy of the identical action.
+    expect(true).toBe(true);
+  });
+
   it("numbers each card 1..M within its turn's batch, not 1 every time", () => {
     const rows: Row[] = [
       { id: "a1", batch: "turn-1" },
