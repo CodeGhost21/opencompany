@@ -178,6 +178,8 @@ mod test {
 
         let issued = issue_password(
             &users,
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
             &company,
             &[],
             Some("Founder@Acme.test"),
@@ -215,6 +217,8 @@ mod test {
 
         issue_password(
             &users,
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
             &company,
             &["ada@acme.test".into()],
             None,
@@ -245,6 +249,8 @@ mod test {
 
         let error = issue_password(
             &users,
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
             &company,
             &["ada@acme.test".into()],
             Some("founder@acme.test"),
@@ -280,6 +286,8 @@ mod test {
 
         issue_password(
             &users,
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
             &company,
             &[],
             Some("ada@acme.test"),
@@ -293,6 +301,8 @@ mod test {
         // Now nobody is named: no manifest admins, no bootstrap admin.
         let again = issue_password(
             &users,
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
             &company,
             &[],
             None,
@@ -350,6 +360,8 @@ mod test {
 
         let issued = issue_password(
             &users,
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
             &company,
             &[],
             Some("ada@acme.test"),
@@ -380,6 +392,8 @@ mod test {
 
         issue_password(
             &users,
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &Arc::new(FsOps::new(dir.path().to_path_buf())),
             &company,
             &[],
             Some("ada@acme.test"),
