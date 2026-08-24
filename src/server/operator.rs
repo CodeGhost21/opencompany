@@ -2075,11 +2075,7 @@ async fn chat_and_emit(
         .responses
         .into_iter()
         .map(|mut response| {
-            response.mentions = project_mentions(
-                &response.mentions,
-                &authors,
-                &viewer,
-            );
+            response.mentions = project_mentions(&response.mentions, &authors, &viewer);
             response
         })
         .collect();
