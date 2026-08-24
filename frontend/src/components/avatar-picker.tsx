@@ -66,12 +66,24 @@ export function AvatarPicker({
 }: Props) {
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // False once the picker has left the tree. An upload outlives a dialog that
+  // was dismissed while it was in flight, and the picker must not then hand the
+  // reference to a caller that is no longer showing it — in AgentDetailView
+  // that `onChange` saves the face, so a slow upload followed by Escape would
+  // change the teammate's icon after the dialog was gone.
+  const mounted = useRef(true);
+  useEffect(() => {
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const current = avatarRef(value, seed);
 
   async function upload(file: File) {
     setUploading(true);
     try {
       const { avatar } = await uploadAvatar(client, company, file);
+      if (!mounted.current) return;
       onChange(avatar);
     } catch (err) {
       // The host's own sentence, which names the actual problem — the wrong
