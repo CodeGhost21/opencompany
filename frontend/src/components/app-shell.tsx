@@ -962,6 +962,7 @@ export function AppShell({
         // Host without `/desks`, or offline — keep the static default
         // threads, but the operator/General line still deserves a
         // rehydration attempt (it's the one every deployment has).
+        if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         defaultThreads().forEach((t) => hydrate(t.id));
         setChatChannelByThread(channelMap(fallbackDesks, []));
