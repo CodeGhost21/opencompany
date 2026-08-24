@@ -241,7 +241,29 @@ pub fn user_slugs(users: &[UserRecord]) -> Vec<String> {
     let mut emitted: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(users.len());
     for user in users {
-        let base = mention_slug(&user_label(user));
+        let mut base = mention_slug(&user_label(user));
+        if base.is_empty() {
+            // A symbol-only display name ("🙂", "!!!") slugs to nothing, and an
+            // empty alias would match every `@` — but dropping the alias makes
+            // the person unmentionable while the picker still offers a row
+            // (`mentionableText` falls back to the label, and the host refuses
+            // the span because `opens_mention` needs a word char after `@`).
+            // Fall back to the email local part, the same handle `user_label`
+            // already uses when there is no display name, and then to the id,
+            // which is guaranteed non-empty and typable.
+            base = mention_slug(
+                &user
+                    .email
+                    .split('@')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            );
+            if base.is_empty() {
+                base = user.id.clone();
+            }
+        }
         loop {
             let count = seen.entry(base.clone()).or_insert(0);
             *count += 1;
