@@ -204,7 +204,7 @@ function CompactChannelRow({
       {hasMentions && (
         <span
           data-testid="channel-mentions"
-          title={`${mentions} mentions of you here`}
+          title={`${mentions} ${mentions === 1 ? "mention" : "mentions"} of you here`}
           className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-destructive"
         />
       )}
