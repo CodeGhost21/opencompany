@@ -16,6 +16,33 @@ function isGeneralChat(context: string | null | undefined): boolean {
 }
 
 /**
+ * The rendered channel a mention's `context` badges, or `undefined` when it has
+ * nowhere to land.
+ *
+ * Shared by the badge placement in [`mentionCountsByChannel`] and the app
+ * shell's "re-read the thread a mention's message is missing from" trigger, so
+ * both resolve the same channel for the same row:
+ *
+ * - An exact rendered channel-id match wins outright: a real desk whose id
+ *   happens to be `general` (or `main`, or — impossibly — `""`) is *that*
+ *   channel, so a mention stored under the canonical id has to badge that
+ *   desk, not the default thread the legacy spellings alias to (issue #65).
+ * - Only a context that names no rendered channel falls back to the alias:
+ *   a legacy general-chat spelling badges the rendered main channel, and one
+ *   with no rendered main channel is dropped (the rail has no row to badge).
+ */
+export function renderedChannelIdForContext(
+  context: string | null | undefined,
+  mainChannelId: string | undefined,
+  renderedChannelIds: ReadonlySet<string>,
+): string | undefined {
+  if (context === undefined || context === null) return undefined;
+  if (renderedChannelIds.has(context)) return context;
+  if (isGeneralChat(context)) return mainChannelId;
+  return context;
+}
+
+/**
  * The mention badge: how many unread mentions of **you** sit in each channel.
  *
  * # Why this is not the unread count
