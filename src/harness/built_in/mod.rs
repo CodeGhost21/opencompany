@@ -2816,19 +2816,33 @@ fn overlay_fingerprint(
     hasher.finish()
 }
 
-/// A stable hash of the operator's `[policy]` override, so a console tier change
-/// rebuilds the roster on the company's next `ensure` (issue #562).
+/// A stable hash of the effective `[policy]`, so a console tier change or a
+/// manifest `[policy]` edit rebuilds the roster on the company's next `ensure`
+/// (issue #562).
 ///
 /// # Why this axis has to exist at all
 ///
 /// `ApprovalPolicy` is constructed in [`build_roster`], **once per roster
 /// build** — not once per call. The roster is cached and rebuilt only when one
 /// of the fingerprints in the staleness check moves. So without this function a
-/// console tier change would be written, persisted, and then **silently ignored
+/// policy change would be written, persisted, and then **silently ignored
 /// until the process restarted**: the write route would return `204`, the
 /// console would show the new tier, and every agent would keep running the old
 /// one. That is the same failure the skill-delta fingerprint above exists to
 /// prevent, and it is invisible from the outside.
+///
+/// # Why it hashes the effective values, not a stored override
+///
+/// The input is the effective policy — the manifest `[policy]` block as
+/// reconciled with any operator override — because the roster is built from
+/// that effective view (`CompanyRecord::effective_policy`). A relative-override
+/// fingerprint is the empty value whenever effective == manifest, which is
+/// exactly the case after a manifest `[policy]` edit that stores no override:
+/// the write is persisted, the native gate is re-applied, and yet the cache key
+/// never moves — so the next `ensure` reuses the roster (with its old
+/// `ApprovalPolicy`) and harness tool calls keep running under the pre-edit
+/// tier while the native gate already enforces the new one. Hashing the
+/// effective values closes that gap.
 ///
 /// # What is hashed, and what deliberately is not
 ///
@@ -2838,59 +2852,30 @@ fn overlay_fingerprint(
 ///   independent rows, so a reorder is a real edit rather than a spurious
 ///   difference. Its length is folded in first so `["a","b"]` cannot collide
 ///   with `["ab"]`.
-/// - The `Some`/`None` distinction is hashed for policy fields that affect the
-///   roster. A deadline-only override is normalized to `None`: TTL is enforced
-///   by the live gate and is not part of the roster snapshot, so it must not
-///   trigger a roster rebuild.
-/// - **Attribution (`set_by`, `at_millis`) is deliberately NOT hashed**, for the
-///   same reason the budget fingerprint omits it: who set the tier and when
-///   changes nothing an agent can act on, and folding it in would rebuild the
-///   roster — dropping live agent sessions — on a save that re-set the same tier.
-fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
+/// - The `Some`/`None` distinction of `auto_approve_under_usd` is hashed, so a
+///   cap change moves the key whether it flips between numbers or to/from
+///   `None` (the strictest setting).
+/// - **The TTL is deliberately NOT hashed**, for the same reason it was excluded
+///   from the old override fingerprint: it is enforced by the live gate, not the
+///   roster snapshot, so a deadline-only change must not trigger a roster
+///   rebuild.
+/// - **Attribution is structurally absent from `Policy`**, so re-saving the same
+///   tier can never rebuild the roster the way hashing an override's `set_by`
+///   would.
+fn effective_policy_fingerprint(policy: &Policy) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    let Some(entry) = override_ else {
-        0u8.hash(&mut hasher);
-        return hasher.finish();
-    };
-    // TTL is enforced by the live gate, not roster policies.
-    if entry.mode.is_none()
-        && entry.always_approve.is_none()
-        && entry.auto_approve_under_usd.is_none()
-    {
-        0u8.hash(&mut hasher);
-        return hasher.finish();
+    policy.mode.hash(&mut hasher);
+    policy.always_approve.len().hash(&mut hasher);
+    for kind in &policy.always_approve {
+        kind.hash(&mut hasher);
     }
-    1u8.hash(&mut hasher);
-    match &entry.mode {
-        Some(mode) => {
+    match policy.auto_approve_under_usd {
+        Some(amount) => {
             1u8.hash(&mut hasher);
-            mode.hash(&mut hasher);
-        }
-        None => 0u8.hash(&mut hasher),
-    }
-    match &entry.always_approve {
-        Some(kinds) => {
-            1u8.hash(&mut hasher);
-            kinds.len().hash(&mut hasher);
-            for kind in kinds {
-                kind.hash(&mut hasher);
-            }
-        }
-        None => 0u8.hash(&mut hasher),
-    }
-    match &entry.auto_approve_under_usd {
-        Some(cap) => {
-            1u8.hash(&mut hasher);
-            match cap {
-                Some(amount) => {
-                    1u8.hash(&mut hasher);
-                    amount.to_bits().hash(&mut hasher);
-                }
-                None => 0u8.hash(&mut hasher),
-            }
+            amount.to_bits().hash(&mut hasher);
         }
         None => 0u8.hash(&mut hasher),
     }
