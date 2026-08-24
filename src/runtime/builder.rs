@@ -3880,6 +3880,7 @@ mod test {
                 "paypal",
                 "search",
                 "mcp:*",
+                "workspace",
             ]);
             for grant in [
                 "media",
@@ -3901,6 +3902,9 @@ mod test {
                 "search.*",
                 "search.web",
                 "mcp:*",
+                "workspace",
+                "workspace.*",
+                "workspace.write",
             ] {
                 assert!(
                     allow_covers(&allow, grant),
