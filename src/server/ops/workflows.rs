@@ -1620,7 +1620,7 @@ async fn run_workflow(
                 approvals: run.approvals,
             })))
         }
-        Ok(Err(err)) => Err(ApiError(err).into_response()),
+        Ok(Err(err)) => Err(ApiError(err).into_response().into()),
         Err(join) => {
             tracing::error!(
                 company = %company.id(),
