@@ -1449,7 +1449,7 @@ export function AppShell({
             channelId,
             // Same undefined-means-none signal as the count memo: with no
             // rendered main channel the general-chat arm matches nothing.
-            chatChannelByThread.main,
+            firstDeskChannelId ?? undefined,
             new Set(
               Object.keys(chatChannelByThread).filter(
                 (threadId) => chatChannelByThread[threadId] === channelId,
