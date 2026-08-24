@@ -39,9 +39,20 @@ function client(runs: Promise<RunSummary[]>): OpenCompanyClient {
   } as unknown as OpenCompanyClient;
 }
 
+/** A client that answers the two run reads this page makes differently. */
+function clientByUrl(
+  answer: (url: string) => Promise<RunSummary[]>,
+): OpenCompanyClient {
+  return {
+    scopeFor: () => "/api/v1/company/acme",
+    get: (url) => answer(String(url)),
+  } as unknown as OpenCompanyClient;
+}
+
 async function render(
   host: OpenCompanyClient,
   feed: Pick<CompanyFeed, "approvals" | "queue">,
+  attemptEventTick?: number,
 ) {
   await act(async () => {
     root.render(
@@ -51,6 +62,7 @@ async function render(
         companyName: "Acme",
         feed,
         scope,
+        ...(attemptEventTick === undefined ? {} : { attemptEventTick }),
       }),
     );
   });
