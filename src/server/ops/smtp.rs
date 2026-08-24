@@ -441,7 +441,7 @@ async fn run_test(
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "no SMTP credentials configured".to_string(),
         ))
-        .into_response());
+        .into_response().into());
     };
     let to = body.to.unwrap_or_else(|| creds.from_email.clone());
     let email = OutboundEmail {

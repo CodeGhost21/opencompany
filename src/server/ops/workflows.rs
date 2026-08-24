@@ -1900,7 +1900,7 @@ async fn draft_from_description(
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "describe the workflow you want in a sentence or two.".to_string(),
         ))
-        .into_response());
+        .into_response().into());
     }
     // Char-safe cap on the request body before it reaches the metered path.
     let description: String = description
@@ -1962,7 +1962,7 @@ async fn draft_from_description(
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "describe the workflow you want in a sentence or two.".to_string(),
         ))
-        .into_response());
+        .into_response().into());
     }
     Err(super::not_wired("the workflow copilot"))
 }
@@ -2152,7 +2152,7 @@ async fn fix_from_run(
             "workflow `{wid}` is defined by a file in the company source tree, so a copilot fix \
              can't be saved for it. Edit `workflows/{wid}.toml` in the company repository instead."
         )))
-        .into_response());
+        .into_response().into());
     }
     let file = load_workflow_with_globals(
         company.runtime.source_dir(),
@@ -2196,7 +2196,7 @@ async fn fix_from_run(
             "this run recorded no error to fix from — reopen the run, or pass its error as a hint."
                 .to_string(),
         ))
-        .into_response());
+        .into_response().into());
     };
     // The journal names a node id; the human-readable name comes from the saved
     // graph the id belongs to.

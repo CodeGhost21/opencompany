@@ -509,7 +509,7 @@ async fn edit_agent(
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         )))
-        .into_response());
+        .into_response().into());
     }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
 

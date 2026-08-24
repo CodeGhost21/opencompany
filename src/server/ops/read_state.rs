@@ -104,7 +104,7 @@ async fn mark_read(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": "channelId must not be empty", "code": "invalid_request" })),
         )
-            .into_response());
+            .into_response().into());
     }
     // The stored marker is returned rather than the requested one, because
     // `mark` is monotonic: a late request carrying an earlier instant leaves the

@@ -419,7 +419,7 @@ async fn invite(
             "{} is already a member",
             LoginIdentity::parse(&identity).label()
         )))
-        .into_response());
+        .into_response().into());
     }
     let mut record = InviteRecord {
         id: generate_id(),
@@ -499,7 +499,7 @@ async fn revoke_invite(
              [users].admins there instead"
                 .to_string(),
         ))
-        .into_response());
+        .into_response().into());
     }
     if invite_id.starts_with("platform:") {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
@@ -507,7 +507,7 @@ async fn revoke_invite(
              unset it there instead"
                 .to_string(),
         ))
-        .into_response());
+        .into_response().into());
     }
     let removed = runtime
         .users()
@@ -696,7 +696,7 @@ async fn ensure_not_last_admin(
         return Err(ApiError(OpenCompanyError::Conflict(
             "this is the company's last admin; promote someone else first".to_string(),
         ))
-        .into_response());
+        .into_response().into());
     }
     Ok(())
 }

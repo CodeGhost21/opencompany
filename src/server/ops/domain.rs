@@ -124,7 +124,7 @@ async fn run_verify(
         return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
             "no domain configured".to_string(),
         ))
-        .into_response());
+        .into_response().into());
     };
     let status = dns::verify(&stored.domain, resolver.as_ref())
         .await?;
