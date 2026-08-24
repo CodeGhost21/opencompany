@@ -182,6 +182,16 @@ describe("readiness is the addressed company's, not the host's", () => {
     await show(clientWith({ status: async () => Promise.reject(new Error("nope")) }));
     expect(find("setup-inference-notice")?.textContent).toContain("couldn't check");
   });
+
+  it("omits the model CTA when this host can never run the design pass", async () => {
+    await show(
+      clientWith({ status: async () => ({ ...ECHO, harnessReachable: false }) }),
+    );
+    // A credential cannot put a harness-less binary on the design path, so the
+    // CTA that promises otherwise would be a dead end — say so instead.
+    expect(find("setup-inference-notice")?.textContent).toContain("can't run a model");
+    expect(linkNamed("Set up a model")).toBeNull();
+  });
 });
 
 describe("a stalled readiness check cannot lock the operator in", () => {
