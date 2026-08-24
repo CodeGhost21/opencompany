@@ -3101,7 +3101,6 @@ mod test {
                         steps: Vec::new(),
                         reply_to: Some(ReplyTo {
                             chat_id: "strategy".into(),
-                        mentions: Vec::new(),
                         }),
                     },
                 ],
