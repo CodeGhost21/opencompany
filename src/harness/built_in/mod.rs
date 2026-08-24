@@ -5954,7 +5954,7 @@ description = "Builds the product."
     #[tokio::test]
     async fn a_manifest_policy_edit_rebuilds_the_roster_with_no_override() {
         let live_store = Arc::new(LiveStore::default());
-        let mut rec = record();
+        let rec = record();
         live_store.save(&rec).await.unwrap();
 
         let mut fx = fixture();
