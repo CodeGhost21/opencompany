@@ -750,7 +750,9 @@ export function ApprovalCard({
           </Button>
           <Button
             size="sm"
-            aria-label={`Approve: ${decisionLabel(a, askerNames, now)}`}
+            aria-label={`Approve: ${decisionLabel(a, askerNames, now)}${
+              batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
+            }`}
             disabled={deciding !== null}
             onClick={() => onDecide("approve", scope)}
           >
