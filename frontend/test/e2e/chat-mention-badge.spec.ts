@@ -247,8 +247,10 @@ test("a collapsed section aggregates its hidden mentions, same as unread", async
 
   // Engineering and Design both live in the "Channels" section. Collapsing it
   // hides both rows, and with them the per-row badges under test above — the
-  // only place those three mentions can still be seen is the header.
-  await page.getByRole("button", { name: "Channels" }).click();
+  // only place those three mentions can still be seen is the header. Exact, so
+  // the desktop rail's "Collapse channels" button (whose name contains the
+  // section's) is not mistaken for the section toggle.
+  await page.getByRole("button", { name: "Channels", exact: true }).click();
 
   await expect(mentionBadge(page, "Engineering")).toHaveCount(0);
   const sectionMentions = page
