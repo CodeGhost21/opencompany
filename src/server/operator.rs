@@ -753,26 +753,15 @@ fn project_event(
             if let Some(task_id) = task_id {
                 o["taskId"] = json!(task_id);
             }
-            // Mention spans, so a console watching live draws the same chips a
-            // reload would rather than rendering the reply flat and then
-            // re-rendering it on refresh.
-            //
-            // **Spans only — deliberately no targets.** A `Mention` carries an
-            // agent id or a *user* id, and this stream has no per-viewer
-            // projection to resolve either into a label; that is the same
-            // reason `ReactionToggled` is dropped here entirely (issue #364).
-            // A chip needs the range and whether it pings, and nothing else, so
-            // that is all this projects. `chat/history` remains the one surface
-            // that answers *who*, per viewer, with labels rather than ids.
-            if !mentions.is_empty() {
+            // Project the same viewer-relative metadata as chat/history. The
+            // stream must carry complete ChatMentionDto values because the live
+            // row is already durable and hydration intentionally skips it.
+            let projected = project_mentions(mentions, authors, viewer);
+            if !projected.is_empty() {
                 o["mentions"] = json!(
-                    mentions
-                        .iter()
-                        .map(|m| json!({
-                            "text": m.text,
-                            "offset": m.offset,
-                            "quiet": m.quiet,
-                        }))
+                    projected
+                        .into_iter()
+                        .map(ChatMentionDto::from)
                         .collect::<Vec<_>>()
                 );
             }
