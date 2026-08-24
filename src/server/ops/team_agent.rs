@@ -2049,6 +2049,19 @@ prompt = "Lead decisively."
     const TINY_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\
 \x01\x00\x01\x00\x00\x02\x00;";
 
+    /// A PNG whose header claims a 65535×65535 frame in a body of a few dozen
+    /// bytes — the decompression bomb the dimension caps exist for. The
+    /// signature and IHDR are enough for both the sniff and the size read.
+    fn bomb_png() -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&65535u32.to_be_bytes());
+        v.extend_from_slice(&65535u32.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v
+    }
+
     /// Posts `bytes` to the avatar upload route as a `file` part named `name`.
     async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
         const BOUNDARY: &str = "----ocavatartest";
