@@ -448,6 +448,13 @@ describe("leaving the completion screen to wire a model", () => {
     await act(async () => {
       (addModelLink() as HTMLElement).click();
     });
+    // The anchor's default is a navigation to Settings; jsdom follows it as a
+    // deferred task, so absorb that before driving the return — otherwise it
+    // can land mid-reload and leave the address on Settings when the fresh
+    // mount re-evaluates the gate.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
     expect(setupRedesign(SCOPE)).toBe(true);
 
     await goTo("#/overview");
