@@ -7497,7 +7497,7 @@ mode = "full"
             &std::collections::HashMap::new(),
             &Viewer::Operator,
         )
-            .expect("a gap must reach the console");
+        .expect("a gap must reach the console");
         assert_eq!(
             value,
             serde_json::json!({ "type": "stream_gap", "missed": 44 })
