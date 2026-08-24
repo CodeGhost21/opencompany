@@ -226,7 +226,7 @@ impl AgentRunGql {
                     label: step.label.clone(),
                     detail: step.detail.clone(),
                     result: step.result.clone(),
-                    failure: step.failure.map(|f| format!("{f:?}").to_lowercase()),
+                    failure: step.failure.map(|f| f.wire_word().to_string()),
                     truncated: step.truncated,
                     elapsed_ms: step.elapsed_ms.map(|v| v as f64),
                     deep: self
