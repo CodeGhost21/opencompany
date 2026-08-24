@@ -66,7 +66,7 @@ pub trait MemoryScopes: Send + Sync {
     /// live window.
     async fn restore_archived_traces(
         &self,
-        company: &CompanyId,
+        _company: &CompanyId,
         traces: &[crate::ports::CompressedTrace],
     ) -> Result<()> {
         if traces.is_empty() {
