@@ -616,12 +616,12 @@ async fn company_events(
     let subscription = scope.runtime.events().subscribe(&company);
     let authors = author_labels(&scope.runtime).await.unwrap_or_default();
     let durable = subscription.filter_map(move |item| {
-            // Keep the teardown guard alive for the life of the stream.
-            let _ = &guard;
-            let event = project_stream_item_for_viewer(&item, &authors, &viewer)
-                .map(|value| Ok(Event::default().data(value.to_string())));
-            std::future::ready(event)
-        });
+        // Keep the teardown guard alive for the life of the stream.
+        let _ = &guard;
+        let event = project_stream_item_for_viewer(&item, &authors, &viewer)
+            .map(|value| Ok(Event::default().data(value.to_string())));
+        std::future::ready(event)
+    });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
     // turn emits while it runs — see [`crate::turn_stream`]) onto the same feed.
     // These are ephemeral and never journaled; the console switches on `type`
