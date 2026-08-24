@@ -3143,8 +3143,15 @@ pub struct PolicyOverride {
     ///
     /// The outer option says whether the operator set this field; the inner
     /// option is the threshold itself. `Some(None)` is therefore a real,
-    /// stricter choice: every spend parks for approval.
-    #[serde(default)]
+    /// stricter choice: every spend parks for approval. The custom serde hooks
+    /// preserve the distinction between a persisted JSON `null` and an absent
+    /// key — plain nested `Option` deserialization collapses both to `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_policy_cap",
+        deserialize_with = "deserialize_policy_cap"
+    )]
     pub auto_approve_under_usd: Option<Option<f64>>,
     /// The approval deadline in hours, or `None` to leave the manifest's value
     /// in force.
