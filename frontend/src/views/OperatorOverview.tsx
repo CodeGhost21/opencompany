@@ -211,7 +211,15 @@ export function OperatorOverview({
           {previousVisit === null ? (
             <p className="mt-5 text-sm text-muted-foreground">Future visits will compare against this one. Company-wide activity history is not stored by the host yet.</p>
           ) : (
-            <RunRows state={runLoad} runs={failuresSinceVisit} empty="No failed attempts were recorded since the previous visit." />
+            <RunRows
+              state={runLoad}
+              runs={failuresSinceVisit}
+              empty={
+                failedReadCapped
+                  ? `No failed attempts since your previous visit appear in the newest ${FAILED_READ_LIMIT} recorded — the host caps the read here.`
+                  : "No failed attempts were recorded since the previous visit."
+              }
+            />
           )}
         </section>
       </div>
