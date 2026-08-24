@@ -947,8 +947,9 @@ function Tools({
           )}
           {willNotApply.length > 0 && (
             <p className="text-xs text-status-blocked-text" data-testid="agent-tools-uncovered">
-              The company tool list does not cover {willNotApply.join(", ")}, so it will be stored
-              and confer nothing.
+              {deskCeilingActive
+                ? `The desk and company tool lists do not cover ${willNotApply.join(", ")}, so it will be stored and confer nothing.`
+                : `The company tool list does not cover ${willNotApply.join(", ")}, so it will be stored and confer nothing.`}
             </p>
           )}
           <div className="flex justify-end gap-2">
