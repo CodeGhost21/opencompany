@@ -48,9 +48,6 @@ use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
-/// The folder every uploaded avatar lands in.
-pub(crate) const AVATARS_FOLDER: &str = "avatars";
-
 /// Builds the avatar route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/avatars", post(upload)).layer(
