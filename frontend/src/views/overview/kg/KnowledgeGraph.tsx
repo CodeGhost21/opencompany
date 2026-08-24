@@ -252,7 +252,7 @@ type SimLink = { source: SimNode | string; target: SimNode | string; kind: strin
  */
 export function KnowledgeGraph({
   graph, agents = [], departments = [], people = [], tasks = [], memory, runsByAgent = {}, toolLabels = {},
-  statusSlot, emptyState = false,
+  statusSlot, covered = false, emptyState = false,
   repelDefault = 150, linkDistDefault = 60, centerDefault = 0.32,
 }: {
   graph: KGData; agents?: Agent[]; departments?: Department[]; people?: Person[]; tasks?: SopTask[];
@@ -270,6 +270,9 @@ export function KnowledgeGraph({
    * operator opened.
    */
   statusSlot?: React.ReactNode;
+  /** an outage overlay covers the graph; it must not answer the keyboard at
+      all — `inert` cannot suppress a `window` listener (issue #1314) */
+  covered?: boolean;
   /** A settled company with no desks gets an explanation and desk-management link. */
   emptyState?: boolean;
   /** latest run per agent id, for the harness card */
@@ -1232,8 +1235,10 @@ export function KnowledgeGraph({
 
   // "/" focuses the vault search whenever the Notes core is open — works
   // in both the inline view and fullscreen (registered independently of the
-  // mode-specific handlers above)
+  // mode-specific handlers above). Skipped while an outage overlay covers the
+  // graph (issue #1314): `inert` cannot silence a `window` listener.
   useEffect(() => {
+    if (covered) return;
     const onSlash = (e: KeyboardEvent) => {
       if (e.key !== '/') return;
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -1244,7 +1249,7 @@ export function KnowledgeGraph({
     };
     window.addEventListener('keydown', onSlash);
     return () => window.removeEventListener('keydown', onSlash);
-  }, []);
+  }, [covered]);
 
   // The constellation subtree is ~2k SVG elements; memoize it so the physics
   // tick (which re-renders the component every animation frame) reuses the
@@ -2587,6 +2592,7 @@ export function KnowledgeGraph({
         searchSlot={vaultSearchInput}
         legendSlot={compactLegend}
         statusSlot={statusSlot}
+        covered={covered}
         emptyState={emptyState}
         onNavDept={navDept}
         onBack={clearDetail}

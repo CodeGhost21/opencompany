@@ -374,6 +374,59 @@ async fn a_login_that_asks_for_nothing_is_unchanged() {
 }
 
 #[tokio::test]
+async fn a_setup_link_carries_the_requested_landing_fragment() {
+    // Setup's hand-off asks the mailed link to land on the roster, so a
+    // production operator who finishes setup and follows the email reaches the
+    // company the wizard just built rather than the Overview graph. The
+    // fragment is appended after the code so the magic-link landing strips the
+    // credential and keeps the destination.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let app = router(state.clone());
+    app.oneshot(post(
+        "/api/v1/companies/acme/auth/request",
+        serde_json::json!({
+            "email": "ada@example.com",
+            "redirect": "#/company?from=setup",
+        }),
+    ))
+    .await
+    .unwrap();
+    let sent = sender.sent();
+    let body = &sent.last().expect("no mail was sent").1.body;
+    assert!(
+        body.contains("/login?company=acme&code=") && body.contains("#/company?from=setup"),
+        "the mailed link must carry the setup destination: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_redirect_is_dropped_not_obeyed() {
+    // The fragment is mailed, so a value that could break the link out of the
+    // body — or name something that is not a console route — must be ignored,
+    // and it must not stop the sign-in mail from going out at all.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let app = router(state.clone());
+    app.oneshot(post(
+        "/api/v1/companies/acme/auth/request",
+        serde_json::json!({
+            "email": "ada@example.com",
+            "redirect": "https://evil.example\n#/company",
+        }),
+    ))
+    .await
+    .unwrap();
+    let sent = sender.sent();
+    let body = &sent.last().expect("no mail was sent").1.body;
+    assert!(!body.contains("evil.example"), "{body}");
+    assert!(
+        body.contains("/login?company=acme&code="),
+        "the sign-in link itself must survive: {body}"
+    );
+}
+
+#[tokio::test]
 async fn a_header_carried_session_can_be_logged_out() {
     // Revocation has to reach the session however it was carried, or a hub
     // console's "sign out" would clear its own storage and leave a live token

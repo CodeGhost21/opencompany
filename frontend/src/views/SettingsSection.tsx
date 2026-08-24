@@ -7,6 +7,7 @@ import { InferenceView } from "@/views/InferenceView";
 import { HostingView } from "@/views/HostingView";
 import { SearchView } from "@/views/SearchView";
 import { McpServersView } from "@/views/McpServersView";
+import { MemoryView } from "@/views/MemoryView";
 import { OAuthView } from "@/views/OAuthView";
 import { PeopleView } from "@/views/PeopleView";
 import { SkillsView } from "@/views/SkillsView";
@@ -142,6 +143,7 @@ export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
           <SearchView key={company ?? "self"} client={client} company={company} />
         )}
         {page === "skills" && <SkillsView client={client} company={company} />}
+        {page === "brain" && <MemoryView client={client} company={company} />}
         {page === "usage" && (
           <Suspense
             fallback={

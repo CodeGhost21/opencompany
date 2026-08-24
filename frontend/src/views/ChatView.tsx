@@ -6,6 +6,7 @@ import {
   useState,
   type Dispatch,
   type ReactNode,
+  type RefObject,
   type SetStateAction,
 } from "react";
 import { TriangleAlert } from "lucide-react";
@@ -61,6 +62,7 @@ import {
   buildChannels,
   buildTimeline,
   buildTimelineItems,
+  channelIdFromSegment,
   channelMembers,
   channelTitle,
   deskFromDto,
@@ -70,6 +72,8 @@ import {
   historyReady,
   HISTORY_UNTRACKED,
   clearTaskCardEverywhere,
+  directMessageChannels,
+  directMessageForId,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -153,6 +157,30 @@ interface Props {
    * answer anyone is going to get.
    */
   onSendFailed?: (threadId: string) => void;
+  /** Called when a delayed response belongs to a previous company scope. */
+  onSendStale?: (threadId: string) => void;
+  /**
+   * The shell's live company ref, so the stale-response check keeps observing
+   * company switches after this view unmounts.
+   *
+   * A component-local ref would freeze at the last render's company once this
+   * subtree disappears — exactly when the operator can walk to another view
+   * and switch companies mid-POST. The shell owns `companyRef` and updates it
+   * on every company change whether or not Chat is mounted, so a send that
+   * resolves or rejects after the switch still sees the new scope and is
+   * declared stale rather than writing the old company's reply into the new
+   * company's transcript.
+   */
+  /**
+   * The latest connection and company scope, updated by the shell while mounted.
+   *
+   * `client` is part of the scope for a reason codex flagged (P1): the registry's
+   * `reseat` path edits a host address by replacing the `OpenCompanyClient` while
+   * deliberately preserving the connection id, so `connection` + `company` alone
+   * do not move when the host underneath a send changes. Comparing the client
+   * instance catches the old host's late completion after reseat.
+   */
+  scopeRef: RefObject<{ connection: string; company: string | null; client: OpenCompanyClient }>;
   /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
@@ -207,6 +235,9 @@ interface Props {
   failedApprovals?: Record<string, string>;
 }
 
+const FIRST_TEAM_BRIEF =
+  "Help us get started: propose the first three priorities for our company and who should own each one.";
+
 /**
  * The chat workspace.
  *
@@ -237,6 +268,8 @@ export function ChatView({
   onSendEnd,
   onSendDetached,
   onSendFailed,
+  onSendStale,
+  scopeRef,
   openTurns,
   liveStepsByThread,
   unread,
@@ -267,6 +300,10 @@ export function ChatView({
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [composerPrefill, setComposerPrefill] = useState<{
+    text: string;
+    revision: number;
+  } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
@@ -498,9 +535,17 @@ export function ChatView({
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
+  //
+  // The shell's live scope ref, not a local one: a local ref would freeze at
+  // the last render's scope once this subtree unmounts, and a `client.chat`
+  // still in flight from before the switch would then pass its stale check and
+  // write the old company's reply into the new company's transcript. The shell
+  // keeps updating its ref on every connection/company change, mounted or not,
+  // so the comparison in `send` stays honest after Chat is gone (codex P1).
+
   const sections = useMemo(
-    () => (desks ? buildChannels(members, desks) : []),
-    [members, desks],
+    () => (desks ? buildChannels(members, desks, transcripts) : []),
+    [members, desks, transcripts],
   );
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
@@ -508,6 +553,16 @@ export function ChatView({
   // channel `firstChannel` returns when they hadn't. It never selected anything
   // the line below wouldn't; it only made "main" look like a real channel id
   // (issue #368).
+  /**
+   * The hash's second segment, URL-escapes undone.
+   *
+   * `useHashView` passes the segment through untouched, but hrefs mint channel
+   * links with `encodeURIComponent` — the "Open the conversation" pill on an
+   * approval card writes `#/chat/dm%3A<agent-id>` for a DM. Without this an
+   * encoded DM id compares against nothing and the link lands on the fallback
+   * channel instead of the conversation that raised the request.
+   */
+  const decodedSub = channelIdFromSegment(sub);
   /**
    * A `#/chat/dm:…` link minted before issue #364 re-keyed DMs onto the
    * teammate's id, mapped onto the id that channel has now.
@@ -517,9 +572,23 @@ export function ChatView({
    * deleted without leaving anything stranded.
    */
   const resolvedSub =
-    sub && !findChannel(sections, sub) ? resolveDmChannelId(sub, members) : null;
+    decodedSub && !findChannel(sections, decodedSub)
+      ? resolveDmChannelId(decodedSub, members)
+      : null;
+  /**
+   * The channel the hash names, else the first one that exists.
+   *
+   * The rail only carries DMs with a transcript (issue #1335), so `findChannel`
+   * answers `null` for an inactive DM — but `dm:<teammate-id>` is still a
+   * valid, directly-addressable conversation. `directMessageForId` is the
+   * all-roster resolver that keeps such a deep link (and the New message
+   * picker's selection) landing on the DM before the first-channel fallback
+   * takes over, without ever adding the inactive DM to the rail.
+   */
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? sub) ?? firstChannel(sections))
+    ? (findChannel(sections, resolvedSub ?? decodedSub) ??
+      directMessageForId(members, resolvedSub ?? decodedSub) ??
+      firstChannel(sections))
     : null;
   /**
    * The hash named a channel this company doesn't have, and the first-channel
@@ -529,9 +598,21 @@ export function ChatView({
    * unknown. Derived rather than stored, so it clears itself the moment the
    * hash changes — there is no stale banner to dismiss. A legacy DM link that
    * the shim above resolved is not unknown; it found its channel.
+   *
+   * An inactive DM is not unknown either: the rail only carries DMs with a
+   * transcript (issue #1335), so `findChannel` answers `null` for a DM the
+   * picker just opened, but `directMessageForId` still resolves it against the
+   * whole roster. Check that resolver explicitly rather than leaning on
+   * `resolvedSub`, whose legacy-id shim is meant to be deletable.
    */
   const unknownChannel =
-    desks && sub && !resolvedSub && !findChannel(sections, sub) ? sub : null;
+    desks &&
+    decodedSub &&
+    !resolvedSub &&
+    !findChannel(sections, decodedSub) &&
+    !directMessageForId(members, decodedSub)
+      ? decodedSub
+      : null;
 
   /**
    * Who is in the channel on screen — `null` when it names no membership, in
@@ -735,6 +816,11 @@ export function ChatView({
     attachments?: AttachmentDto[],
   ) {
     if (sending) return;
+    const scopeAtSend = {
+      connection: scope.connection,
+      company: scope.company,
+      client,
+    };
     const target = active.id;
     const chatId = activeThreadId;
     // The optimistic bubble carries the attachments too, so the operator sees
@@ -755,7 +841,7 @@ export function ChatView({
     // the delivery path, so telling the shell "ended" for either would take the
     // working row down mid-turn (detached) or throw away the reply it was
     // holding (failed). See `PendingSyncPosts` for the table.
-    let outcome: "resolved" | "detached" | "failed" = "resolved";
+    let outcome: "resolved" | "detached" | "failed" | "stale" = "resolved";
     try {
       const answer = await client.chat(
         text,
@@ -772,6 +858,17 @@ export function ChatView({
         // the client neither sends nor is trusted for that metadata.
         attachments?.map((a) => a.nodeId),
       );
+      const latestScope = scopeRef.current;
+      if (
+        latestScope &&
+        (scopeAtSend.company !== latestScope.company ||
+          scopeAtSend.connection !== latestScope.connection ||
+          scopeAtSend.client !== latestScope.client)
+      ) {
+        outcome = "stale";
+        if (chatId) onSendStale?.(chatId);
+        return;
+      }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
       // journaled at accept time, so its durable id is a fact within
@@ -807,6 +904,17 @@ export function ChatView({
       onReply?.();
     } catch (err) {
       outcome = "failed";
+      const latestScope = scopeRef.current;
+      if (
+        latestScope &&
+        (scopeAtSend.company !== latestScope.company ||
+          scopeAtSend.connection !== latestScope.connection ||
+          scopeAtSend.client !== latestScope.client)
+      ) {
+        outcome = "stale";
+        if (chatId) onSendStale?.(chatId);
+        return;
+      }
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
       // whether their message was taken at all. The two facts are not in
@@ -1087,6 +1195,8 @@ export function ChatView({
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
+        directMessages={directMessageChannels(members)}
+        onStartDirectMessage={selectChannel}
         className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
       />
       <ChannelRail
@@ -1096,6 +1206,8 @@ export function ChatView({
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
+        directMessages={directMessageChannels(members)}
+        onStartDirectMessage={selectChannel}
         collapsed={channelsCollapsed}
         onExpand={toggleChannels}
         className="hidden lg:flex"
@@ -1147,9 +1259,16 @@ export function ChatView({
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
               resolveAttachmentUrl={resolveAttachmentUrl}
+              onStartBrief={() =>
+                setComposerPrefill((current) => ({
+                  text: FIRST_TEAM_BRIEF,
+                  revision: (current?.revision ?? 0) + 1,
+                }))
+              }
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
+              chatChannelByThread={chatChannelByThread}
               decidingApprovals={decidingApprovals}
               failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}
@@ -1171,6 +1290,7 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
+              prefill={composerPrefill ?? undefined}
               onSend={(text, intent, attachments) =>
                 void send(text, intent, undefined, attachments)
               }

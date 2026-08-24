@@ -65,6 +65,16 @@ type Approval {
 	board task's attempt), which is the majority.
 	"""
 	workflowRunId: String
+	"""
+	Which workflow a parked `workflow.approve` gate is asking about
+	(issue #1418), when the effect is one.
+	
+	Carried for the same reason it is on the REST summary: it is the second
+	half of the run address, and it must survive role redaction or a Member
+	holding up a stalled workflow would see `workflow_run_id` and still have
+	nowhere to click.
+	"""
+	workflowId: String
 }
 
 """

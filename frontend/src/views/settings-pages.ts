@@ -18,6 +18,7 @@ import {
   type LucideIcon,
   Settings2,
   Sparkles,
+  Brain,
   UserCog,
 } from "lucide-react";
 
@@ -57,6 +58,13 @@ export const SETTINGS_PAGES = [
   // gets a chance to correct it. The siblings describe their content; so does
   // this now.
   { id: "skills", label: "Skills", icon: Sparkles, hint: "Playbooks your teammates read", group: "capability" },
+  {
+    id: "brain",
+    label: "Brain",
+    icon: Brain,
+    hint: "What your company remembers",
+    group: "capability",
+  },
   { id: "usage", label: "Usage", icon: ChartColumnBig, hint: "What this company is spending", group: "spend" },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon; hint: string; group: string }[];
 
