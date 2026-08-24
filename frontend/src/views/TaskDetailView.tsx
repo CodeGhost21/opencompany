@@ -695,9 +695,15 @@ function DetailHeader({
   // was journaled for it, so claiming otherwise beside a settled status is the
   // self-contradiction the report caught.
   const neverStarted = !hasDispatch && neverDispatched(task);
-  // A run window contains its approval waits, so the time the agent actually
-  // worked is the remainder. Waiting itself is stated once in the approval row.
-  const workingMs = Math.max(0, (worked?.millis ?? 0) - (waiting?.millis ?? 0));
+  // `worked` is the whole elapsed run window; waiting sits *inside* it, so
+  // working time is the remainder. Clamped at zero because the two figures come
+  // from different sources (event log vs journal join) and a clock skew between
+  // them must never render a negative duration.
+  const waitedMs = waiting?.millis ?? 0;
+  const workingMs = Math.max(0, (worked?.millis ?? 0) - waitedMs);
+  // The acceptance line: a task that never waited shows no waiting figure at
+  // all, not a "Waiting 0s".
+  const showWaiting = waitedMs > 0 || Boolean(waiting?.live);
   return (
     <div className="p-4">
       <div className="flex items-start justify-between gap-3">
