@@ -697,7 +697,7 @@ mod test {
     #[test]
     fn vp8_height_uses_all_fourteen_bits() {
         let (w, h) = (MAX_AVATAR_DIMENSION, 16383);
-        let tall = webp_vp8(w, h);
+        let tall = webp_vp8(w as u16, h as u16);
         assert_eq!(image_dimensions(&tall).unwrap(), (w, h));
         assert!(
             check_image_dimensions(&tall).is_err(),
