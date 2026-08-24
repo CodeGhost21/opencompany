@@ -140,14 +140,13 @@ pub const MAX_AVATAR_PIXELS: u64 = 4096 * 4096;
 /// particular an SVG, an HTML document and a PDF all land here as `None`
 /// whatever they were labelled as.
 pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
-    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.starts_with(PNG) {
+    if bytes.starts_with(PNG_SIGNATURE) {
         return Some("image/png");
     }
-    if bytes.starts_with(b"\xff\xd8\xff") {
+    if bytes.starts_with(JPEG_SIGNATURE) {
         return Some("image/jpeg");
     }
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+    if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89) {
         return Some("image/gif");
     }
     // RIFF....WEBP — the four size bytes in between are part of the container,
@@ -157,6 +156,168 @@ pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
         return Some("image/webp");
     }
     None
+}
+
+/// The decoded dimensions of a supported image, read from its own header.
+///
+/// [`sniff_image`] answers "do the leading bytes *name* one of the four
+/// formats"; this answers "and what size does the format those bytes name
+/// claim". The gap between the two is the decompression bomb: a header can
+/// promise 65535×65535 in a payload small enough to pass the avatar ceiling,
+/// and a decoder that trusts the promise hands the allocation to whoever
+/// views it. Reading the announced size before the bytes are stored turns that
+/// from a per-viewer allocation into a `400` on the upload.
+///
+/// A header parse, not a decode — decoding to learn the size would be the
+/// allocation the check exists to prevent.
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.starts_with(PNG_SIGNATURE) {
+        // Signature (8) + IHDR length (4) + "IHDR" (4), then big-endian width
+        // and height at a fixed offset.
+        let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+        let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+        return Some((w, h));
+    }
+    if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89) {
+        // Logical screen width and height, little-endian, right after the
+        // signature.
+        let w = u16::from_le_bytes(bytes.get(6..8)?.try_into().ok()?) as u32;
+        let h = u16::from_le_bytes(bytes.get(8..10)?.try_into().ok()?) as u32;
+        return Some((w, h));
+    }
+    if bytes.starts_with(JPEG_SIGNATURE) {
+        return jpeg_dimensions(bytes);
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return webp_dimensions(bytes);
+    }
+    None
+}
+
+/// The height and width a JPEG announces, from its SOF segment.
+///
+/// The SOF marker carries the frame size, and it may sit after any number of
+/// APPn/COM/DQT/DHT/DRI segments — there is no fixed offset — so the marker
+/// list has to be walked. Each segment is `FF` + marker + 2-byte length; the
+/// length covers itself and the payload but not the marker.
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    // Start after the SOI (`FF D8`), which `sniff_image` has already required.
+    let mut i = 2;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        // `FF FF` is a fill byte; the second FF begins the real marker.
+        if bytes[i + 1] == 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = bytes[i + 1];
+        // Standalone markers carry no length field: SOI, EOI, RSTn, TEM.
+        if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if len < 2 {
+            return None;
+        }
+        // A SOF segment is precision(1) + height(2) + width(2), then the
+        // per-component bytes. The SOF markers are C0–CF except the ones that
+        // are not SOF: DHT (C4), JPG (C8), DAC (CC), DNL (DC), DRI (DD).
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC | 0xDC | 0xDD)
+        {
+            if i + 4 + len > bytes.len() {
+                return None;
+            }
+            let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            let w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
+            return Some((w, h));
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// The width and height a WebP announces, from its first image chunk.
+///
+/// After the 12-byte RIFF/WEBP container, chunks are FourCC (4) + size (4) +
+/// payload, padded to an even byte count. The canvas size lives in the first
+/// image chunk — VP8X when the file is extended (alpha, animation), else VP8
+/// (lossy) or VP8L (lossless).
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 12;
+    while i + 8 <= bytes.len() {
+        let fourcc = bytes.get(i..i + 4)?;
+        let size = u32::from_le_bytes(bytes.get(i + 4..i + 8)?.try_into().ok()?) as usize;
+        let data = bytes.get(i + 8..i + 8 + size)?;
+        match fourcc {
+            b"VP8 " => {
+                // Lossy: frame tag (3) + start code (3), then 14-bit width and
+                // height (RFC 6386 §9.1).
+                if data.len() < 9 {
+                    return None;
+                }
+                let w = (data[6] as u32) | (((data[7] & 0x3F) as u32) << 8);
+                let h = (((data[7] & 0xC0) as u32) >> 6) | ((data[8] as u32) << 2);
+                return Some((w, h));
+            }
+            b"VP8L" => {
+                // Lossless: `0x2F` signature, then 14-bit (width−1) and 14-bit
+                // (height−1).
+                if data.len() < 5 || data[0] != 0x2F {
+                    return None;
+                }
+                let w = 1 + ((data[1] as u32) | (((data[2] & 0x3F) as u32) << 8));
+                let h = 1
+                    + ((((data[2] & 0xC0) as u32) >> 6)
+                        | ((data[3] as u32) << 2)
+                        | ((data[4] as u32) << 10));
+                return Some((w, h));
+            }
+            b"VP8X" => {
+                // Extended: flags (1) + reserved (3) + 24-bit (width−1) and
+                // (height−1).
+                if data.len() < 10 {
+                    return None;
+                }
+                let w = 1 + ((data[4] as u32) | ((data[5] as u32) << 8) | ((data[6] as u32) << 16));
+                let h = 1 + ((data[7] as u32) | ((data[8] as u32) << 8) | ((data[9] as u32) << 16));
+                return Some((w, h));
+            }
+            // ALPH, ANIM, ANMF, ICCP, EXIF, XMP and anything unknown are
+            // skipped — the first image chunk has already been read by the
+            // time a file reaches them.
+            _ => {}
+        }
+        i += 8 + size + (size & 1);
+    }
+    None
+}
+
+/// Refuses an image whose decoded size is a decompression bomb.
+///
+/// [`sniff_image`] proves the leading bytes *name* one of the four formats;
+/// this proves the image they name is not pathological. An avatar is rendered
+/// at a handful of pixels, so an edge over [`MAX_AVATAR_DIMENSION`] or an area
+/// over [`MAX_AVATAR_PIXELS`] has nothing legitimate behind it — it is a
+/// header that would make every decoder that touches it allocate a buffer
+/// nobody needs. A payload too short to announce a size is refused as not an
+/// image: a truncated avatar would not decode anywhere either.
+pub fn check_image_dimensions(bytes: &[u8]) -> Result<()> {
+    let Some((w, h)) = image_dimensions(bytes) else {
+        return Err(not_an_image());
+    };
+    if w > MAX_AVATAR_DIMENSION
+        || h > MAX_AVATAR_DIMENSION
+        || (w as u64) * (h as u64) > MAX_AVATAR_PIXELS
+    {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "that image is {w}×{h} pixels — an avatar has to fit within \
+             {MAX_AVATAR_DIMENSION}×{MAX_AVATAR_DIMENSION}."
+        )));
+    }
+    Ok(())
 }
 
 /// Parses a stored or submitted avatar reference.
