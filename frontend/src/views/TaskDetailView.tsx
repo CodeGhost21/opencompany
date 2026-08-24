@@ -1225,6 +1225,8 @@ function LineageRail({
   );
 }
 
+export { groupTimeline } from "@/views/runs/RunTimeline";
+
 // Timeline rendering lives in `@/views/runs/RunTimeline`; the task and attempt
 // surfaces share the same grouping, waiting bands, and step-state treatment.
 
