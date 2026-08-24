@@ -1163,13 +1163,15 @@ pub enum RosterSource {
 ///
 /// The review screen said "we couldn't reach a model to tailor it" for *every*
 /// fallback, because [`RosterSource::Fallback`] was the only thing it had to go
-/// on. That is true when no credential is wired and false in the two cases where
-/// a model answered and its answer was unusable — the operator is then told the
-/// host could not reach something it reached fine.
+/// on. That is true when no credential is wired, and false in the cases where a
+/// model was wired but unreachable, or a model answered and its answer was
+/// unusable — the operator is then told the host could not reach something it
+/// reached fine, or is sent to fix a key that already works.
 ///
 /// It matters because the **action differs**. No model means "add a key". An
-/// unusable answer means "you told us very little; go back and say more". A
-/// single sentence covering both can only be vague enough to be useless.
+/// unreachable model means "check the provider or retry". An unusable answer
+/// means "you told us very little; go back and say more". A single sentence
+/// covering all three can only be vague enough to be useless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FallbackReason {
     /// No credential was reachable, so no design pass ran at all.
