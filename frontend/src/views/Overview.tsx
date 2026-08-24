@@ -117,10 +117,23 @@ export function Overview({ client, company, companyName }: Props) {
   // React 18's types predate the boolean `inert` prop.
   const graphShellRef = useRef<HTMLDivElement>(null);
   const outageRef = useRef<HTMLDivElement>(null);
+  // The status slot's Refresh control is the natural landing spot when an
+  // outage dismisses — the overlay that held focus unmounts with the "Try
+  // again" button, and dropping a keyboard user to <body> would restart their
+  // whole tab order (issue #1314). The button is disabled while the retried
+  // read is in flight, so the hand-off is deferred until that load answers.
+  const refreshButtonRef = useRef<HTMLButtonElement>(null);
+  // Set while the outage overlay is showing, so the dismissal branch of the
+  // effect below can tell "the outage just went away" from "the page is
+  // loading for the first time" — only the former must move focus.
+  const outageWasShowingRef = useRef(false);
+  // Set when the outage dismisses; consumed once the retried load completes.
+  const restoreFocusToRefreshRef = useRef(false);
   useEffect(() => {
     const shell = graphShellRef.current;
     if (!shell) return;
     if (loadError) {
+      outageWasShowingRef.current = true;
       shell.setAttribute("inert", "");
       // The graph — and the Refresh button whose failed click just produced
       // this outage — are now inert, so the browser would drop focus to
@@ -129,8 +142,22 @@ export function Overview({ client, company, companyName }: Props) {
       outageRef.current?.focus();
     } else {
       shell.removeAttribute("inert");
+      if (outageWasShowingRef.current) {
+        outageWasShowingRef.current = false;
+        restoreFocusToRefreshRef.current = true;
+      }
     }
   }, [loadError]);
+
+  // Runs after every commit; the ref flags keep it a no-op until an outage is
+  // actually dismissed and the retried load has answered. Only then is the
+  // Refresh control enabled, so the focus hand-off actually lands.
+  useEffect(() => {
+    if (!loading && !loadError && restoreFocusToRefreshRef.current) {
+      restoreFocusToRefreshRef.current = false;
+      refreshButtonRef.current?.focus();
+    }
+  });
 
   useEffect(() => {
     let live = true;
