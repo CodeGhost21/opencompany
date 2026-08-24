@@ -670,7 +670,7 @@ async fn load_user(
             ApiError(OpenCompanyError::InvalidRequest(format!(
                 "no user {user_id}"
             )))
-            .into_response()
+            .into_response().into()
         })
 }
 
