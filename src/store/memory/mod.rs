@@ -270,10 +270,21 @@ impl BoundMemory {
         key: String,
         make: impl FnOnce() -> ProviderContextStore,
     ) -> Arc<dyn ContextStore> {
-        self.context_stores
+        let mut cache = self
+            .context_stores
             .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
             .lock()
-            .expect("context store cache lock poisoned")
+            .expect("context store cache lock poisoned");
+        // Bound the cache at [`SCOPED_CONTEXT_CACHE_CAPACITY`]: an unbounded
+        // scope set must not grow the map without limit. Evict any entry to
+        // make room — HashMap iteration order is arbitrary, and for a cache of
+        // cheap `Arc`s any victim is fine, since the next access to that scope
+        // rebuilds it.
+        if !cache.contains_key(&key) && cache.len() >= SCOPED_CONTEXT_CACHE_CAPACITY {
+            let victim = cache.keys().next().expect("non-empty cache").clone();
+            cache.remove(&victim);
+        }
+        cache
             .entry(key)
             .or_insert_with(|| Arc::new(make()))
             .clone()
