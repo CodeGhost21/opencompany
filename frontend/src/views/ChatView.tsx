@@ -876,6 +876,31 @@ export function ChatView({
           )
         : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
+      // The synchronous response predates mention metadata on some hosts. A
+      // reply is already journaled by the time this response arrives, so fetch
+      // the authoritative projection and merge its mention DTOs onto the
+      // optimistic reply instead of leaving the live row chip-less until a
+      // full reload.
+      if (chatId && replies.some((reply) => reply.id.startsWith("h"))) {
+        void client
+          .getChatHistory(chatId, company)
+          .then((entries) => {
+            const hydrated = fromHistory(entries);
+            const byId = new Map(hydrated.map((message) => [message.id, message]));
+            setTranscripts((transcripts) => ({
+              ...transcripts,
+              [target]: (transcripts[target] ?? []).map((message) => {
+                const authoritative = byId.get(message.id);
+                return authoritative?.mentions
+                  ? { ...message, mentions: authoritative.mentions }
+                  : message;
+              }),
+            }));
+          })
+          .catch(() => {
+            /* The next history hydration remains the fallback. */
+          });
+      }
       onReply?.();
     } catch (err) {
       outcome = "failed";
