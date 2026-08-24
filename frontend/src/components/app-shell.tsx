@@ -909,8 +909,15 @@ export function AppShell({
     const hydratedChannels = new Set<string>();
     const inFlight = new Set<string>();
 
+    // Same status again — a poll tick re-reading history that changed nothing —
+    // must not mint a new object: it re-renders every consumer of hydration
+    // state on a five-second cadence for no change. Returning `h` unchanged
+    // lets React bail out.
     const markHistory = (channelId: string, status: HistoryStatus) =>
-      setHydration((h) => ({ ...h, byChannel: { ...h.byChannel, [channelId]: status } }));
+      setHydration((h) => {
+        if (h.byChannel[channelId] === status) return h;
+        return { ...h, byChannel: { ...h.byChannel, [channelId]: status } };
+      });
 
     // One history fetch per thread, fanned into both transcript stores. The
     // Chat workspace keeps `transcripts` keyed by channel id, and the parked
