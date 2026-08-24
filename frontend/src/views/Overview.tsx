@@ -386,6 +386,7 @@ export function Overview({ client, company, companyName }: Props) {
             memory={memoryGraph}
             toolLabels={adapted.toolLabels}
             statusSlot={statusSlot}
+            covered={!!loadError}
           />
         </Suspense>
       </div>
