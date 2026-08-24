@@ -134,10 +134,13 @@ describe("the autonomy direction", () => {
     expect(widensAutonomy(TIERS, "unknown", "full")).toBe(false);
   });
 
-  it("identifies spend-cap resets that widen or remove the cap", () => {
+  it("identifies spend-cap resets that widen the cap", () => {
+    // `null` is the stricter state (every spend parks), so only moves toward a
+    // finite cap — or a higher finite cap — are widening.
     expect(widensSpendCap(10, 20)).toBe(true);
-    expect(widensSpendCap(10, null)).toBe(true);
-    expect(widensSpendCap(null, 20)).toBe(false);
+    expect(widensSpendCap(10, null)).toBe(false);
+    expect(widensSpendCap(null, 20)).toBe(true);
+    expect(widensSpendCap(null, null)).toBe(false);
     expect(widensSpendCap(20, 10)).toBe(false);
     expect(widensSpendCap(10, 10)).toBe(false);
   });
