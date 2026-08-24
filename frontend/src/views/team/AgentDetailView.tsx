@@ -43,6 +43,7 @@ import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
+import { AgentRuns } from "@/views/team/AgentRuns";
 
 type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
 
@@ -549,6 +550,18 @@ export function AgentDetailView({
             />
             <FactLine agent={agent} workload={workload} />
             <OpenTasks tasks={openTasks} />
+
+            {/* What this teammate has actually done (issue #1573), directly
+                under what it is doing now. Everything below this point defines
+                the teammate — instructions, tools, inbox, budget — and the
+                record of its work reads before its definition, not after four
+                cards of configuration. */}
+            <AgentRuns
+              client={client}
+              company={company}
+              agentId={agent.id}
+              agentName={agent.name?.trim() || agent.role}
+            />
 
             {/* The Edit action sits on the teammate's name row (issue #1434) —
                 one editing action, in the place a page's actions live, rather

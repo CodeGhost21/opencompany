@@ -288,6 +288,22 @@ export interface Task {
    */
   originChatId?: string;
   /**
+   * The workflow run whose agent node opened this card (issue #661), and the
+   * graph it is a run of.
+   *
+   * Carried on the **board** read, not just task detail, because a card with no
+   * parent and no origin chat is otherwise unexplained: with these two an
+   * operator finding a card nobody opened can see the schedule that did. They
+   * are stamped together by one call site on the host, so either both are
+   * present or neither is — but they are typed independently, because a host
+   * predating them sends neither and the console must make no claim then.
+   *
+   * `originRunId` is what deep-links the workflow canvas to *the run that
+   * opened this card* rather than to the graph's current shape.
+   */
+  originRunId?: string;
+  originWorkflowId?: string;
+  /**
    * What this card's latest successful attempt produced (issue #339).
    *
    * Carried on the **board** read, not just task detail, because the link is

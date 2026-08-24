@@ -134,7 +134,7 @@ use crate::company::Policy;
 use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
 use crate::policy::{CallPath, McpReadSet};
 use crate::ports::UsageMeter;
-use crate::ports::types::{CompanyId, Effect, EffectGroup};
+use crate::ports::types::{CompanyId, Effect, EffectGroup, Verdict};
 use crate::runtime::grants::{GrantSet, GrantSubject, GrantedCall};
 
 /// The name openhuman knows this policy by, and the name it stamps into the
@@ -1092,10 +1092,11 @@ impl ApprovalPolicy {
         // effect's payload — one function, so the two answers cannot drift into
         // a grant that never matches its own tool.
         let scope = crate::policy::consequence::standing_scope_of(tool, args);
-        let Some(grant) = self.requests.grants().match_standing(
+        let Some(grant) = self.requests.grants().match_standing_with_verdict(
             &subject,
             tool,
             scope.as_deref(),
+            Verdict::Approve,
             crate::ports::now_millis(),
         ) else {
             return false;
@@ -1108,6 +1109,30 @@ impl ApprovalPolicy {
             grant.expires_at_millis
         );
         true
+    }
+
+    fn standing_deny_applies(&self, tool: &str, args: &serde_json::Value) -> bool {
+        // Agents only, on purpose: a standing denial is only *enforced* on the
+        // agent turn path, where openhuman treats a `Deny` verdict as
+        // fail-closed. The workflow gate deliberately does not honour `Deny`
+        // (see `src/workflows/gate.rs`), so minting a standing denial for a
+        // workflow would advertise a refusal nothing ever enforces. The mint
+        // side refuses those too; this keeps the check from ever *advertising*
+        // one even if a stale deny were already in the set.
+        let Some(agent) = self.agent.as_deref() else {
+            return false;
+        };
+        let scope = crate::policy::consequence::standing_scope_of(tool, args);
+        self.requests
+            .grants()
+            .match_standing_with_verdict(
+                &GrantSubject::Agent(agent.to_string()),
+                tool,
+                scope.as_deref(),
+                Verdict::Deny,
+                crate::ports::now_millis(),
+            )
+            .is_some()
     }
 
     /// Does this tool call **spend money**? The predicate the daily budget arm
@@ -1381,6 +1406,12 @@ impl ToolPolicy for ApprovalPolicy {
                 grant.agent
             );
             return ToolPolicyDecision::Allow;
+        }
+
+        if self.standing_deny_applies(tool, &request.arguments) {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' is denied by a standing permission; it will ask again when that refusal expires or is revoked"
+            ));
         }
 
         // 2b. A live STANDING grant: the operator opened this tool up for this
@@ -3528,6 +3559,51 @@ mod tests {
         ));
     }
 
+    /// Issue #1458: a standing denial is only **enforced** on the agent turn
+    /// path, where openhuman treats a `Deny` verdict as fail-closed. The
+    /// workflow gate deliberately does not honour `Deny`
+    /// (`src/workflows/gate.rs`), so this policy must not advertise one for a
+    /// workflow subject — even if a stale denial is sitting in the set — or the
+    /// gate would be handed a verdict it is documented to ignore and the
+    /// operator's "don't ask again" would be silently dropped on the next run.
+    #[tokio::test]
+    async fn a_standing_deny_is_not_advertised_for_a_workflow_subject() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("deny-1"),
+            agent: String::new(),
+            workflow: Some("sports_digest".to_string()),
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        });
+
+        let p = policy("full", &["web_fetch"], None)
+            .with_requests(queue)
+            .with_workflow("sports_digest");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a workflow standing denial must not be advertised on the gate path: {decision:?}"
+        );
+    }
+
     // --- The per-agent daily spend cap (issue #304) ---------------------------
 
     use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
@@ -4007,6 +4083,7 @@ mod tests {
             agent: agent.to_string(),
             workflow: None,
             tool: tool.to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,
                 id: "user-1".to_string(),

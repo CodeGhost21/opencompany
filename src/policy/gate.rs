@@ -157,8 +157,11 @@ pub enum ResolveOutcome {
     /// The approval was parked but is past its TTL, so it resolves to a
     /// default-deny whatever the operator asked for. It IS removed.
     Expired,
-    /// The operator denied it. Removed; nothing to execute.
-    Denied,
+    /// The operator denied it. Removed, and here is the effect the card showed,
+    /// retained so a standing denial can be minted against the same scoped
+    /// arguments (issue #1458) rather than the payload-scrubbed copy the journal
+    /// keeps (issue #351), which would read as an unscoped wildcard.
+    Denied(Effect),
     /// The operator approved it in time. Removed, and here is the effect.
     Approved(Effect),
 }
@@ -408,7 +411,10 @@ impl ManifestApprovalGate {
         }
         match verdict {
             Verdict::Approve => ResolveOutcome::Approved(parked.effect),
-            Verdict::Deny => ResolveOutcome::Denied,
+            // Carry the effect rather than re-reading the journal's scrubbed
+            // copy (issue #351): a standing deny minted from that copy would
+            // lose the scope the operator actually refused (issue #1458).
+            Verdict::Deny => ResolveOutcome::Denied(parked.effect),
         }
     }
 
@@ -1178,7 +1184,9 @@ mod test {
         let id = gate.park(&company(), eff.clone()).await.unwrap();
         assert_eq!(
             gate.resolve_outcome(&id, Verdict::Deny, operator(), now_millis()),
-            ResolveOutcome::Denied
+            ResolveOutcome::Denied(eff.clone()),
+            "a deny must carry the parked effect so a standing denial can be \
+             scoped to what the operator actually refused (issue #1458)"
         );
 
         // Expired: past the TTL, an approve still resolves to a default-deny,

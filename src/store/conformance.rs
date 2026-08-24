@@ -5420,6 +5420,98 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
             .unwrap()
             .is_empty()
     );
+
+    // -- the per-desk filter (issue #1573) -----------------------------------
+    //
+    // In a company of its own so it disturbs none of the counts above, which
+    // are asserted exactly.
+    //
+    // Three things have to hold, and only the first is obvious. A desk's
+    // history spans **cards and card-less chat turns** alike, because both are
+    // recorded attempts at work by that desk — a filter that saw only
+    // dispatches would hide every conversation an operator had with the
+    // teammate. It composes with the other predicates rather than replacing
+    // them. And it stops at the company boundary like every other read here.
+    let gamma = CompanyId::new("gamma");
+    runs.create_run(&gamma, NewRun::for_task("g1", "card", "engineer"))
+        .await
+        .unwrap();
+    runs.create_run(&gamma, NewRun::for_chat("g2", "general", "engineer"))
+        .await
+        .unwrap();
+    runs.create_run(&gamma, NewRun::for_task("g3", "card", "ceo"))
+        .await
+        .unwrap();
+    runs.create_run(&alpha, NewRun::for_task("g4", "card", "engineer"))
+        .await
+        .unwrap();
+
+    let mut engineer = runs
+        .list_runs(&gamma, &RunFilter::for_agent("engineer"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect::<Vec<_>>();
+    // Sorted rather than compared in list order: all three rows are minted in
+    // the same millisecond, so `sort_newest_first` breaks the tie on `attempt`
+    // and `id`, and pinning that here would assert the tiebreak rather than the
+    // filter. The ordering itself is already pinned above.
+    engineer.sort();
+    assert_eq!(
+        engineer,
+        ["g1", "g2"],
+        "one desk's attempts, cards and card-less chat turns alike, and nobody \
+         else's — not the other desk in this company, not the same desk in another"
+    );
+
+    assert_eq!(
+        runs.list_runs(&gamma, &RunFilter::for_agent("ceo"))
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        ["g3"]
+    );
+
+    // Composes with `task_id`: the desk's attempts *at one card*.
+    assert_eq!(
+        runs.list_runs(
+            &gamma,
+            &RunFilter {
+                agent_id: Some("engineer".into()),
+                ..RunFilter::for_task("card")
+            }
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect::<Vec<_>>(),
+        ["g1"],
+        "the desk and card predicates intersect rather than either winning"
+    );
+
+    // …and with `statuses`. Every gamma row is still `Pending`.
+    assert!(
+        runs.list_runs(
+            &gamma,
+            &RunFilter::for_agent("engineer").with_status(RunStatus::Succeeded)
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+
+    // A desk nobody ran is empty, not an error — a removed teammate's id, or a
+    // typo, must not look like a broken read.
+    assert!(
+        runs.list_runs(&gamma, &RunFilter::for_agent("nobody"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------
