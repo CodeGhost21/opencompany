@@ -216,6 +216,17 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     // guidance. Keep narrowing consistent with the wiring predicates so an
     // agent cannot ask for one of them through a catch-all company grant.
     //
+    // The request must also be a spelling the wiring predicate accepts when
+    // stored *verbatim*: the write path keeps the request intact in `effective`,
+    // so a glued-star request like `search*` or `workspace.write*` reaches the
+    // belt as `search*`/`workspace.write*` — which `grants_search_explicit` and
+    // `grants_workspace_write_explicit` both reject, even though their stripped
+    // forms would pass. Only the bare namespace, a separator-broken descendant
+    // (`search.*`, `search.web`), and the colon forms (`mcp:*`) are spellings
+    // the wiring can honour; anything else would render in the card as granted
+    // while the tools stay unwired. Each branch therefore asks the predicate on
+    // the allow-list *and* on the single request glob.
+    //
     // Workspace writes are explicit-only in both spellings
     // [`grants_workspace_write_explicit`](crate::company::grants_workspace_write_explicit)
     // accepts: the bare `workspace` grant as well as `workspace.write`. A bare
@@ -223,7 +234,8 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     // it under a `["*"]` allow-list would hold the exact token the wiring
     // predicate accepts and gain write tools the company withheld.
     if literal == "workspace" || literal == "workspace.write" {
-        return crate::company::grants_workspace_write_explicit(allow);
+        return crate::company::grants_workspace_write_explicit(allow)
+            && crate::company::grants_workspace_write_explicit(&[tool.to_string()]);
     }
 
     // The namespace predicates accept the bare namespace or any dotted
@@ -233,22 +245,28 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     // below would hand a wildcard-only company the whole namespace on a
     // sub-grant request.
     if literal == "media" || literal.starts_with("media.") {
-        return crate::company::grants_media_explicit(allow);
+        return crate::company::grants_media_explicit(allow)
+            && crate::company::grants_media_explicit(&[tool.to_string()]);
     }
     if literal == "composio" || literal.starts_with("composio.") {
-        return crate::company::grants_composio_explicit(allow);
+        return crate::company::grants_composio_explicit(allow)
+            && crate::company::grants_composio_explicit(&[tool.to_string()]);
     }
     if literal == "chargebee" || literal.starts_with("chargebee.") {
-        return crate::company::grants_chargebee_explicit(allow);
+        return crate::company::grants_chargebee_explicit(allow)
+            && crate::company::grants_chargebee_explicit(&[tool.to_string()]);
     }
     if literal == "hosting" || literal.starts_with("hosting.") {
-        return crate::company::grants_hosting_explicit(allow);
+        return crate::company::grants_hosting_explicit(allow)
+            && crate::company::grants_hosting_explicit(&[tool.to_string()]);
     }
     if literal == "paypal" || literal.starts_with("paypal.") {
-        return crate::company::grants_paypal_explicit(allow);
+        return crate::company::grants_paypal_explicit(allow)
+            && crate::company::grants_paypal_explicit(&[tool.to_string()]);
     }
     if literal == "search" || literal.starts_with("search.") {
-        return crate::company::grants_search_explicit(allow);
+        return crate::company::grants_search_explicit(allow)
+            && crate::company::grants_search_explicit(&[tool.to_string()]);
     }
 
     // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
