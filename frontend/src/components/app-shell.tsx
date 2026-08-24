@@ -1393,7 +1393,9 @@ export function AppShell({
         : mentionsToClear(
             mentionFeedRef.current,
             channelId,
-            chatChannelByThread.main ?? "",
+            // Same undefined-means-none signal as the count memo: with no
+            // rendered main channel the general-chat arm matches nothing.
+            chatChannelByThread.main,
             new Set(
               Object.keys(chatChannelByThread).filter(
                 (threadId) => chatChannelByThread[threadId] === channelId,
