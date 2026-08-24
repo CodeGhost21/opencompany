@@ -1221,20 +1221,32 @@ export function AppShell({
    * nothing else changes.
    */
   const [mentionFeed, setMentionFeed] = useState<NotificationDto[]>([]);
+  const mentionFeedRevision = useRef(0);
   const refreshMentions = useCallback(() => {
+    const requestCompany = company;
+    const revision = ++mentionFeedRevision.current;
     void client
-      .notifications(company)
+      .notifications(requestCompany)
       // A host that answers this route with something other than the documented
       // shape must not take the console down with it. `?? []` rather than a
       // trusted `feed.notifications`: an older or proxied host can return a bare
       // array, or `null`, and iterating that throws during render — which blanks
       // the whole app, not just the badge. The badge is the least important
       // thing on the screen and must fail like it.
-      .then((feed) => setMentionFeed(Array.isArray(feed?.notifications) ? feed.notifications : []))
-      .catch(() => setMentionFeed([]));
+      .then((feed) => {
+        if (revision !== mentionFeedRevision.current || requestCompany !== companyRef.current) return;
+        setMentionFeed(Array.isArray(feed?.notifications) ? feed.notifications : []);
+      })
+      .catch(() => {
+        if (revision === mentionFeedRevision.current && requestCompany === companyRef.current) {
+          setMentionFeed([]);
+        }
+      });
   }, [client, company]);
 
   useEffect(() => {
+    mentionFeedRevision.current++;
+    setMentionFeed([]);
     refreshMentions();
     const onFocus = () => refreshMentions();
     window.addEventListener("focus", onFocus);
