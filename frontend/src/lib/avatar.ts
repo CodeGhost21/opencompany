@@ -215,10 +215,13 @@ export function releaseAvatar(client: OpenCompanyClient, company: string | null,
     // A component-owned URL (minted when the cache was full of pinned
     // entries) has no cache owner to evict it — this is the release that
     // must revoke it, or the face would pin its blob for the life of the tab.
+    // The cache entry goes with it: the resolved promise answers with a URL
+    // that is about to be dead, so a later mount must fetch again.
     const url = componentUrls.get(key);
     if (url) {
       URL.revokeObjectURL(url);
       componentUrls.delete(key);
+      blobUrls.delete(key);
     }
   } else {
     blobUrlRefs.set(key, count - 1);
