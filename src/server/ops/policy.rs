@@ -286,7 +286,8 @@ async fn set_policy(
         return Err(refusal(&format!(
             "`mode` must be one of {} — you sent `{mode}`.",
             POLICY_MODES.join(", ")
-        )));
+        ))
+        .into());
     }
 
     let write_lock = company_write_lock(company.id());
