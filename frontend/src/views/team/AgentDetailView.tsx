@@ -528,8 +528,11 @@ export function AgentDetailView({
               // there would be a click whose save is a 400. Same rule the edit
               // form's fields follow.
               onPickAvatar={
-                agent.editable.includes("avatar") ? () => setAvatarOpen(true) : undefined
+                agent.editable.includes("avatar")
+                  ? () => setAvatarOpen(true)
+                  : undefined
               }
+              avatarBusy={avatarSaving}
               action={
                 !editing ? (
                   <Button
