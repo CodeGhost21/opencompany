@@ -209,7 +209,7 @@ export function ApprovalsView({
   if (!holding) heldNow.current = now;
   const regionNow = holding ? heldNow.current : now;
   const askerNames = useAskerNames(client, company, approvals, holding);
-  const threadLinks = useApprovalThreadLinks(client, company, rows);
+  const threadLinks = useApprovalThreadLinks(client, company, rows, holding);
   const { grants, granterNames, refreshGrants } = useStandingGrants(
     client,
     company,
