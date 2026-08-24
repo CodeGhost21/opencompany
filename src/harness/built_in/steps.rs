@@ -543,25 +543,6 @@ impl StepTrace {
         self.thinking_open = false;
         closing.into_iter().collect()
     }
-        let (seq, buf) = self.thinking_buf.take()?;
-        self.thinking_pending_bytes = 0;
-        if buf.is_empty() {
-            return None;
-        }
-        Some((
-            seq,
-            TurnStep {
-                kind: TurnStepKind::Thinking,
-                status: TurnStepStatus::Ok,
-                label: "Thinking".to_string(),
-                ..TurnStep::default()
-            },
-            Some(crate::ports::deep_trace::bound_detail(TurnStepDetail {
-                reasoning: Some(buf),
-                ..TurnStepDetail::default()
-            })),
-        ))
-    }
 
     /// How many ordinals have been handed out. Test-only: the sink tracks what
     /// actually landed in the store, which is not the same number when a write
