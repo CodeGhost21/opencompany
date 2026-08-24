@@ -391,7 +391,7 @@ pub(crate) fn child_calls_to_repeat(
             };
             prefix.push_str(segment);
             prefix.push_str(GATE_NAMESPACE);
-            graph = &next.graph;
+            graph = next.graph.clone();
             record = Some(next);
         }
 
