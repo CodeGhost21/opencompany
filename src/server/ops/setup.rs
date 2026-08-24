@@ -38,7 +38,7 @@
 //! next call does not enforce.
 
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};

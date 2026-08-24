@@ -29,7 +29,6 @@ use serde_json::json;
 
 use crate::AppState;
 use crate::ports::read_state::ChannelRead;
-use crate::server::error::ApiError;
 use crate::server::ops::scope::{ScopedCompany, scoped};
 
 pub fn router() -> Router<AppState> {
