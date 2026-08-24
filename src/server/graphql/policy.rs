@@ -62,13 +62,20 @@ pub struct PolicyGql {
     /// The always-ask list actually in force. The operator's real lever: it
     /// wins over every tier, `full` included.
     pub always_approve: Vec<String>,
+    /// Spend strictly under this amount is auto-approved without an approval;
+    /// `null` means no spend cap is in force.
     pub auto_approve_under_usd: Option<f64>,
+    /// How long an undecided approval remains actionable, in hours.
     pub approval_ttl_hours: f64,
     /// The manifest's tier, so a client can see what a reset would restore.
     pub manifest_mode: String,
     /// The manifest's always-ask list, for the same reason.
     pub manifest_always_approve: Vec<String>,
+    /// The manifest's spend cap, for the same reason — what a reset would
+    /// restore (a cap is looser when it is higher or `null`).
     pub manifest_auto_approve_under_usd: Option<f64>,
+    /// The manifest's approval deadline, for the same reason — what a reset
+    /// would restore.
     pub manifest_approval_ttl_hours: Option<f64>,
     /// Whether an operator override is in force.
     ///

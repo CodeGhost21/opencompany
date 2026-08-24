@@ -394,9 +394,20 @@ async fn set_policy(
     record.overlay_policy = (!entry.is_empty()).then_some(entry);
 
     save(&company, &record).await?;
-    // The persisted override is picked up by the next runtime turn. Do not
-    // mutate the shared gate here: an in-flight turn must finish under the
-    // policy snapshot it started with.
+    // The deadline is immediate, not next-turn: a parked card stays the same
+    // request, but its deadline is re-evaluated against the current TTL each
+    // time it is displayed, swept or resolved, so waiting for the next cycle
+    // would let approvals parked under the old (longer) TTL outlive the deadline
+    // the console just reported. The tier/cap/always-ask half is the safe-turn-
+    // boundary one and is applied by `run_locked` at the start of the next
+    // cycle — an in-flight turn must finish under the policy snapshot it started
+    // with (issue #1455). A test-injected gate is exempt.
+    if !company.runtime.gate_injected {
+        company
+            .runtime
+            .approval_gate
+            .apply_effective_ttl(&record.effective_policy());
+    }
     Ok(Json(PolicyDto::build(&record)))
 }
 
@@ -422,9 +433,16 @@ async fn clear_policy(
     let mut record = load_record(&company).await?;
     record.overlay_policy = None;
     save(&company, &record).await?;
-    // The persisted manifest policy is picked up by the next runtime turn. Do
-    // not mutate the shared gate here: an in-flight turn must finish under the
-    // policy snapshot it started with.
+    // Same split as `set_policy` (issue #1455): the manifest/default deadline
+    // applies immediately — a parked card's deadline is re-evaluated against the
+    // current TTL — while the manifest tier/cap/always-ask returns at the start
+    // of the next cycle via `run_locked`.
+    if !company.runtime.gate_injected {
+        company
+            .runtime
+            .approval_gate
+            .apply_effective_ttl(&record.effective_policy());
+    }
     Ok(Json(PolicyDto::build(&record)))
 }
 
@@ -642,6 +660,62 @@ mod tests {
         let (_, reread) = call(&state, "GET", None).await;
         assert!(reread["autoApproveUnderUsd"].is_null());
         assert_eq!(reread["approvalTtlHours"], 72);
+    }
+
+    /// The saved override reaches the live gate on the documented schedule
+    /// (issue #1455): the deadline immediately — a parked card is re-checked
+    /// against the current TTL each time it is displayed or swept — and the
+    /// tier/cap/always-ask half at the next turn boundary, applied by
+    /// `run_locked` so an in-flight turn finishes under the snapshot it started
+    /// with.
+    #[tokio::test]
+    async fn a_policy_put_applies_the_deadline_immediately_and_the_cap_next_turn() {
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{CompanyEvent, Effect, EffectGroup, PolicyDecision};
+
+        let dir = home();
+        let state = state(dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("registered").clone();
+        assert_eq!(runtime.approval_gate.ttl_millis(), 24 * 60 * 60 * 1000);
+
+        // Deadline-only PUT: the live gate's TTL moves without waiting for a turn.
+        let (status, body) = call(&state, "PUT", Some(json!({ "approvalTtlHours": 72 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["approvalTtlHours"], 72);
+        assert_eq!(runtime.approval_gate.ttl_millis(), 72 * 60 * 60 * 1000);
+
+        // Cap PUT: the snapshot must NOT move mid-turn...
+        let (status, _) = call(&state, "PUT", Some(json!({ "autoApproveUnderUsd": 50 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        let spend = Effect {
+            kind: "x402.spend".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(30.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        // ...a $30 spend still parks under the manifest cap of $5...
+        assert!(matches!(
+            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
+            PolicyDecision::RequireApproval
+        ));
+
+        // ...and the next turn applies the effective policy, so it allows.
+        runtime
+            .run_cycle(vec![CompanyEvent::ScheduleFired {
+                cron: "* * * * *".to_string(),
+                prompt: "status".to_string(),
+            }])
+            .await
+            .expect("the next turn runs");
+        assert!(matches!(
+            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
+            PolicyDecision::Allow
+        ));
     }
 
     /// A deadline `null` releases that one override while preserving the cap,

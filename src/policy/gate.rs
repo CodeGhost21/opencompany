@@ -271,9 +271,10 @@ impl ManifestApprovalGate {
     /// Replaces the policy snapshot the gate evaluates against, keeping the
     /// parked queue and the emergency switch.
     ///
-    /// Used at boot/rebuild time, where the gate is constructed from the seed's
-    /// `[policy]` alone and the operator's console override resolves only after
-    /// the persisted record is read — see
+    /// Used at boot/rebuild time and at the start of every cycle (issue #1455):
+    /// the gate is constructed from the seed's `[policy]` alone and the
+    /// operator's console override resolves only after the persisted record is
+    /// read — see
     /// [`CompanyRecord::effective_policy`](crate::ports::types::CompanyRecord::effective_policy).
     /// Applying the effective policy keeps native evaluation (mode,
     /// `always_approve`, spend cap) and the derived deadline enforcing what the
@@ -281,14 +282,29 @@ impl ManifestApprovalGate {
     /// by `GET` while the live gate silently reverted to the manifest snapshot,
     /// which is especially unsafe after an operator *shortened* a deadline.
     pub fn apply_effective_policy(&self, policy: Policy) {
-        let ttl_millis = policy
-            .approval_ttl_hours
-            .map(|hours| hours.saturating_mul(60 * 60 * 1000))
-            .unwrap_or(DEFAULT_TTL_MILLIS);
+        self.apply_effective_ttl(&policy);
         self.policy
             .write()
             .expect("policy lock poisoned")
             .clone_from(&policy);
+    }
+
+    /// Moves only the deadline derived from `policy`, leaving the evaluation
+    /// snapshot (mode, `always_approve`, spend cap) untouched.
+    ///
+    /// The TTL is *immediate* by contract while the rest of the policy moves at
+    /// the next safe turn boundary: a parked card remains the same request, but
+    /// its deadline is re-evaluated against the current TTL each time it is
+    /// displayed, swept or resolved, so delaying the deadline until the next
+    /// cycle would let approvals parked under a longer TTL outlive the one the
+    /// console just reported. The ops handler applies this right after a policy
+    /// PUT/DELETE persists, and [`apply_effective_policy`](Self::apply_effective_policy)
+    /// applies it alongside the snapshot at boot and per-cycle.
+    pub fn apply_effective_ttl(&self, policy: &Policy) {
+        let ttl_millis = policy
+            .approval_ttl_hours
+            .map(|hours| hours.saturating_mul(60 * 60 * 1000))
+            .unwrap_or(DEFAULT_TTL_MILLIS);
         self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
     }
 
@@ -1697,6 +1713,78 @@ mod test {
         // A side-effecting group, so this would be `Deny` if the switch
         // defaulted engaged — but a kind outside `always_approve`, so under
         // `full` the undisturbed answer is `Allow` rather than a park.
+        assert_eq!(
+            decide(&gate, &effect("blog.post", EffectGroup::Publish)).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    /// The live-policy update keeps the parked queue and the emergency switch
+    /// while the evaluation snapshot and the derived deadline move (issue
+    /// #1455). This is the property the boot and per-cycle refresh rely on: a
+    /// console override lands on a gate that may already hold an approval the
+    /// operator was asked about and a stop an operator pulled, and neither may
+    /// be disturbed.
+    #[tokio::test]
+    async fn apply_effective_policy_moves_snapshot_and_ttl_but_not_parked_or_emergency() {
+        let gate = ManifestApprovalGate::new(policy("full", None)).with_ttl_millis(1000);
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+
+        let stricter = Policy {
+            mode: "supervised".to_string(),
+            always_approve: FENCE.iter().map(|s| s.to_string()).collect(),
+            auto_approve_under_usd: Some(5.0),
+            approval_ttl_hours: Some(48),
+        };
+        gate.apply_effective_policy(stricter);
+
+        // Parked queue and stop survive...
+        assert_eq!(gate.parked_ids(), vec![id.clone()]);
+        assert!(gate.is_emergency());
+        // ...and the deadline moved.
+        assert_eq!(gate.ttl_millis(), 48 * 60 * 60 * 1000);
+
+        // With the stop released, evaluation reflects the new snapshot: `full`
+        // waved every spend through, while the new `supervised` snapshot parks
+        // one over the cap.
+        gate.set_emergency(false);
+        let mut over = effect("x402.spend", EffectGroup::Spend);
+        over.amount_usd = Some(6.0);
+        assert_eq!(decide(&gate, &over).await, PolicyDecision::RequireApproval);
+    }
+
+    /// The TTL-only update — what the ops handler applies immediately after a
+    /// policy PUT/DELETE — moves the deadline without touching the snapshot, so
+    /// an in-flight turn evaluating under the old tier is not disturbed.
+    #[tokio::test]
+    async fn apply_effective_ttl_moves_only_the_deadline() {
+        let gate = ManifestApprovalGate::new(policy("full", None)).with_ttl_millis(1000);
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+
+        let new_deadline = Policy {
+            mode: "readonly".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: Some(1),
+        };
+        gate.apply_effective_ttl(&new_deadline);
+
+        assert_eq!(gate.ttl_millis(), 60 * 60 * 1000);
+        assert_eq!(gate.parked_ids(), vec![id]);
+        assert!(gate.is_emergency());
+
+        // Snapshot untouched: with the stop released, `blog.post` (Publish, not
+        // in FENCE) still `Allow`s under `full`, which a `readonly` snapshot
+        // would park.
+        gate.set_emergency(false);
         assert_eq!(
             decide(&gate, &effect("blog.post", EffectGroup::Publish)).await,
             PolicyDecision::Allow

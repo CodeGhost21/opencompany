@@ -3136,6 +3136,10 @@ impl RuntimeBuilder {
         // (`companies/<name>`); record it so read resolvers can find committed
         // skills/workflows content on the serve path.
         runtime.set_source_dir(self.seed_dir.clone());
+        // Issue #1455: the per-cycle effective-policy refresh and the ops
+        // handler's immediate TTL write must both skip a test-injected gate.
+        // Computed above, before `self.approvals` was moved out of the builder.
+        runtime.gate_injected = gate_injected;
         // How humans sign in, resolved once here rather than per request: the
         // host-wide override wins, else the manifest's `[users].mode`. An
         // unparseable manifest mode cannot reach this point — `validate` names it
@@ -7344,6 +7348,114 @@ needs_reason = true
         assert!(
             !labels.contains(&"task-outcome/eng1"),
             "desk turn routed to the blueprint lead eng1 — the builder dropped the operator desk order; saw {labels:?}"
+        );
+    }
+
+    /// A build applies the carried console override to the live gate, and marks
+    /// the runtime so the per-cycle refresh (issue #1455) knows the gate is the
+    /// real one. A test-injected gate is exempt on both counts: it carries its
+    /// own policy/TTL on purpose.
+    #[tokio::test]
+    async fn build_applies_the_effective_policy_to_the_gate_but_not_an_injected_one() {
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{
+            Actor, ActorKind, Effect, EffectGroup, PolicyDecision, PolicyOverride,
+        };
+        use crate::store::FsCompanyStore;
+
+        let dir = tmp_home("oc-policy-build-");
+        let manifest = parse(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [policy]\nmode = \"supervised\"\n\
+             always_approve = [\"payment.send\"]\n\
+             auto_approve_under_usd = 5.0\n\
+             approval_ttl_hours = 24\n",
+        );
+        let id = CompanyId::new("acme");
+        let overlay = PolicyOverride {
+            mode: Some("full".to_string()),
+            always_approve: None,
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "admin-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        };
+        FsCompanyStore::new(dir.path())
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: Some(overlay),
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(dir.path(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        assert!(!runtime.gate_injected);
+        // The override moved the tier: a $30 spend, above the manifest cap of
+        // $5, now `Allow`s under the carried `full` mode.
+        let spend = Effect {
+            kind: "x402.spend".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(30.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        assert!(matches!(
+            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
+            PolicyDecision::Allow
+        ));
+
+        // An injected gate wins: the build must not clobber its fixture.
+        let injected = Arc::new(
+            ManifestApprovalGate::new(seed_policy("readonly", &[], None)).with_ttl_millis(999),
+        );
+        let injected_runtime = RuntimeBuilder::new(dir.path(), manifest)
+            .with_id(id.clone())
+            .with_approvals(injected.clone())
+            .build()
+            .await
+            .unwrap();
+        assert!(injected_runtime.gate_injected);
+        assert_eq!(injected_runtime.approval_gate.ttl_millis(), 999);
+        assert_eq!(
+            injected_runtime.approval_gate.parked_ids(),
+            injected.parked_ids()
+        );
+        assert!(
+            matches!(
+                injected_runtime
+                    .approval_gate
+                    .evaluate(&id, &spend)
+                    .await
+                    .unwrap(),
+                PolicyDecision::RequireApproval
+            ),
+            "the injected readonly gate must keep its own policy, not the carried override"
         );
     }
 }

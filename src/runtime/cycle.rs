@@ -451,6 +451,25 @@ impl<'a> CycleRunner<'a> {
         // still written below — only the read was dead.
         let record = self.rt.store.load(&company).await?;
 
+        // Issue #1455: a console policy PUT/DELETE persisted the override but
+        // must not reach the live native gate mid-turn — an in-flight turn
+        // finishes under the snapshot it started with. The start of a cycle,
+        // holding the serial lock with the freshly-loaded record in hand, is
+        // that safe boundary: re-apply the effective policy (mode, always-ask
+        // list, spend cap) so this turn's native effects evaluate against what
+        // the console reports, even on a company that has not been rebuilt. The
+        // deadline half is immediate already (the ops handler writes the TTL
+        // right after save); re-applying it here costs nothing and keeps a
+        // boot/rebuild-created runtime consistent. A test-injected gate carries
+        // its own policy on purpose and is exempt.
+        if !self.rt.gate_injected
+            && let Some(record) = &record
+        {
+            self.rt
+                .approval_gate
+                .apply_effective_policy(record.effective_policy());
+        }
+
         // Issue #176 (handed-task awareness): when an operator message is
         // addressed to a desk/agent that already has open work handed to it,
         // fold a briefing of that work into the message the brain sees — so a
