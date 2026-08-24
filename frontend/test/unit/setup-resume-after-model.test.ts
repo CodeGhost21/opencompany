@@ -495,6 +495,11 @@ describe("leaving the completion screen to wire a model", () => {
     await act(async () => {
       (addModelLink() as HTMLElement).click();
     });
+    // Absorb the anchor's deferred Settings navigation so it cannot fire into
+    // the skip click below.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
     expect(setupRedesign(SCOPE)).toBe(true);
 
     await goTo("#/overview");
