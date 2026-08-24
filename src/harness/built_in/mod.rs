@@ -6606,23 +6606,23 @@ description = "Builds the product."
         // A row carrying only a face hashes like no row at all.
         assert_eq!(
             override_fingerprint(&[]),
-            override_fingerprint(&[avatar_only.clone()]),
+            override_fingerprint(std::slice::from_ref(&avatar_only)),
             "an avatar-only row must not move the fingerprint"
         );
         // A persona edit still moves it, with or without a face riding along.
         assert_ne!(
             override_fingerprint(&[]),
-            override_fingerprint(&[persona.clone()]),
+            override_fingerprint(std::slice::from_ref(&persona)),
             "a persona edit must still move the fingerprint"
         );
         // Two rows differing only in their face hash alike — no spurious rebuild
         // when an operator changes one teammate's avatar.
         assert_eq!(
-            override_fingerprint(&[persona.clone()]),
-            override_fingerprint(&[AgentOverride {
+            override_fingerprint(std::slice::from_ref(&persona)),
+            override_fingerprint(std::slice::from_ref(&AgentOverride {
                 avatar: Some("tiny:fox".into()),
-                ..persona.clone()
-            }]),
+                ..persona
+            })),
             "the face must not be part of the fingerprint"
         );
     }
