@@ -192,10 +192,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     // Same URL, different method — the accessible names must not collide: the
     // method rides after the URL with its label so the two buttons read apart.
     expect(labelled).toContain(
-      `Approve: Make a request to a web address — https://api.example.com/items — method: GET — request ${T0} — approval 1 of 2 — asked by Ops`,
+      `Approve: Make a request to a web address — https://api.example.com/items — method: GET — asked by Ops — request ${T0} — approval 1 of 2`,
     );
     expect(labelled).toContain(
-      `Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — request ${T0} — approval 2 of 2 — asked by Ops`,
+      `Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — asked by Ops — request ${T0} — approval 2 of 2`,
     );
   });
 
@@ -259,10 +259,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       b.getAttribute("aria-label"),
     );
     expect(labelled).toContain(
-      `Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 1} — request ${T0} — approval 1 of 2 — asked by Ops`,
+      `Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 1} — asked by Ops — request ${T0} — approval 1 of 2`,
     );
     expect(labelled).toContain(
-      `Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 2} — request ${T0} — approval 2 of 2 — asked by Ops`,
+      `Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 2} — asked by Ops — request ${T0} — approval 2 of 2`,
     );
   });
 
@@ -319,10 +319,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     // `payment.send` has no predictable first argument name — dropping it
     // would let `{recipient: "acme"}` and `{payee: "acme"}` collide (#1411).
     expect(labelled).toContain(
-      `Approve: Send a payment — ${money(40)} — recipient: acme — request ${T0} — approval 1 of 2 — asked by Ops`,
+      `Approve: Send a payment — ${money(40)} — recipient: acme — asked by Ops — request ${T0} — approval 1 of 2`,
     );
     expect(labelled).toContain(
-      `Approve: Send a payment — ${money(4000)} — recipient: acme — request ${T0} — approval 2 of 2 — asked by Ops`,
+      `Approve: Send a payment — ${money(4000)} — recipient: acme — asked by Ops — request ${T0} — approval 2 of 2`,
     );
   });
 
