@@ -666,8 +666,7 @@ async fn edit_agent(
     {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "no harness named `{id}` is available for this company."
-        )))
-        .into_response());
+        ))));
     }
 
     // A model override only means anything on an `acp` harness — the same
