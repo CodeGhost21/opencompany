@@ -435,7 +435,7 @@ export function ApprovalsView({
         <div {...queueHold}>
           <StandingPermissions
             grants={grants}
-            now={regionNow}
+            now={now}
             askerNames={askerNames}
             granterNames={granterNames}
             onRevoke={async (id) => {
@@ -538,7 +538,7 @@ export function ApprovalsView({
                   <ApprovalCard
                     key={a.id}
                     approval={a}
-                    now={regionNow}
+                    now={now}
                     askerNames={askerNames}
                     chatChannelByThread={chatChannelByThread}
                     thread={threadLinks.get(a.id)}
