@@ -50,8 +50,12 @@ function status(mode: string): PolicyStatus {
   return {
     mode,
     alwaysApprove: ["shell"],
+    autoApproveUnderUsd: null,
+    approvalTtlHours: 24,
     manifestMode: mode,
     manifestAlwaysApprove: ["shell"],
+    manifestAutoApproveUnderUsd: null,
+    manifestApprovalTtlHours: null,
     overridden: false,
     takesEffect: "on the next turn",
     tiers: TIERS,
