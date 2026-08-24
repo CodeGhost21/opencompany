@@ -738,6 +738,7 @@ export function SetupDialog({
             finished={phase.kind === "done"}
             fallback={phase.fallback}
             harnessReachable={harnessReachable}
+            canManage={canManage}
             onDone={onDone}
             onRedesign={() => onRedesign(createdIds.current)}
             onTryAgain={tryRedesign}
