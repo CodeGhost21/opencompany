@@ -223,7 +223,7 @@ export function OperatorOverview({
             </div>
             <AlertTriangle className="size-5 text-status-failed-text" aria-hidden />
           </div>
-          <RunRows state={runLoad} runs={stopped} empty="No work is paused or failed right now." />
+          <RunRows state={runLoad} runs={stopped} deskIds={deskIds} empty="No work is paused or failed right now." />
         </section>
 
         <section aria-labelledby="overview-since" className="rounded-xl border bg-card p-5 shadow-sm">
