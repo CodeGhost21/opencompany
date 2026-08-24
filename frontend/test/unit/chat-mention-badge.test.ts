@@ -121,6 +121,14 @@ describe("mentionsToClear", () => {
       "a",
     ]);
   });
+  it("clears General-desk spellings when the rendered main channel is opened", () => {
+    for (const context of ["General", "general", ""]) {
+      expect(mentionsToClear([note({ id: "a", context })], "general", "general")).toEqual(
+        ["a"],
+        `context ${JSON.stringify(context)} must clear with the main channel`,
+      );
+    }
+  });
   it("returns nothing for a channel with no mentions", () => {
     expect(mentionsToClear(feed, "random")).toEqual([]);
   });
