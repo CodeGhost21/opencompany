@@ -225,8 +225,7 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         // A SOF segment is precision(1) + height(2) + width(2), then the
         // per-component bytes. The SOF markers are C0–CF except the ones that
         // are not SOF: DHT (C4), JPG (C8), DAC (CC), DNL (DC), DRI (DD).
-        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC | 0xDC | 0xDD)
-        {
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC | 0xDC | 0xDD) {
             // `len` covers the length field and the payload but not the marker,
             // so the segment ends at `i + 2 + len`. A real SOF always carries
             // at least one component, so `len >= 10` and the size bytes below
@@ -643,7 +642,10 @@ mod test {
         v.extend_from_slice(b"WEBPVP8X");
         v.extend_from_slice(&10u32.to_le_bytes());
         v.extend_from_slice(&[
-            0x00, 0x00, 0x00, 0x00, //
+            0x00,
+            0x00,
+            0x00,
+            0x00, //
             (wm1 & 0xFF) as u8,
             ((wm1 >> 8) & 0xFF) as u8,
             ((wm1 >> 16) & 0xFF) as u8,
@@ -687,7 +689,12 @@ mod test {
 
     #[test]
     fn size_check_accepts_a_reasonable_image() {
-        for ok in [png(192, 192), gif(4096, 4096), jpeg(4032, 3024), webp_vp8x(4096, 4096)] {
+        for ok in [
+            png(192, 192),
+            gif(4096, 4096),
+            jpeg(4032, 3024),
+            webp_vp8x(4096, 4096),
+        ] {
             check_image_dimensions(&ok).expect("a normal image must pass");
         }
     }
