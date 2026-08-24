@@ -98,13 +98,13 @@ test("typing @ opens the picker and filters as you type", async ({ page }) => {
   await openChannel(page, "engineering");
 
   await composer(page).click();
-  await composer(page).type("hey @");
+  await composer(page).pressSequentially("hey @");
   await expect(picker(page)).toBeVisible();
 
   // Everything is offered before a query narrows it.
   await expect(options(page).first()).toBeVisible();
 
-  await composer(page).type("eng");
+  await composer(page).pressSequentially("eng");
   // The teammate wins the exact query even though a desk also starts with it.
   await expect(options(page).first()).toContainText("engineer");
 });
@@ -118,7 +118,7 @@ test("Enter picks the highlighted row and does not send", async ({ page }) => {
   await openChannel(page, "engineering");
 
   await composer(page).click();
-  await composer(page).type("hey @eng");
+  await composer(page).pressSequentially("hey @eng");
   await expect(picker(page)).toBeVisible();
   await composer(page).press("Enter");
 
@@ -135,9 +135,9 @@ test("Enter with the picker shut sends, and carries the resolved mention", async
   await openChannel(page, "engineering");
 
   await composer(page).click();
-  await composer(page).type("hey @eng");
+  await composer(page).pressSequentially("hey @eng");
   await composer(page).press("Enter"); // picks
-  await composer(page).type("what is the build status?");
+  await composer(page).pressSequentially("what is the build status?");
   await composer(page).press("Enter"); // sends
 
   await expect.poll(() => sent.length).toBe(1);
@@ -159,7 +159,7 @@ test("Escape closes the picker and leaves the draft alone", async ({ page }) => 
   await openChannel(page, "engineering");
 
   await composer(page).click();
-  await composer(page).type("hey @eng");
+  await composer(page).pressSequentially("hey @eng");
   await expect(picker(page)).toBeVisible();
   await composer(page).press("Escape");
 
@@ -174,7 +174,7 @@ test("the picker does not open inside an email address", async ({ page }) => {
   await openChannel(page, "engineering");
 
   await composer(page).click();
-  await composer(page).type("write to jane@eng");
+  await composer(page).pressSequentially("write to jane@eng");
   await expect(picker(page)).toHaveCount(0);
 });
 
@@ -183,7 +183,7 @@ test("a two-word person is reachable, space and all", async ({ page }) => {
   await openChannel(page, "engineering");
 
   await composer(page).click();
-  await composer(page).type("thanks @Jane Do");
+  await composer(page).pressSequentially("thanks @Jane Do");
   // The query survives the space — without that, a display name with one in it
   // can never be picked.
   await expect(picker(page)).toBeVisible();
@@ -198,12 +198,12 @@ test("backspacing through a chip un-mentions it", async ({ page }) => {
   await openChannel(page, "engineering");
 
   await composer(page).click();
-  await composer(page).type("hey @eng");
+  await composer(page).pressSequentially("hey @eng");
   await composer(page).press("Enter"); // picks `@engineer `
   // Delete the trailing space and one character of the handle.
   await composer(page).press("Backspace");
   await composer(page).press("Backspace");
-  await composer(page).type(" hello");
+  await composer(page).pressSequentially(" hello");
   await composer(page).press("Enter");
 
   await expect.poll(() => sent.length).toBe(1);
@@ -246,7 +246,7 @@ test("a host with no mention directory still sends, with no picker", async ({ pa
 
   await openChannel(page, "engineering");
   await composer(page).click();
-  await composer(page).type("hey @engineer");
+  await composer(page).pressSequentially("hey @engineer");
   // No picker, and Enter therefore sends — the composer's behaviour before the
   // feature existed, which is what an older host must keep getting.
   await expect(picker(page)).toHaveCount(0);
