@@ -877,3 +877,31 @@ async fn namespace_summaries_reports_each_namespace_once_with_its_count() {
         "each namespace must carry ITS own count, not the store total: {summaries:?}"
     );
 }
+
+#[test]
+fn scoped_context_cache_stays_bounded() {
+    // The per-scope cache is keyed by agent/desk id, which is attacker-adjacent
+    // input in a multi-company host: nothing but internal id hygiene stops a
+    // process-lifetime HashMap from accumulating one entry per distinct id
+    // ever seen. The bound is a capacity cap with arbitrary eviction, safe
+    // because entries are `Arc`-backed — this proves the map cannot outgrow it
+    // no matter how many distinct scopes are asked for.
+    let mem = engine();
+    let cache = mem.context_stores.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+
+    let overflow = super::SCOPED_CONTEXT_CACHE_CAPACITY + 64;
+    for i in 0..overflow {
+        // Distinct ids: the cache is keyed by the `agent:<id>` label, so
+        // repeated access to the same scope would never grow it. Use the raw
+        // private field via `agent_context` and drop the Arc each iteration so
+        // nothing pins the victim entries alive across eviction.
+        let _ = mem.agent_context(&format!("agent-{i}"));
+    }
+
+    let len = cache.lock().unwrap().len();
+    assert!(
+        len <= super::SCOPED_CONTEXT_CACHE_CAPACITY,
+        "per-scope context cache grew to {len} entries, past the {}-entry cap",
+        super::SCOPED_CONTEXT_CACHE_CAPACITY
+    );
+}
