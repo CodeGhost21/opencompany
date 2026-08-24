@@ -12,10 +12,10 @@
 //! * `DELETE …/deep-trace` purges every deep-trace record for the company.
 //! * `DELETE …/deep-trace/{run_id}` purges one run's detail.
 
+use axum::Router;
 use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::delete;
-use axum::Router;
 
 use crate::AppState;
 use crate::server::error::ApiError;
@@ -23,10 +23,8 @@ use crate::server::ops::{AdminScopedCompany, scoped};
 
 /// Builds the authenticated deep-trace purge routes.
 pub fn router() -> Router<AppState> {
-    scoped("/deep-trace", delete(purge_all)).merge(scoped(
-        "/deep-trace/{run_id}",
-        delete(purge_run),
-    ))
+    scoped("/deep-trace", delete(purge_all))
+        .merge(scoped("/deep-trace/{run_id}", delete(purge_run)))
 }
 
 #[derive(Debug, serde::Deserialize)]
