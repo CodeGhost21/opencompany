@@ -183,7 +183,7 @@ interface Props {
    * cannot yet prove is on screen, which is exactly the case where this is
    * `true`.
    */
-  onChannelViewed?: (channelId: string, historyPending: boolean) => void;
+  onChannelViewed?: (channelId: string, historyPending: boolean, mentionFeedRevision?: number) => void;
   /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
