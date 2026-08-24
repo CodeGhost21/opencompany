@@ -1,0 +1,965 @@
+Console E2E	Set up job	﻿2026-08-24T12:41:54.8147599Z Current runner version: '2.336.0'
+Console E2E	Set up job	2026-08-24T12:41:54.8175525Z ##[group]Runner Image Provisioner
+Console E2E	Set up job	2026-08-24T12:41:54.8176487Z Hosted Compute Agent
+Console E2E	Set up job	2026-08-24T12:41:54.8177267Z Version: 20260729.566
+Console E2E	Set up job	2026-08-24T12:41:54.8178050Z Commit: cf7153fe6e25b664e8693c24944bf2b00355d109
+Console E2E	Set up job	2026-08-24T12:41:54.8178978Z Build Date: 2026-07-29T19:17:02Z
+Console E2E	Set up job	2026-08-24T12:41:54.8179920Z Worker ID: {97757172-fe46-4f4f-a00c-da32f33c72c5}
+Console E2E	Set up job	2026-08-24T12:41:54.8180810Z Azure Region: eastus
+Console E2E	Set up job	2026-08-24T12:41:54.8181758Z ##[endgroup]
+Console E2E	Set up job	2026-08-24T12:41:54.8183441Z ##[group]Operating System
+Console E2E	Set up job	2026-08-24T12:41:54.8184325Z Ubuntu
+Console E2E	Set up job	2026-08-24T12:41:54.8184979Z 24.04.4
+Console E2E	Set up job	2026-08-24T12:41:54.8185593Z LTS
+Console E2E	Set up job	2026-08-24T12:41:54.8186263Z ##[endgroup]
+Console E2E	Set up job	2026-08-24T12:41:54.8186922Z ##[group]Runner Image
+Console E2E	Set up job	2026-08-24T12:41:54.8188149Z Image: ubuntu-24.04
+Console E2E	Set up job	2026-08-24T12:41:54.8188881Z Version: 20260816.277.1
+Console E2E	Set up job	2026-08-24T12:41:54.8190183Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260816.277/images/ubuntu/Ubuntu2404-Readme.md
+Console E2E	Set up job	2026-08-24T12:41:54.8192621Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260816.277
+Console E2E	Set up job	2026-08-24T12:41:54.8193945Z ##[endgroup]
+Console E2E	Set up job	2026-08-24T12:41:54.8195273Z ##[group]GITHUB_TOKEN Permissions
+Console E2E	Set up job	2026-08-24T12:41:54.8197449Z Contents: read
+Console E2E	Set up job	2026-08-24T12:41:54.8198180Z Metadata: read
+Console E2E	Set up job	2026-08-24T12:41:54.8199033Z ##[endgroup]
+Console E2E	Set up job	2026-08-24T12:41:54.8201582Z Secret source: Actions
+Console E2E	Set up job	2026-08-24T12:41:54.8202886Z Prepare workflow directory
+Console E2E	Set up job	2026-08-24T12:41:54.8630351Z Prepare all required actions
+Console E2E	Set up job	2026-08-24T12:41:54.8685152Z Getting action download info
+Console E2E	Set up job	2026-08-24T12:41:55.0114462Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Console E2E	Set up job	2026-08-24T12:41:55.1447193Z Download action repository 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020' (SHA:820762786026740c76f36085b0efc47a31fe5020)
+Console E2E	Set up job	2026-08-24T12:41:55.2308775Z Download action repository 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' (SHA:3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c)
+Console E2E	Set up job	2026-08-24T12:41:55.3834455Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+Console E2E	Set up job	2026-08-24T12:41:55.5649918Z Complete job name: Console E2E
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	﻿2026-08-24T12:41:55.6336611Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6337433Z with:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6337779Z   persist-credentials: false
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6338210Z   repository: tinyhumansai/opencompany
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6341286Z   token: ***
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6341626Z   ssh-strict: true
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6341971Z   ssh-user: git
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6342298Z   clean: true
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6342649Z   sparse-checkout-cone-mode: true
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6343055Z   fetch-depth: 1
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6343395Z   fetch-tags: false
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6343738Z   show-progress: true
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6344086Z   lfs: false
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6344413Z   submodules: false
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6344794Z   set-safe-directory: true
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6345194Z   allow-unsafe-pr-checkout: false
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6345767Z env:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6346088Z   CARGO_INCREMENTAL: 0
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6346478Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.6346917Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7140520Z Syncing repository: tinyhumansai/opencompany
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7142155Z ##[group]Getting Git version info
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7142760Z Working directory is '/home/runner/work/opencompany/opencompany'
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7143617Z [command]/usr/bin/git version
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7189067Z git version 2.55.0
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7204241Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7212104Z Temporarily overriding HOME='/home/runner/work/_temp/984c7cc8-9f7f-4af8-a123-5ab3a3d72fe5' before making global git config changes
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7213615Z Adding repository directory to the temporary git global config as a safe directory
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7216012Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/opencompany/opencompany
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7249725Z Deleting the contents of '/home/runner/work/opencompany/opencompany'
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7310423Z ##[group]Determining repository object format
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7311774Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7312771Z ##[group]Initializing the repository
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7313521Z [command]/usr/bin/git init /home/runner/work/opencompany/opencompany
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7320950Z hint: Using 'master' as the name for the initial branch. This default branch name
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7322258Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7323414Z hint: to use in all of your new repositories, which will suppress this warning,
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7324344Z hint: call:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7324841Z hint:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7325431Z hint: 	git config --global init.defaultBranch <name>
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7326214Z hint:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7326948Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7328017Z hint: 'development'. The just-created branch can be renamed via this command:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7328699Z hint:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7329045Z hint: 	git branch -m <name>
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7329431Z hint:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7330120Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7331380Z Initialized empty Git repository in /home/runner/work/opencompany/opencompany/.git/
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7332707Z [command]/usr/bin/git remote add origin https://github.com/tinyhumansai/opencompany
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7364674Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7365319Z ##[group]Disabling automatic garbage collection
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7366913Z [command]/usr/bin/git config --local gc.auto 0
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7390560Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7391513Z ##[group]Setting up auth
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7392156Z Removing SSH command configuration
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7394736Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7418796Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7676672Z Removing HTTP extra header
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7681862Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7713239Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7895831Z Removing includeIf entries pointing to credentials config files
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7900237Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.7925645Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8109581Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8147367Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/opencompany/opencompany/.git.path /home/runner/work/_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8173686Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/opencompany/opencompany/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8203542Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8229468Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8252600Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8253511Z ##[group]Fetching the repository
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:55.8259069Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +80e929875594b95e9517df8865ca4d194ab420c7:refs/remotes/pull/1679/merge
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4518335Z From https://github.com/tinyhumansai/opencompany
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4519912Z  * [new ref]         80e929875594b95e9517df8865ca4d194ab420c7 -> pull/1679/merge
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4522799Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4523923Z ##[group]Determining the checkout info
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4525083Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4526597Z [command]/usr/bin/git sparse-checkout disable
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4564401Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4587212Z ##[group]Checking out the ref
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.4589182Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/1679/merge
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6292682Z Note: switching to 'refs/remotes/pull/1679/merge'.
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6293353Z 
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6293694Z You are in 'detached HEAD' state. You can look around, make experimental
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6294523Z changes and commit them, and you can discard any commits you make in this
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6295396Z state without impacting any branches by switching back to a branch.
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6295920Z 
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6296276Z If you want to create a new branch to retain commits you create, you may
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6297033Z do so (now or later) by using -c with the switch command. Example:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6297482Z 
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6297686Z   git switch -c <new-branch-name>
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6298031Z 
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6298222Z Or undo this operation with:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6298533Z 
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6298700Z   git switch -
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6298983Z 
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6299323Z Turn off this advice by setting config variable advice.detachedHead to false
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6299889Z 
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6300426Z HEAD is now at 80e9298 Merge e19de06539e906ed8f664f6a96b420f8fbc316ed into 359e1c10f4c3f81c8d495d9f43d001e2c901bf3a
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6313214Z ##[endgroup]
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6348929Z [command]/usr/bin/git log -1 --format=%H
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6369218Z 80e929875594b95e9517df8865ca4d194ab420c7
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6380425Z ##[group]Removing auth
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6380961Z Removing SSH command configuration
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6383163Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6408830Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6595861Z Removing HTTP extra header
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6599300Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6628611Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6832315Z Removing includeIf entries pointing to credentials config files
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6833564Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6853533Z includeif.gitdir:/home/runner/work/opencompany/opencompany/.git.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6854738Z includeif.gitdir:/home/runner/work/opencompany/opencompany/.git/worktrees/*.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6855862Z includeif.gitdir:/github/workspace/.git.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6856765Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6860307Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/opencompany/opencompany/.git.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6878971Z /home/runner/work/_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6892441Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/opencompany/opencompany/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-22eb1e15\-0557\-4325\-b321\-886ee3e31c43\.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6917876Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/opencompany/opencompany/.git/worktrees/*.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6935686Z /home/runner/work/_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6943141Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/opencompany/opencompany/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-22eb1e15\-0557\-4325\-b321\-886ee3e31c43\.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6966710Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.6985974Z /github/runner_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.7021805Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-22eb1e15\-0557\-4325\-b321\-886ee3e31c43\.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.7050165Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.7069548Z /github/runner_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.7101728Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-22eb1e15\-0557\-4325\-b321\-886ee3e31c43\.config
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.7109034Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.7286657Z Removing credentials config '/home/runner/work/_temp/git-credentials-22eb1e15-0557-4325-b321-886ee3e31c43.config'
+Console E2E	Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:41:57.7292306Z ##[endgroup]
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	﻿2026-08-24T12:41:57.7571401Z ##[group]Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7572688Z with:
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7573422Z   node-version-file: frontend/.nvmrc
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7574345Z   cache: npm
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7575194Z   cache-dependency-path: frontend/package-lock.json
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7576273Z   check-latest: false
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7583258Z   token: ***
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7584011Z   package-manager-cache: true
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7584851Z env:
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7585521Z   CARGO_INCREMENTAL: 0
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7586373Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.7587331Z ##[endgroup]
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.8558002Z Resolved frontend/.nvmrc as 22
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.8597134Z Found in cache @ /opt/hostedtoolcache/node/22.23.2/x64
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:41:57.8599067Z ##[group]Environment details
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:01.6666172Z node: v22.23.2
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:01.6667611Z npm: 10.9.8
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:01.6667995Z yarn: 1.22.22
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:01.6669156Z ##[endgroup]
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:01.6680574Z [command]/opt/hostedtoolcache/node/22.23.2/x64/bin/npm config get cache
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:02.0855671Z /home/runner/.npm
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:02.2104683Z Cache hit for: node-cache-Linux-x64-npm-8720b700bbb0941c0eb49b9a23afb491a86058e46be074ede3955bd8533fc63d
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:02.6533232Z Received 78994881 of 78994881 (100.0%), 249.5 MBs/sec
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:02.6538967Z Cache Size: ~75 MB (78994881 B)
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:02.6590570Z [command]/usr/bin/tar -xf /home/runner/work/_temp/e77b9431-5b1b-4ba4-8371-949e1e7550ea/cache.tzst -P -C /home/runner/work/opencompany/opencompany --use-compress-program unzstd
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:03.0182518Z Cache restored successfully
+Console E2E	Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020	2026-08-24T12:42:03.0221716Z Cache restored from key: node-cache-Linux-x64-npm-8720b700bbb0941c0eb49b9a23afb491a86058e46be074ede3955bd8533fc63d
+Console E2E	Run npm ci	﻿2026-08-24T12:42:03.0395636Z ##[group]Run npm ci
+Console E2E	Run npm ci	2026-08-24T12:42:03.0395949Z ^[[36;1mnpm ci^[[0m
+Console E2E	Run npm ci	2026-08-24T12:42:03.0967842Z shell: /usr/bin/bash -e {0}
+Console E2E	Run npm ci	2026-08-24T12:42:03.0968406Z env:
+Console E2E	Run npm ci	2026-08-24T12:42:03.0968599Z   CARGO_INCREMENTAL: 0
+Console E2E	Run npm ci	2026-08-24T12:42:03.0968835Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Run npm ci	2026-08-24T12:42:03.0969088Z ##[endgroup]
+Console E2E	Run npm ci	2026-08-24T12:42:08.0313334Z npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
+Console E2E	Run npm ci	2026-08-24T12:42:12.1790985Z 
+Console E2E	Run npm ci	2026-08-24T12:42:12.1792007Z added 699 packages, and audited 700 packages in 9s
+Console E2E	Run npm ci	2026-08-24T12:42:12.1792399Z 
+Console E2E	Run npm ci	2026-08-24T12:42:12.1792620Z 229 packages are looking for funding
+Console E2E	Run npm ci	2026-08-24T12:42:12.1793034Z   run `npm fund` for details
+Console E2E	Run npm ci	2026-08-24T12:42:12.1982982Z 
+Console E2E	Run npm ci	2026-08-24T12:42:12.1987619Z 11 vulnerabilities (3 moderate, 8 high)
+Console E2E	Run npm ci	2026-08-24T12:42:12.1988108Z 
+Console E2E	Run npm ci	2026-08-24T12:42:12.1988617Z To address issues that do not require attention, run:
+Console E2E	Run npm ci	2026-08-24T12:42:12.1989097Z   npm audit fix
+Console E2E	Run npm ci	2026-08-24T12:42:12.1989364Z 
+Console E2E	Run npm ci	2026-08-24T12:42:12.1989656Z To address all issues (including breaking changes), run:
+Console E2E	Run npm ci	2026-08-24T12:42:12.1990107Z   npm audit fix --force
+Console E2E	Run npm ci	2026-08-24T12:42:12.1990295Z 
+Console E2E	Run npm ci	2026-08-24T12:42:12.1990446Z Run `npm audit` for details.
+Console E2E	Download the host binary	﻿2026-08-24T12:42:12.2714221Z ##[group]Run actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+Console E2E	Download the host binary	2026-08-24T12:42:12.2714583Z with:
+Console E2E	Download the host binary	2026-08-24T12:42:12.2714764Z   name: opencompany-debug-binary
+Console E2E	Download the host binary	2026-08-24T12:42:12.2714975Z   path: target/debug
+Console E2E	Download the host binary	2026-08-24T12:42:12.2715166Z   merge-multiple: false
+Console E2E	Download the host binary	2026-08-24T12:42:12.2715369Z   repository: tinyhumansai/opencompany
+Console E2E	Download the host binary	2026-08-24T12:42:12.2715590Z   run-id: 32727281764
+Console E2E	Download the host binary	2026-08-24T12:42:12.2715774Z   skip-decompress: false
+Console E2E	Download the host binary	2026-08-24T12:42:12.2715980Z   digest-mismatch: error
+Console E2E	Download the host binary	2026-08-24T12:42:12.2716154Z env:
+Console E2E	Download the host binary	2026-08-24T12:42:12.2716313Z   CARGO_INCREMENTAL: 0
+Console E2E	Download the host binary	2026-08-24T12:42:12.2716520Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Download the host binary	2026-08-24T12:42:12.2716755Z ##[endgroup]
+Console E2E	Download the host binary	2026-08-24T12:42:12.3780646Z Downloading single artifact
+Console E2E	Download the host binary	2026-08-24T12:42:12.4521667Z Preparing to download the following artifacts:
+Console E2E	Download the host binary	2026-08-24T12:42:12.4522945Z - opencompany-debug-binary (ID: 9520430132, Size: 36118697, Expected Digest: sha256:3db0e4a86632c3226e0e2e1442e5925b4b9f5e9a8b8f1ca91820daeb88c93f3e)
+Console E2E	Download the host binary	2026-08-24T12:42:12.6257531Z Redirecting to blob download url: https://productionresultssa9.blob.core.windows.net/actions-results/a35accce-a03f-4999-9712-4f23d7686f01/workflow-job-run-080ce8ab-f9b3-5735-af9a-bc16a607e18c/artifacts/babd32e1459e4f88eef5ad6d23bdc41c56aaafced916a4af72f4b20a87ef264d.zip
+Console E2E	Download the host binary	2026-08-24T12:42:12.6259732Z Starting download of artifact to: /home/runner/work/opencompany/opencompany/target/debug
+Console E2E	Download the host binary	2026-08-24T12:42:12.7130162Z (node:2276) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+Console E2E	Download the host binary	2026-08-24T12:42:12.7131730Z (Use `node --trace-deprecation ...` to show where the warning was created)
+Console E2E	Download the host binary	2026-08-24T12:42:13.6463075Z SHA256 digest of downloaded artifact is 3db0e4a86632c3226e0e2e1442e5925b4b9f5e9a8b8f1ca91820daeb88c93f3e
+Console E2E	Download the host binary	2026-08-24T12:42:13.6463969Z Artifact download completed successfully.
+Console E2E	Download the host binary	2026-08-24T12:42:13.6464419Z Total of 1 artifact(s) downloaded
+Console E2E	Download the host binary	2026-08-24T12:42:13.6469142Z Download artifact has finished successfully
+Console E2E	Restore the executable bit	﻿2026-08-24T12:42:13.6573732Z ##[group]Run chmod +x target/debug/opencompany
+Console E2E	Restore the executable bit	2026-08-24T12:42:13.6574063Z ^[[36;1mchmod +x target/debug/opencompany^[[0m
+Console E2E	Restore the executable bit	2026-08-24T12:42:13.6607828Z shell: /usr/bin/bash -e {0}
+Console E2E	Restore the executable bit	2026-08-24T12:42:13.6608052Z env:
+Console E2E	Restore the executable bit	2026-08-24T12:42:13.6608228Z   CARGO_INCREMENTAL: 0
+Console E2E	Restore the executable bit	2026-08-24T12:42:13.6608450Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Restore the executable bit	2026-08-24T12:42:13.6608695Z ##[endgroup]
+Console E2E	Install Chromium	﻿2026-08-24T12:42:13.6691043Z ##[group]Run npx playwright install --with-deps chromium
+Console E2E	Install Chromium	2026-08-24T12:42:13.6691560Z ^[[36;1mnpx playwright install --with-deps chromium^[[0m
+Console E2E	Install Chromium	2026-08-24T12:42:13.6720208Z shell: /usr/bin/bash -e {0}
+Console E2E	Install Chromium	2026-08-24T12:42:13.6720430Z env:
+Console E2E	Install Chromium	2026-08-24T12:42:13.6720612Z   CARGO_INCREMENTAL: 0
+Console E2E	Install Chromium	2026-08-24T12:42:13.6720830Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Install Chromium	2026-08-24T12:42:13.6721401Z ##[endgroup]
+Console E2E	Install Chromium	2026-08-24T12:42:14.2713532Z Installing dependencies...
+Console E2E	Install Chromium	2026-08-24T12:42:14.2764110Z Switching to root user to install dependencies...
+Console E2E	Install Chromium	2026-08-24T12:42:14.3342330Z Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]
+Console E2E	Install Chromium	2026-08-24T12:42:14.3687243Z Hit:2 http://azure.archive.ubuntu.com/ubuntu noble InRelease
+Console E2E	Install Chromium	2026-08-24T12:42:14.3698352Z Hit:6 https://packages.microsoft.com/repos/azure-cli noble InRelease
+Console E2E	Install Chromium	2026-08-24T12:42:14.3699560Z Get:7 https://packages.microsoft.com/ubuntu/24.04/prod noble InRelease [3600 B]
+Console E2E	Install Chromium	2026-08-24T12:42:14.3712254Z Get:3 http://azure.archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.3759665Z Get:4 http://azure.archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.3793274Z Get:5 http://azure.archive.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.3937450Z Get:8 https://dl.google.com/linux/chrome-stable/deb stable InRelease [2548 B]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5128666Z Get:9 https://packages.microsoft.com/ubuntu/24.04/prod noble/main arm64 Packages [357 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5262268Z Get:10 https://packages.microsoft.com/ubuntu/24.04/prod noble/main amd64 Packages [403 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5529727Z Get:11 http://azure.archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages [1229 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5602412Z Get:12 http://azure.archive.ubuntu.com/ubuntu noble-updates/main Translation-en [286 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5625134Z Get:13 http://azure.archive.ubuntu.com/ubuntu noble-updates/main amd64 Components [181 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5663793Z Get:14 http://azure.archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages [1687 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5732878Z Get:15 http://azure.archive.ubuntu.com/ubuntu noble-updates/universe Translation-en [337 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5758789Z Get:16 http://azure.archive.ubuntu.com/ubuntu noble-updates/universe amd64 Components [388 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5789714Z Get:17 http://azure.archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages [1486 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5867056Z Get:18 http://azure.archive.ubuntu.com/ubuntu noble-updates/restricted Translation-en [339 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5893296Z Get:19 http://azure.archive.ubuntu.com/ubuntu noble-updates/multiverse Translation-en [12.8 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.5905809Z Get:20 http://azure.archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Components [940 B]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6452938Z Get:21 http://azure.archive.ubuntu.com/ubuntu noble-backports/main amd64 Components [5768 B]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6471615Z Get:22 http://azure.archive.ubuntu.com/ubuntu noble-backports/universe amd64 Components [12.6 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6485128Z Get:23 http://azure.archive.ubuntu.com/ubuntu noble-security/main amd64 Packages [969 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6562393Z Get:24 http://azure.archive.ubuntu.com/ubuntu noble-security/main Translation-en [206 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6567285Z Get:25 http://azure.archive.ubuntu.com/ubuntu noble-security/main amd64 Components [46.4 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6593211Z Get:26 http://azure.archive.ubuntu.com/ubuntu noble-security/universe amd64 Packages [1202 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6655091Z Get:27 http://azure.archive.ubuntu.com/ubuntu noble-security/universe Translation-en [240 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6687276Z Get:28 http://azure.archive.ubuntu.com/ubuntu noble-security/universe amd64 Components [76.3 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6706901Z Get:29 http://azure.archive.ubuntu.com/ubuntu noble-security/restricted amd64 Packages [1388 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6780205Z Get:30 http://azure.archive.ubuntu.com/ubuntu noble-security/restricted Translation-en [320 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.6813544Z Get:31 http://azure.archive.ubuntu.com/ubuntu noble-security/multiverse Translation-en [11.1 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:14.7082656Z Get:32 https://dl.google.com/linux/chrome-stable/deb stable/main amd64 Packages [1418 B]
+Console E2E	Install Chromium	2026-08-24T12:42:21.9054338Z Fetched 11.6 MB in 1s (10.5 MB/s)
+Console E2E	Install Chromium	2026-08-24T12:42:22.4936567Z Reading package lists...
+Console E2E	Install Chromium	2026-08-24T12:42:22.5281021Z Reading package lists...
+Console E2E	Install Chromium	2026-08-24T12:42:22.6802318Z Building dependency tree...
+Console E2E	Install Chromium	2026-08-24T12:42:22.6808395Z Reading state information...
+Console E2E	Install Chromium	2026-08-24T12:42:22.8023753Z libasound2t64 is already the newest version (1.2.11-1ubuntu0.3).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8024380Z libasound2t64 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8024899Z libatk-bridge2.0-0t64 is already the newest version (2.52.0-1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8025415Z libatk-bridge2.0-0t64 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8025903Z libatk1.0-0t64 is already the newest version (2.52.0-1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8026352Z libatk1.0-0t64 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8026820Z libatspi2.0-0t64 is already the newest version (2.52.0-1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8027339Z libatspi2.0-0t64 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8027851Z libcairo2 is already the newest version (1.18.0-3build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8028344Z libcairo2 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8028848Z libcups2t64 is already the newest version (2.4.7-1.2ubuntu7.14).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8029366Z libcups2t64 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8029915Z libdbus-1-3 is already the newest version (1.14.10-4ubuntu4.1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8030445Z libdbus-1-3 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8040106Z libdrm2 is already the newest version (2.4.125-1ubuntu0.1~24.04.2).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8040776Z libdrm2 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8041554Z libgbm1 is already the newest version (25.2.8-0ubuntu0.24.04.2).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8042105Z libgbm1 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8042661Z libglib2.0-0t64 is already the newest version (2.80.0-6ubuntu3.8).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8043257Z libglib2.0-0t64 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8043834Z libnspr4 is already the newest version (2:4.35-1.1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8044321Z libnspr4 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8044826Z libnss3 is already the newest version (2:3.98-1ubuntu0.2).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8045311Z libnss3 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8045852Z libpango-1.0-0 is already the newest version (1.52.1+ds-1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8046395Z libpango-1.0-0 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8046950Z libx11-6 is already the newest version (2:1.8.7-1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8047520Z libx11-6 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8047901Z libxcb1 is already the newest version (1.15-1ubuntu2).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8048206Z libxcb1 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8048539Z libxcomposite1 is already the newest version (1:0.4.5-1build3).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8048875Z libxcomposite1 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8049212Z libxdamage1 is already the newest version (1:1.1.6-1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8049524Z libxdamage1 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8049832Z libxext6 is already the newest version (2:1.3.4-1build2).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8050133Z libxext6 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8050448Z libxfixes3 is already the newest version (1:6.0.0-2build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8050762Z libxfixes3 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8051198Z libxkbcommon0 is already the newest version (1.6.0-1build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8051519Z libxkbcommon0 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8051850Z libxrandr2 is already the newest version (2:1.5.2-2build1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8052147Z libxrandr2 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8052465Z xvfb is already the newest version (2:21.1.12-1ubuntu1.6).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8052889Z fonts-noto-color-emoji is already the newest version (2.047-0ubuntu0.24.04.1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8053326Z libfontconfig1 is already the newest version (2.15.0-1.1ubuntu2).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8053936Z libfontconfig1 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8054288Z libfreetype6 is already the newest version (2.13.2+dfsg-1ubuntu0.1).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8054619Z libfreetype6 set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8054949Z fonts-liberation is already the newest version (1:2.1.5-3).
+Console E2E	Install Chromium	2026-08-24T12:42:22.8055397Z fonts-liberation set to manually installed.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8055714Z The following additional packages will be installed:
+Console E2E	Install Chromium	2026-08-24T12:42:22.8056008Z   xfonts-encodings xfonts-utils
+Console E2E	Install Chromium	2026-08-24T12:42:22.8056230Z Recommended packages:
+Console E2E	Install Chromium	2026-08-24T12:42:22.8056462Z   fonts-ipafont-mincho fonts-tlwg-loma
+Console E2E	Install Chromium	2026-08-24T12:42:22.8275222Z The following NEW packages will be installed:
+Console E2E	Install Chromium	2026-08-24T12:42:22.8275812Z   fonts-freefont-ttf fonts-ipafont-gothic fonts-tlwg-loma-otf fonts-unifont
+Console E2E	Install Chromium	2026-08-24T12:42:22.8279718Z   fonts-wqy-zenhei xfonts-cyrillic xfonts-encodings xfonts-scalable
+Console E2E	Install Chromium	2026-08-24T12:42:22.8280195Z   xfonts-utils
+Console E2E	Install Chromium	2026-08-24T12:42:22.8420195Z 0 upgraded, 9 newly installed, 0 to remove and 29 not upgraded.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8420773Z Need to get 21.1 MB of archives.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8421288Z After this operation, 79.5 MB of additional disk space will be used.
+Console E2E	Install Chromium	2026-08-24T12:42:22.8421689Z Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]
+Console E2E	Install Chromium	2026-08-24T12:42:22.8696200Z Get:2 http://azure.archive.ubuntu.com/ubuntu noble/universe amd64 fonts-ipafont-gothic all 00303-21ubuntu1 [3513 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:22.9362397Z Get:3 http://azure.archive.ubuntu.com/ubuntu noble/main amd64 fonts-freefont-ttf all 20211204+svn4273-2 [5641 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.1142388Z Get:4 http://azure.archive.ubuntu.com/ubuntu noble/universe amd64 fonts-tlwg-loma-otf all 1:0.7.3-1 [107 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.2337933Z Get:5 http://azure.archive.ubuntu.com/ubuntu noble/universe amd64 fonts-unifont all 1:15.1.01-1build1 [2993 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.3551027Z Get:6 http://azure.archive.ubuntu.com/ubuntu noble/universe amd64 fonts-wqy-zenhei all 0.9.45-8 [7472 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.5878724Z Get:7 http://azure.archive.ubuntu.com/ubuntu noble/main amd64 xfonts-encodings all 1:1.0.5-0ubuntu2 [578 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.6151909Z Get:8 http://azure.archive.ubuntu.com/ubuntu noble/main amd64 xfonts-utils amd64 1:7.7+6build3 [94.4 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.6299690Z Get:9 http://azure.archive.ubuntu.com/ubuntu noble/universe amd64 xfonts-cyrillic all 1:1.0.5+nmu1 [384 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.6498743Z Get:10 http://azure.archive.ubuntu.com/ubuntu noble/main amd64 xfonts-scalable all 1:1.0.3-1.3 [304 kB]
+Console E2E	Install Chromium	2026-08-24T12:42:23.8574600Z Fetched 21.1 MB in 1s (25.6 MB/s)
+Console E2E	Install Chromium	2026-08-24T12:42:23.9749699Z Selecting previously unselected package fonts-ipafont-gothic.
+Console E2E	Install Chromium	2026-08-24T12:42:23.9942484Z (Reading database ... 
+Console E2E	Install Chromium	2026-08-24T12:42:23.9943096Z (Reading database ... 5%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9943637Z (Reading database ... 10%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9943986Z (Reading database ... 15%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9944302Z (Reading database ... 20%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9944695Z (Reading database ... 25%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9944966Z (Reading database ... 30%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9945219Z (Reading database ... 35%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9945517Z (Reading database ... 40%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9945748Z (Reading database ... 45%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9945956Z (Reading database ... 50%
+Console E2E	Install Chromium	2026-08-24T12:42:23.9963055Z (Reading database ... 55%
+Console E2E	Install Chromium	2026-08-24T12:42:24.0914801Z (Reading database ... 60%
+Console E2E	Install Chromium	2026-08-24T12:42:24.4186767Z (Reading database ... 65%
+Console E2E	Install Chromium	2026-08-24T12:42:24.5844537Z (Reading database ... 70%
+Console E2E	Install Chromium	2026-08-24T12:42:24.7772720Z (Reading database ... 75%
+Console E2E	Install Chromium	2026-08-24T12:42:24.9324538Z (Reading database ... 80%
+Console E2E	Install Chromium	2026-08-24T12:42:25.1375387Z (Reading database ... 85%
+Console E2E	Install Chromium	2026-08-24T12:42:25.3252380Z (Reading database ... 90%
+Console E2E	Install Chromium	2026-08-24T12:42:25.5382158Z (Reading database ... 95%
+Console E2E	Install Chromium	2026-08-24T12:42:25.5382495Z (Reading database ... 100%
+Console E2E	Install Chromium	2026-08-24T12:42:25.5382863Z (Reading database ... 203124 files and directories currently installed.)
+Console E2E	Install Chromium	2026-08-24T12:42:25.5422377Z Preparing to unpack .../0-fonts-ipafont-gothic_00303-21ubuntu1_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:25.5541286Z Unpacking fonts-ipafont-gothic (00303-21ubuntu1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:25.7816791Z Selecting previously unselected package fonts-freefont-ttf.
+Console E2E	Install Chromium	2026-08-24T12:42:25.7927690Z Preparing to unpack .../1-fonts-freefont-ttf_20211204+svn4273-2_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:25.7934634Z Unpacking fonts-freefont-ttf (20211204+svn4273-2) ...
+Console E2E	Install Chromium	2026-08-24T12:42:25.8790856Z Selecting previously unselected package fonts-tlwg-loma-otf.
+Console E2E	Install Chromium	2026-08-24T12:42:25.8900294Z Preparing to unpack .../2-fonts-tlwg-loma-otf_1%3a0.7.3-1_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:25.8908778Z Unpacking fonts-tlwg-loma-otf (1:0.7.3-1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:25.9140603Z Selecting previously unselected package fonts-unifont.
+Console E2E	Install Chromium	2026-08-24T12:42:25.9254250Z Preparing to unpack .../3-fonts-unifont_1%3a15.1.01-1build1_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:25.9261720Z Unpacking fonts-unifont (1:15.1.01-1build1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.1221371Z Selecting previously unselected package fonts-wqy-zenhei.
+Console E2E	Install Chromium	2026-08-24T12:42:26.1331292Z Preparing to unpack .../4-fonts-wqy-zenhei_0.9.45-8_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.1414051Z Unpacking fonts-wqy-zenhei (0.9.45-8) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.5826343Z Selecting previously unselected package xfonts-encodings.
+Console E2E	Install Chromium	2026-08-24T12:42:26.5936492Z Preparing to unpack .../5-xfonts-encodings_1%3a1.0.5-0ubuntu2_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.5943948Z Unpacking xfonts-encodings (1:1.0.5-0ubuntu2) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.6209223Z Selecting previously unselected package xfonts-utils.
+Console E2E	Install Chromium	2026-08-24T12:42:26.6314896Z Preparing to unpack .../6-xfonts-utils_1%3a7.7+6build3_amd64.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.6322435Z Unpacking xfonts-utils (1:7.7+6build3) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.7354432Z Selecting previously unselected package xfonts-cyrillic.
+Console E2E	Install Chromium	2026-08-24T12:42:26.7463342Z Preparing to unpack .../7-xfonts-cyrillic_1%3a1.0.5+nmu1_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.7471296Z Unpacking xfonts-cyrillic (1:1.0.5+nmu1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.7784577Z Selecting previously unselected package xfonts-scalable.
+Console E2E	Install Chromium	2026-08-24T12:42:26.7890162Z Preparing to unpack .../8-xfonts-scalable_1%3a1.0.3-1.3_all.deb ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.7898023Z Unpacking xfonts-scalable (1:1.0.3-1.3) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.8294618Z Setting up fonts-wqy-zenhei (0.9.45-8) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.8397560Z Setting up fonts-freefont-ttf (20211204+svn4273-2) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.8417437Z Setting up fonts-tlwg-loma-otf (1:0.7.3-1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.8436951Z Setting up xfonts-encodings (1:1.0.5-0ubuntu2) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.8456029Z Setting up fonts-ipafont-gothic (00303-21ubuntu1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.8515464Z update-alternatives: using /usr/share/fonts/opentype/ipafont-gothic/ipag.ttf to provide /usr/share/fonts/truetype/fonts-japanese-gothic.ttf (fonts-japanese-gothic.ttf) in auto mode
+Console E2E	Install Chromium	2026-08-24T12:42:26.8534037Z Setting up fonts-unifont (1:15.1.01-1build1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:26.9972950Z Setting up xfonts-utils (1:7.7+6build3) ...
+Console E2E	Install Chromium	2026-08-24T12:42:27.0014003Z Setting up xfonts-cyrillic (1:1.0.5+nmu1) ...
+Console E2E	Install Chromium	2026-08-24T12:42:27.0295161Z Setting up xfonts-scalable (1:1.0.3-1.3) ...
+Console E2E	Install Chromium	2026-08-24T12:42:27.0524386Z Processing triggers for man-db (2.12.0-4build2) ...
+Console E2E	Install Chromium	2026-08-24T12:42:27.0541764Z Not building database; man-db/auto-update is not 'true'.
+Console E2E	Install Chromium	2026-08-24T12:42:27.0553482Z Processing triggers for fontconfig (2.15.0-1.1ubuntu2) ...
+Console E2E	Install Chromium	2026-08-24T12:42:27.6328845Z 
+Console E2E	Install Chromium	2026-08-24T12:42:28.3180965Z Running kernel seems to be up-to-date.
+Console E2E	Install Chromium	2026-08-24T12:42:28.3181571Z 
+Console E2E	Install Chromium	2026-08-24T12:42:28.3181787Z No services need to be restarted.
+Console E2E	Install Chromium	2026-08-24T12:42:28.3182024Z 
+Console E2E	Install Chromium	2026-08-24T12:42:28.3182206Z No containers need to be restarted.
+Console E2E	Install Chromium	2026-08-24T12:42:28.3182450Z 
+Console E2E	Install Chromium	2026-08-24T12:42:28.3182695Z No user sessions are running outdated binaries.
+Console E2E	Install Chromium	2026-08-24T12:42:28.3182958Z 
+Console E2E	Install Chromium	2026-08-24T12:42:28.3183328Z No VM guests are running outdated hypervisor (qemu) binaries on this host.
+Console E2E	Install Chromium	2026-08-24T12:42:28.3184612Z Downloading Chrome for Testing 149.0.7827.55 (playwright chromium v1228) from https://cdn.playwright.dev/builds/cft/149.0.7827.55/linux64/chrome-linux64.zip
+Console E2E	Install Chromium	2026-08-24T12:42:29.2628076Z |                                                                                |   0% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.3883089Z |■■■■■■■■                                                                        |  10% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.4651971Z |■■■■■■■■■■■■■■■■                                                                |  20% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.5199546Z |■■■■■■■■■■■■■■■■■■■■■■■■                                                        |  30% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.5696044Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                                |  40% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.6193044Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                        |  50% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.6647202Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                |  60% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.7069169Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                        |  70% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.7505183Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                |  80% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.7977637Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■        |  90% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:29.8509613Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■| 100% of 177 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:31.8291574Z Chrome for Testing 149.0.7827.55 (playwright chromium v1228) downloaded to /home/runner/.cache/ms-playwright/chromium-1228
+Console E2E	Install Chromium	2026-08-24T12:42:31.8293799Z Downloading FFmpeg (playwright ffmpeg v1011) from https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip
+Console E2E	Install Chromium	2026-08-24T12:42:32.7148238Z |                                                                                |   0% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7189474Z |■■■■■■■■                                                                        |  10% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7224274Z |■■■■■■■■■■■■■■■■                                                                |  20% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7241982Z |■■■■■■■■■■■■■■■■■■■■■■■■                                                        |  30% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7257864Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                                |  40% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7274126Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                        |  50% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7288308Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                |  60% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7297758Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                        |  70% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7315049Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                |  80% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7323953Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■        |  90% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7333793Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■| 100% of 2.3 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:32.7770313Z FFmpeg (playwright ffmpeg v1011) downloaded to /home/runner/.cache/ms-playwright/ffmpeg-1011
+Console E2E	Install Chromium	2026-08-24T12:42:32.7773235Z Downloading Chrome Headless Shell 149.0.7827.55 (playwright chromium-headless-shell v1228) from https://cdn.playwright.dev/builds/cft/149.0.7827.55/linux64/chrome-headless-shell-linux64.zip
+Console E2E	Install Chromium	2026-08-24T12:42:33.6888989Z |                                                                                |   0% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:33.8088279Z |■■■■■■■■                                                                        |  10% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:33.8751712Z |■■■■■■■■■■■■■■■■                                                                |  20% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:33.9213873Z |■■■■■■■■■■■■■■■■■■■■■■■■                                                        |  30% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:33.9562141Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                                |  40% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:33.9845084Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                        |  50% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:34.0176472Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                                |  60% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:34.0425228Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                        |  70% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:34.0722699Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■                |  80% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:34.1007755Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■        |  90% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:34.1264004Z |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■| 100% of 114.2 MiB
+Console E2E	Install Chromium	2026-08-24T12:42:35.5426382Z Chrome Headless Shell 149.0.7827.55 (playwright chromium-headless-shell v1228) downloaded to /home/runner/.cache/ms-playwright/chromium_headless_shell-1228
+Console E2E	Run the end-to-end suite	﻿2026-08-24T12:42:35.5642167Z ##[group]Run npm run e2e
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.5642412Z ^[[36;1mnpm run e2e^[[0m
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.5675084Z shell: /usr/bin/bash -e {0}
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.5675300Z env:
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.5675498Z   CARGO_INCREMENTAL: 0
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.5675729Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.5675972Z ##[endgroup]
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.6430406Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.6430933Z > opencompany-console@0.1.0 e2e
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.6431482Z > playwright test
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:35.6431614Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:36.6228501Z [WebServer] [e2e host] building the console bundle (PW_SKIP_CONSOLE_BUILD=1 to skip)
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:36.6940501Z [WebServer] 
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:36.6941014Z [WebServer] > opencompany-console@0.1.0 build
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:36.6941641Z [WebServer] > tsc -b && vite build
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:36.6941975Z [WebServer] 
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:48.0561543Z [WebServer] vite v5.4.21 building for production...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:48.0966138Z [WebServer] transforming...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:54.9259658Z [WebServer] ✓ 4100 modules transformed.
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.4195227Z [WebServer] rendering chunks...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8135442Z [WebServer] computing gzip size...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8548113Z [WebServer] dist/assets/geist-mono-symbols2-wght-normal-CO5SzqOn.woff2          5.81 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8549389Z [WebServer] dist/assets/geist-mono-cyrillic-ext-wght-normal-X_5orZeX.woff2      6.18 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8550373Z [WebServer] dist/index.html                                                     6.23 kB │ gzip:   2.80 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8551626Z [WebServer] dist/assets/geist-cyrillic-ext-wght-normal-DjL33-gN.woff2           7.42 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8552408Z [WebServer] dist/assets/geist-mono-vietnamese-wght-normal-DadHysG0.woff2        7.70 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8553197Z [WebServer] dist/assets/geist-vietnamese-wght-normal-6IgcOCM7.woff2             8.00 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8553992Z [WebServer] dist/assets/geist-mono-cyrillic-wght-normal-DiZS0aHC.woff2         12.94 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8554757Z [WebServer] dist/assets/geist-mono-latin-ext-wght-normal-Bwz-egvJ.woff2        14.70 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8555518Z [WebServer] dist/assets/geist-cyrillic-wght-normal-BEAKL7Jp.woff2              15.08 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8556274Z [WebServer] dist/assets/geist-latin-ext-wght-normal-DC-KSUi6.woff2             16.51 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8557004Z [WebServer] dist/assets/geist-mono-latin-wght-normal-XN7g48iV.woff2            23.13 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8557744Z [WebServer] dist/assets/geist-latin-wght-normal-BgDaEnEv.woff2                 29.40 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8558611Z [WebServer] dist/assets/WorkflowsView-BnuhLJ6X.css                             15.87 kB │ gzip:   2.67 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8559520Z [WebServer] dist/assets/index-C7RA4Jy3.css                                    184.68 kB │ gzip:  28.40 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8560600Z [WebServer] dist/assets/arrow-up-right-D2nA4wdV.js                              0.34 kB │ gzip:   0.27 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8561578Z [WebServer] dist/assets/coins-CvXCBI1O.js                                       0.45 kB │ gzip:   0.33 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8562421Z [WebServer] dist/assets/hash-DT79zyLM.js                                        1.35 kB │ gzip:   0.66 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8563219Z [WebServer] dist/assets/timer-DWAvo6M8.js                                       2.79 kB │ gzip:   1.29 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8564013Z [WebServer] dist/assets/YAxis-DiHBZdo7.js                                       4.18 kB │ gzip:   1.82 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8564821Z [WebServer] dist/assets/PagesView-CGq018tA.js                                   4.85 kB │ gzip:   2.00 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8565641Z [WebServer] dist/assets/CartesianGrid-CvBIqG55.js                               6.43 kB │ gzip:   2.25 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8566448Z [WebServer] dist/assets/FinancesView-D0lcdMn3.js                                7.16 kB │ gzip:   2.64 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8567230Z [WebServer] dist/assets/value-DqH_WevB.js                                       9.37 kB │ gzip:   4.00 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8568292Z [WebServer] dist/assets/ObservatoryView-B67y_hX0.js                            23.88 kB │ gzip:   7.11 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8569120Z [WebServer] dist/assets/StyleguideView-D8hDmidG.js                             28.44 kB │ gzip:   8.51 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8569966Z [WebServer] dist/assets/FinanceSection-t37mNyCf.js                             31.06 kB │ gzip:   8.51 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8570878Z [WebServer] dist/assets/UsageView-DzyOxidY.js                                  32.41 kB │ gzip:   9.59 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8592344Z [WebServer] dist/assets/index-BoQ1aGqQ.js                                      56.36 kB │ gzip:  18.72 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8593565Z [WebServer] dist/assets/WorkspaceView-XxWmy4wY.js                              58.96 kB │ gzip:  17.43 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8594807Z [WebServer] dist/assets/KnowledgeGraph-D8rPBjtt.js                             82.25 kB │ gzip:  27.41 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8596046Z [WebServer] dist/assets/WorkflowsView-zVPuOYwW.js                             303.79 kB │ gzip:  94.09 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8597240Z [WebServer] dist/assets/chart-DFrfgRCk.js                                     339.82 kB │ gzip: 101.88 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8598349Z [WebServer] dist/assets/index-w2lx9ZmQ.js                                   1,646.94 kB │ gzip: 486.57 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8598910Z [WebServer] 
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8599465Z [WebServer] (!) Some chunks are larger than 500 kB after minification. Consider:
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8600456Z [WebServer] - Using dynamic import() to code-split the application
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8601864Z [WebServer] - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8603150Z [WebServer] - Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:55.8603894Z [WebServer] ✓ built in 7.78s
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:56.0148668Z [WebServer] 
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:56.0149260Z [WebServer] > opencompany-console@0.1.0 build:pages-sdk
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:56.0150547Z [WebServer] > tsc -p tsconfig.pages-sdk.json && vite build --config pages-sdk/vite.config.ts && vite build --config pages-sdk/vite.react.config.ts
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:56.0172402Z [WebServer] 
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:57.6244796Z [WebServer] vite v5.4.21 building for production...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:57.6562377Z [WebServer] transforming...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.2347128Z [WebServer] ✓ 102 modules transformed.
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.2708325Z [WebServer] rendering chunks...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.2956110Z [WebServer] computing gzip size...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.3042385Z [WebServer] dist/pages-sdk/index.css  380.20 kB │ gzip: 176.98 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.3043174Z [WebServer] dist/pages-sdk/index.mjs  112.43 kB │ gzip:  23.29 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.3044755Z [WebServer] ✓ built in 663ms
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.4608554Z [WebServer] vite v5.4.21 building for production...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.4916698Z [WebServer] transforming...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.9138193Z [WebServer] ✓ 27 modules transformed.
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.9774882Z [WebServer] rendering chunks...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.9793760Z [WebServer] computing gzip size...
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.9864858Z [WebServer] dist/pages-sdk/react.mjs  202.71 kB │ gzip: 52.74 kB
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:58.9865637Z [WebServer] ✓ built in 508ms
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:59.0121372Z [WebServer] [e2e host] serving /home/runner/work/opencompany/opencompany/companies/e2e_harness on 127.0.0.1:14146 (data: /home/runner/work/opencompany/opencompany/target/e2e/data)
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:59.0178700Z [WebServer] agent journal: /home/runner/work/opencompany/opencompany/target/e2e/data/openhuman/workspace/tinyagents_store (root /home/runner/work/opencompany/opencompany/target/e2e/data/openhuman, from OPENCOMPANY_DATA_DIR)
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:59.0568171Z [WebServer] registered company `e2e-harness-co` (E2E Harness Co) from /home/runner/work/opencompany/opencompany/companies/e2e_harness
+Console E2E	Run the end-to-end suite	2026-08-24T12:42:59.0569125Z [WebServer] listening on 127.0.0.1:14146 (from --bind)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:00.6591963Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:00.6593001Z Running 327 tests using 1 worker
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:00.6608293Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:01.6646530Z   ✓    1 test/e2e/add-host-connectors.spec.ts:194:1 › a desktop offers all four places a runtime can run (501ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:02.2599776Z   ✓    2 test/e2e/add-host-connectors.spec.ts:212:1 › the chooser is a screen, and its tabs fit the card they are drawn in (583ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:02.6732467Z   ✓    3 test/e2e/add-host-connectors.spec.ts:248:1 › a browser is offered only the two connectors it can honour (405ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:03.1090064Z   ✓    4 test/e2e/add-host-connectors.spec.ts:263:1 › a browser is told a gateway has to allow this console's origin (426ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:03.7235921Z   ✓    5 test/e2e/add-host-connectors.spec.ts:274:1 › a host reached over ssh is added at the address the shell opened (606ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:04.3059041Z   ✓    6 test/e2e/add-host-connectors.spec.ts:317:1 › ssh's refusal stays on screen instead of becoming a host (575ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:04.6444318Z   ✓    7 test/e2e/add-host-connectors.spec.ts:378:1 › a cloud tenant that is asleep is being woken, not unreachable (330ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:04.9770221Z   ✓    8 test/e2e/add-host-connectors.spec.ts:399:1 › the same address as a gateway you run is simply unreachable (323ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:05.2063141Z   ✓    9 test/e2e/add-host-connectors.spec.ts:414:1 › a hub with no hosts offers the choice rather than describing it (219ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:05.7469921Z   ✓   10 test/e2e/agent-detail.spec.ts:84:1 › a company agent opens from its card and shows what it is (528ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:06.1471754Z   ✓   11 test/e2e/agent-detail.spec.ts:144:1 › desk membership is on the agent, and an agent is reachable by link (390ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:07.5783225Z   ✓   12 test/e2e/agent-detail.spec.ts:157:1 › an agent defined in the console can be read back and edited (1.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:08.1268792Z   ✓   13 test/e2e/agent-profile-panel.spec.ts:39:1 › a teammate's face opens who they are, without leaving the channel (537ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:09.1748335Z   ✓   14 test/e2e/agent-profile-panel.spec.ts:59:1 › the panel hands off to the teammate's own page, with the form open (1.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:09.5276951Z   ✓   15 test/e2e/agent-profile-panel.spec.ts:76:1 › Back closes the editor and leaves the teammate's page standing (343ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:09.8450055Z   ✓   16 test/e2e/agent-runs.spec.ts:41:1 › a teammate's page lists the attempts it has made (308ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:11.3231631Z   ✓   17 test/e2e/alert-dialog-confirm.spec.ts:96:1 › confirming a task delete dismisses the dialog before the request lands (1.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:11.7249612Z   ✓   18 test/e2e/approval-timeout-honesty.spec.ts:207:1 › a proxy timeout does not claim the decision failed, and clears the card (384ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:12.1063571Z   ✓   19 test/e2e/approval-timeout-honesty.spec.ts:246:1 › a declined approval that times out reads as recorded, not failed (372ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:12.4730096Z   ✓   20 test/e2e/approval-timeout-honesty.spec.ts:277:1 › a host refusal still reports honestly, with no markup in the message (356ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:12.8557791Z   ✓   21 test/e2e/approval-timeout-honesty.spec.ts:312:1 › a connection that fails instantly is still reported as a failure (373ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:13.2410224Z   ✓   22 test/e2e/approval-timeout-honesty.spec.ts:339:1 › an unparseable body on the document reader falls back to the status line (377ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:13.9399938Z   ✓   23 test/e2e/assignee-picker.spec.ts:84:1 › the edit dialog offers Unassigned, desks and teammates instead of a text field (684ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:14.7155183Z   ✓   24 test/e2e/assignee-picker.spec.ts:133:1 › a card assigned to a desk keeps the desk, not the desk's lead (767ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:16.0990994Z   ✓   25 test/e2e/assignee-picker.spec.ts:152:1 › a card can be assigned to a teammate, and created for nobody at all (1.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:17.2275568Z   ✓   26 test/e2e/assignee-picker.spec.ts:180:1 › renaming a card does not resubmit its assignee (1.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:18.4562333Z   ✓   27 test/e2e/assignee-picker.spec.ts:209:1 › the detail screen can hand a card back to the orchestrator (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:19.1403386Z   ✓   28 test/e2e/assignee-picker.spec.ts:235:1 › an assignee the roster no longer carries still renders, and the card stays editable (674ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:19.5063281Z   ✓   29 test/e2e/board-columns.spec.ts:75:1 › the retired #/tasks lands on the board, and #/tasks/<id> still opens the card (351ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:19.8479469Z   ✓   30 test/e2e/board-columns.spec.ts:99:1 › the board renders the three phases in order, and none of the retired columns (332ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:20.3070514Z   ✓   31 test/e2e/board-columns.spec.ts:116:1 › an empty board leaves its column affordances to explain the empty state (450ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:21.1325457Z   ✓   32 test/e2e/board-columns.spec.ts:170:1 › new work enters through one prompt box and lands in Pending (814ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:21.5057642Z   ✓   33 test/e2e/board-columns.spec.ts:265:1 › Plan first moves the card into planning without dispatching it (361ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:21.5806027Z   -   34 test/e2e/board-columns.spec.ts:339:1 › a card sent to Plan first is planned and settled, never left parked
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:22.2507323Z   ✓   35 test/e2e/board-drag.spec.ts:207:1 › the whole board fits the window, so the last column is a full drop target (656ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:24.8352896Z   ✓   36 test/e2e/board-drag.spec.ts:234:1 › a card drags from Working to Done, and the board scrolls to get there (2.6s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:26.2206197Z   ✓   37 test/e2e/board-drag.spec.ts:336:1 › a drop that misses every column says so instead of doing nothing (1.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:27.6200292Z   ✓   38 test/e2e/board-drag.spec.ts:370:1 › a move the host refuses names the card, the column, and the reason (1.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:28.5838926Z   ✓   39 test/e2e/brain-memory.spec.ts:22:1 › operator adds a Brain memory that persists across reload and can be deleted (948ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:29.0958860Z   ✓   40 test/e2e/chat-approval-line.spec.ts:109:1 › the line recording a decision is visible in a real channel (499ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:29.7753791Z   ✓   41 test/e2e/chat-approval-line.spec.ts:132:1 › a decision the host refuses says so in the same channel (670ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:30.2279925Z   ✓   42 test/e2e/chat-approval-line.spec.ts:150:1 › with no channel ever opened, the decision still reaches the first desk (442ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:30.7849601Z   ✓   43 test/e2e/chat-channel-membership.spec.ts:140:1 › #369 each desk counts and lists its own members, not the company (543ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:31.2968515Z   ✓   44 test/e2e/chat-channel-membership.spec.ts:170:1 › #369 a DM reads as two people, not as the whole company (505ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:31.6911838Z   ✓   45 test/e2e/chat-channel-membership.spec.ts:184:1 › #369 a host with no desks surface still shows the whole roster (384ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:34.7153056Z   ✓   46 test/e2e/chat-channel-membership.spec.ts:197:1 › #370 a deep link never flashes a channel the company doesn't have (3.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:35.1322638Z   ✓   47 test/e2e/chat-channel-membership.spec.ts:225:1 › #370 an unknown channel opens the first one and says so (408ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:35.4995549Z   ✓   48 test/e2e/chat-channel-membership.spec.ts:245:1 › #370 a broken /desks is a retryable error, not invented channels (358ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:36.0436438Z   ✓   49 test/e2e/chat-channel-membership.spec.ts:268:1 › #485 a desk channel links out to its own desk on the org chart (535ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:36.5819480Z   ✓   50 test/e2e/chat-channel-membership.spec.ts:291:1 › #485 a DM has no desk to manage (530ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:36.9892084Z   ✓   51 test/e2e/chat-channel-membership.spec.ts:308:1 › #485 a fallback desk offers no link to a desk the host doesn't have (399ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:43:37.4297936Z   ✓   52 test/e2e/chat-channel-membership.spec.ts:321:1 › the send path and the thread id it addresses are undisturbed (431ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:44:46.1968360Z   ✘   53 test/e2e/chat-detached-post-failure.spec.ts:79:1 › a chat POST killed in flight still shows the reply the host went on to write (1.1m)
+Console E2E	Run the end-to-end suite	2026-08-24T12:44:56.4505701Z   ✓   54 test/e2e/chat-detached-sse-unavailable.spec.ts:74:1 › with /events unreachable, a detached turn's reply still lands and the working row still settles (9.8s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:00.1284689Z   ✓   55 test/e2e/chat-dispatch-marker.spec.ts:100:1 › a settled dispatch marks the channel its card was raised in — and only that one (3.7s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:00.2099697Z   -   56 test/e2e/chat-dispatch-marker.spec.ts:188:1 › the marker lands live and survives a reload exactly once
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:00.2947789Z   -   57 test/e2e/chat-dispatch-marker.spec.ts:230:1 › a card raised on the board leaves no channel marker
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:00.7403444Z   ✓   58 test/e2e/chat-history-loading.spec.ts:108:1 › a reloaded DM waits for its history instead of calling itself new (431ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:01.1691402Z   ✓   59 test/e2e/chat-history-loading.spec.ts:142:1 › a DM the host reports empty does say it is the start (418ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:01.6622079Z   ✓   60 test/e2e/chat-inline-approval.spec.ts:94:1 › a request raised in a channel appears in that channel, and only there (480ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:02.0034236Z   ✓   61 test/e2e/chat-inline-approval.spec.ts:123:1 › the Approvals page still shows everything, including the inline one (331ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:05.2788151Z   ✓   62 test/e2e/chat-inline-approval.spec.ts:132:1 › deciding inline detaches, and the continuation lands in the same channel (3.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:05.7490371Z   ✓   63 test/e2e/chat-inline-approval.spec.ts:188:1 › declining inline says so in the thread rather than leaving it stalled (458ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:09.3766274Z   ✓   64 test/e2e/chat-inline-approval.spec.ts:209:1 › a decision made on the Approvals page settles the inline card, with no reload (3.6s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:09.7618509Z   ✓   65 test/e2e/chat-inline-approval.spec.ts:243:1 › a parked approval raises its card live, without a reload (374ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:10.9115349Z   ✓   66 test/e2e/chat-live-events.spec.ts:125:1 › a reply the console never asked for lands in the open channel, with no reload (1.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:11.3949392Z   ✓   67 test/e2e/chat-live-events.spec.ts:144:1 › a reply to a channel you are not on leaves an unread badge, and opening it clears the badge (472ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:15.5767485Z   ✓   68 test/e2e/chat-live-events.spec.ts:166:1 › a turn sent from the composer renders exactly one company bubble (4.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:15.9597503Z   ✓   69 test/e2e/chat-live-events.spec.ts:192:1 › a running turn shows its tool rows in the channel (373ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:20.2929929Z   ✓   70 test/e2e/chat-live-events.spec.ts:251:1 › a detached turn's reply arrives over the stream, not on the POST (4.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:20.9097365Z   ✓   71 test/e2e/chat-live-events.spec.ts:279:1 › a detached turn survives a reload and rebuilds from the durable record (607ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:29.3607991Z   ✓   72 test/e2e/chat-live-events.spec.ts:301:1 › a turn still open on reload re-arms the working row, and clears when it settles (8.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:33.9544491Z   ✓   73 test/e2e/chat-live-events.spec.ts:376:1 › a failed turn leaves a durable line, not a spinner (4.6s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:34.3254953Z   ✓   74 test/e2e/chat-presence.spec.ts:104:1 › a present person shows an online dot; an absent one shows no status (359ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:34.6743337Z   ✓   75 test/e2e/chat-presence.spec.ts:130:1 › an away status renders distinctly from online (341ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:35.0247593Z   ✓   76 test/e2e/chat-presence.spec.ts:151:1 › a teammate row carries no presence dot (342ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:43.6202544Z   ✓   77 test/e2e/chat-presence.spec.ts:164:1 › a typing frame renders a line, and it clears when the renewals stop (8.6s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:44.9042011Z   ✓   78 test/e2e/chat-presence.spec.ts:187:1 › a typing frame for another channel does not leak into this one (1.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:45.2578770Z   ✓   79 test/e2e/chat-presence.spec.ts:207:1 › a host with no presence route degrades to no dots at all (346ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:51.3004346Z   ✓   80 test/e2e/chat-to-card.spec.ts:52:1 › any message on a desk thread can be added to the board (6.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:45:51.3739809Z   -   81 test/e2e/chat-to-card.spec.ts:85:1 › a card the orchestrator opens is chipped in chat, and survives a reload
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:07.9316861Z   ✓   82 test/e2e/chat-to-card.spec.ts:134:1 › a dismissed card's chip goes away and does not come back on reload (16.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:08.2892118Z   ✓   83 test/e2e/company-cards.spec.ts:149:1 › #1141 the Company nav lands on the teammates, not on the desks (337ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:08.6175228Z   ✓   84 test/e2e/company-cards.spec.ts:168:1 › #1141 a card carries the description, the status and the open count (321ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:09.0031718Z   ✓   85 test/e2e/company-cards.spec.ts:199:1 › #1436 the roster can search names, show working teammates, and identify the baseline (375ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:09.3007939Z   ✓   86 test/e2e/company-cards.spec.ts:222:1 › #1436 a workload outage disables the Working filter instead of hiding the roster (288ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:09.6843782Z   ✓   87 test/e2e/company-cards.spec.ts:242:1 › the status line sits on one baseline across a row, whatever the description (376ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:10.3500566Z   ✓   88 test/e2e/company-cards.spec.ts:289:1 › #1193 the chart is a destination with its own address, not a mode (656ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:10.8176756Z   ✓   89 test/e2e/company-cards.spec.ts:315:1 › #1193 the Company nav row means the roster, even after visiting Desks (458ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:11.1673392Z   ✓   90 test/e2e/company-cards.spec.ts:344:1 › #1193 desk management survives — a desk can still be created and reached (341ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:11.4511254Z   ✓   91 test/e2e/company-cards.spec.ts:361:1 › #485 a desk address still opens the chart at that desk (274ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:11.7848717Z   ✓   92 test/e2e/company-cards.spec.ts:372:1 › #1141 a host with no board says nothing, rather than idle (326ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:12.2054487Z   ✓   93 test/e2e/company-cards.spec.ts:395:1 › #1181 the card and the detail header wear the same mascot (411ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:12.6049541Z   ✓   94 test/e2e/company-cards.spec.ts:417:1 › #1190 the card carries no switch; the inbox lives on the teammate (391ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:12.8842223Z   ✓   95 test/e2e/company-cards.spec.ts:436:1 › #1141 bare #/team is the Company page now (271ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.4182232Z   ✓   96 test/e2e/company-cards.spec.ts:447:1 › #1141 a card opens a teammate, breadcrumbed and editable (526ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7672789Z   ✓   97 test/e2e/company-cards.spec.ts:493:1 › #1433 switching teammates drops the previous one's open tasks (339ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7674923Z   -   98 test/e2e/composio-account-choice.spec.ts:211:1 › an operator names the account, and the page says so
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7676875Z   -   99 test/e2e/composio-account-choice.spec.ts:356:3 › the agent acts as the chosen account › no id is sent until somebody chooses, and then it is theirs
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7678329Z   -  100 test/e2e/composio-provider-detail.spec.ts:179:1 › the panel names every account the company holds, and marks none of them
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7679717Z   -  101 test/e2e/composio-provider-detail.spec.ts:235:1 › an account Composio did not date says so rather than showing a blank
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7681175Z   -  102 test/e2e/composio-provider-detail.spec.ts:282:1 › usage is counted per provider, and an unmetered host reports no figure
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7682413Z   -  103 test/e2e/composio-provider-detail.spec.ts:314:1 › a disconnect addresses one account, and leaves the other connected
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:13.7683723Z   -  104 test/e2e/composio-provider-detail.spec.ts:361:1 › a member is told what is connected and offered nothing that changes it
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:14.2175656Z   ✓  105 test/e2e/connection-degrade.spec.ts:77:1 › a host that is down reddens its own row and leaves the others working (431ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:15.0816071Z   ✓  106 test/e2e/connection-degrade.spec.ts:123:1 › selecting the dead host shows its failure without disturbing the live one (850ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:15.5927679Z   ✓  107 test/e2e/connection-degrade.spec.ts:153:1 › the number row switches hosts, and leaves the browser alone past the last one (500ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:15.9993529Z   ✓  108 test/e2e/connection-degrade.spec.ts:189:1 › names the host it was told nothing about by the address it answers on (394ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:16.7840276Z   ✓  109 test/e2e/connections-authority.spec.ts:87:1 › a member sees what is connected but is offered nothing that changes it (776ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:17.4790960Z   ✓  110 test/e2e/connections-authority.spec.ts:144:1 › an admin is still offered every control across the three pages (688ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:18.1559874Z   ✓  111 test/e2e/connections-native-not-offered.spec.ts:75:1 › a provider the backend does not offer is no longer listed (666ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:18.9225701Z   ✓  112 test/e2e/connections-native-not-offered.spec.ts:93:1 › no Connect is offered anywhere on a host that cannot authorize one (759ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:19.6728992Z   ✓  113 test/e2e/connections-native-not-offered.spec.ts:106:1 › a provider already connected natively keeps its tile and its Disconnect (741ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:20.2918342Z   ✓  114 test/e2e/connections-native-not-offered.spec.ts:147:1 › a host with no catalog says why the grid is empty (609ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:21.0573146Z   ✓  115 test/e2e/connections-one-list.spec.ts:60:1 › a provider appears exactly once on the page (755ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:21.7395424Z   ✓  116 test/e2e/connections-one-list.spec.ts:74:1 › the page holds one provider grid, not two (674ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:22.3911630Z   ✓  117 test/e2e/connections-one-list.spec.ts:89:1 › no connect action is offered for an already-connected provider (643ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:22.7425421Z   ✓  118 test/e2e/desktop-connections.spec.ts:203:1 › a desktop opens on its embedded host, not on its own origin (336ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:23.1794131Z   ✓  119 test/e2e/desktop-connections.spec.ts:235:1 › a remembered host does not take the launch just by being older (428ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:25.1589743Z   ✓  120 test/e2e/desktop-connections.spec.ts:290:1 › a desktop waits for its own host rather than borrowing a remembered one (2.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:25.5962931Z   ✓  121 test/e2e/desktop-connections.spec.ts:342:1 › a paired host on plain http is refused, and says why (428ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:26.0116802Z   ✓  122 test/e2e/desktop-connections.spec.ts:389:1 › an unencrypted host with no credential still connects (408ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:26.2614134Z   ✓  123 test/e2e/desktop-connections.spec.ts:427:1 › a desktop whose host did not start says so, and can still add one (239ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:26.7450795Z   ✓  124 test/e2e/desktop-embedded-identity.spec.ts:203:1 › a relaunch at a new port re-addresses the connection instead of adding one (471ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:26.9967648Z   ✓  125 test/e2e/desktop-embedded-identity.spec.ts:264:1 › the rows an older version left behind collapse on the next launch (242ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:27.5851317Z   ✓  126 test/e2e/desktop-local-instances.spec.ts:196:1 › a stopped instance is listed and startable, not a broken row (575ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:28.2144341Z   ✓  127 test/e2e/desktop-local-instances.spec.ts:217:1 › a host started here can be stopped again without losing the others (621ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:28.7826102Z   ✓  128 test/e2e/desktop-local-instances.spec.ts:241:1 › a second company can be created on this computer (560ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:29.6100320Z   ✓  129 test/e2e/desktop-local-instances.spec.ts:260:1 › a desktop-created company can be deleted after confirmation (820ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:30.1500883Z   ✓  130 test/e2e/desktop-local-instances.spec.ts:279:1 › the default desktop company cannot be deleted (533ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:31.3310159Z   ✓  131 test/e2e/dialog-accessibility.spec.ts:43:1 › the task dialog is modal and restores keyboard focus for every close path (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:31.8988823Z   ✓  132 test/e2e/dialog-accessibility.spec.ts:70:1 › the mobile sidebar sheet is modal (559ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:32.5243863Z   ✓  133 test/e2e/dialog-accessibility.spec.ts:82:1 › the mobile sidebar sheet returns focus to its toggle, not to an earlier control (618ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:33.1934266Z   ✓  134 test/e2e/host-switch-history.spec.ts:85:1 › Back undoes a host switch instead of silently spending the other host's route (658ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:33.7997430Z   ✓  135 test/e2e/host-switch-history.spec.ts:123:1 › the working host's own route stack is intact after a trip through the failure (599ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:34.0269512Z   ✓  136 test/e2e/host-switch-history.spec.ts:157:1 › a copied address reopens the host it named, failure and all (216ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:34.4299652Z   ✓  137 test/e2e/host-switch-history.spec.ts:167:1 › a host that cannot be reached can be forgotten from the failure itself (394ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:35.3126986Z   ✓  138 test/e2e/inbox.spec.ts:48:1 › Inbox is reachable, explains that it is parked, and reads the host's per-agent store (874ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:36.2795901Z   ✓  139 test/e2e/inference.spec.ts:52:1 › a key typed for a BYOK provider is not discarded by switching to managed (955ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:37.2641771Z   ✓  140 test/e2e/inference.spec.ts:93:1 › a key typed for a BYOK provider does reach the host on save (977ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:38.4470276Z   ✓  141 test/e2e/inference.spec.ts:139:1 › changing provider asks before replacing a typed endpoint or model (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:38.8144665Z   ✓  142 test/e2e/ledger-list-row.spec.ts:18:1 › a list row leads with its title and shows one readable status (354ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:39.1412473Z   ✓  143 test/e2e/lifecycle-platform-scope.spec.ts:37:1 › the lifecycle card offers pause, withholds suspend and archive, and says why (315ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:39.2218631Z   ✓  144 test/e2e/lifecycle-platform-scope.spec.ts:61:1 › the host really does refuse suspend and archive to this session (71ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:39.5589500Z   ✓  145 test/e2e/list-switcher.spec.ts:56:1 › Work is one nav row, landing on Tasks by default with the title as the switcher (326ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:40.0449634Z   ✓  146 test/e2e/list-switcher.spec.ts:74:1 › opening the switcher lists every list, current one marked, with open counts (477ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:40.6472598Z   ✓  147 test/e2e/list-switcher.spec.ts:88:1 › selecting a list from the switcher swaps the page and updates the address (595ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:41.1822186Z   ✓  148 test/e2e/list-switcher.spec.ts:102:1 › a deep link to a non-default list opens that list directly, and the back button returns (527ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:41.4927012Z   ✓  149 test/e2e/list-switcher.spec.ts:119:1 › #/tasks/<id> still opens the card detail page, untouched by the switcher (302ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:42.2212475Z   ✓  150 test/e2e/list-switcher.spec.ts:135:1 › Manage lists opens from the switcher, in Work — not Company (721ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:42.8168395Z   ✓  151 test/e2e/list-switcher.spec.ts:153:1 › New list opens the declare wizard in place, over the current list (586ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:43.3138266Z   ✓  152 test/e2e/list-switcher.spec.ts:167:1 › the browser Back button closes the in-place wizard rather than skipping past it (486ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:43.7291647Z   ✓  153 test/e2e/list-switcher.spec.ts:186:1 › counts show zero, not nothing, so a zero never reads as missing information (406ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:44.2740937Z   ✓  154 test/e2e/list-switcher.spec.ts:198:1 › an unknown or retired list's address recovers through the same switcher (536ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:44.4808399Z   ✓  155 test/e2e/login-centred.spec.ts:61:3 › the sign-in composition is centred below the header at 1440x900 (195ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:44.6759959Z   ✓  156 test/e2e/login-centred.spec.ts:61:3 › the sign-in composition is centred below the header at 1100x900 (190ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:45.0127991Z   ✓  157 test/e2e/login-centred.spec.ts:103:1 › centring holds as the card changes height (331ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:45.2628924Z   ✓  158 test/e2e/login-centred.spec.ts:144:3 › the wallet-mode card is centred below the header (243ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:45.4842975Z   ✓  159 test/e2e/login-centred.spec.ts:144:3 › the none-mode card is centred below the header (212ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:45.7368073Z   ✓  160 test/e2e/login-centred.spec.ts:169:1 › a viewport too short for the card scrolls rather than clipping it (249ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:46.1260703Z   ✓  161 test/e2e/login-resend.spec.ts:41:1 › the sent card offers a throttled resend, and nothing around it contradicts it (379ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:46.6168969Z   ✓  162 test/e2e/manage-hosts.spec.ts:83:1 › every connected host is listed with what can be done to it (481ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:47.1634245Z   ✓  163 test/e2e/manage-hosts.spec.ts:98:1 › renaming a host keeps everything the console remembers about it (539ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:47.7129611Z   ✓  164 test/e2e/manage-hosts.spec.ts:119:1 › a host that moved is re-addressed under the id it already had (540ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:48.2177773Z   ✓  165 test/e2e/manage-hosts.spec.ts:138:1 › moving a host onto one this console already holds is refused (496ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:48.7318298Z   ✓  166 test/e2e/manage-hosts.spec.ts:156:1 › an address with no scheme is refused rather than saved (506ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:49.4317708Z   ✓  167 test/e2e/manage-hosts.spec.ts:171:1 › forgetting a host drops it from the roster and from storage (690ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:50.7655878Z   ✓  168 test/e2e/manage-lists-wizard.spec.ts:55:1 › the wizard declares a real list from Manage Lists, which appears in the switcher (1.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:52.2638680Z   ✓  169 test/e2e/manage-lists-wizard.spec.ts:112:1 › retiring a declared list asks before it deletes, then removes it everywhere (1.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:52.8450586Z   ✓  170 test/e2e/manage-lists-wizard.spec.ts:191:1 › a managed list row opens that list (574ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:52.8451920Z   -  171 test/e2e/mcp-agent.spec.ts:85:1 › an agent calls a tool on a registered MCP server and shows the result
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:53.4290452Z   ✓  172 test/e2e/mcp.spec.ts:47:1 › Settings MCP lists the company's servers instead of crashing on open (570ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:54.1520688Z   ✓  173 test/e2e/mcp.spec.ts:81:1 › a server opens into the panel a Composio provider opens into (712ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:54.9257531Z   ✓  174 test/e2e/mcp.spec.ts:132:1 › an admin adds and removes a runtime MCP server (765ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:55.8113608Z   ✓  175 test/e2e/mcp.spec.ts:181:1 › mcp.json shows the same servers the rows do, and saves an edit back (877ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:56.4706785Z   ✓  176 test/e2e/oauth-onboarding-resume.spec.ts:48:1 › a legacy hash callback lands on the OAuth page with its cancellation message (647ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:57.2383795Z   ✓  177 test/e2e/oauth-onboarding-resume.spec.ts:86:1 › an unknown failure code still produces a usable message (760ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:57.9772162Z   ✓  178 test/e2e/oauth-onboarding-resume.spec.ts:94:1 › the tour resumes on the accounts stop after a redirect (731ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:58.6142956Z   ✓  179 test/e2e/oauth-onboarding-resume.spec.ts:140:1 › a stale resume marker does not hijack a later visit (630ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:58.6879897Z   -  180 test/e2e/orchestration-simulation.spec.ts:97:1 › a goal becomes delegated cards, the team works them, and review closes them
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:59.0995620Z   ✓  181 test/e2e/org-tree.spec.ts:358:1 › #311 the org chart is reachable, which it was not before (396ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:59.4331754Z   ✓  182 test/e2e/org-tree.spec.ts:397:1 › #311 the chart is three levels and never a fourth (324ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:46:59.7653419Z   ✓  183 test/e2e/org-tree.spec.ts:422:1 › #311 the lead is the desk's first member, badged (323ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:00.7166642Z   ✓  184 test/e2e/org-tree.spec.ts:443:1 › #311 a desk can be created from the chart and survives a reload (943ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:01.7158829Z   ✓  185 test/e2e/org-tree.spec.ts:473:1 › #311 membership can be edited from the chart and survives a reload (992ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:02.6999979Z   ✓  186 test/e2e/org-tree.spec.ts:519:1 › #839 creates a teammate on a selected desk and persists it (972ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:03.4067104Z   ✓  187 test/e2e/org-tree.spec.ts:556:1 › #839 creates a teammate with no desk as unplaced (698ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:04.0850272Z   ✓  188 test/e2e/org-tree.spec.ts:578:1 › #839 refuses a company-page teammate add when the host has no team write plane (666ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:04.8407095Z   ✓  189 test/e2e/org-tree.spec.ts:595:1 › #1099 a teammate added from the company page is confirmed by name (744ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:05.4755414Z   ✓  190 test/e2e/org-tree.spec.ts:616:1 › #1099 a teammate the chart cannot read back is not confirmed as added (626ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:06.0327001Z   ✓  191 test/e2e/org-tree.spec.ts:649:1 › #311 the lead can be changed from the chart and survives a reload (547ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:07.2720581Z   ✓  192 test/e2e/org-tree.spec.ts:683:1 › a desk offers one add control, and it stays usable when the roster is exhausted (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:08.1691859Z   ✓  193 test/e2e/org-tree.spec.ts:719:1 › #839 a teammate created but not placed is still on the chart to place by hand (886ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:08.7982179Z   ✓  194 test/e2e/org-tree.spec.ts:766:1 › #839 dragging a seat reorders the desk and persists the new lead (621ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:09.4337058Z   ✓  195 test/e2e/org-tree.spec.ts:797:1 › #1227 dragging a seat across desks moves it, and persists (622ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:10.0329709Z   ✓  196 test/e2e/org-tree.spec.ts:845:1 › #1227 dragging a blueprint seat across desks is refused, visibly (590ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:10.6342622Z   ✓  197 test/e2e/org-tree.spec.ts:888:1 › #311 blueprint structure offers no control the host would refuse (591ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:10.9583521Z   ✓  198 test/e2e/org-tree.spec.ts:933:1 › #485 #/company/<deskId> lands on that desk, not just on the chart (315ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:11.3828264Z   ✓  199 test/e2e/org-tree.spec.ts:961:1 › #485 a desk id the chart doesn't have is a silent no-op (413ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:11.7335996Z   ✓  200 test/e2e/org-tree.spec.ts:992:1 › #485 following the same desk link twice still lands on it (343ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:12.0504232Z   ✓  201 test/e2e/org-tree.spec.ts:1030:1 › #485 a stale id does not leave the previous desk wearing the ring (308ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:12.8586697Z   ✓  202 test/e2e/org-tree.spec.ts:1052:1 › #485 a membership edit on the chart is there when you get back to chat (797ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:13.1803504Z   ✓  203 test/e2e/org-tree.spec.ts:1095:1 › #311 a seat naming nobody on the roster is shown, not hidden (314ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:13.6540009Z   ✓  204 test/e2e/org-tree.spec.ts:1114:1 › #1102 a teammate on the chart opens their detail page (464ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:13.9650593Z   ✓  205 test/e2e/org-tree.spec.ts:1149:1 › #1102 a seat naming nobody on the roster is not offered as a link (301ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:14.3752246Z   ✓  206 test/e2e/overview-responsive-chrome.spec.ts:26:3 › keeps graph chrome reachable at 390px (399ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:14.8856487Z   ✓  207 test/e2e/overview-responsive-chrome.spec.ts:26:3 › keeps graph chrome reachable at 768px (501ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:15.1931513Z   ✓  208 test/e2e/page-headings.spec.ts:28:3 › the Brain route has one level-one heading (295ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:15.4758174Z   ✓  209 test/e2e/page-headings.spec.ts:28:3 › the Feedback route has one level-one heading (274ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:15.7384306Z   ✓  210 test/e2e/page-headings.spec.ts:28:3 › the Inbox route has one level-one heading (253ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:16.1147748Z   ✓  211 test/e2e/page-headings.spec.ts:28:3 › the Finances route has one level-one heading (368ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:16.4171588Z   ✓  212 test/e2e/page-headings.spec.ts:28:3 › the Conversation route has one level-one heading (292ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:16.6241997Z [page console] debug: [events] connecting {url: /api/v1/companies/e2e-harness-co/events}
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:16.6393057Z [page console] debug: [events] connected {url: /api/v1/companies/e2e-harness-co/events}
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:16.9911500Z   ✓  213 test/e2e/pages-render.spec.ts:25:1 › an agent-authored page bundle loads and paints in its sandboxed iframe (560ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:17.7679863Z   ✓  214 test/e2e/people-invite.spec.ts:77:1 › a host that cannot send email says so instead of reporting success (764ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:18.4549258Z   ✓  215 test/e2e/people-invite.spec.ts:113:1 › a delivered invite is reported as emailed, and the roster says so (674ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:18.7984947Z   ✓  216 test/e2e/shell-scrollbars.spec.ts:79:1 › scroll panes are styled by the console, not by the platform (330ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:19.9701871Z   ✓  217 test/e2e/shell-scrollbars.spec.ts:152:1 › scrolling marks the pane that moved, and only until it settles (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:20.3097663Z   ✓  218 test/e2e/shell-two-layer.spec.ts:115:3 › the shell is chrome plus one inset card, with no seam (light) (318ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:20.6349875Z   ✓  219 test/e2e/shell-two-layer.spec.ts:136:3 › the content card is inset on all four sides and rounded (light) (312ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:21.0874000Z   ✓  220 test/e2e/shell-two-layer.spec.ts:165:3 › the knowledge graph fills the card without spilling out of it (light) (443ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:21.4187523Z   ✓  221 test/e2e/shell-two-layer.spec.ts:115:3 › the shell is chrome plus one inset card, with no seam (dark) (322ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:21.7387548Z   ✓  222 test/e2e/shell-two-layer.spec.ts:136:3 › the content card is inset on all four sides and rounded (dark) (312ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:22.2126517Z   ✓  223 test/e2e/shell-two-layer.spec.ts:165:3 › the knowledge graph fills the card without spilling out of it (dark) (463ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:22.6165114Z   ✓  224 test/e2e/shell-two-layer.spec.ts:204:1 › the workflow canvas fills the card and keeps its minimap inside it (396ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:23.0365085Z   ✓  225 test/e2e/sidebar-host-switcher.spec.ts:34:1 › the sidebar owns the left edge, and its header switches hosts (409ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:23.6640340Z   ✓  226 test/e2e/sidebar-toggle-reachable.spec.ts:54:3 › sidebar toggle reachability › the mobile sheet has an in-viewport way back (614ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:24.7740982Z   ✓  227 test/e2e/sidebar-toggle-reachable.spec.ts:65:3 › sidebar toggle reachability › the mobile sheet closes after selecting a destination (1.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:25.3692426Z   ✓  228 test/e2e/sidebar-toggle-reachable.spec.ts:80:3 › sidebar toggle reachability › Escape closes the mobile sheet after focus moves inside it (588ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:26.0868895Z   ✓  229 test/e2e/sidebar-toggle-reachable.spec.ts:95:3 › sidebar toggle reachability › the mobile trigger does not overlap scrollable page content (710ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:27.1650146Z   ✓  230 test/e2e/sidebar-toggle-reachable.spec.ts:145:3 › sidebar toggle reachability › the inline sidebar's collapse control is a named, keyboard-operable header button (1.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:27.8256089Z   ✓  231 test/e2e/skills-registry.spec.ts:36:1 › registry tab lists the live server registry, not a hardcoded array (650ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:28.6362861Z   ✓  232 test/e2e/skills-registry.spec.ts:77:1 › installing from the registry lands a skill the host can serve (802ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:29.3330748Z   ✓  233 test/e2e/styleguide-navigation.spec.ts:3:1 › the standalone styleguide keeps theme controls and console navigation available (686ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:45.8072419Z   ✓  234 test/e2e/team-budget-edit.spec.ts:71:1 › an admin can cap a teammate the company left uncapped, and reset it back (16.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:47.4872342Z   ✓  235 test/e2e/team-budget-edit.spec.ts:118:1 › an admin can change a company-set cap, remove it, and reset it back (1.7s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:48.0085379Z   ✓  236 test/e2e/team-budget.spec.ts:29:1 › the Team page shows a capped teammate's daily budget and omits it for uncapped ones (508ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:48.3479326Z   ✓  237 test/e2e/team-desks.spec.ts:106:1 › #1440 teammates on a desk show the desk's name on the card (327ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:48.6463367Z   ✓  238 test/e2e/team-desks.spec.ts:119:1 › #1440 a teammate on no desk says so on the card (291ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:48.9477945Z   ✓  239 test/e2e/team-desks.spec.ts:131:1 › #1440 a desk member who is not the lead carries no marker (293ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:49.2968756Z   ✓  240 test/e2e/team-desks.spec.ts:144:1 › #1440 clicking a desk chip navigates to its own address (341ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:49.6804876Z   ✓  241 test/e2e/team-desks.spec.ts:160:1 › #1391 the teammate action is a focused title button, not an interactive card (376ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:50.0061964Z   ✓  242 test/e2e/theme-toggle-visible.spec.ts:109:3 › theme switch shows a glyph inside its button on scrolled Settings (dark) (314ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:50.3317538Z   ✓  243 test/e2e/theme-toggle-visible.spec.ts:109:3 › theme switch shows a glyph inside its button on scrolled Settings (light) (314ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:50.8865516Z   ✓  244 test/e2e/theme-toggle-visible.spec.ts:131:1 › the theme menu opens over the trigger and switches the theme (546ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:47:55.9002910Z   ✓  245 test/e2e/toast-dismissal.spec.ts:64:1 › the tour toast dismisses itself (5.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:02.9659152Z   ✓  246 test/e2e/toast-dismissal.spec.ts:72:1 › a toast cannot be pinned open by sonner's expand hotkey (7.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:10.0134507Z   ✓  247 test/e2e/toast-dismissal.spec.ts:84:1 › a toast does not follow the operator across views (7.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:21.9991710Z   ✓  248 test/e2e/toast-dismissal.spec.ts:99:1 › hovering a toast still holds it open to be read (12.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:25.3002566Z   ✓  249 test/e2e/tour-completion-persists.spec.ts:134:1 › completing the tour is remembered across a reload (3.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:27.0073973Z   ✓  250 test/e2e/tour-completion-persists.spec.ts:156:1 › skipping from inside a running tour is remembered across a reload (1.7s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:27.7218937Z   ✓  251 test/e2e/tour-completion-persists.spec.ts:183:1 › refusing the tour before it starts is remembered across a reload (706ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:31.3135975Z   ✓  252 test/e2e/tour-popover-in-viewport.spec.ts:67:3 › every tour stop's card is inside a 1512x772 viewport (3.6s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:34.8446566Z   ✓  253 test/e2e/tour-popover-in-viewport.spec.ts:67:3 › every tour stop's card is inside a 1280x800 viewport (3.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:34.8447656Z   -  254 test/e2e/wiring.spec.ts:44:1 › operator console renders a mocked backend reply end to end
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:36.2217705Z   ✓  255 test/e2e/workflow-canvas-escape.spec.ts:52:1 › Escape closes the node inspector and restores the canvas (1.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:37.0551355Z   ✓  256 test/e2e/workflow-canvas-escape.spec.ts:73:1 › Escape closes the copilot and does nothing once canvas overlays are gone (823ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:38.0382550Z   ✓  257 test/e2e/workflow-canvas-escape.spec.ts:91:1 › the copilot leads with its purpose and mutes the unavailable composer (975ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:38.8346150Z   ✓  258 test/e2e/workflow-canvas-fit.spec.ts:86:3 › at 1440px a ten-node pipeline opens legible and at its start (785ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:39.6295796Z   ✓  259 test/e2e/workflow-canvas-fit.spec.ts:86:3 › at 1100px a ten-node pipeline opens legible and at its start (783ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:40.3903579Z   ✓  260 test/e2e/workflow-canvas-fit.spec.ts:122:1 › a short workflow still fits whole, untouched (752ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:41.4044853Z   ✓  261 test/e2e/workflow-canvas-fit.spec.ts:138:1 › Zoom Out still reaches below the fit floor (#1261) (1.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:41.4048355Z   -  262 test/e2e/workflow-canvas-live.spec.ts:140:3 › workflow canvas during a live run › a console watching from the start sees each node light up (#863)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:41.4050166Z   -  263 test/e2e/workflow-canvas-live.spec.ts:184:3 › workflow canvas during a live run › a console that opens mid-run still paints the trail so far (#863)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:42.2213378Z   ✓  264 test/e2e/workflow-create-affordance.spec.ts:44:1 › one control answers to 'New workflow', and clicking it opens the dialog (806ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:43.1141880Z   ✓  265 test/e2e/workflow-create-affordance.spec.ts:59:1 › the empty state's call to action is reachable and distinctly named (885ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:43.7583120Z   ✓  266 test/e2e/workflow-create-affordance.spec.ts:97:1 › the empty state gives a first-time author an on-ramp, not just a button (#813) (635ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:45.1434930Z   ✓  267 test/e2e/workflow-dialog-feedback.spec.ts:79:1 › a bad email target is reported on blur, and typing again clears it (1.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:46.5543905Z   ✓  268 test/e2e/workflow-dialog-feedback.spec.ts:111:1 › an empty field is never nagged on blur — that stays submit's business (1.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:48.3750349Z   ✓  269 test/e2e/workflow-dialog-feedback.spec.ts:125:1 › changing a node's kind clears the field AND its error, leaving no orphan (1.8s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:51.1294266Z   ✓  270 test/e2e/workflow-dialog-feedback.spec.ts:160:1 › a cron expression is read back in plain English, in UTC and local time (2.7s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:52.9578015Z   ✓  271 test/e2e/workflow-dialog-feedback.spec.ts:191:1 › a schedule the humaniser won't paraphrase still previews its next runs (1.8s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:54.9263333Z   ✓  272 test/e2e/workflow-dialog-feedback.spec.ts:204:1 › garbage in the cron field previews the parser's message without blocking (2.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:48:58.8613875Z   ✓  273 test/e2e/workflow-dialog-feedback.spec.ts:241:1 › a condition's branches are picked, not typed, and the host checks the graph (#1074) (3.9s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:01.7126766Z   ✓  274 test/e2e/workflow-dialog-feedback.spec.ts:321:1 › the host's refusal of an unreachable node arrives before Create (#1074) (2.8s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:05.0802615Z   ✓  275 test/e2e/workflow-dialog-feedback.spec.ts:360:1 › a valid workflow still saves (3.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:06.1614557Z   ✓  276 test/e2e/workflow-dialog-feedback.spec.ts:405:1 › a new scheduled workflow discloses that it starts paused (#813) (1.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:07.2556890Z   ✓  277 test/e2e/workflow-dialog-feedback.spec.ts:426:1 › the collapsed destination shows a label, never the raw __none__ sentinel (#813) (1.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:08.5305566Z   ✓  278 test/e2e/workflow-dialog-feedback.spec.ts:445:1 › the channel destination is a picker of wired channels, not free text (#813) (1.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:09.6003571Z   ✓  279 test/e2e/workflow-dialog-feedback.spec.ts:470:1 › submitting with an empty id surfaces the validation message on-screen (#813) (1.1s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:10.4454202Z   ✓  280 test/e2e/workflow-edit-delete.spec.ts:191:1 › a source-defined workflow cannot be deleted, and the console says why (832ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:11.7599855Z   ✓  281 test/e2e/workflow-edit-delete.spec.ts:210:1 › deleting is confirm-gated, and the confirmation says what goes and what stays (1.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:12.9772155Z   ✓  282 test/e2e/workflow-edit-delete.spec.ts:245:1 › confirming the delete returns to the index, and removes it from the host (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:14.5437680Z   ✓  283 test/e2e/workflow-edit-delete.spec.ts:293:1 › a version conflict surfaces distinctly with a way out, and deletes nothing (1.6s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:15.2793147Z   ✓  284 test/e2e/workflow-edit-delete.spec.ts:355:1 › a source-defined workflow offers no Edit, with the same explanation Delete gives (728ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:16.8285941Z   ✓  285 test/e2e/workflow-edit-delete.spec.ts:375:1 › an author can change a saved workflow's schedule, and the id is read-only (1.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:19.2278877Z   ✓  286 test/e2e/workflow-edit-delete.spec.ts:438:1 › a stale save surfaces the conflict banner and writes nothing (2.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:21.0693707Z   ✓  287 test/e2e/workflow-edit-delete.spec.ts:502:1 › a field error raised on one graph never appears on another (1.8s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:21.6458761Z   ✓  288 test/e2e/workflow-inline-approval.spec.ts:187:1 › a run's parked card is decidable in the run window, and only that run's (551ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:21.9947965Z   ✓  289 test/e2e/workflow-inline-approval.spec.ts:211:1 › the Approvals page still shows everything, including the run's card (340ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:22.6126666Z   ✓  290 test/e2e/workflow-inline-approval.spec.ts:222:1 › deciding in the run window sends one ordinary resolve, on that card's own id (609ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:28.0268439Z   ✓  291 test/e2e/workflow-inline-approval.spec.ts:246:1 › a decision made on the Approvals page settles the run window, with no reload (5.4s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:28.6716832Z   ✓  292 test/e2e/workflow-list-columns.spec.ts:151:1 › every column of the list shares one vertical edge (631ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:29.2727254Z   ✓  293 test/e2e/workflow-list-columns.spec.ts:190:1 › the description is the column that yields when the list narrows (593ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:30.1107555Z   ✓  294 test/e2e/workflow-live-list.spec.ts:163:1 › a workflow authored elsewhere reaches the list, with no reload (826ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:30.9444291Z   ✓  295 test/e2e/workflow-live-list.spec.ts:197:1 › a workflow renamed elsewhere renames on screen, with no reload (827ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:31.8606177Z   ✓  296 test/e2e/workflow-live-list.spec.ts:237:1 › deleting the workflow on screen elsewhere returns to the list, and takes it out of the list (906ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:32.7111384Z   ✓  297 test/e2e/workflow-live-list.spec.ts:287:1 › a delete elsewhere corrects the URL in place, without pushing history (841ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:45.2095559Z   ✓  298 test/e2e/workflow-node-config.spec.ts:54:1 › authoring a tool_call node's config through the form round-trips to the host (12.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:46.4066150Z   ✓  299 test/e2e/workflow-node-inspector-reveal.spec.ts:112:3 › at 1440px the inspector pans its node out from under itself (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:47.5994510Z   ✓  300 test/e2e/workflow-node-inspector-reveal.spec.ts:112:3 › at 1024px the inspector pans its node out from under itself (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:49.0677693Z   ✓  301 test/e2e/workflow-node-inspector-reveal.spec.ts:142:1 › closing the inspector puts the canvas back where it was (1.5s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:49.9273310Z   ✓  302 test/e2e/workflow-node-inspector-reveal.spec.ts:171:1 › a node nowhere near the panel does not move the canvas at all (851ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:50.7755763Z   ✓  303 test/e2e/workflow-node-inspector-reveal.spec.ts:202:1 › with reduced motion the reveal is a cut, and still clears the panel both ways (840ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:51.6834193Z   ✓  304 test/e2e/workflow-node-inspector-reveal.spec.ts:240:1 › a pan of the operator's own outlives the inspector (900ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:52.4865873Z   ✓  305 test/e2e/workflow-run-history-rail.spec.ts:66:1 › at xl the run history is a left rail, and the canvas keeps its width (791ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:53.2580129Z   ✓  306 test/e2e/workflow-run-history-rail.spec.ts:100:1 › below xl the run history falls back to a strip under the canvas (765ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:54.1814626Z   ✓  307 test/e2e/workflow-run-history-rail.spec.ts:126:1 › the index carries no run chrome, and leaving a workflow takes the rail with it (916ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:54.8939264Z   ✓  308 test/e2e/workflow-run-history.spec.ts:75:1 › the console asks the host for the selected workflow's runs, not the whole company's (701ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:55.7607845Z   ✓  309 test/e2e/workflow-run-history.spec.ts:111:1 › the run-history panel opens and shows only the selected workflow's runs (860ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:55.8328867Z   -  310 test/e2e/workflow-run-history.spec.ts:137:1 › running a workflow adds it to the durable history and it survives a reload
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:56.7285758Z   ✓  311 test/e2e/workflow-run-inference.spec.ts:45:1 › a run refused for a missing inference provider shows a persistent, linked banner (886ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:56.8169722Z   -  312 test/e2e/workflow-run-result-rail.spec.ts:52:1 › at xl the run result is a right rail, and the canvas keeps a usable width
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:56.8985262Z   -  313 test/e2e/workflow-run-result-rail.spec.ts:84:1 › below xl the run result falls back to a strip under the canvas
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:56.9649670Z   -  314 test/e2e/workflow-run-result-rail.spec.ts:111:1 › both rails open at once: history left, run result right, canvas squeezed but usable
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:57.0475279Z   -  315 test/e2e/workflow-run-result.spec.ts:50:1 › running a workflow shows its per-node output in the result drawer
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:58.2489990Z   ✓  316 test/e2e/workflow-run-with-input.spec.ts:86:3 › running a workflow on a specific input (#1204) › the field is off the toolbar and behind the second half of Run (1.2s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:49:59.5304744Z   ✓  317 test/e2e/workflow-run-with-input.spec.ts:107:3 › running a workflow on a specific input (#1204) › what is typed reaches the host as the run's trigger input (1.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:00.7954165Z   ✓  318 test/e2e/workflow-run-with-input.spec.ts:134:3 › running a workflow on a specific input (#1204) › the toolbar's Run still runs with no input, draft or not (1.3s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:01.8427269Z   ✓  319 test/e2e/workflow-selection-persists.spec.ts:129:1 › workflows tab selection is preserved across tab switches (#864) (1.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:02.4880150Z   ✓  320 test/e2e/workflow-selection-persists.spec.ts:166:1 › a company switch does not reuse the previous company's workflow route (#864) (636ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:03.5113390Z   ✓  321 test/e2e/workflow-toolbar-reachable.spec.ts:198:5 › workflows toolbar reachability (#824) › every detail toolbar control is inside the viewport at 1280px (1.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:04.2798406Z   ✓  322 test/e2e/workflow-toolbar-reachable.spec.ts:233:5 › workflows toolbar reachability (#824) › every index toolbar control is inside the viewport at 1280px (758ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:05.2414142Z   ✓  323 test/e2e/workflow-toolbar-reachable.spec.ts:198:5 › workflows toolbar reachability (#824) › every detail toolbar control is inside the viewport at 1024px (951ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:05.9916040Z   ✓  324 test/e2e/workflow-toolbar-reachable.spec.ts:233:5 › workflows toolbar reachability (#824) › every index toolbar control is inside the viewport at 1024px (741ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:06.9336501Z   ✓  325 test/e2e/workflow-toolbar-reachable.spec.ts:252:3 › workflows toolbar reachability (#824) › New workflow can actually be clicked, not merely rendered (931ms)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:08.9253126Z   ✓  326 test/e2e/workspace.spec.ts:74:1 › the Workspace tab reads and writes the host's store, not localStorage (2.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9264701Z   ✓  327 test/e2e/workspace.spec.ts:171:1 › the retired local scratchpad is offered for import, its seed discarded (16.0s)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9736543Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9755527Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9756881Z   1) test/e2e/chat-detached-post-failure.spec.ts:79:1 › a chat POST killed in flight still shows the reply the host went on to write 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9757573Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9757784Z     Error: expect(locator).toBeVisible() failed
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9758060Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9758483Z     Locator: locator('article[data-message-id]').filter({ hasText: 'You said: cut-1787575417464' })
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9759062Z     Expected: visible
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9759349Z     Timeout: 60000ms
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9759673Z     Error: element(s) not found
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9759881Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9759984Z     Call log:
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9760323Z       - Expect "toBeVisible" with timeout 60000ms
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9760902Z       - waiting for locator('article[data-message-id]').filter({ hasText: 'You said: cut-1787575417464' })
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9761409Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9761416Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9761649Z       163 |   // millisecond answer, and the reply either appears in that window (proving
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9762236Z       164 |   // the release) or the test fails all the same — the wait is slack, not grace.
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9762903Z     > 165 |   await expect(reply(page, marker)).toBeVisible({ timeout: 60_000 });
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9763245Z           |                                     ^
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9763532Z       166 |   await expect(reply(page, marker)).toHaveCount(1);
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9763782Z       167 |
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9764089Z       168 |   // Releasing must not be a licence to double-render: nothing else is going to
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9764651Z         at /home/runner/work/opencompany/opencompany/frontend/test/e2e/chat-detached-post-failure.spec.ts:165:37
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9764983Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9765317Z     attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9765872Z     test-results/chat-detached-post-failure-2dca9-y-the-host-went-on-to-write/test-failed-1.png
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9766464Z     ────────────────────────────────────────────────────────────────────────────────────────────────
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9766696Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9767018Z     Error Context: test-results/chat-detached-post-failure-2dca9-y-the-host-went-on-to-write/error-context.md
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9767352Z 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9767427Z   1 failed
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9767951Z     test/e2e/chat-detached-post-failure.spec.ts:79:1 › a chat POST killed in flight still shows the reply the host went on to write 
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9768547Z   21 skipped
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9768730Z   305 passed (7.8m)
+Console E2E	Run the end-to-end suite	2026-08-24T12:50:24.9958224Z ##[error]Process completed with exit code 1.
+Console E2E	Upload failure artifacts	﻿2026-08-24T12:50:25.0016473Z ##[group]Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0016800Z with:
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0016974Z   name: playwright-failures
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0017194Z   path: frontend/test-results/
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0017394Z   retention-days: 7
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0017576Z   if-no-files-found: warn
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0017766Z   compression-level: 6
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0017945Z   overwrite: false
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0018128Z   include-hidden-files: false
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0018325Z   archive: true
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0018487Z env:
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0018649Z   CARGO_INCREMENTAL: 0
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0018847Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.0019072Z ##[endgroup]
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.1145173Z With the provided path, there will be 2 files uploaded
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.1149373Z Artifact name is valid!
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.1149740Z Root directory input is valid!
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.3295708Z Uploading artifact: playwright-failures.zip
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.3328730Z Beginning upload of artifact content to blob storage
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.4115072Z Uploaded bytes 84776
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.4262792Z Finished uploading artifact content to blob storage!
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.4263692Z SHA256 digest of uploaded artifact is 1e4412eb5c01483102e6134c40b1b577f1c38102ffcb48a55e208802850ba4a2
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.4264352Z Finalizing artifact upload
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.6316524Z Artifact playwright-failures successfully finalized. Artifact ID 9520719813
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.6317712Z Artifact playwright-failures has been successfully uploaded! Final size is 84776 bytes. Artifact ID is 9520719813
+Console E2E	Upload failure artifacts	2026-08-24T12:50:25.6320122Z Artifact download URL: https://github.com/tinyhumansai/opencompany/actions/runs/32727281764/artifacts/9520719813
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	﻿2026-08-24T12:50:25.6478762Z Post job cleanup.
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7151786Z [command]/usr/bin/git version
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7181533Z git version 2.55.0
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7205925Z Temporarily overriding HOME='/home/runner/work/_temp/6bbe3456-4537-43eb-a09c-b899710f1b95' before making global git config changes
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7207017Z Adding repository directory to the temporary git global config as a safe directory
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7209841Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/opencompany/opencompany
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7232836Z Removing SSH command configuration
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7237530Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7265173Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7447393Z Removing HTTP extra header
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7451584Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7478246Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7655788Z Removing includeIf entries pointing to credentials config files
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7660263Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Console E2E	Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	2026-08-24T12:50:25.7684978Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Console E2E	Complete job	﻿2026-08-24T12:50:25.7980891Z Cleaning up orphan processes
