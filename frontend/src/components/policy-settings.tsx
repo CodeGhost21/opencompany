@@ -781,7 +781,7 @@ export function PolicySettings({ client, company }: Props) {
                       ? null
                       : tierButtons.current[checkedIndex] ?? null;
                   if (confirmSource.current === "reset") {
-                    return resetButtonRef.current;
+                    return resetButtonRef.current ?? checked;
                   }
                   return checked;
                 }}
