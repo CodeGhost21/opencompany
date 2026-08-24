@@ -885,10 +885,15 @@ function Tools({
   const draft = parseToolGlobs(field);
   const dirty = toolGlobsDiffer(agent.tools.requested, draft);
   // Live, before the save rather than after it: the intersection is the thing
-  // operators get wrong, and a glob the company does not allow is stored
-  // happily and then confers nothing. Saying so while they type is the whole
-  // reason this card knows about `companyAllow`.
-  const willNotApply = draft.filter((glob) => !companyCovers(agent.tools.companyAllow, glob));
+  // operators get wrong, and a glob the desk-and-company ceiling does not allow
+  // is stored happily and then confers nothing. Saying so while they type is the
+  // whole reason this card knows the ceilings. The desk level is the gate when
+  // a desk states one — `grantCeiling` is `deskAllow` when non-empty, else the
+  // company allow-list, matching the host's `agent_scoped_grants` two-level
+  // application — because a desk that omits a company-allowed namespace drops
+  // it immediately after saving.
+  const deskCeilingActive = agent.tools.deskAllow.length > 0;
+  const willNotApply = draft.filter((glob) => !companyCovers(grantCeiling(agent.tools), glob));
 
   return (
     <Section
