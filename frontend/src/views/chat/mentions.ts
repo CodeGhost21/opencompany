@@ -39,6 +39,12 @@ export interface Mentionable {
   hint?: string;
   /** Whether this row is on the channel being composed in. Ranks first. */
   inChannel?: boolean;
+  /**
+   * The teammates a mention of this desk expands to. Set on desk rows only,
+   * so the outside-channel warning can judge a desk mention by its blast
+   * radius rather than skipping it.
+   */
+  memberIds?: string[];
 }
 
 /**
