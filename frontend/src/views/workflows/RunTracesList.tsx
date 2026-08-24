@@ -201,7 +201,7 @@ export function RunTracesList({
 
   useEffect(() => {
     setWorkflowFilter(new Set());
-  }, [workflows]);
+  }, [company]);
 
   const filtered = useMemo(
     () => runs.filter((run) => runMatchesFilters(run, { now, rangeMs, workflowFilter, verdictFilter })),
