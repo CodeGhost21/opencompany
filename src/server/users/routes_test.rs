@@ -1083,6 +1083,43 @@ async fn suspending_a_user_kills_their_session_at_once() {
     assert_eq!(request_dev_code(&state, "bob@example.com").await, None);
 }
 
+/// The same bound the self-service route enforces, on the admin route too: an
+/// over-long name written for somebody else would render on every surface that
+/// shows them and ride in every roster payload.
+#[tokio::test]
+async fn an_admin_cannot_set_an_over_long_display_name() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) = state_with_mail(&home).await;
+    let admin = login_via_link(&state, &sender, "ada@example.com").await;
+
+    let app = router(state.clone());
+    app.oneshot(post_with_cookie(
+        "/api/v1/companies/acme/users/invites",
+        serde_json::json!({ "email": "bob@example.com" }),
+        &admin,
+    ))
+    .await
+    .unwrap();
+    let bob_id = user_id(&state, &admin, "bob@example.com").await;
+
+    let long = "A".repeat(crate::server::users::MAX_DISPLAY_NAME_CHARS + 1);
+    let app = router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/companies/acme/users/{bob_id}"))
+                .header("content-type", "application/json")
+                .header("cookie", &admin)
+                .body(Body::from(serde_json::json!({ "displayName": long }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn the_last_admin_cannot_be_demoted() {
     let home_dir = home();
