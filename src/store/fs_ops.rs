@@ -799,19 +799,41 @@ impl DeepTraceStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.deep_trace_jsonl();
-        // The per-path lock makes read-dedup-prune-write atomic against a
+        // The per-path lock makes append and compact atomic against a
         // concurrent step write — process-local, the documented fs-backend
         // assumption everywhere in this file.
         let lock = path_lock(&path);
         let _guard = lock.lock().await;
-        let mut all = read_jsonl::<RunStepDetailRecord>(&path).await?;
-        // Last-write-wins per (run_id, step_seq). A reasoning run flushes once
-        // partway through and again at close, both under the same ordinal, so
-        // without this a long thought would stack rather than converge.
-        all.retain(|r| !(r.run_id == record.run_id && r.step_seq == record.step_seq));
-        all.push(record.clone());
-        prune_deep_trace(&mut all);
-        rewrite_jsonl(&path, &all).await
+        // A genuine append, exactly like `run_steps`: the read side folds a
+        // repeated `(run_id, step_seq)` to its last line (`list_step_details`),
+        // so a flush that rewrites an existing ordinal converges rather than
+        // stacks. The old whole-file read-prune-rewrite per step was quadratic
+        // in a long company's history — every event rewrote everything.
+        append_line(&path, &serde_json::to_string(record)?).await?;
+        // Compaction is deferred until it is actually required. The known set
+        // is seeded from disk on the first deep-trace write of a process, so a
+        // file that already exceeded the cap is corrected immediately; after
+        // that, a fresh run id pushing the count past the cap triggers one
+        // read-prune-rewrite, and the set is rebuilt from the survivors.
+        let mut by_path = self.deep_runs.lock().await;
+        let runs = by_path.entry(path.clone()).or_default();
+        if runs.is_empty() {
+            let mut all = read_jsonl::<RunStepDetailRecord>(&path).await?;
+            let before = all.len();
+            prune_deep_trace(&mut all);
+            *runs = all.iter().map(|r| r.run_id.clone()).collect();
+            if all.len() < before {
+                rewrite_jsonl(&path, &all).await?;
+            }
+            return Ok(());
+        }
+        if runs.insert(record.run_id.clone()) && runs.len() > MAX_DEEP_RUNS_PER_COMPANY {
+            let mut all = read_jsonl::<RunStepDetailRecord>(&path).await?;
+            prune_deep_trace(&mut all);
+            rewrite_jsonl(&path, &all).await?;
+            *runs = all.iter().map(|r| r.run_id.clone()).collect();
+        }
+        Ok(())
     }
 
     async fn list_step_details(
