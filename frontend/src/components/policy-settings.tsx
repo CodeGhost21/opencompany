@@ -93,6 +93,17 @@ export function widensAutonomy(
   return fromIndex !== -1 && toIndex > fromIndex;
 }
 
+/** Whether replacing the current spend cap with the manifest cap loosens it. */
+export function widensSpendCap(
+  current: number | null,
+  manifest: number | null,
+): boolean {
+  // null represents no cap, which is looser than every finite cap.
+  if (manifest === null) return current !== null;
+  if (current === null) return false;
+  return manifest > current;
+}
+
 /**
  * ASCII-only case-insensitive equality, mirroring `str::eq_ignore_ascii_case`.
  *
