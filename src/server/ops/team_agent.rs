@@ -694,7 +694,8 @@ async fn edit_agent(
                  transport to forward it to. Bind it to an ACP harness first, or clear \
                  the model."
             )))
-            .into_response());
+            .into_response()
+            .into());
         }
         // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
         // still cannot carry a model, because the runner wire protocol has no
