@@ -1323,6 +1323,29 @@ members = ["engineer", "ceo"]
         assert!(found.is_empty(), "{found:?}");
     }
 
+    /// The same desk-only rule applies when a structured caller supplies the
+    /// span: `@#engineer` paired with the agent target must not ping them.
+    /// `is_valid_alias_for` strips the hash for the alias comparison, so
+    /// without the kind check here the `#`-shaped mention would validate.
+    #[test]
+    fn a_hash_prefixed_non_desk_target_is_demoted_in_revalidation() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@#engineer".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let out = resolve(
+            "@#engineer please",
+            Some(supplied),
+            None,
+            &acme(),
+            &people(),
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].quiet, "{out:?}");
+    }
+
     #[test]
     fn every_everyone_alias_reaches_the_same_target() {
         for alias in EVERYONE_ALIASES {
