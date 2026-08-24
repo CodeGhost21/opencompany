@@ -1450,16 +1450,16 @@ mod tests {
         };
         let effective = grants("effective");
         assert!(
-            effective.iter().any(|g| *g == "workspace.read"),
+            effective.contains(&"workspace.read"),
             "research reads the workspace: {effective:?}"
         );
         assert!(
-            !effective.iter().any(|g| *g == "workspace.write"),
+            !effective.contains(&"workspace.write"),
             "research must not write the workspace it reports on: {effective:?}"
         );
         let requested = grants("requested");
         assert!(
-            !requested.iter().any(|g| *g == "workspace.write"),
+            !requested.contains(&"workspace.write"),
             "the stored belt is the research belt, not the company grant: {requested:?}"
         );
 
