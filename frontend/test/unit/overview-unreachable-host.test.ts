@@ -184,6 +184,17 @@ describe("a host that cannot be reached at all", () => {
     expect(shell?.hasAttribute("inert")).toBe(true);
   });
 
+  it("flags the graph as covered while the outage shows", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // `covered` is handed to the graph so its global keyboard handler is
+    // suspended too — `inert` cannot silence a `window` listener (issue
+    // #1314).
+    expect(lastCovered).toBe(true);
+  });
+
   it("retries from the outage state", async () => {
     const unreachable = fakeClient();
     goUnreachable(unreachable);
