@@ -45,7 +45,7 @@ export function mentionCountsByChannel(
    * (tinysweeper). Direct desk/DM ids are unaffected: they badge from the
    * `renderedChannelIds` arm regardless.
    */
-  mainChannelId: string | undefined,
+  mainChannelId?: string,
   renderedChannelIds: ReadonlySet<string> = new Set(),
 ): Record<string, number> {
   const out: Record<string, number> = {};
