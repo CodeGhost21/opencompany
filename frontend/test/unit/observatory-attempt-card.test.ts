@@ -199,4 +199,41 @@ describe("attempt cards behind a deep link", () => {
     expect(onOpen).toHaveBeenCalledTimes(2);
     expect(onOpen).toHaveBeenLastCalledWith("att-a");
   });
+
+  it("re-reads the deep half when an existing step completes, not just when one is added", async () => {
+    // The length-only signal missed the in-place transition: completing a tool
+    // call flips an existing step's status and lands its result without adding
+    // an ordinal, and an open card must re-read the deep half then too — the
+    // reasoning that just flushed is exactly the pane a reader is watching.
+    const onOpen = vi.fn();
+    const running = run({
+      id: "att-a",
+      phase: "active",
+      status: "running",
+      steps: [step({ seq: 1, label: "read_file", status: "running", elapsedMs: 0 })],
+    });
+    await mount([running], { turn: "att-a", onOpen });
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    // A poll rewrites the same ordinal: the call finished, its result landed.
+    const completed = run({
+      id: "att-a",
+      phase: "active",
+      status: "running",
+      steps: [
+        step({
+          seq: 1,
+          label: "read_file",
+          status: "ok",
+          elapsedMs: 412,
+          result: "src/main.rs",
+        }),
+      ],
+    });
+    await mount([completed], { turn: "att-a", onOpen });
+
+    expect(onOpen).toHaveBeenCalledTimes(2);
+    expect(onOpen).toHaveBeenLastCalledWith("att-a");
+  });
 });
