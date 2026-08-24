@@ -187,9 +187,8 @@ pub enum AgentFocus {
     Operations,
     /// Keeps people and work moving. Same belt as [`Writing`](Self::Writing).
     Coordination,
-    /// Makes and maintains the product itself. Same belt as
-    /// [`Writing`](Self::Writing) — deliberately **not** `repo` or `shell`,
-    /// which no focus reaches.
+    /// Makes and maintains the product itself. The one focus that reaches
+    /// `shell` and `code`, and the only belt that does.
     Build,
     /// Answers customers. Same belt as [`Writing`](Self::Writing).
     Support,
