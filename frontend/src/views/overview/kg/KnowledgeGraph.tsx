@@ -2581,6 +2581,7 @@ export function KnowledgeGraph({
         searchSlot={vaultSearchInput}
         legendSlot={compactLegend}
         statusSlot={statusSlot}
+        covered={covered}
         onNavDept={navDept}
         onBack={clearDetail}
       >
