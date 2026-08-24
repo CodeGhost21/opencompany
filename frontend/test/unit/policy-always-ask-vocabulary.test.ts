@@ -669,6 +669,21 @@ describe("alwaysApproveGates", () => {
     expect(alwaysApproveGates("payment", "payments_report")).toBe(false);
   });
 
+  it("folds ASCII case only, like eq_ignore_ascii_case", () => {
+    // The Kelvin sign is a Unicode case confusable: full-Unicode lowercasing
+    // turns `worKspace_write` into `workspace_write`, but the backend's
+    // ASCII-only `eq_ignore_ascii_case` does not fold U+212A, so this fence
+    // would never gate — the warning must not accept it either.
+    expect(alwaysApproveGates("worKspace_write", "workspace_write")).toBe(
+      false,
+    );
+    expect(alwaysApproveGates("WORKSPACE_WRITE", "workspace_write")).toBe(
+      false,
+    );
+    expect(alwaysApproveGates("SHELL", "shell")).toBe(true);
+    expect(alwaysApproveGates("Invoice", "invoice.send")).toBe(true);
+  });
+
   it("treats an empty entry as gating nothing", () => {
     expect(alwaysApproveGates("  ", "shell")).toBe(false);
     expect(alwaysApproveGates("", "shell")).toBe(false);
