@@ -677,7 +677,13 @@ function granterLabel(
  * leaving its generic headline alone would not distinguish one request from
  * another.
  */
-export function ApprovalCard({
+function grantDurationLabel(expiresInMillis: number): string {
+  return (
+    GRANT_DURATIONS.find((duration) => duration.millis === expiresInMillis)?.label ??
+    `${Math.round(expiresInMillis / 86_400_000)} days`
+  );
+}
+
   approval: a,
   now,
   askerNames,
