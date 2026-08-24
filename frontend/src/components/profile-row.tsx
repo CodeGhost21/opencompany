@@ -185,9 +185,18 @@ function ProfileDialog({
       // name edit held hostage by a face nobody asked about. (An unchanged
       // name can still be sent: `null` is the legitimate "call me the derived
       // name again", and `""` would be a name that renders as a gap.)
-      const changes: { displayName?: string | null; avatar?: string | null } = {
-        displayName: name.trim() === "" ? null : name.trim(),
-      };
+      const trimmed = name.trim();
+      const nextName = trimmed === "" ? null : trimmed;
+      const changes: { displayName?: string | null; avatar?: string | null } = {};
+      // Only send the name when it would actually change something. A dialog
+      // that has sat open while another client or an admin renamed us must not
+      // write the stale boxed value back over the new one on an avatar-only
+      // save — the same rule the avatar field already follows. `null` is still
+      // sent when it means something: clearing an explicitly-set name back to
+      // the derived one.
+      if (nextName !== (me.displayName ?? null)) {
+        changes.displayName = nextName;
+      }
       if (avatar !== me.avatar) {
         changes.avatar = avatar ?? null;
       }
