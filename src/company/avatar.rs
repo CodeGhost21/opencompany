@@ -735,7 +735,7 @@ mod test {
     #[test]
     fn size_check_refuses_a_truncated_payload() {
         for truncated in [
-            &PNG_SIGNATURE[..],
+            PNG_SIGNATURE,
             &b"GIF89a"[..],
             &b"\xff\xd8\xff\xe0\x00\x10"[..],
             &b"RIFF\x16\x00\x00\x00WEBPVP8X"[..],
