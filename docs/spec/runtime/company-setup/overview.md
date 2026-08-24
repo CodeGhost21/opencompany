@@ -355,9 +355,11 @@ open, so merely not persisting the skip would still strand them.
 differs.** `no_model` means nothing was reachable — wire a credential.
 `model_unreachable` means a credential is wired but the provider did not answer
 — check the connection or retry. `not_designable` means a model answered
-unusably, almost always because the answers were too sparse. "Add a model in
-Settings" shows only for `no_model`; elsewhere it would send someone to fix a
-credential that had just worked.
+unusably, almost always because the answers were too sparse — the retry
+restarts the questions in place so the operator can say more about the business
+(the Company page's own setup prompt is unreachable once the fallback team
+staffs the company). "Add a model in Settings" shows only for `no_model`;
+elsewhere it would send someone to fix a credential that had just worked.
 
 **Decision D3c: redesign replaces the fallback team rather than stacking on it.**
 When an operator follows "Add a model in Settings" after receiving a fallback,
