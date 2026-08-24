@@ -1150,7 +1150,9 @@ mod test {
             team_hint: String::new(),
             automate: "Meta ads, order dispatch".to_string(),
         };
-        let (proposal, _) = builder(Arc::new(UnreachableModel)).propose(&answers).await;
+        let (proposal, _) = RosterBuilder::new(Arc::new(UnreachableModel), "test-model")
+            .propose(&answers)
+            .await;
         assert_eq!(proposal.source, RosterSource::Fallback);
         assert_eq!(
             proposal.reason,
