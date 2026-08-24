@@ -80,7 +80,7 @@ pub struct WorkflowSpawn {
     events: Arc<dyn EventLog>,
     supervisor: RunSupervisor,
     runner: Arc<dyn WorkflowRunner>,
-}
+    runs: Arc<dyn RunStore>,}
 
 impl WorkflowSpawn {
     /// Reads the three shared handles off `runtime` and pairs them with the
