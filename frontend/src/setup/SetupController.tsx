@@ -174,6 +174,20 @@ export function SetupController({
     onForceHandled?.();
   }, [force, onForceHandled]);
 
+  // Leaving `#/setup` closes the dialog the address opened.
+  //
+  // The shell clears `force` once this controller has taken it, so `open` would
+  // otherwise survive the route that asked for it: a Back from `#/setup` would
+  // leave the blocking dialog over Settings while the address bar says Settings
+  // (issue #1417 review). Closed on the true→false edge, never while the route
+  // holds — and never because the route is absent, which would dismiss a dialog
+  // the first-run gate or the Team prompt opened.
+  const routeOpenRef = useRef(routeOpen);
+  useEffect(() => {
+    if (routeOpenRef.current && !routeOpen) setOpen(false);
+    routeOpenRef.current = routeOpen;
+  }, [routeOpen]);
+
   const skip = useCallback(() => {
     markSetupSkipped(scope);
     setOpen(false);
