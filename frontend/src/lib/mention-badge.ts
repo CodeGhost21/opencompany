@@ -1,5 +1,5 @@
 import type { NotificationDto } from "@/api/types";
-import { MAIN_THREAD_ID } from "@/lib/chat";
+import { MAIN_THREAD_ID, hostMessageId } from "@/lib/chat";
 
 /**
  * Mirrors the host's `is_general_chat` (`src/server/chat_history.rs`, issue
