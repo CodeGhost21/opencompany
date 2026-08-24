@@ -675,8 +675,29 @@ pub async fn export_bundle(
     facts: Option<Arc<dyn FactStore>>,
     opts: ExportOpts,
 ) -> Result<()> {
-    let contents =
-        BundleContents::read_via_ports(id, store, events, memory, context, facts).await?;
+    export_bundle_with_scopes(
+        id, dest, store, events, memory, context, facts, None, opts,
+    )
+    .await
+}
+
+/// Exports a bundle while preserving an optional provider archive tier.
+#[allow(clippy::too_many_arguments)]
+pub async fn export_bundle_with_scopes(
+    id: &CompanyId,
+    dest: &Path,
+    store: Arc<dyn CompanyStore>,
+    events: Arc<dyn EventLog>,
+    memory: Arc<dyn MemoryStore>,
+    context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
+    scopes: Option<Arc<dyn MemoryScopes>>,
+    opts: ExportOpts,
+) -> Result<()> {
+    let contents = BundleContents::read_via_ports(
+        id, store, events, memory, context, facts, scopes,
+    )
+    .await?;
     contents.write_to_dir(dest).await?;
 
     if opts.include_secrets
