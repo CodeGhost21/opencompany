@@ -396,12 +396,11 @@ Two related problems surfaced in the same run, both fixed:
 
 - The Team page fabricated a twelve-agent starter roster whenever the host
   answered with nobody, so "this company has no team yet" rendered directly above
-  twelve agents that did not exist on the host. A genuinely empty company now
-  shows an honest empty state. The same sentence had to go for the mirror-image
-  reason once the gate started opening again: the prompt renders above the
-  baseline's teammates, who *do* exist on the host, so it now reads "this company
-  hasn't been set up yet" — true whether the roster below it holds nobody or the
-  baseline's four.
+  twelve agents that did not exist on the host; a genuinely empty company now
+  shows an honest empty state. Once the gate reopened, the same sentence had to
+  go for the mirror-image reason: the prompt renders above the baseline's
+  teammates, who *do* exist, so it now reads "this company hasn't been set up
+  yet" — true whether the roster below it holds nobody or the baseline's four.
 - The product tour is held not only while the dialog is open but for as long as
   the company is unstaffed. Otherwise skipping setup popped the tour's welcome
   straight over an empty console — the first impression this document exists to
