@@ -366,4 +366,54 @@ describe("leaving the completion screen to wire a model", () => {
     expect(dialog(), "the redesign they were owed never reopened").toBeTruthy();
     expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
   });
+
+  it("replaces only the fallback team when another operator staffs someone meanwhile", async () => {
+    // The redesign's replacement is bounded by the team the first pass actually
+    // created, captured when the operator left for model settings — not by the
+    // roster as it reads on return. A colleague who staffs a teammate while
+    // those settings were open is doing their own work; deleting that row would
+    // remove someone who was never told they were provisional.
+    const removed: string[] = [];
+    const roster: TeamMemberDto[] = [...BASELINE];
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      listTeam: async () => [...roster],
+      get: async () => ({ cognition: "echo" }),
+      post: async () => ({
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        template: "ecommerce",
+        source: "fallback",
+        reason: "no_model",
+      }),
+      addTeamMember: async (input: { name: string; role: string }) => {
+        const member = { id: input.name.toLowerCase(), role: input.role, inboxEnabled: false } as TeamMemberDto;
+        roster.push(member);
+        return member;
+      },
+      removeTeamMember: async (id: string) => {
+        removed.push(id);
+      },
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+    await runFlow();
+
+    // Leave for model settings, persisting the fallback team as the redesign's
+    // boundary — the first pass created exactly one teammate.
+    await act(async () => {
+      (addModelLink() as HTMLElement).click();
+    });
+    expect(setupRedesign(SCOPE)).toBe(true);
+
+    // A colleague staffs a teammate while the settings page is open.
+    roster.push({ id: "bob", role: "Support", inboxEnabled: false } as TeamMemberDto);
+
+    // Return: the redesign reopens, and the second build-out must replace only
+    // the fallback team — ada — leaving bob, someone else's work, alone.
+    await goTo("#/overview");
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
+    await runFlow();
+
+    expect(removed, "the fallback team should be replaced").toContain("ada");
+    expect(removed, "a teammate staffed while settings were open must survive").not.toContain("bob");
+  });
 });
