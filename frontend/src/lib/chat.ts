@@ -1,4 +1,4 @@
-import type { ChatHistoryMessageDto, TurnStep } from "@/api/types";
+import type { ChatHistoryMessageDto, ChatMentionDto, TurnStep } from "@/api/types";
 
 /**
  * The company's main line, by thread id.
