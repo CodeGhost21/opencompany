@@ -252,6 +252,7 @@ export function ChatView({
   liveStepsByThread,
   unread,
   mentions,
+  mentionFeedRevision,
   onChannelViewed,
   approvals,
   chatChannelByThread,
