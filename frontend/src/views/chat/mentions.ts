@@ -224,13 +224,33 @@ export function insertMention(
   range: { start: number; end: number },
   entry: Mentionable,
 ): { text: string; caret: number; mention: Mention } {
-  const span = `@${entry.label}`;
+  const span = `@${mentionableText(entry)}`;
   const text = `${draft.slice(0, range.start)}${span} ${draft.slice(range.end)}`;
   return {
     text,
     caret: range.start + span.length + 1,
     mention: { target: entry.target, text: span, offset: range.start },
   };
+}
+
+/**
+ * The `@`-spelling of a row's mention the host will actually resolve.
+ *
+ * The host's scanner only opens a mention when the character right after `@`
+ * is word-like (alphanumeric or `_`, or `#` for the `@#desk` spelling), so a
+ * person whose display name starts with an emoji or punctuation — `👩‍💻 Ada` —
+ * cannot be picked by their label: `@👩‍💻 Ada` fails server revalidation and
+ * the mention is dropped, leaving a chip-less literal that pings nobody. The
+ * row's own `aliases` carry a typable fallback (the host-minted slug), so the
+ * picker inserts that instead, keeping the picked mention real.
+ */
+function mentionableText(entry: Mentionable): string {
+  const opens = (s: string) => /^[\p{L}\p{N}_#]/u.test(s);
+  if (opens(entry.label)) return entry.label;
+  for (const alias of entry.aliases) {
+    if (opens(alias)) return alias;
+  }
+  return entry.label;
 }
 
 /**
