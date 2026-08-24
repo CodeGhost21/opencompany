@@ -932,21 +932,28 @@ async fn live_ports(
     // Every refusal lives in the lib (`store::select::refuse_bundle_env`)
     // where the feature lanes execute its tests; the bin only reports.
     opencompany::store::refuse_bundle_env(&settings, home_was_flagged)?;
-    let (store, events, mut memory, mut context, mut facts, mut scopes) = match open_storage(&settings, home)
-        .await?
-    {
-        Some(h) => (h.company, h.events, h.memory, h.context, Some(h.facts), None),
-        // The fs default: the same ports the old hardwired path built,
-        // plus the fs fact store the old path silently left behind.
-        None => (
-            Arc::new(FsCompanyStore::new(home.to_path_buf())) as _,
-            Arc::new(FsEventLog::new(home.to_path_buf())) as _,
-            Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
-            Arc::new(FsContextStore::new(home.to_path_buf())) as _,
-            Some(Arc::new(FsOps::new(home.to_path_buf())) as Arc<dyn opencompany::ports::FactStore>),
-            None,
-        ),
-    };
+    let (store, events, mut memory, mut context, mut facts, mut scopes) =
+        match open_storage(&settings, home).await? {
+            Some(h) => (
+                h.company,
+                h.events,
+                h.memory,
+                h.context,
+                Some(h.facts),
+                None,
+            ),
+            // The fs default: the same ports the old hardwired path built,
+            // plus the fs fact store the old path silently left behind.
+            None => (
+                Arc::new(FsCompanyStore::new(home.to_path_buf())) as _,
+                Arc::new(FsEventLog::new(home.to_path_buf())) as _,
+                Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
+                Arc::new(FsContextStore::new(home.to_path_buf())) as _,
+                Some(Arc::new(FsOps::new(home.to_path_buf()))
+                    as Arc<dyn opencompany::ports::FactStore>),
+                None,
+            ),
+        };
     if let Some(overlay) = open_memory_overlay(&settings)? {
         memory = overlay.memory;
         context = overlay.context;
@@ -957,7 +964,12 @@ async fn live_ports(
             facts = Some(f);
         }
     }
-    Ok(((store, events, memory, context), facts, scopes, settings.kind))
+    Ok((
+        (store, events, memory, context),
+        facts,
+        scopes,
+        settings.kind,
+    ))
 }
 
 /// A process-unique temporary path under the system temp dir. Used only by the
@@ -986,12 +998,16 @@ async fn export_to_dir(
     // is writing is torn, and the refusal here names the running process
     // instead of silently racing it.
     let _home_lock = opencompany::store::lock::acquire(home)?;
-    let ((store, events, memory, context), facts, scopes, _) = live_ports(home, home_was_flagged).await?;
+    let ((store, events, memory, context), facts, scopes, _) =
+        live_ports(home, home_was_flagged).await?;
     let opts = ExportOpts {
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
     };
-    export_bundle_with_scopes(id, dest, store, events, memory, context, facts, scopes, opts).await
+    export_bundle_with_scopes(
+        id, dest, store, events, memory, context, facts, scopes, opts,
+    )
+    .await
 }
 
 /// Default build: export writes an unpacked bundle directory (no `.tar` support
