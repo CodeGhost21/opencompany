@@ -9393,6 +9393,26 @@ mode = "full"
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         settle(&c.runtime, 1).await;
+        // The notification is filed inside `publish_continuation`, after the
+        // reply is journaled — `settle` only waits for the reply. A loaded CI
+        // runner can reach this point before the notification append finishes,
+        // so poll for it (issue #1665, Codex P1 regression).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = c
+                    .runtime
+                    .notifications()
+                    .list(&c.runtime.id(), &admin.id)
+                    .await
+                    .unwrap();
+                if notes.iter().any(|n| n.notification.kind == "mention") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the mention notification never appeared");
 
         let notes = c
             .runtime
