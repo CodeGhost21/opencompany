@@ -2814,8 +2814,7 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
     }
 
     1u8.hash(&mut hasher);
-    {
-            match &entry.mode {
+    match &entry.mode {
                 Some(mode) => {
                     1u8.hash(&mut hasher);
                     mode.hash(&mut hasher);
