@@ -1027,7 +1027,7 @@ async fn discover_tools(
 mod tests {
     use super::*;
     use crate::company::CompanyManifest;
-    use crate::ports::types::{CompanyId, OverlayAgent};
+    use crate::ports::types::{CompanyId, OverlayAgent, OverlayDesk};
 
     /// A company allowing two MCP families, with one manifest agent that lists
     /// none (so it inherits both).
