@@ -273,8 +273,12 @@ describe("leaving to wire a model", () => {
     const client = {
       ...clientWith([...BASELINE]),
       listTeam: async (company: string | null) => {
-        if (company === "acme" && ++acmeReads >= 2) return acmeRead;
-        return [...STAFFED];
+        // The second acme read — the one `arrive` starts on the return — is the
+        // read we hold open. Every other read is served.
+        if (company !== "acme") return [...STAFFED];
+        acmeReads++;
+        if (acmeReads >= 2) return acmeRead;
+        return [...BASELINE];
       },
     } as unknown as OpenCompanyClient;
     const render = (company: string | null) =>
