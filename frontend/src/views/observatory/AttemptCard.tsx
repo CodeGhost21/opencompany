@@ -41,8 +41,9 @@ export function AttemptCard({ run, nowMs, focusStep }: Props) {
   const state = runState(run);
   const elapsed =
     (run.finishedAtMillis ?? nowMs) - (run.startedAtMillis ?? run.createdAtMillis);
-  const tokens =
-    run.usage.inputTokens + run.usage.outputTokens + run.usage.cachedInputTokens;
+  // `cachedInput` is a subset of `input` (prompt_tokens_details.cached_tokens),
+  // so it is not added here — the canonical metering total is input + output.
+  const tokens = run.usage.inputTokens + run.usage.outputTokens;
 
   return (
     <div className={cn("bg-card rounded border border-l-2", TONE[state])}>
