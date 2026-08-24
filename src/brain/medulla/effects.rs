@@ -11,14 +11,38 @@ use serde_json::{Value, json};
 
 use crate::ports::now_millis;
 use crate::ports::types::{
-    ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect, EffectGroup,
-    LedgerEntry, OutboundMessage, Verdict,
+    Attachment, ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect,
+    EffectGroup, LedgerEntry, OutboundMessage, Verdict,
 };
 
 use super::wire::{EffectFrame, Role, WireEvent};
 
 /// The device-tool name prefix that routes a tool call to the context store.
 pub(crate) const CONTEXT_TOOL_PREFIX: &str = "context_";
+
+/// Appends a line per attachment naming its workspace node id, so the
+/// inference sidecar can read the bytes itself through the same
+/// `context_*` device-tool surface it already has (issue #1682).
+///
+/// Without this, `OperatorMessage.attachments` was journaled for the
+/// transcript but never reached the wire — a hosted or sidecar turn had no
+/// way to know a file existed, let alone fetch it. This does not embed the
+/// file's bytes or content on the wire (`WireEvent::body` is a plaintext
+/// cap at 200000 chars, not a payload channel); it hands the brain the
+/// reference it needs to pull the file through its own tool call.
+fn with_attachment_refs(text: &str, attachments: &[Attachment]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+    let mut body = text.to_string();
+    for a in attachments {
+        body.push_str(&format!(
+            "\n\n[Attached file: {} ({}, {} bytes) — workspace node {}]",
+            a.name, a.mime, a.size, a.node_id
+        ));
+    }
+    body
+}
 
 /// What one executed effect contributed to the cycle result.
 #[derive(Default)]
@@ -34,10 +58,12 @@ pub(crate) struct EffectOutcome {
 /// Normalizes a [`CompanyEvent`] into the [`WireEvent`] `POST /events` carries.
 pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
     let (role, sender, body, kind) = match event {
-        CompanyEvent::OperatorMessage { text, .. } => (
+        CompanyEvent::OperatorMessage {
+            text, attachments, ..
+        } => (
             Role::User,
             "operator".to_string(),
-            text.clone(),
+            with_attachment_refs(text, attachments),
             "operator.message",
         ),
         CompanyEvent::WebhookReceived { channel, body } => (
@@ -963,5 +989,56 @@ mod test {
         assert!(wired.body.contains("digest"), "{}", wired.body);
         assert!(wired.body.contains("owner_summary"), "{}", wired.body);
         assert!(wired.body.contains("started"), "{}", wired.body);
+    }
+
+    /// **Issue #1682, codex review finding.** An attachment was journaled for
+    /// transcript rendering but never reached the wire — `wire_event` used to
+    /// destructure `OperatorMessage` with `{ text, .. }` and drop
+    /// `attachments` on the floor, so a hosted or sidecar turn had no way to
+    /// know a file was attached, let alone read it. This pins that the node
+    /// id (and name) now ride the body text, giving the brain what it needs
+    /// to pull the file through its own `context_*` device-tool call.
+    #[test]
+    fn an_attachment_rides_the_wire_as_a_node_reference() {
+        let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "summarize the attached report".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+            attachments: vec![Attachment {
+                node_id: "node-abc123".to_string(),
+                name: "report.pdf".to_string(),
+                mime: "application/pdf".to_string(),
+                size: 2048,
+            }],
+        };
+
+        let wired = wire_event(9, &event);
+
+        assert!(wired.body.contains("summarize the attached report"));
+        assert!(wired.body.contains("report.pdf"), "{}", wired.body);
+        assert!(wired.body.contains("node-abc123"), "{}", wired.body);
+        assert_eq!(wired.kind, "operator.message");
+    }
+
+    /// A message with no attachment carries its text byte-for-byte, as
+    /// before — no stray marker on the common case.
+    #[test]
+    fn a_message_with_no_attachment_wires_out_unchanged() {
+        let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "status?".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+            attachments: Vec::new(),
+        };
+
+        let wired = wire_event(9, &event);
+
+        assert_eq!(wired.body, "status?");
     }
 }
