@@ -1833,6 +1833,13 @@ struct AcceptedTurn {
 ///
 /// Preserves the caller's order and refuses on the first bad id, so the message
 /// is never journaled with a partial or reordered attachment list.
+///
+/// Also reads and extracts each attachment's text where the format and size
+/// allow it (issue #1682, codex review finding) — see
+/// [`extracted_attachment_text`]. A sequential loop rather than
+/// `node_ids.iter().map(..).collect()`: extraction reads bytes and must
+/// `.await`, and a chat message carries at most a small handful of
+/// attachments, so there is no throughput this would meaningfully cost.
 async fn resolve_attachments(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -1842,29 +1849,98 @@ async fn resolve_attachments(
         return Ok(Vec::new());
     }
     let tree = runtime.workspace().tree(id).await?;
-    node_ids
-        .iter()
-        .map(|node_id| {
-            let node = tree
-                .iter()
-                .find(|n| &n.id == node_id && n.is_binary())
-                .ok_or_else(|| {
-                    ApiError(OpenCompanyError::InvalidRequest(format!(
-                        "attachment {node_id} is not a file in this company's workspace"
-                    )))
-                })?;
-            Ok(Attachment {
-                node_id: node.id.clone(),
-                name: node.name.clone(),
-                // A binary node always carries both — `is_binary()` is exactly
-                // `mime.is_some()`, and the store computes `size` alongside it —
-                // so the defaults are unreachable and exist only to keep this
-                // total without an `unwrap` a later store change could break.
-                mime: node.mime.clone().unwrap_or_default(),
-                size: node.size.unwrap_or(0),
-            })
-        })
-        .collect()
+    let mut resolved = Vec::with_capacity(node_ids.len());
+    for node_id in node_ids {
+        let node = tree
+            .iter()
+            .find(|n| &n.id == node_id && n.is_binary())
+            .ok_or_else(|| {
+                ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "attachment {node_id} is not a file in this company's workspace"
+                )))
+            })?;
+        let extracted_text = extracted_attachment_text(runtime, id, node).await;
+        resolved.push(Attachment {
+            node_id: node.id.clone(),
+            name: node.name.clone(),
+            // A binary node always carries both — `is_binary()` is exactly
+            // `mime.is_some()`, and the store computes `size` alongside it —
+            // so the defaults are unreachable and exist only to keep this
+            // total without an `unwrap` a later store change could break.
+            mime: node.mime.clone().unwrap_or_default(),
+            size: node.size.unwrap_or(0),
+            extracted_text,
+        });
+    }
+    Ok(resolved)
+}
+
+/// The largest attachment [`resolve_attachments`] reads for extraction, in
+/// bytes.
+///
+/// Well below [`crate::ingest::MAX_DOCUMENT_BYTES`] on purpose — that cap is
+/// for the dedicated memory-drop page, where reading a large document is the
+/// whole point of the request. A chat attachment's extraction instead runs
+/// inline in the synchronous `/chat` POST, so it stays small enough that an
+/// otherwise-instant send never feels stuck parsing a PDF.
+const MAX_ATTACHMENT_EXTRACT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The most extracted text one attachment contributes to the wire, in chars.
+///
+/// [`crate::brain::medulla::wire::WireEvent::body`] caps at 200000 chars and
+/// carries the operator's own words too, so no single attachment may be free
+/// to crowd out the rest of the turn.
+const MAX_ATTACHMENT_EXTRACT_CHARS: usize = 6_000;
+
+/// Reads and extracts one binary node's text where the format and size allow
+/// it, `None` otherwise (issue #1682, codex review finding).
+///
+/// `None` covers three cases alike — an image or other format nothing here
+/// parses, a scan with no text layer, and a payload over
+/// [`MAX_ATTACHMENT_EXTRACT_BYTES`] — because for "does the brain have
+/// something to read" a caller does not need to tell them apart. Reuses
+/// [`crate::ingest::extract`], the same PDF/DOCX/PPTX/XLSX/plain-text
+/// pipeline the memory-drop page already runs, so a chat attachment's actual
+/// words ride the durable [`Attachment`] rather than leaving a hosted or
+/// sidecar brain with only a node id and no device tool that resolves it.
+///
+/// Best-effort: any read failure (a race with a delete, a transient store
+/// error) answers `None` rather than failing the send — the reference alone
+/// still reaches the transcript and the journal.
+async fn extracted_attachment_text(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node: &crate::ports::workspace::WorkspaceNode,
+) -> Option<String> {
+    use futures::TryStreamExt;
+
+    let size = node.size?;
+    if size == 0 || size > MAX_ATTACHMENT_EXTRACT_BYTES {
+        return None;
+    }
+    let (_, mut stream) = runtime
+        .workspace()
+        .read_bytes(id, &node.id)
+        .await
+        .ok()
+        .flatten()?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    while let Ok(Some(chunk)) = stream.try_next().await {
+        bytes.extend_from_slice(&chunk);
+        // Belt-and-braces against a store whose streamed length disagrees
+        // with the metadata `size` it reported — never buffer past the cap
+        // just because the node claimed to be under it.
+        if bytes.len() as u64 > MAX_ATTACHMENT_EXTRACT_BYTES {
+            return None;
+        }
+    }
+    match crate::ingest::extract(&node.name, node.mime.as_deref(), &bytes) {
+        crate::ingest::Extracted::Text(text) => Some(crate::ledger::budget::truncate(
+            &text,
+            MAX_ATTACHMENT_EXTRACT_CHARS,
+        )),
+        crate::ingest::Extracted::Empty | crate::ingest::Extracted::Unsupported(_) => None,
+    }
 }
 
 async fn accept_chat_turn(

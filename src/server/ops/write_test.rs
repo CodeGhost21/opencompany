@@ -9404,6 +9404,107 @@ async fn chat_message_with_attachment_journals_and_hydrates() {
     assert_eq!(attachment["size"], png.len() as u64, "size is the store's");
 }
 
+/// Codex review finding on #1682, round 2: a bare node id told a hosted or
+/// sidecar brain a file existed but gave it nothing to act on — no device
+/// tool bridges a `context_*` call into the workspace's binary store. The
+/// send route now extracts a readable attachment's text and journals it
+/// alongside the reference, so `wire_event` (`brain::medulla::effects`) has
+/// real content to put on the wire.
+///
+/// Reads the raw journal rather than `/chat/history` on purpose:
+/// `extracted_text` is an internal server-to-brain channel, not operator-
+/// facing data, so `ChatAttachmentDto` deliberately drops it — the console
+/// never sees it and must not.
+#[tokio::test]
+async fn chat_attachment_text_is_extracted_and_journaled_for_the_brain() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let text = b"Q3 revenue grew 12% year over year.".to_vec();
+    let (status, reference) = chat_upload(&state, "report.txt", Some("text/plain"), &text).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "summarize the attached report", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(
+        journaled[0].extracted_text.as_deref(),
+        Some("Q3 revenue grew 12% year over year."),
+        "a plain-text attachment's content must reach the durable event, \
+         not just its node id"
+    );
+}
+
+/// A binary attachment nothing here parses (an image) journals with no
+/// extracted text — the reference alone rides the wire, and honestly: no
+/// content is fabricated for a format extraction cannot read.
+#[tokio::test]
+async fn chat_attachment_with_no_readable_text_journals_none() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x01];
+    let (status, reference) = chat_upload(&state, "photo.png", Some("image/png"), &png).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "what's in this photo?", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(journaled[0].extracted_text, None);
+}
+
 /// The IDOR / phantom guard: a `node_id` that resolves to no binary node in
 /// this company's workspace refuses the send with a `400`, on the same terms a
 /// malformed thread `parent` does — so a stale or hostile client cannot attach

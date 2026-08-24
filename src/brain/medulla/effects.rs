@@ -20,26 +20,39 @@ use super::wire::{EffectFrame, Role, WireEvent};
 /// The device-tool name prefix that routes a tool call to the context store.
 pub(crate) const CONTEXT_TOOL_PREFIX: &str = "context_";
 
-/// Appends a line per attachment naming its workspace node id, so the
-/// inference sidecar can read the bytes itself through the same
-/// `context_*` device-tool surface it already has (issue #1682).
+/// Appends a marker per attachment — its extracted text when
+/// `resolve_attachments` (`server::operator`) managed to read one, else just
+/// the workspace node id — so a hosted or sidecar turn has something to work
+/// with (issue #1682).
 ///
 /// Without this, `OperatorMessage.attachments` was journaled for the
-/// transcript but never reached the wire — a hosted or sidecar turn had no
-/// way to know a file existed, let alone fetch it. This does not embed the
-/// file's bytes or content on the wire (`WireEvent::body` is a plaintext
-/// cap at 200000 chars, not a payload channel); it hands the brain the
-/// reference it needs to pull the file through its own tool call.
+/// transcript but never reached the wire at all — a turn had no way to know a
+/// file was even attached. A node id alone is a half-measure a codex review
+/// pass on that first fix caught: nothing on the wire side ever bridges a
+/// `context_*` device-tool call into the workspace's binary store, so a bare
+/// reference told the brain a file existed and gave it no way to read it. The
+/// extracted text is what actually closes that gap for the formats
+/// `crate::ingest::extract` reads (PDF, DOCX, PPTX, XLSX, plain text); an
+/// image or a scan with no text layer still falls back to the reference,
+/// which is honest about what the brain does not have rather than silent
+/// about it.
 fn with_attachment_refs(text: &str, attachments: &[Attachment]) -> String {
     if attachments.is_empty() {
         return text.to_string();
     }
     let mut body = text.to_string();
     for a in attachments {
-        body.push_str(&format!(
-            "\n\n[Attached file: {} ({}, {} bytes) — workspace node {}]",
-            a.name, a.mime, a.size, a.node_id
-        ));
+        match &a.extracted_text {
+            Some(extracted) => body.push_str(&format!(
+                "\n\n[Attached file: {} ({}, {} bytes) — workspace node {} — contents:\n{extracted}]",
+                a.name, a.mime, a.size, a.node_id
+            )),
+            None => body.push_str(&format!(
+                "\n\n[Attached file: {} ({}, {} bytes) — workspace node {} — no readable text \
+                 extracted]",
+                a.name, a.mime, a.size, a.node_id
+            )),
+        }
     }
     body
 }
@@ -991,15 +1004,49 @@ mod test {
         assert!(wired.body.contains("started"), "{}", wired.body);
     }
 
-    /// **Issue #1682, codex review finding.** An attachment was journaled for
-    /// transcript rendering but never reached the wire — `wire_event` used to
-    /// destructure `OperatorMessage` with `{ text, .. }` and drop
-    /// `attachments` on the floor, so a hosted or sidecar turn had no way to
-    /// know a file was attached, let alone read it. This pins that the node
-    /// id (and name) now ride the body text, giving the brain what it needs
-    /// to pull the file through its own `context_*` device-tool call.
+    /// **Issue #1682, codex review finding (round 1).** An attachment was
+    /// journaled for transcript rendering but never reached the wire —
+    /// `wire_event` used to destructure `OperatorMessage` with `{ text, .. }`
+    /// and drop `attachments` on the floor, so a hosted or sidecar turn had
+    /// no way to know a file was attached at all. This pins the fallback
+    /// case — no extracted text (an image, a scan, a format nothing here
+    /// parses) — where the node id and name still ride the body honestly,
+    /// naming what the brain does not have rather than staying silent.
     #[test]
-    fn an_attachment_rides_the_wire_as_a_node_reference() {
+    fn an_attachment_with_no_extracted_text_rides_the_wire_as_a_bare_reference() {
+        let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "what's in this photo?".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+            attachments: vec![Attachment {
+                node_id: "node-abc123".to_string(),
+                name: "photo.png".to_string(),
+                mime: "image/png".to_string(),
+                size: 2048,
+                extracted_text: None,
+            }],
+        };
+
+        let wired = wire_event(9, &event);
+
+        assert!(wired.body.contains("what's in this photo?"));
+        assert!(wired.body.contains("photo.png"), "{}", wired.body);
+        assert!(wired.body.contains("node-abc123"), "{}", wired.body);
+        assert_eq!(wired.kind, "operator.message");
+    }
+
+    /// **Issue #1682, codex review finding (round 2).** A bare node
+    /// reference told a hosted or sidecar brain a file existed and gave it no
+    /// way to read it — nothing on the wire side bridges a `context_*`
+    /// device-tool call into the workspace's binary store. This pins that
+    /// `resolve_attachments`' extracted text, when there is some, rides the
+    /// body directly — the brain gets the report's actual words, not a
+    /// pointer to a store it has no tool for.
+    #[test]
+    fn an_attachment_with_extracted_text_carries_its_content_on_the_wire() {
         let event = CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
             parent: None,
@@ -1012,14 +1059,19 @@ mod test {
                 name: "report.pdf".to_string(),
                 mime: "application/pdf".to_string(),
                 size: 2048,
+                extracted_text: Some("Q3 revenue grew 12% year over year.".to_string()),
             }],
         };
 
         let wired = wire_event(9, &event);
 
         assert!(wired.body.contains("summarize the attached report"));
+        assert!(
+            wired.body.contains("Q3 revenue grew 12% year over year."),
+            "{}",
+            wired.body
+        );
         assert!(wired.body.contains("report.pdf"), "{}", wired.body);
-        assert!(wired.body.contains("node-abc123"), "{}", wired.body);
         assert_eq!(wired.kind, "operator.message");
     }
 
