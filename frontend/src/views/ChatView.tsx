@@ -79,6 +79,19 @@ import {
   type Transcripts,
 } from "./chat/model";
 
+/**
+ * The stable empty transcript fallback.
+ *
+ * `transcripts[channel.id]` can be absent for a channel with no history yet —
+ * a newly opened DM, or a desk whose history came back empty. Falling back to a
+ * fresh `[]` would give `messages` a new identity on every render, which
+ * recomputes the `replyParents`/`loadedMessageIds` memos and re-runs the
+ * channel-view effect on every render — and that effect's state write
+ * re-renders the shell, closing a render loop. One shared empty array keeps the
+ * identity stable until a transcript entry actually lands.
+ */
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
