@@ -750,7 +750,7 @@ export function ChatView({
     // the delivery path, so telling the shell "ended" for either would take the
     // working row down mid-turn (detached) or throw away the reply it was
     // holding (failed). See `PendingSyncPosts` for the table.
-    let outcome: "resolved" | "detached" | "failed" = "resolved";
+    let outcome: "resolved" | "detached" | "failed" | "stale" = "resolved";
     try {
       const answer = await client.chat(
         text,
