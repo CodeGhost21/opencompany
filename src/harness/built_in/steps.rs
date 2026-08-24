@@ -2502,14 +2502,15 @@ mod tests {
                 emitted.iter().map(|(seq, _, _)| *seq).collect();
             assert_eq!(ordinals.len(), 1, "a thinking run is ONE step");
 
-            // The last write under that ordinal carries the whole thought.
-            let last = emitted
+            // `push` emits the first delta once and later flushes only the NEW
+            // bytes; the sink concatenates the per-flush chunks, so the stored
+            // reasoning is the whole thought without the first chunk repeating.
+            let reasoning: String = emitted
                 .iter()
                 .filter_map(|(_, _, d)| d.as_ref())
                 .filter_map(|d| d.reasoning.clone())
-                .next_back()
-                .expect("reasoning was captured");
-            assert_eq!(last, "first second third");
+                .collect();
+            assert_eq!(reasoning, "first second third");
         }
 
         /// The bug the vec return exists to prevent: a tool call closing a
