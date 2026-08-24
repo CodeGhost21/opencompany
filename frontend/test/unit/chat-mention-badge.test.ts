@@ -60,6 +60,22 @@ describe("mentionCountsByChannel", () => {
       general: 1,
     });
   });
+
+  /**
+   * An unaddressed message (an API client omitting `chat`) lands in the General
+   * desk and can store `"General"` or `""` as its context. The rail has no
+   * `General` row — it is built from the company's real desk ids — so every
+   * spelling of the default desk has to badge the rendered main channel, or the
+   * mention renders nowhere and can never be cleared.
+   */
+  it("maps every spelling of the General desk onto the rendered main channel", () => {
+    for (const context of ["General", "general", ""]) {
+      expect(mentionCountsByChannel([note({ id: "a", context })], "general")).toEqual(
+        { general: 1 },
+        `context ${JSON.stringify(context)} must badge the main channel`,
+      );
+    }
+  });
   it("is empty for an empty feed", () => {
     expect(mentionCountsByChannel([])).toEqual({});
   });
