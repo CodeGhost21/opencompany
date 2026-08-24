@@ -3126,23 +3126,22 @@ mod tests {
         }
 
         #[test]
-        fn every_failure_class_has_a_word() {
-            for failure in [
-                TurnStepFailure::Declined,
-                TurnStepFailure::BlockedByPolicy,
-                TurnStepFailure::Unauthorized,
-                TurnStepFailure::MissingPermission,
-                TurnStepFailure::MissingApp,
-                TurnStepFailure::NotFound,
-                TurnStepFailure::Timeout,
-                TurnStepFailure::Unavailable,
-                TurnStepFailure::Failed,
+        fn every_failure_class_has_a_stable_snake_case_wire_word() {
+            for (failure, expected) in [
+                (TurnStepFailure::Declined, "declined"),
+                (TurnStepFailure::BlockedByPolicy, "blocked_by_policy"),
+                (TurnStepFailure::Unauthorized, "unauthorized"),
+                (TurnStepFailure::MissingPermission, "missing_permission"),
+                (TurnStepFailure::MissingApp, "missing_app"),
+                (TurnStepFailure::NotFound, "not_found"),
+                (TurnStepFailure::Timeout, "timeout"),
+                (TurnStepFailure::Unavailable, "unavailable"),
+                (TurnStepFailure::Failed, "failed"),
             ] {
-                let word = failure_word(failure);
-                assert!(!word.is_empty());
-                assert_eq!(word, word.to_lowercase(), "wire words are snake_case");
+                assert_eq!(failure.wire_word(), expected);
             }
         }
+
     }
 
     // ---- the attempt row a workflow node now opens ------------------------
