@@ -162,7 +162,16 @@ function AvatarTile({
 function useAvatarSrc(ref: string): string | null {
   const { client, company } = useConsole();
   const immediate = staticAvatarSrc(ref);
-  const [src, setSrc] = useState<string | null>(immediate);
+
+  // The URL is stored beside the reference it was fetched for, and only trusted
+  // while it still matches. A mounted tile whose `ref` changes must not keep
+  // showing the previous face while the new one is in flight — the render that
+  // carries the new prop would otherwise still answer with the old state, and
+  // the previous person's face would flash before the effect replaced it.
+  // A mascot resolves synchronously, so `immediate` is always the current face
+  // and the stateful path only ever holds an uploaded one.
+  const [fetched, setFetched] = useState<{ ref: string; src: string | null } | null>(null);
+  const src = fetched?.ref === ref ? fetched.src : immediate;
 
   useEffect(() => {
     // No client means no authenticated fetch is possible — outside the console
@@ -170,16 +179,16 @@ function useAvatarSrc(ref: string): string | null {
     // draws as the tone tile, which is the same thing a deleted one does.
     const resolved = client ? resolveAvatarSrc(client, company, ref) : immediate;
     if (typeof resolved === "string" || resolved === null) {
-      setSrc(resolved);
+      setFetched({ ref, src: resolved });
       return;
     }
     // A reference that changed while a fetch was in flight must not have the
     // stale result written over it — the tile would show the previous person's
     // face, which is worse than showing none.
     let live = true;
-    setSrc(null);
+    setFetched({ ref, src: null });
     void resolved.then((url) => {
-      if (live) setSrc(url);
+      if (live) setFetched({ ref, src: url });
     });
     return () => {
       live = false;
