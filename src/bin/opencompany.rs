@@ -950,6 +950,9 @@ async fn live_ports(
     if let Some(overlay) = open_memory_overlay(&settings)? {
         memory = overlay.memory;
         context = overlay.context;
+        if let Some(s) = overlay.scopes {
+            scopes = Some(s);
+        }
         if let Some(f) = overlay.facts {
             facts = Some(f);
         }
