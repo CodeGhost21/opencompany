@@ -2379,6 +2379,109 @@ async fn agent_runs_walks_a_workflow_run_to_its_reasoning() {
     );
 }
 
+/// The deep half is a store read, not a constant: a query that does not select
+/// `steps.deep` must not drag the deep store into the request at all. The
+/// console's Observatory list polls every 4/30 seconds and deliberately selects
+/// no deep bodies, so an eager read would materialize up to `limit` runs ×
+/// hundreds of detail rows per poll for data nothing renders — the lookahead
+/// keeps that read off the hot path.
+#[tokio::test]
+async fn a_list_query_without_deep_does_not_read_the_deep_store() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::ports::deep_trace::{DeepTraceStore, RunStepDetailRecord};
+    use crate::store::fs_ops::FsOps;
+
+    #[derive(Clone)]
+    struct CountingDeepTrace {
+        inner: Arc<FsOps>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl DeepTraceStore for CountingDeepTrace {
+        async fn append_step_detail(
+            &self,
+            company: &CompanyId,
+            record: &RunStepDetailRecord,
+        ) -> crate::error::Result<()> {
+            self.inner.append_step_detail(company, record).await
+        }
+
+        async fn list_step_details(
+            &self,
+            company: &CompanyId,
+            run_id: &str,
+        ) -> crate::error::Result<Vec<RunStepDetailRecord>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.list_step_details(company, run_id).await
+        }
+
+        async fn list_step_details_for_runs(
+            &self,
+            company: &CompanyId,
+            run_ids: &[String],
+        ) -> crate::error::Result<std::collections::HashMap<String, Vec<RunStepDetailRecord>>>
+        {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.list_step_details_for_runs(company, run_ids).await
+        }
+
+        async fn purge_deep_trace(
+            &self,
+            company: &CompanyId,
+            run_id: Option<&str>,
+        ) -> crate::error::Result<u64> {
+            self.inner.purge_deep_trace(company, run_id).await
+        }
+    }
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let deep = Arc::new(CountingDeepTrace {
+        inner: Arc::new(FsOps::new(home.clone())),
+        reads: reads.clone(),
+    });
+    let state = state_with_builder(&home, manifest(), |b| b.with_deep_trace(deep)).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    // The list read selects no deep bodies…
+    let value = query(
+        router(state.clone()),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq kind label result } } } }"}"#,
+    )
+    .await;
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "the attempt still lists: {value}");
+    assert_eq!(runs[0]["steps"][0]["kind"], "thinking");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "a deep-less list must not read the deep store"
+    );
+
+    // …and the single-run deep read still works when it is selected.
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRun(id:\"att-1\") { steps { seq deep { reasoning } } } } }"}"#,
+    )
+    .await;
+    let steps = value["data"]["company"]["agentRun"]["steps"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRun missing: {value}"));
+    assert_eq!(
+        steps[0]["deep"]["reasoning"],
+        "Collatz — memoise the chain"
+    );
+    assert!(
+        reads.load(Ordering::SeqCst) >= 1,
+        "selecting deep must read the store"
+    );
+}
+
 /// The unredacted half is role-gated: a member sees the scrubbed trace and no
 /// `deep`, exactly as approval contents are gated (issue #618). Without this,
 /// any signed-in member could read raw tool arguments and output — which may
