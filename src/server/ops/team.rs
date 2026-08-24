@@ -1481,7 +1481,7 @@ mod tests {
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
         assert!(
-            effective.iter().any(|g| *g == "workspace.write"),
+            effective.contains(&"workspace.write"),
             "a focus-less add still inherits the company grant: {effective:?}"
         );
     }
