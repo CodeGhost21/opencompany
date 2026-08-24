@@ -258,7 +258,7 @@ export function ChatView({
   onSendDetached,
   onSendFailed,
   onSendStale,
-  scopeCompanyRef,
+  scopeRef,
   openTurns,
   liveStepsByThread,
   unread,
