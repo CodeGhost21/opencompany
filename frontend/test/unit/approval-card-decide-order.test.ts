@@ -259,7 +259,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       b.getAttribute("aria-label"),
     );
     expect(labelled).toContain(
-      'Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 1} — request ${T0} — asked by Ops',
+      `Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 1} — request ${T0} — asked by Ops`,
     );
     expect(labelled).toContain(
       'Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 2} — request ${T0} — asked by Ops',
