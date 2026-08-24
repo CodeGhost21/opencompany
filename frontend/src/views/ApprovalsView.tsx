@@ -8,6 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
   type ApprovalSummary,
+  GRANT_DURATIONS,
   type GrantScope,
   type StandingGrant,
   type Verdict,
