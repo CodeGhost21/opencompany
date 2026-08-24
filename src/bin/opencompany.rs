@@ -944,6 +944,7 @@ async fn live_ports(
             Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
             Arc::new(FsContextStore::new(home.to_path_buf())) as _,
             Some(Arc::new(FsOps::new(home.to_path_buf())) as Arc<dyn opencompany::ports::FactStore>),
+            None,
         ),
     };
     if let Some(overlay) = open_memory_overlay(&settings)? {
