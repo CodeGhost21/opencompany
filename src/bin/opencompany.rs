@@ -1119,6 +1119,8 @@ async fn run_issue_password(
 
     let issued = bootstrap::issue_password(
         &users,
+        &sessions,
+        &login_codes,
         &id,
         &manifest_admins,
         bootstrap_admin.as_deref(),
