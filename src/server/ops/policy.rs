@@ -682,8 +682,7 @@ mod tests {
         );
 
         for hours in [0, 8_761, u64::MAX] {
-            let (status, _) =
-                call(&state, "PUT", Some(json!({ "approvalTtlHours": hours }))).await;
+            let (status, _) = call(&state, "PUT", Some(json!({ "approvalTtlHours": hours }))).await;
             assert_eq!(
                 status,
                 StatusCode::UNPROCESSABLE_ENTITY,
