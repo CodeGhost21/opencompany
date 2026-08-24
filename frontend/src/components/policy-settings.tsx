@@ -830,7 +830,9 @@ export function PolicySettings({ client, company }: Props) {
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>Keep current setting</AlertDialogCancel>
+                  <AlertDialogCancel disabled={saving}>
+                    Keep current setting
+                  </AlertDialogCancel>
                   <AlertDialogAction
                     data-testid="policy-tier-confirm"
                     disabled={saving}
