@@ -38,15 +38,27 @@ export function SetupController({
   client,
   company,
   force,
+  routeOpen,
   deepLinked,
   onForceHandled,
   onOpenChange,
   onCompleted,
+  onRouteDismiss,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   /** Opened by hand from the Team page's prompt, regardless of the skip flag. */
   force?: boolean;
+  /**
+   * Whether the `#/setup` recovery address is on screen.
+   *
+   * The shell clears `force` the moment this controller consumes it, so a
+   * dialog a Back pressed from `#/setup` would otherwise leave open over the
+   * page the address bar now names. Closed on the true→false edge only — never
+   * because the route is merely absent — so a dialog the first-run gate or the
+   * Team prompt opened, with no `#/setup` involved, is not yanked away.
+   */
+  routeOpen?: boolean;
   /**
    * The operator arrived on a view they named, so do not open unprompted.
    *
@@ -73,6 +85,8 @@ export function SetupController({
   onOpenChange?: (open: boolean) => void;
   /** Setup finished and created a team — the roster reads should refresh. */
   onCompleted?: () => void;
+  /** Leaves the manual `#/setup` route after skip or completion. */
+  onRouteDismiss?: () => void;
 }) {
   const scope = useLocalScope();
   const [open, setOpen] = useState(false);
@@ -140,9 +154,14 @@ export function SetupController({
       // Only the first evaluation may open the dialog by itself; see
       // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
       // keeps holding and the Team page keeps prompting.
-      setOpen(
-        first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) }),
-      );
+      // The reset at the beginning of this effect closes the previous
+      // company's dialog. Once this roster read has started, only open here
+      // for the automatic first-run offer; do not close a dialog that an
+      // explicit recovery action (`#/setup` or Settings) opened while the read
+      // was in flight (issue #1417).
+      if (first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) })) {
+        setOpen(true);
+      }
       setChecked(true);
     })();
 
@@ -158,10 +177,25 @@ export function SetupController({
     onForceHandled?.();
   }, [force, onForceHandled]);
 
+  // Leaving `#/setup` closes the dialog the address opened.
+  //
+  // The shell clears `force` once this controller has taken it, so `open` would
+  // otherwise survive the route that asked for it: a Back from `#/setup` would
+  // leave the blocking dialog over Settings while the address bar says Settings
+  // (issue #1417 review). Closed on the true→false edge, never while the route
+  // holds — and never because the route is absent, which would dismiss a dialog
+  // the first-run gate or the Team prompt opened.
+  const routeOpenRef = useRef(routeOpen);
+  useEffect(() => {
+    if (routeOpenRef.current && !routeOpen) setOpen(false);
+    routeOpenRef.current = routeOpen;
+  }, [routeOpen]);
+
   const skip = useCallback(() => {
     markSetupSkipped(scope);
     setOpen(false);
-  }, [scope]);
+    if (routeOpen) onRouteDismiss?.();
+  }, [routeOpen, onRouteDismiss, scope]);
 
   const done = useCallback(() => {
     // Clear the skip so it cannot outlive what it was suppressing: an operator
@@ -169,10 +203,14 @@ export function SetupController({
     // setup again rather than left on an empty team page.
     clearSetupSkipped(scope);
     setOpen(false);
+    // The route must be left before the completion handler chooses the staffed
+    // company's destination (Company). Skip has no completion handler, so it
+    // still lands on Overview through the same callback.
+    if (routeOpen) onRouteDismiss?.();
     // The team exists now, so the tour has something to walk through.
     setUnstaffed(false);
     onCompleted?.();
-  }, [scope, onCompleted]);
+  }, [scope, onCompleted, routeOpen, onRouteDismiss]);
 
   if (!checked && !force) return null;
   if (!open) return null;

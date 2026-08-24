@@ -481,6 +481,24 @@ export interface ApprovalSummary {
    */
   workflow_run_id?: string | null;
   /**
+   * Which **workflow** a parked `workflow.approve` gate is asking about
+   * (#1418) — the second half of the run address, beside {@link workflow_run_id}.
+   *
+   * A run id alone cannot name a console page, so this is what turns a native
+   * workflow approval into an "Open the run" link.
+   *
+   * **Deliberately not read from {@link payload}.** Payload is a redacted
+   * rendering, and role redaction (#618) strips it from a member reader
+   * entirely; the host projects this top-level field from the raw parked effect
+   * (`gate_workflow_id`) so it survives redaction the way `workflow_run_id`
+   * already does — a member holding up a stalled workflow keeps the address.
+   *
+   * Absent on every non-gate approval (a chat turn, a scheduler tick) and on a
+   * tool call parked *by* a workflow; only native `workflow.approve` effects
+   * carry it. Optional because an old host predates the field.
+   */
+  workflow_id?: string | null;
+  /**
    * Which turn's gated calls this one belongs to (#842) — an opaque key shared
    * by every approval a single agent turn parked.
    *
@@ -572,8 +590,13 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  */
 export interface StandingGrant {
   id: string;
-  /** The teammate it was granted to. */
+  /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
+   * which names its subject in `workflow` instead. */
   agent: string;
+  /** The authored workflow allowed to redeem it, when the grant is to a
+   * workflow rather than a teammate (issue #1098) — `agent` is empty then.
+   * Absent on every teammate grant. */
+  workflow?: string;
   /** The tool it admits, with any arguments. */
   tool: string;
   verdict: Verdict;
@@ -933,6 +956,21 @@ export interface AgentDetailDto {
   /** The declared cognition-tier hint, when the manifest sets one. */
   tier?: string;
   /**
+   * Which declared harness this teammate runs on, by id (issue #1245's
+   * harness-picker follow-up). `undefined` means the harness marked
+   * `default = true` — read `GET {scope}/harnesses` ([`HarnessDto`]) for the
+   * full declared set, including which one that is.
+   */
+  harness?: string;
+  /**
+   * This teammate's own model override, when it has one (issue #1245's
+   * per-agent follow-up). Meaningful only when the teammate runs on an ACP
+   * harness (an operator's own coding CLI) — the host does not tell this
+   * response which harness that is, so the console shows it as informational
+   * rather than validating it against one.
+   */
+  model?: string;
+  /**
    * Whether this teammate is the company's orchestrator. Resolved by the roster
    * rule (a tagged tier first, else the first declared agent), so it is NOT the
    * same question as `tier === "orchestrator"`: a company that tags nobody still
@@ -995,6 +1033,68 @@ export interface EditAgentInput {
    * persona the operator did not touch.
    */
   instructions?: string | null;
+  /**
+   * The teammate's own model override (issue #1245's per-agent follow-up).
+   * Same double-option shape as `description`: absent leaves it alone, `null`
+   * clears it back to the harness's own default, and a string sets it.
+   * Admin-only on the host, alongside `tools` — a member's `PATCH` carrying
+   * this key gets a `403`.
+   */
+  model?: string | null;
+  /**
+   * Which declared harness this teammate runs on (issue #1245's
+   * harness-picker follow-up). Same double-option shape as `model`: absent
+   * leaves it alone, `null` clears it back to the company's default, and a
+   * string pins it to one of the ids `GET {scope}/harnesses` lists.
+   * Admin-only on the host, alongside `model`/`tools`.
+   */
+  harness?: string | null;
+}
+
+/**
+ * One declared `[[harness]]`, from `GET {scope}/harnesses` (issue #1245's
+ * harness-picker follow-up) — what Settings' Harnesses card and the per-agent
+ * Harness picker both read, so the two cannot disagree about what the
+ * company has declared. Read-only: a harness lives in the version-controlled
+ * `company.toml`, the same as everything else `AgentDetailDto` treats as the
+ * blueprint.
+ */
+export interface HarnessDto {
+  id: string;
+  /** `"built_in"` (managed) or `"acp"` (external). */
+  kind: "built_in" | "acp";
+  /** Whether a teammate naming no harness runs here. Exactly one entry sets this. */
+  default: boolean;
+  /** `acp` harnesses only: which CLI (`claude`/`codex`), when `transport === "local"`. */
+  agent?: string;
+  /**
+   * Whether the host serving this company can spawn this harness's transport.
+   *
+   * Answered by the host because the console cannot work it out: a desktop
+   * connected to a *remote* company still has its own local survey, and
+   * probing a declared `transport = "local"` harness against the operator's
+   * laptop reports readiness for a machine that will never run those turns.
+   *
+   * Optional so a host predating the field degrades to not probing rather
+   * than to probing wrongly — the safe direction, since "can't say from here"
+   * is a state the page already renders honestly.
+   */
+  runsHere?: boolean;
+  /** `acp` harnesses only: `"local"` (spawned on this machine) or `"runner"` (a registered remote). */
+  transport?: string;
+  /**
+   * Whether this entry is **declared** in `company.toml` (`false`) or merely
+   * **detected** (`true`) — a coding CLI this build can drive, bindable
+   * without any `[[harness]]` naming it.
+   *
+   * The distinction is what the External harnesses page is built on. A
+   * declared harness is a property of the *company*, identical wherever the
+   * manifest is opened. A detected one is a property of the *machine*: the
+   * host says only "you may bind to this id" and cannot know whether the CLI
+   * is installed or signed in — that answer comes from `acpHarnesses()` on
+   * the desktop, joined against this list by `id`.
+   */
+  detected: boolean;
 }
 
 /**

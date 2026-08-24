@@ -48,13 +48,16 @@ export type View =
   | "ledgers"
   | "team"
   | "workspace"
-  | "memory"
   | "approvals"
   | "workflows"
   | "pages"
   | "finances"
   | "settings"
-  | "feedback";
+  | "feedback"
+  /** The first-run setup dialog, opened from a direct address or Settings. */
+  | "setup"
+  /** The explanation shown when an address names no console surface. */
+  | "not-found";
 
 /**
  * Every routable view, one entry per member of `View` — the compiler enforces
@@ -103,7 +106,6 @@ const ROUTABLE: Record<View, true> = {
    */
   team: true,
   workspace: true,
-  memory: true,
   approvals: true,
   workflows: true,
   /**
@@ -129,6 +131,10 @@ const ROUTABLE: Record<View, true> = {
   settings: true,
   /** No nav row: linked from the sidebar footer instead. */
   feedback: true,
+  /** No nav row: opens SetupController over Overview (issue #1417). */
+  setup: true,
+  /** No nav row: the explicit destination for an unrecognized address (#1417). */
+  "not-found": true,
 };
 
 /**
