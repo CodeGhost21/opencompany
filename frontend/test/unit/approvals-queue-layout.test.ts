@@ -32,7 +32,8 @@ const GRANT: StandingGrant = {
 };
 
 const client = {
-  get: async <T,>(path: string): Promise<T> => (path.endsWith("/users") ? [] : null) as T,
+  get: async <T>(path: string): Promise<T> =>
+    (path.endsWith("/users") ? [] : null) as T,
   listGrants: async () => [GRANT],
   listTeam: async () => [],
   revokeGrant: async () => undefined,
@@ -54,7 +55,9 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -90,13 +93,19 @@ describe("the approvals backlog queue (#1427)", () => {
     );
     expect(queueHeading).toBeDefined();
     expect(permissionsHeading).toBeDefined();
-    expect(permissionsHeading!.compareDocumentPosition(queueHeading!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      permissionsHeading!.compareDocumentPosition(queueHeading!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(queueHeading!.parentElement?.className).toContain("sticky");
-    expect(queueHeading!.parentElement?.textContent).toContain("Each one has a deadline.");
-    expect([...container.querySelectorAll("[data-approval-id]")].map((row) => row.getAttribute("data-approval-id"))).toEqual([
-      "soon",
-      "tomorrow",
-    ]);
+    expect(queueHeading!.parentElement?.textContent).toContain(
+      "Each one has a deadline.",
+    );
+    expect(
+      [...container.querySelectorAll("[data-approval-id]")].map((row) =>
+        row.getAttribute("data-approval-id"),
+      ),
+    ).toEqual(["soon", "tomorrow"]);
   });
 
   it("holds the whole permissions-and-queue region while revoking a grant (#1593)", async () => {

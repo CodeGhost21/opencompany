@@ -52,7 +52,9 @@ function controllableClient(roster: { id: string; name: string }[]) {
 }
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -66,11 +68,19 @@ afterEach(() => {
 
 describe("useAskerNames (#1593)", () => {
   it("defers names that arrive during the hold and applies them on release", async () => {
-    const { client, resolveRoster } = controllableClient([{ id: "ops", name: "Ops Agent" }]);
+    const { client, resolveRoster } = controllableClient([
+      { id: "ops", name: "Ops Agent" },
+    ]);
 
     // Mount while the queue is held. The roster read resolves during the hold.
     await act(async () => {
-      root.render(createElement(Probe, { client, approvals: [approval("a1", "ops")], holding: true }));
+      root.render(
+        createElement(Probe, {
+          client,
+          approvals: [approval("a1", "ops")],
+          holding: true,
+        }),
+      );
     });
     await act(async () => {
       resolveRoster();
@@ -83,15 +93,29 @@ describe("useAskerNames (#1593)", () => {
 
     // The hold releases: the stashed name lands.
     await act(async () => {
-      root.render(createElement(Probe, { client, approvals: [approval("a1", "ops")], holding: false }));
+      root.render(
+        createElement(Probe, {
+          client,
+          approvals: [approval("a1", "ops")],
+          holding: false,
+        }),
+      );
     });
     expect(lastNames?.get("ops")).toBe("Ops Agent");
   });
 
   it("applies names immediately when not holding", async () => {
-    const { client, resolveRoster } = controllableClient([{ id: "ops", name: "Ops Agent" }]);
+    const { client, resolveRoster } = controllableClient([
+      { id: "ops", name: "Ops Agent" },
+    ]);
     await act(async () => {
-      root.render(createElement(Probe, { client, approvals: [approval("a1", "ops")], holding: false }));
+      root.render(
+        createElement(Probe, {
+          client,
+          approvals: [approval("a1", "ops")],
+          holding: false,
+        }),
+      );
     });
     await act(async () => {
       resolveRoster();

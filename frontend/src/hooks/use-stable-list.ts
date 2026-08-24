@@ -124,8 +124,13 @@ export function useStableList<T>(live: T[]): StableList<T> {
    */
   const focusInsideNow = useCallback(() => {
     const active = document.activeElement;
-    if (active instanceof HTMLElement && active.matches(":disabled")) return false;
-    return active !== null && containerRef.current !== null && containerRef.current.contains(active);
+    if (active instanceof HTMLElement && active.matches(":disabled"))
+      return false;
+    return (
+      active !== null &&
+      containerRef.current !== null &&
+      containerRef.current.contains(active)
+    );
   }, []);
 
   const thawIfIdle = useCallback(() => {
@@ -157,7 +162,8 @@ export function useStableList<T>(live: T[]): StableList<T> {
     (event: FocusEvent) => {
       // Focus moving between two cards inside the queue is not leaving it —
       // only a blur whose destination is outside the container thaws.
-      if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+      if (event.currentTarget.contains(event.relatedTarget as Node | null))
+        return;
       focusInside.current = false;
       thawIfIdle();
     },

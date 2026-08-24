@@ -37,7 +37,11 @@ import {
 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { GRANT_DURATIONS, type ApprovalSummary, type GrantScope } from "@/api/types";
+import {
+  GRANT_DURATIONS,
+  type ApprovalSummary,
+  type GrantScope,
+} from "@/api/types";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import {
   approvalAction,
@@ -49,7 +53,11 @@ import {
 } from "@/lib/language";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
+import {
+  channelIdForThread,
+  deskFromDto,
+  dmChannelId,
+} from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -102,7 +110,9 @@ export function ApprovalHeadline({
       <div className="min-w-[min(12rem,100%)] flex-1">
         <p className="font-medium">{approvalAction(a)}</p>
         {a.amount_usd != null && (
-          <p className="text-xs font-medium text-muted-foreground">{money(a.amount_usd)}</p>
+          <p className="text-xs font-medium text-muted-foreground">
+            {money(a.amount_usd)}
+          </p>
         )}
         {/*
          * #618: an absent amount normally means "this effect involves no
@@ -111,7 +121,9 @@ export function ApprovalHeadline({
          * misreading the flag exists to prevent.
          */}
         {a.amount_usd == null && a.contents_hidden && (
-          <p className="text-xs font-medium text-muted-foreground italic">Amount hidden</p>
+          <p className="text-xs font-medium text-muted-foreground italic">
+            Amount hidden
+          </p>
         )}
       </div>
       {actions && (
@@ -158,7 +170,8 @@ export function ApprovalMeta({
       {asker && (
         <>
           <span>
-            Asked by <span className="font-medium text-foreground">{asker}</span>
+            Asked by{" "}
+            <span className="font-medium text-foreground">{asker}</span>
           </span>
           <span aria-hidden>·</span>
         </>
@@ -208,7 +221,9 @@ export function ApprovalMeta({
        * Wording and emphasis both come from `payloadAge`, so they are testable as
        * a string rather than only as rendered output.
        */}
-      <span className={age.emphasise ? "font-medium text-foreground" : undefined}>
+      <span
+        className={age.emphasise ? "font-medium text-foreground" : undefined}
+      >
         {age.text}
       </span>
       {/* The deadline (#971), beside how old the payload is — the two halves of
@@ -232,7 +247,9 @@ export function ApprovalMeta({
       {typeof a.expires_at_millis === "number" && (
         <>
           <span aria-hidden>·</span>
-          <span className={deadlineToneClass(deadline.tone)}>{deadline.text}</span>
+          <span className={deadlineToneClass(deadline.tone)}>
+            {deadline.text}
+          </span>
         </>
       )}
       {status && (
@@ -284,7 +301,8 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
       <div className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
         <EyeOff className="size-3.5 shrink-0" />
         <span>
-          Details hidden by your role. An admin can see what this approval will do and decide it.
+          Details hidden by your role. An admin can see what this approval will
+          do and decide it.
         </span>
       </div>
     );
@@ -293,7 +311,10 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
   // A named action can still be decided from its headline. The generic
   // fallback cannot: without a payload it otherwise leaves the operator with
   // no fact at all about what is being approved (#1419).
-  if (lines.length === 0 && approvalAction(approval) === "Do something that needs your sign-off") {
+  if (
+    lines.length === 0 &&
+    approvalAction(approval) === "Do something that needs your sign-off"
+  ) {
     return (
       <p className="text-xs text-muted-foreground">
         No further details were supplied.
@@ -304,7 +325,8 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
   if (lines.length === 0) return null;
 
   const clampable =
-    lines.length > PREVIEW_LINES || lines.some((l) => l.value.length > PREVIEW_VALUE_CHARS);
+    lines.length > PREVIEW_LINES ||
+    lines.some((l) => l.value.length > PREVIEW_VALUE_CHARS);
   const shown = expanded || !clampable ? lines : lines.slice(0, PREVIEW_LINES);
 
   return (
@@ -328,7 +350,11 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
           onClick={() => setExpanded((v) => !v)}
           className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
         >
-          {expanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+          {expanded ? (
+            <ChevronUp className="size-3" />
+          ) : (
+            <ChevronDown className="size-3" />
+          )}
           {expanded ? "Show less" : "Show everything"}
         </button>
       )}
@@ -385,14 +411,17 @@ export function useApprovalThreadLinks(
 ): Map<string, ApprovalThreadLink> {
   const threadKey = useMemo(
     () =>
-      Array.from(new Set(approvals.map((approval) => approval.thread).filter(Boolean)))
+      Array.from(
+        new Set(approvals.map((approval) => approval.thread).filter(Boolean)),
+      )
         .sort()
         .join(","),
     [approvals],
   );
-  const [topology, setTopology] = useState<{ desks: Desk[]; members: TeamMember[] } | null>(
-    null,
-  );
+  const [topology, setTopology] = useState<{
+    desks: Desk[];
+    members: TeamMember[];
+  } | null>(null);
 
   useEffect(() => {
     if (!threadKey) {
@@ -424,7 +453,11 @@ export function useApprovalThreadLinks(
     if (!topology) return new Map();
     return new Map(
       approvals.flatMap((approval) => {
-        const link = approvalThreadLink(approval, topology.desks, topology.members);
+        const link = approvalThreadLink(
+          approval,
+          topology.desks,
+          topology.members,
+        );
         return link ? [[approval.id, link] as const] : [];
       }),
     );
@@ -472,7 +505,9 @@ export function ApprovalScopeControl({
       disabled={disabled}
       className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60"
     >
-      <legend className="px-1 text-xs text-muted-foreground">If you approve</legend>
+      <legend className="px-1 text-xs text-muted-foreground">
+        If you approve
+      </legend>
       <div className="flex flex-col gap-1.5">
         <label className="flex items-center gap-2">
           <input
@@ -493,16 +528,26 @@ export function ApprovalScopeControl({
             // the first option, not an empty one — so there is no state in
             // which "for a period" is selected with no period.
             onChange={() =>
-              onChange({ kind: "tool", expiresInMillis: GRANT_DURATIONS[0].millis })
+              onChange({
+                kind: "tool",
+                expiresInMillis: GRANT_DURATIONS[0].millis,
+              })
             }
             className="size-3.5 accent-primary"
           />
           <span>Let {askerLabel(a, askerNames)} use this tool for</span>
           <select
-            value={scope.kind === "tool" ? scope.expiresInMillis : GRANT_DURATIONS[0].millis}
+            value={
+              scope.kind === "tool"
+                ? scope.expiresInMillis
+                : GRANT_DURATIONS[0].millis
+            }
             disabled={scope.kind !== "tool"}
             onChange={(e) =>
-              onChange({ kind: "tool", expiresInMillis: Number(e.target.value) })
+              onChange({
+                kind: "tool",
+                expiresInMillis: Number(e.target.value),
+              })
             }
             aria-label="How long this permission lasts"
             className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
@@ -517,8 +562,8 @@ export function ApprovalScopeControl({
       </div>
       {scope.kind === "tool" && (
         <p className="mt-1.5 px-1 text-xs text-muted-foreground">
-          It won't ask again for this tool until then — with any arguments. You can take it
-          back from Standing permissions at any time.
+          It won't ask again for this tool until then — with any arguments. You
+          can take it back from Standing permissions at any time.
         </p>
       )}
     </fieldset>
@@ -540,22 +585,68 @@ export function DeclineScopeControl({
   if (!a.broadly_deniable) return null;
   const name = `decline-scope-${a.id}`;
   return (
-    <fieldset disabled={disabled} className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60">
-      <legend className="px-1 text-xs text-muted-foreground">If you decline</legend>
+    <fieldset
+      disabled={disabled}
+      className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60"
+    >
+      <legend className="px-1 text-xs text-muted-foreground">
+        If you decline
+      </legend>
       <div className="flex flex-col gap-1.5">
         <label className="flex items-center gap-2">
-          <input type="radio" name={name} checked={scope.kind === "once"} onChange={() => onChange({ kind: "once" })} className="size-3.5 accent-primary" />
+          <input
+            type="radio"
+            name={name}
+            checked={scope.kind === "once"}
+            onChange={() => onChange({ kind: "once" })}
+            className="size-3.5 accent-primary"
+          />
           <span>Just this once</span>
         </label>
         <label className="flex flex-wrap items-center gap-2">
-          <input type="radio" name={name} checked={scope.kind === "tool"} onChange={() => onChange({ kind: "tool", expiresInMillis: GRANT_DURATIONS[0].millis })} className="size-3.5 accent-primary" />
+          <input
+            type="radio"
+            name={name}
+            checked={scope.kind === "tool"}
+            onChange={() =>
+              onChange({
+                kind: "tool",
+                expiresInMillis: GRANT_DURATIONS[0].millis,
+              })
+            }
+            className="size-3.5 accent-primary"
+          />
           <span>Don't ask again for this tool for</span>
-          <select value={scope.kind === "tool" ? scope.expiresInMillis : GRANT_DURATIONS[0].millis} disabled={scope.kind !== "tool"} onChange={(e) => onChange({ kind: "tool", expiresInMillis: Number(e.target.value) })} aria-label="How long this refusal lasts" className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50">
-            {GRANT_DURATIONS.map((d) => <option key={d.millis} value={d.millis}>{d.label}</option>)}
+          <select
+            value={
+              scope.kind === "tool"
+                ? scope.expiresInMillis
+                : GRANT_DURATIONS[0].millis
+            }
+            disabled={scope.kind !== "tool"}
+            onChange={(e) =>
+              onChange({
+                kind: "tool",
+                expiresInMillis: Number(e.target.value),
+              })
+            }
+            aria-label="How long this refusal lasts"
+            className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
+          >
+            {GRANT_DURATIONS.map((d) => (
+              <option key={d.millis} value={d.millis}>
+                {d.label}
+              </option>
+            ))}
           </select>
         </label>
       </div>
-      {scope.kind === "tool" && <p className="mt-1.5 px-1 text-xs text-muted-foreground">It won't ask again for this tool until then. You can take it back from Standing permissions at any time.</p>}
+      {scope.kind === "tool" && (
+        <p className="mt-1.5 px-1 text-xs text-muted-foreground">
+          It won't ask again for this tool until then. You can take it back from
+          Standing permissions at any time.
+        </p>
+      )}
     </fieldset>
   );
 }
@@ -567,7 +658,10 @@ export function DeclineScopeControl({
  * teammate would be worse than naming none, so this only ever narrows from what
  * the host actually said — it never guesses.
  */
-function askerLabel(a: ApprovalSummary, askerNames: Map<string, string>): string {
+function askerLabel(
+  a: ApprovalSummary,
+  askerNames: Map<string, string>,
+): string {
   if (!a.agent) return "this teammate";
   return askerNames.get(a.agent) ?? a.agent;
 }
@@ -609,7 +703,11 @@ export function useAskerNames(
   // refetch the roster every few seconds for a roster that rarely changes.
   const askerKey = useMemo(
     () =>
-      Array.from(new Set(approvals.map((a) => a.agent).filter((id): id is string => !!id)))
+      Array.from(
+        new Set(
+          approvals.map((a) => a.agent).filter((id): id is string => !!id),
+        ),
+      )
         .sort()
         .join(","),
     [approvals],

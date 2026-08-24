@@ -27,18 +27,32 @@ function Harness({ items }: { items: string[] }) {
   return createElement(
     "div",
     { "data-testid": "queue", ...stable.containerProps },
-    stable.items.map((id) => createElement("div", { key: id, "data-id": id }, id)),
+    stable.items.map((id) =>
+      createElement("div", { key: id, "data-id": id }, id),
+    ),
   );
 }
 
-function FocusHarness({ items, disabled }: { items: string[]; disabled: boolean }) {
+function FocusHarness({
+  items,
+  disabled,
+}: {
+  items: string[];
+  disabled: boolean;
+}) {
   const stable = useStableList(items);
   captured = stable;
   return createElement(
     "div",
     { "data-testid": "queue", ...stable.containerProps },
-    createElement("button", { disabled, "data-testid": "focus-target" }, "Decide"),
-    stable.items.map((id) => createElement("div", { key: id, "data-id": id }, id)),
+    createElement(
+      "button",
+      { disabled, "data-testid": "focus-target" },
+      "Decide",
+    ),
+    stable.items.map((id) =>
+      createElement("div", { key: id, "data-id": id }, id),
+    ),
   );
 }
 
@@ -59,7 +73,9 @@ function domOrder(): string[] {
 }
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -100,10 +116,14 @@ describe("useStableList (#1414)", () => {
 
   it("thaws after a focused control is disabled without a blur event", async () => {
     await act(async () => {
-      root.render(createElement(FocusHarness, { items: ["a", "b"], disabled: false }));
+      root.render(
+        createElement(FocusHarness, { items: ["a", "b"], disabled: false }),
+      );
     });
 
-    const target = container.querySelector<HTMLButtonElement>("[data-testid=focus-target]")!;
+    const target = container.querySelector<HTMLButtonElement>(
+      "[data-testid=focus-target]",
+    )!;
     await act(async () => target.focus());
     expect(captured.holding).toBe(true);
 
@@ -111,7 +131,9 @@ describe("useStableList (#1414)", () => {
     // does not dispatch blur. The hook's post-commit check must still release
     // the hold so a later poll can reconcile.
     await act(async () => {
-      root.render(createElement(FocusHarness, { items: ["a", "b"], disabled: true }));
+      root.render(
+        createElement(FocusHarness, { items: ["a", "b"], disabled: true }),
+      );
     });
     expect(captured.holding).toBe(false);
   });
