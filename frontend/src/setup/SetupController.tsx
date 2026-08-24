@@ -244,6 +244,7 @@ export function SetupController({
   const skip = useCallback(() => {
     markSetupSkipped(scope);
     setOpen(false);
+    setRedesigning(false);
   }, [scope]);
 
   /**
