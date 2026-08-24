@@ -50,8 +50,10 @@ function clientWith(
     status?: () => Promise<InferenceStatus>;
     source?: "model" | "fallback";
     reason?: string | null;
+    roster?: TeamMemberDto[];
   } = {},
-): OpenCompanyClient {
+): OpenCompanyClient & { removed: string[] } {
+  const removed: string[] = [];
   return {
     scopeFor: (company: string | null) => `/api/v1/companies/${company}`,
     get: async () => (over.status ? await over.status() : ECHO),
@@ -62,7 +64,12 @@ function clientWith(
       ...(over.reason === null ? {} : { reason: over.reason ?? "no_model" }),
     }),
     addTeamMember: async () => ({}),
-  } as unknown as OpenCompanyClient;
+    listTeam: async () => over.roster ?? [],
+    removeTeamMember: async (agentId: string) => {
+      removed.push(agentId);
+    },
+    removed,
+  } as unknown as OpenCompanyClient & { removed: string[] };
 }
 
 let container: HTMLDivElement;
