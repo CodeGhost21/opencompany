@@ -1066,6 +1066,13 @@ export function AppShell({
         .getChatHistory(threadId, company)
         .then((entries) => {
           if (!mountedRef.current || entries.length === 0) return;
+          // A company switch while the re-read was in flight invalidates the
+          // result: the messages belong to the old company and must not
+          // repopulate the new company's (just-cleared) transcripts. The
+          // re-read is recreated when `company` changes, so the closure's
+          // `company` is the scope it started for and `companyRef` is where
+          // the switch landed — see `onSendFailed`'s identical guard.
+          if (companyRef.current !== company) return;
           const hydrated = fromHistory(entries);
           setThreads((ts) =>
             ts.map((t) => {
