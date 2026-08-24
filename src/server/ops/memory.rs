@@ -1149,7 +1149,7 @@ mod route_tests {
     use crate::company::CompanyManifest;
     use crate::ports::context::ContextStore;
     use crate::ports::types::{
-        ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompanyRecord, ContextChunk,
+        ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
     };
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
