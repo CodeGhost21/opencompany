@@ -328,8 +328,16 @@ impl BundleContents {
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
         facts: Option<Arc<dyn FactStore>>,
+        scopes: Option<Arc<dyn MemoryScopes>>,
     ) -> Result<()> {
-        // Refused BEFORE anything is written: the event log and ledger are
+        // Archived traces must remain in their recovery tier. Refuse before any
+        // append-only writes when the import target cannot restore that tier.
+        if !self.archived_traces.is_empty() && scopes.is_none() {
+            return Err(OpenCompanyError::Store(format!(
+                "bundle carries {} archived traces but the import target serves no archive tier",
+                self.archived_traces.len()
+            )));
+        }
         // append-only, so a refusal after `store.save`/`append` would leave a
         // half-imported company whose retry duplicates history.
         if facts.is_none() && !self.facts.is_empty() {
