@@ -258,8 +258,19 @@ impl WorkflowSpawn {
             // pair honest, so a test run leaves no `WorkflowRunFinished` for the
             // history to fold and no boot sweep to adopt. The settled result is
             // the whole record, and it still flows back to the awaiting caller.
+            // `result` can be absent when the runner's hard-abort path drops the
+            // engine future. Settle every workflow-node attempt that is still
+            // active before publishing the run outcome, so cancellation cannot
+            // leave Observatory showing a permanently running attempt.
+            if !dry_run && ctx.cancel.is_cancelled() {
+                settle_cancelled_workflow_attempts(
+                    self.runs.as_ref(),
+                    &self.company,
+                    &ctx.run_id,
+                )
+                .await;
+            }
             if !dry_run {
-                // Issue #228: journaled on BOTH arms. The caller may well have
                 // closed the tab; the record is what is still there tomorrow.
                 let outcome = match result.as_ref() {
                     Ok(run) => Ok(run),
