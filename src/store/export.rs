@@ -448,6 +448,13 @@ impl BundleContents {
             jsonl(&self.traces)?.as_bytes(),
         )
         .await?;
+        if !self.archived_traces.is_empty() {
+            write_file(
+                &memory_dir.join(ARCHIVES_JSONL),
+                jsonl(&self.archived_traces)?.as_bytes(),
+            )
+            .await?;
+        }
         // Only when there are any: an empty file would make every new export
         // differ from an old host's byte-for-byte for no information. At the
         // bundle root, matching `paths::Bundle::facts_jsonl`. A factless
