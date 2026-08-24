@@ -1363,6 +1363,14 @@ impl ApprovalPolicy {
             return crate::policy::consequence::mcp_call_reach(tool, args, &self.mcp_reads);
         }
         let consequence = crate::policy::consequence_of(tool, args);
+        // Only `auto` consumes the ownership downgrade: `full` ignores the
+        // consequence entirely and `supervised`/`readonly` read only `reach`.
+        // Reading the whole workspace tree to grade authorship in those modes
+        // is pure cost, so the lookup is gated on the one mode that uses it
+        // (issue #877).
+        if self.mode != PolicyMode::Auto {
+            return consequence;
+        }
         let Some(workspace) = self.workspace.as_ref() else {
             return consequence;
         };
