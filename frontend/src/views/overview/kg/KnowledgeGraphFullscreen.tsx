@@ -107,7 +107,7 @@ export function KnowledgeGraphFullscreen({
           department in its spot in the circle, the active one bloomed into its
           tree with its colour glow, the rest dimmed in the background. */}
       <div className="relative min-w-0 flex-1 overflow-hidden bg-os-surface">
-        {children}
+        {!emptyState && children}
 
         {/* vault search — top-left while the Notes core is open */}
         {searchSlot && <div className="absolute left-5 top-5 z-10">{searchSlot}</div>}
