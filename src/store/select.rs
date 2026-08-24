@@ -209,7 +209,8 @@ pub struct MemoryOverlay {
     /// What is bound, for status output.
     pub descriptor: MemoryDescriptor,
     /// The bound provider, kept solely so [`Self::refresh_health`] can probe
-    /// it once at boot.
+    /// it at boot and for operator status reads. `None` on a bare test overlay,
+    /// which has no provider to ask.
     ///
     /// Private on purpose: `MemoryCore` is a supertrait of `MemoryProvider`,
     /// so a public handle here would let anything holding an `AppState` call
@@ -247,13 +248,13 @@ impl MemoryOverlay {
         }
     }
 
-    /// Probes the bound engine once and records the answer on the descriptor,
-    /// so `/spec` can tell an operator "bound but unreachable" before the
-    /// first cycle finds out — until this ran, a hosted engine with a dead
+    /// Probes the bound engine and records the answer on the descriptor, so the
+    /// authenticated engine endpoint can tell an operator "bound but unreachable"
+    /// before the first cycle finds out — until this ran, a hosted engine with a dead
     /// endpoint or a revoked key bound cleanly and failed days later, on a
     /// path nobody was watching.
     ///
-    /// Boot-time only, bounded by `timeout`, and advisory by design: a probe
+    /// Bounded by `timeout`, and advisory by design: a probe
     /// failure logs loudly and records `healthy: Some(false)`, it never
     /// refuses the boot. Configuration errors already refuse at open; a
     /// transient vendor outage must not crash-loop a tenant that could serve
@@ -326,8 +327,9 @@ pub struct MemoryDescriptor {
     /// `Ready`, or `Degraded` — reachable and serving, possibly reduced.
     /// Only `Down` maps to `Some(false)`.
     ///
-    /// `None` means the engine was never probed. `Some(false)` is a bound engine
-    /// whose probe failed: still bound, loudly warned, visible on `/spec`.
+    /// `None` means the engine was never probed — a boot path that skipped
+    /// [`MemoryOverlay::refresh_health`]. `Some(false)` is a bound engine
+    /// whose probe failed: still bound and loudly warned.
     pub healthy: Option<bool>,
 }
 
