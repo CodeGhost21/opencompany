@@ -156,12 +156,46 @@ An agent's system prompt is assembled in this order, and the order is a decision
 1. the generated **persona** — who this teammate is, at which company;
 2. its inline **`prompt`**;
 3. its **`prompt_files`** bodies;
-4. tool briefs (workspace, publishing, skills catalogue);
+4. tool briefs (workspace, ledgers, sandbox, publishing, skills catalogue);
 5. its routed **`context`** documents.
 
 Static material first, volatile last. The prompt prefix is what a provider cache
 reuses across turns, so a workspace note the operator edits between two turns
 must not invalidate the briefing behind it.
+
+### The sandbox brief
+
+Step 4 includes a **sandbox** brief (`harness::toolbelt::sandbox_brief`) naming
+the agent's own working directory and the tools that reach it: `file_read` /
+`file_write` / `edit` / `list` / `glob` / `grep` under the `files`/`docs` grant,
+`shell` and `read_workspace_state` under `shell`, and `apply_patch` /
+`git_operations` / `csv_export` under `code`. Each clause is emitted only under
+the grant that wired its tools, and an agent holding none of the three gets no
+section.
+
+It is not cosmetic. A granted tool the prompt never names is, in practice, a
+tool the agent does not use: asked to *write* something, an agent that had never
+been told it holds `file_write` recorded a task about writing it instead, and
+`shell` — wired since the exec cell — was named in no brief at all. The brief
+also states the path confinement the belt already enforces for the file/code
+tools (`exec_security` sets `workspace_only`, so an absolute path or a `../`
+escape is refused), because an agent that does not know it spends turns
+rediscovering it one refusal at a time. The shell clause is deliberately not
+framed that way: `action_dir` only sets the command's working directory, and a
+same-uid command can read anywhere the server can
+([agent-isolation.md](../security/agent-isolation.md)), so the brief describes
+the directory as where shell commands *start*, never as a jail.
+
+The `shell` clause tracks what was **wired**, not what was granted:
+`toolbelt::shell_tools` withholds the whole namespace when the per-agent audit
+logger cannot initialize, and the brief follows it rather than the grant.
+
+The `shell`/`code` clauses also track the per-turn capability tier
+(`capability_budget::resolve_filter`, live at `HarnessPool::ensure`): a fail-closed
+metering error or an exhausted budget makes `filter_by_capabilities` drop the
+matching tools from the vector `build_agent` hands to the builder, and
+`sandbox_brief_flags` withholds the matching clause for the same turn — so the
+brief never instructs an agent to call a tool the filter has already removed.
 
 Step 5 is resolved by the async caller before the (synchronous) agent build and
 fingerprinted over document **bodies**, so editing a routed note reaches the next

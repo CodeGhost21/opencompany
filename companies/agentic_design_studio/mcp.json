@@ -1,0 +1,15 @@
+{
+  "$comment": "Design systems ship as code against a real component API, and the brand documents a studio works from live in a shared workspace.",
+  "mcpServers": {
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "description": "Version-accurate API and library documentation, so answers match the release in use."
+    },
+    "notion": {
+      "url": "https://mcp.notion.com/mcp",
+      "description": "The workspace this company's documents already live in. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/notion/auth"
+    }
+  }
+}

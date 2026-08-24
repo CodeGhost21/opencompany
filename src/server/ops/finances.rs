@@ -169,6 +169,24 @@ mod tests {
         assert!(dto["transactions"].as_array().unwrap().is_empty(), "{dto}");
     }
 
+    /// A manifest with no `[budget]` answers `budgetUsd: null` — "no cap set" —
+    /// so the console can tell it apart from an explicit zero-dollar cap.
+    #[tokio::test]
+    async fn no_budget_projects_null_budget_usd() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_ledger(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+            Vec::new(),
+        )
+        .await;
+
+        let (status, dto) = get_finances(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["budgetUsd"], Value::Null, "{dto}");
+    }
+
     /// A ledger with a spend and a revenue entry this month projects the
     /// expected budget / spend / revenue / net, by-category, and journal.
     #[tokio::test]

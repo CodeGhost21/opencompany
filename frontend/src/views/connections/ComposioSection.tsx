@@ -125,7 +125,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       setToken("");
       // Clearing an override falls back to whatever tier remains — the status
       // the host just returned says which, and the grid re-probes for itself.
-      toast.success("Composio token cleared.");
+      toast.success(res.note);
       onChanged();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not clear the token.");
@@ -162,9 +162,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <Plug className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Composio credential
-        </h3>
+        </h2>
       </div>
       <p className="text-sm text-muted-foreground">
         {!canManage
