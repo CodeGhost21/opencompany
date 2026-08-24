@@ -300,6 +300,13 @@ impl BundleContents {
         }
 
         Ok(Self {
+            id: id.clone(),
+            manifest: record.manifest,
+            lifecycle: record.lifecycle,
+            template_provenance: record.template_provenance,
+            setup: record.setup,
+            ledger: record.ledger,
+            events,
             traces,
             archived_traces,
             facts,
