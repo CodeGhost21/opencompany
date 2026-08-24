@@ -9909,6 +9909,39 @@ mode = "full"
         );
     }
 
+    /// [`mention_context`] resolves a `dm:`-prefixed key **as sent** before
+    /// stripping the prefix, so a desk literally named `dm:engineering` keeps
+    /// that id. Pre-fix, the unconditional strip resolved `engineering` instead
+    /// and filed the badge under the wrong transcript — the exact claim
+    /// [`assignee::dm_key`]'s contract warns about.
+    #[tokio::test]
+    async fn mention_context_a_desk_literally_named_dm_prefix_keeps_its_id() {
+        let home_dir = home();
+        let state = state_with_dm_prefixed_desk(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // The literal `dm:engineering` desk resolves as sent; stripping would
+        // misroute to the plain `engineering` desk.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:engineering").await,
+            "dm:engineering",
+            "a desk literally named dm:<…> keeps its id — the raw key resolves first"
+        );
+        // The un-prefixed desk is untouched by the collision.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "engineering").await,
+            "engineering",
+            "the un-prefixed desk still resolves to its own id"
+        );
+        // A genuine DM still re-keys onto the rail's DM channel.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:backend_engineer").await,
+            "dm:backend_engineer",
+            "a real DM channel is unaffected by the literal dm: desk"
+        );
+    }
+
     /// [`mention_context`] stores the **canonical** id for a key typed in a
     /// noncanonical shape — a desk by its display name, a teammate by a
     /// case-variant of their id. `assignee::resolve` already returns canonical
