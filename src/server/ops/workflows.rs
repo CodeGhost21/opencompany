@@ -1505,9 +1505,7 @@ async fn run_workflow(
 
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
     if !safe_wid(&wid) {
-        return Err(
-            OpenCompanyError::NotFound(format!("workflow {wid}")),
-        );
+        return Err(OpenCompanyError::NotFound(format!("workflow {wid}")).into());
     }
 
     // Load the saved graph from the seed ∪ overlay union, so a graph created on
@@ -2119,9 +2117,7 @@ async fn fix_from_run(
     // `wid` becomes a filename on the read below — reject anything that could
     // escape `workflows/`.
     if !safe_wid(&wid) {
-        return Err(
-            OpenCompanyError::NotFound(format!("workflow {wid}")),
-        );
+        return Err(OpenCompanyError::NotFound(format!("workflow {wid}")).into());
     }
 
     // No builder wired: classify WHY exactly as the draft + run routes do (issues
