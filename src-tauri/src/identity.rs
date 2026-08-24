@@ -200,9 +200,11 @@ fn picture(username: Option<&str>) -> Option<String> {
     let dir = PathBuf::from(public)
         .join("AccountPictures")
         .join(current_sid()?);
-    // Sizes sit directly in the SID folder, so one level of walk reaches them.
+    // Sizes sit either directly in the SID folder or one level deeper in a
+    // GUID-named subfolder (the layout Windows itself writes for the standard
+    // account images), so two levels of walk reach both.
     let mut best: Option<(u64, PathBuf)> = None;
-    for entry in walk(&dir, 1) {
+    for entry in walk(&dir, 2) {
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_file() || meta.len() > MAX_PICTURE_BYTES {
             continue;
