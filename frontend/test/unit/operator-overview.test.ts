@@ -197,7 +197,7 @@ describe("the operator overview landing page (#1321)", () => {
       get: (url: string) =>
         new Promise<RunSummary[]>((resolve) => {
           const u = String(url);
-          (u.includes("status=failed,paused") ? stoppedResolvers : failedResolvers).push(resolve);
+          (u.includes("status=failed%2Cpaused") ? stoppedResolvers : failedResolvers).push(resolve);
         }),
     } as unknown as OpenCompanyClient;
 
