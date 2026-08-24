@@ -358,11 +358,45 @@ pub(crate) fn child_calls_to_repeat(
     let approved = approved_ids(trigger_input);
     let mut out = Vec::new();
     for node_id in pending {
-        let Some((record, gate)) = descend(registry, parent, node_id, Some(trigger_input)) else {
+        let mut segments: Vec<&str> = node_id.split(GATE_NAMESPACE).collect();
+        let Some(gate) = segments.pop() else {
             continue;
         };
-        let prefix = namespaced_prefix(node_id);
-        for call in child_calls_preceding(&record.graph, &gate, &approved, &prefix) {
+        let mut graph = parent;
+        let mut record = None;
+        let mut prefix = String::new();
+
+        // A nested child is restarted from its own root, so calls in every
+        // ancestor child before the next `sub_workflow` node are repeated too.
+        // Walk each intermediate graph before descending to the record below it.
+        for segment in segments {
+            let Some(child_id) = child_id_of(graph, segment, Some(trigger_input)) else {
+                record = None;
+                break;
+            };
+            if let Some(ancestor) = record.as_ref() {
+                for call in child_calls_preceding(&ancestor.graph, segment, &approved, &prefix) {
+                    if !out.contains(&call) {
+                        out.push(call);
+                    }
+                }
+            }
+            let Some(next) = registry.get(&child_id) else {
+                record = None;
+                break;
+            };
+            prefix.push_str(segment);
+            prefix.push_str(GATE_NAMESPACE);
+            graph = &next.graph;
+            record = Some(next);
+        }
+
+        let Some(record) = record else {
+            continue;
+        };
+        // Keep the deepest-child node ids in their established local form;
+        // ancestor calls carry the namespace so equal local ids remain distinct.
+        for call in child_calls_preceding(&record.graph, gate, &approved, &prefix) {
             if !out.contains(&call) {
                 out.push(call);
             }
