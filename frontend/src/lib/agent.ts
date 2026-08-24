@@ -297,8 +297,12 @@ export function companyCovers(allow: string[], glob: string): boolean {
   // matcher below either, or a wildcard would look like it covers a grant the
   // host rejects.
   // Likewise a bare `search` grant covers its sub-grant asks, matching
-  // `grants_search_explicit`.
-  if (literal === "workspace.write") {
+  // `grants_search_explicit`. Workspace writes are explicit-only in *both*
+  // spellings the wiring predicate accepts — the bare `workspace` grant as well
+  // as `workspace.write` — because a bare `workspace` request under a `["*"]`
+  // allow-list would otherwise fall through to the generic matcher below and
+  // preview as covered a grant that hands the agent the exact write token.
+  if (literal === "workspace" || literal === "workspace.write") {
     return allow.some((grant) => grant === "workspace" || grant === "workspace.write");
   }
   if (literal === "media" || literal.startsWith("media.")) {
