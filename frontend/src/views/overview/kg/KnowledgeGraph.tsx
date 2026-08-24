@@ -50,7 +50,7 @@ const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; 
   self: { color: 'var(--text)', Icon: Sparkles, label: 'Notes', r: 18 },
   team: { color: 'var(--brain-1)', Icon: Users, label: 'Desks', r: 15 },
   workflow: { color: 'var(--brain-2)', Icon: WorkflowIcon, label: 'Workflows', r: 8.5 },
-  step: { color: 'var(--brain-2)', Icon: Milestone, label: 'Stages', r: 6 },
+  step: { color: 'var(--stage)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },
   person: { color: 'var(--warn)', Icon: UserRound, label: 'Humans', r: 10 },
   employee: { color: 'var(--accent)', Icon: User, label: 'AI teammates', r: 10 },
@@ -131,6 +131,49 @@ const hashStr = (s: string) => {
 const HUB_COLOR = 'var(--kg-brain-1)';
 const NOTE_COLOR = 'var(--kg-brain-1)';
 const ORPHAN_COLOR = 'var(--kg-brain-1)'; // rim dust dims via its lower fill opacity
+
+/** The fullscreen wheel's persistent key. Its items wrap within the canvas so
+ * narrower fields never crop the kinds an operator needs to distinguish.
+ *
+ * `flex-wrap` + `max-w-full` are load-bearing, not cosmetic (issue #1385):
+ * this strip is pinned bottom-left inside the field's `overflow-hidden` box,
+ * so a single non-wrapping row is silently cut off at narrow widths — on
+ * mobile, and on desktop whenever the 13.5rem sidebar is expanded. The
+ * trailing caveat is the last item, so it is the first thing to disappear,
+ * which would put the one control that explains the wheel out of reach
+ * exactly where the wheel is hardest to read.
+ *
+ * `gap-y-1` keeps the wrapped rows tighter than the 12px column gap, and
+ * `items-end` keeps every label on the caveat summary's line: that caveat is
+ * a disclosure whose explanation opens in flow ABOVE its summary, so an open
+ * caveat grows this box upward and `items-center` would drag the labels up
+ * with it (see `WorkflowPlacementNotice`). */
+export function KnowledgeGraphLegend() {
+  return (
+    <div
+      aria-label="Graph legend"
+      className="flex max-w-full flex-wrap items-end gap-x-3 gap-y-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur"
+    >
+      {(
+        [
+          { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
+          { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
+          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
+          { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
+          { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
+          { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
+          { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
+        ] as const
+      ).map(({ label, color, Icon }) => (
+        <span key={label} className="flex items-center gap-1.5 whitespace-nowrap font-mono text-3xs text-os-muted">
+          <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
+          {label}
+        </span>
+      ))}
+      <WorkflowPlacementNotice />
+    </div>
+  );
+}
 // the bright traveling sparks that fire along the links like synapses
 const SYNAPSE_COLOR = 'var(--kg-spark)';
 const SYNAPSE_N = 22;
@@ -1551,42 +1594,9 @@ export function KnowledgeGraph({
     if (target) selectTool(target);
   };
 
-  // compact legend for the fullscreen wheel: color + icon per kind, with the
-  // Notes core in its vault orange
-  // `flex-wrap` + `max-w-full` are load-bearing, not cosmetic (issue #1385):
-  // this strip is pinned bottom-left inside the field's `overflow-hidden` box,
-  // so a single non-wrapping row is silently cut off at narrow widths — on
-  // mobile, and on desktop whenever the 13.5rem sidebar is expanded. The
-  // trailing caveat is the last item, so it is the first thing to disappear,
-  // which would put the one control that explains the wheel out of reach
-  // exactly where the wheel is hardest to read.
-  //
-  // `gap-y-1` keeps the wrapped rows tighter than the 12px column gap, and
-  // `items-end` keeps every label on the caveat summary's line: that caveat is
-  // a disclosure whose explanation opens in flow ABOVE its summary, so an open
-  // caveat grows this box upward and `items-center` would drag the labels up
-  // with it (see `WorkflowPlacementNotice`).
-  const compactLegend = (
-    <div className="flex max-w-full flex-wrap items-end gap-x-3 gap-y-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
-      {(
-        [
-          { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
-          { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
-          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
-          { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
-          { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
-          { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
-          { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
-        ] as const
-      ).map(({ label, color, Icon }) => (
-        <span key={label} className="flex whitespace-nowrap items-center gap-1.5 font-mono text-3xs text-os-muted">
-          <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
-          {label}
-        </span>
-      ))}
-      <WorkflowPlacementNotice />
-    </div>
-  );
+  // The compact legend lives in `KnowledgeGraphLegend` (above) so its distinct
+  // colours and responsive class contract are pinned by a regression test.
+  const compactLegend = <KnowledgeGraphLegend />;
 
   // the vault search chip — one instance, rendered by whichever chrome is live
   // (inline top-left row or the fullscreen wrapper slot)
