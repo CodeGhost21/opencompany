@@ -289,6 +289,25 @@ export function AgentDetailView({
     void boot();
   }, [boot]);
 
+  // Close the harness editor whenever the displayed teammate changes.
+  //
+  // This view stays mounted across teammates, and these three are the only
+  // pieces of state `boot` does not re-derive — it refreshes `agent` and
+  // `draft` and leaves the harness editor exactly as it was. So an editor left
+  // open on A stayed open on B still holding A's harness and model, and Save
+  // then PATCHed A's binding onto B. The host accepts it, because the id is
+  // valid for the company: nothing downstream can tell that the operator was
+  // looking at someone else when they picked it.
+  //
+  // Reset rather than repopulated: `onEdit` seeds the drafts from whichever
+  // teammate is on screen when it opens, so closing is enough and there is one
+  // seeding path rather than two that can disagree.
+  useEffect(() => {
+    setEditingHarness(false);
+    setHarnessDraft(HARNESS_DEFAULT);
+    setModelDraft("");
+  }, [agentId]);
+
   /**
    * The board, read for this one teammate — the same derivation the Company
    * cards use, from the same two reads (`lib/team-workload.ts`).

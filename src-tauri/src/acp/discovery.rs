@@ -350,7 +350,7 @@ impl Probe for SystemProbe {
 ///
 /// The bare name is tried first on both platforms, so an extensionless
 /// executable on `PATH` still wins where one exists.
-fn executable_names(command: &str) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn executable_names(command: &str) -> impl Iterator<Item = String> + '_ {
     let extensions: Vec<String> = if cfg!(windows) && !command.contains('.') {
         std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
@@ -512,6 +512,28 @@ pub async fn confirm(harness_id: &str, cwd: &Path) -> ConfirmedHarness {
     // An adapter this app owns wins over one on `PATH`; the spawn is given an
     // absolute path in that case, so it cannot accidentally pick up the other.
     let resolved = resolve_adapter(harness);
+
+    // Node is checked *before* the spawn, not only after a `NotOnPath`.
+    //
+    // The post-spawn check reached `NodeMissing` only when the OS could not
+    // find the adapter at all — which is the rarer half. With an adapter
+    // installed and no Node, the shebang line means `/usr/bin/env` starts
+    // fine and then exits 127, so the client sees the pipe close and reports
+    // `Gone`. That surfaced as "Won't start", which sends the operator to
+    // debug an adapter that is perfectly intact, and never mentions the one
+    // thing missing.
+    //
+    // Only when an adapter was resolved: with neither present, `NotInstalled`
+    // or `AdapterMissing` is the more useful answer, and it still names the
+    // Node requirement in its own copy.
+    if resolved.is_some() && super::tools::node().is_none() {
+        return ConfirmedHarness {
+            readiness: Readiness::NodeMissing,
+            models: Vec::new(),
+            path: resolved,
+        };
+    }
+
     let command = resolved
         .as_ref()
         .map(|path| path.display().to_string())

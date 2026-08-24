@@ -84,8 +84,17 @@ pub fn npm() -> Option<PathBuf> {
 /// `npm --prefix <root>` links executables into `<root>/node_modules/.bin`,
 /// verified against the real registry rather than assumed.
 pub fn installed_adapter_in(root: &Path, harness: &Harness) -> Option<PathBuf> {
-    let binary = root.join("node_modules/.bin").join(harness.command);
-    binary.exists().then_some(binary)
+    // Platform-aware for the same reason `SystemProbe` is, and this half was
+    // missed when that one was fixed. On Windows npm writes *two* files into
+    // `.bin`: `<command>.cmd`, which Windows can run, and an extensionless
+    // POSIX shell shim beside it, which it cannot. Returning the extensionless
+    // one handed `Command::new` a shell script — and because an app-owned
+    // adapter takes precedence over `PATH`, a failed Install would shadow a
+    // perfectly good global adapter rather than simply not helping.
+    let bin = root.join("node_modules/.bin");
+    crate::acp::discovery::executable_names(harness.command)
+        .map(|name| bin.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 /// [`installed_adapter_in`] against the real [`tools_dir`].

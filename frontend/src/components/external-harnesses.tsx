@@ -160,8 +160,14 @@ export function ExternalHarnesses({ client, company }: Props) {
       // A host predating `GET {scope}/harnesses` renders nothing rather than
       // an error — matching how `DevicePairing`/`localInstances` degrade for
       // an older host: absent, not broken.
+      // Generation-checked like every other write in this component, and it
+      // was the one that was not. Settings is reused across company changes,
+      // so a 404 from a *superseded* load — an older host that lacked the
+      // route — arrived after the new company had already populated its rows
+      // and hid a panel that was working.
+      if (generation.current !== run) return;
       if (error instanceof ApiError && error.status === 404) setUnsupported(true);
-      if (generation.current === run) setLoading(false);
+      setLoading(false);
     }
   }, [client, company]);
 
