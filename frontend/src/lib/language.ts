@@ -567,7 +567,7 @@ export function grantHeadline(g: StandingGrant): string {
  *
  * A teammate grant is the agent; a workflow grant (issue #1098) carries no
  * agent — `agent` is empty — and names the authored workflow instead. Reading
- * `agent` alone for that second kind yields `Revoke 's permission: …`, so both
+ * `agent` alone for that second kind yields `Remove 's permission: …`, so both
  * halves have to resolve, and a revocation's accessible name must never read
  * with an empty subject.
  */
