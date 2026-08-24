@@ -6904,11 +6904,28 @@ mod test {
         );
     }
 
-    /// An override carrying no instructions is empty; one carrying text is not.
+    /// An override carrying nothing is empty — and an override carrying only
+    /// `avatar`, `model` or `harness` is not, so a face-only edit or a
+    /// model-only edit is persisted rather than dropped as a no-op.
     #[test]
     fn agent_override_is_empty_only_when_nothing_is_set() {
         assert!(override_entry("ceo", None).is_empty());
         assert!(!override_entry("ceo", Some("x")).is_empty());
+
+        for (field, fill) in [
+            ("name", Box::new(|e: &mut AgentOverride| e.name = Some("Ada".to_string())) as Box<dyn Fn(&mut AgentOverride)>),
+            ("role", Box::new(|e: &mut AgentOverride| e.role = Some("CEO".to_string()))),
+            ("description", Box::new(|e: &mut AgentOverride| e.description = Some("desc".to_string()))),
+            ("tools", Box::new(|e: &mut AgentOverride| e.tools = Some(vec!["docs.*".to_string()]))),
+            ("instructions", Box::new(|e: &mut AgentOverride| e.instructions = Some("Be terse.".to_string()))),
+            ("avatar", Box::new(|e: &mut AgentOverride| e.avatar = Some("tiny:teal".to_string()))),
+            ("model", Box::new(|e: &mut AgentOverride| e.model = Some("gpt-5".to_string()))),
+            ("harness", Box::new(|e: &mut AgentOverride| e.harness = Some("laptop".to_string()))),
+        ] {
+            let mut edit = override_entry("ceo", None);
+            fill(&mut edit);
+            assert!(!edit.is_empty(), "{field} alone must make the override non-empty");
+        }
     }
 
     /// The persona overrides round-trip through the `OverlayBlob` the
