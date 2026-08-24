@@ -43,8 +43,7 @@ async function show(props: {
     root.render(
       createElement(
         ConnectionScopeProvider,
-        { scope },
-        createElement(SetupController, {
+        { scope, children: createElement(SetupController, {
           client,
           company: scope.company,
           // The automatic first-run gate is a different concern from the route;
@@ -52,7 +51,7 @@ async function show(props: {
           deepLinked: true,
           onOpenChange: () => {},
           ...props,
-        }),
+        }) },
       ),
     );
   });
