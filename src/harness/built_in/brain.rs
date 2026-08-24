@@ -2783,14 +2783,7 @@ impl HarnessBrain {
                     // `resolve_desk_id` does not recognise that console-only
                     // alias, so a broadcast from the main thread would otherwise
                     // expand against no desk at all.
-                    let addressed_desk = match chat.as_deref() {
-                        Some(chat)
-                            if !crate::server::chat_history::is_general_chat(Some(chat)) =>
-                        {
-                            chat
-                        }
-                        _ => crate::server::ops::language::DEFAULT_DESK,
-                    };
+                    let addressed_desk = Self::everyone_desk(chat.as_deref());
                     let also_mentioned = crate::runtime::mentions::mentioned_agents(
                         &self.record(),
                         addressed_desk,
