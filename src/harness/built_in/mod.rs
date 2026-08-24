@@ -1429,13 +1429,15 @@ impl HarnessPool {
         let override_fp = override_fingerprint(&overlay.agent_edits);
         // The policy axis. A cycle pins it to the snapshot the native gate was
         // re-applied from (so a mid-turn override reaches neither gate); a
-        // direct `ensure` fingerprints the live store overlay, as before.
+        // direct `ensure` fingerprints the live effective policy. Either way
+        // the fingerprint covers the effective mode/list/cap values — not a
+        // relative override — so a manifest `[policy]` edit moves the cache key
+        // even when no override is stored (or a redundant one was carried and
+        // cleared), and the roster cannot keep an `ApprovalPolicy` built under
+        // a tier the native gate no longer enforces.
         let policy_fp = match policy_snapshot {
-            Some(policy) => {
-                let override_ = policy_override_for(policy, &company.manifest.policy);
-                policy_fingerprint(Some(&override_))
-            }
-            None => policy_fingerprint(overlay.policy.as_ref()),
+            Some(policy) => effective_policy_fingerprint(policy),
+            None => effective_policy_fingerprint(&company.effective_policy()),
         };
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
