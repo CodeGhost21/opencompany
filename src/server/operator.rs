@@ -9213,6 +9213,81 @@ mode = "full"
         );
     }
 
+    /// **Codex P1 (pass 2).** A continuation's reply is journaled through
+    /// `publish_continuation`, not the `/chat` turn — so a mention an agent
+    /// types back in an approval follow-up used to render as a chip and
+    /// nothing else: no badge, no durable row, exactly the person it is meant
+    /// to reach (offline when the reply lands) getting neither.
+    ///
+    /// Both paths file through the same writer now; this pins that an `@user`
+    /// in a continuation reply lands as a mention notification whose audience
+    /// carries the person named, under the chat the continuation answered in.
+    #[tokio::test]
+    async fn a_continuation_reply_that_mentions_a_user_files_a_notification() {
+        let home_dir = home();
+        let c = multi_park_company_run(
+            home_dir.path(),
+            1,
+            Some("sales"),
+            false,
+            None,
+            Some("@harness-admin"),
+        )
+        .await;
+
+        let users = c
+            .runtime
+            .users()
+            .list_users(&CompanyId::new("acme"))
+            .await
+            .unwrap();
+        let admin = users
+            .iter()
+            .find(|u| u.email == "harness-admin@example.test")
+            .expect("the fixed admin is seeded");
+        assert_eq!(
+            admin.status,
+            crate::ports::users::UserStatus::Active,
+            "the admin must be an active, mentionable target"
+        );
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(approve_detached(&c.approvals[0]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        settle(&c.runtime, 1).await;
+
+        let notes = c
+            .runtime
+            .notifications()
+            .list(&CompanyId::new("acme"), &admin.id)
+            .await
+            .unwrap();
+        let mentions: Vec<_> = notes
+            .into_iter()
+            .filter(|n| n.notification.kind == "mention")
+            .collect();
+        assert_eq!(
+            mentions.len(),
+            1,
+            "the continuation's mention must badge the person it names"
+        );
+        let note = &mentions[0].notification;
+        assert_eq!(note.context.as_deref(), Some("sales"));
+        assert_eq!(
+            note.title,
+            "Someone mentioned you in sales",
+            "a continuation has no author, so the generic label is the honest one"
+        );
+        assert!(
+            note.audience.as_ref().is_some_and(|a| a.contains(&admin.id)),
+            "the named user must be in the notification's audience"
+        );
+    }
+
     /// **Issue #379's routing, re-homed (issue #469).** The continuation
     /// resumes in the thread the sign-off was raised in — and in no other.
     ///
