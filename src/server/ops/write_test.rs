@@ -9307,6 +9307,56 @@ async fn chat_upload_sanitizes_pathy_filename() {
     );
 }
 
+/// Codex review finding on #1682: chat uploads all land at the workspace
+/// root, so a second message attaching a file under an earlier one's exact
+/// name — the common case of picking `image.png` twice — used to 409 rather
+/// than attach, since the only way to free the name was deleting the first
+/// upload and breaking its download. The route now retries once under a
+/// disambiguated name instead of failing the attach.
+#[tokio::test]
+async fn chat_upload_disambiguates_a_repeated_filename() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let first: Vec<u8> = vec![0x01, 0x02, 0x03];
+    let (status, first_ref) = chat_upload(&state, "image.png", Some("image/png"), &first).await;
+    assert_eq!(status, StatusCode::OK, "{first_ref}");
+    assert_eq!(first_ref["name"], "image.png");
+
+    // A later message attaches a *different* file under the same filename.
+    let second: Vec<u8> = vec![0x09, 0x08, 0x07, 0x06];
+    let (status, second_ref) = chat_upload(&state, "image.png", Some("image/png"), &second).await;
+    assert_eq!(status, StatusCode::OK, "{second_ref}");
+    let second_name = second_ref["name"].as_str().expect("a stored name");
+    assert_ne!(
+        second_name, "image.png",
+        "the second upload must not silently fail or overwrite the first"
+    );
+    assert!(
+        second_name.starts_with("image-") && second_name.ends_with(".png"),
+        "expected a disambiguated image-*.png name, got {second_name}"
+    );
+
+    // Both node ids are distinct, live in the tree, and stream back their own
+    // (not each other's) bytes — no data was lost or aliased on the collision.
+    let first_id = first_ref["nodeId"].as_str().unwrap();
+    let second_id = second_ref["nodeId"].as_str().unwrap();
+    assert_ne!(first_id, second_id);
+    for (node_id, want) in [(first_id, &first), (second_id, &second)] {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/company/workspace/blob/{node_id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&got.to_vec(), want);
+    }
+}
+
 /// The headline of #1682 end-to-end: an operator attaches a file, the message
 /// carries it, and a reload projects the attachment back with the **store's**
 /// name / mime / size — never a client claim, because `/chat` was handed only

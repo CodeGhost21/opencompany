@@ -965,8 +965,9 @@ async fn chat_upload(
         .admit_upload(company.id(), &name, bytes.len() as u64)
         .await?;
 
-    let node = WorkspaceNode {
-        id: generate_id(),
+    let id = generate_id();
+    let mut node = WorkspaceNode {
+        id: id.clone(),
         name: name.clone(),
         kind: NodeKind::File,
         parent_id: None,
@@ -979,20 +980,52 @@ async fn chat_upload(
         size: None,
         sha256: None,
     };
-    company
+    // Chat uploads all land at the workspace root (`parent_id: None`), so a
+    // second attachment reusing an earlier one's exact filename — the same
+    // `image.png` picked in two different messages — collides on the sibling
+    // uniqueness `create_binary` enforces. That used to surface as a 409 on
+    // the second attach, silently losing it, since deleting the first (the
+    // only way to free the name) would break its download too. On exactly
+    // that conflict, retry once under a disambiguated name derived from this
+    // upload's own freshly-minted id — guaranteed free — rather than fail the
+    // attach. The stored name is what `resolve_attachments` later reads back
+    // as the display name, so a repeat filename is honestly shown suffixed
+    // rather than silently dropped.
+    if let Err(OpenCompanyError::Conflict(_)) = company
         .runtime
         .workspace()
         .create_binary(company.id(), &node, &bytes)
-        .await?;
+        .await
+    {
+        node.name = disambiguate_name(&name, &id);
+        company
+            .runtime
+            .workspace()
+            .create_binary(company.id(), &node, &bytes)
+            .await?;
+    }
 
     Ok(Json(AttachmentRef {
         node_id: node.id,
-        name,
+        name: node.name,
         mime,
         // The stored length is exactly what was written — `create_binary`
         // measures the same bytes — so it needs no re-read to report.
         size: bytes.len() as u64,
     }))
+}
+
+/// Inserts a short disambiguator before `name`'s extension (or at its end,
+/// with none), from the tail of `id` — already a fresh, collision-free ULID,
+/// so no extra uniqueness check is needed against it.
+///
+/// `image.png` + id `...01J8` → `image-01j8.png`.
+fn disambiguate_name(name: &str, id: &str) -> String {
+    let tag = &id[id.len().saturating_sub(6)..];
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!("{stem}-{tag}.{ext}"),
+        _ => format!("{name}-{tag}"),
+    }
 }
 
 /// The media type to store a upload under.
