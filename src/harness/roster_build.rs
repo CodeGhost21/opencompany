@@ -871,6 +871,27 @@ mod test {
         }
     }
 
+    /// A model that cannot be reached: `invoke` errors, as a provider that is
+    /// down or a key the host refuses does. The pass must report this as an
+    /// unreachable model rather than "no model", because the operator's next
+    /// move differs — a key is already wired.
+    struct UnreachableModel;
+
+    #[async_trait]
+    impl ChatModel<()> for UnreachableModel {
+        async fn invoke(&self, _state: &(), _request: ModelRequest) -> TaResult<ModelResponse> {
+            Err(tinyagents::TinyAgentsError::Model(
+                "provider refused the call".to_string(),
+            ))
+        }
+    }
+
+    impl HarnessModel for UnreachableModel {
+        fn telemetry_provider_id(&self) -> String {
+            "managed".to_string()
+        }
+    }
+
     /// Three jobs, so a gap is expressible.
     fn three_jobs() -> SetupAnswers {
         SetupAnswers {
