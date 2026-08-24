@@ -23,7 +23,6 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -429,20 +428,19 @@ async fn run_test(
     state: &AppState,
     runtime: Arc<CompanyRuntime>,
     body: TestSend,
-) -> Result<Json<TestResult>, Response> {
+) -> Result<Json<TestResult>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     // Not wired without a sender (default build / no `smtp` feature).
     let Some(sender) = state.connections().mail.clone() else {
-        return Err(super::not_wired("smtp test send"));
+        return Err(super::not_wired("smtp test send").into());
     };
-    let creds = load_credentials(&runtime)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let creds = load_credentials(&runtime).await?;
     let Some(creds) = creds else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "no SMTP credentials configured".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     };
     let to = body.to.unwrap_or_else(|| creds.from_email.clone());
     let email = OutboundEmail {
@@ -546,7 +544,7 @@ async fn test_smtp(
     company: AdminScopedCompany,
     State(state): State<AppState>,
     body: Option<Json<TestSend>>,
-) -> Result<Json<TestResult>, Response> {
+) -> Result<Json<TestResult>, crate::server::Rejection> {
     run_test(
         &state,
         company.runtime,

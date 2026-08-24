@@ -13,7 +13,6 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -113,26 +112,21 @@ async fn put_domain(
 async fn run_verify(
     state: &AppState,
     runtime: Arc<CompanyRuntime>,
-) -> Result<Json<DomainStatus>, Response> {
+) -> Result<Json<DomainStatus>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(resolver) = state.connections().dns.clone() else {
-        return Err(super::not_wired("domain verification"));
+        return Err(super::not_wired("domain verification").into());
     };
-    let stored = load_domain(&runtime)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let stored = load_domain(&runtime).await?;
     let Some(stored) = stored else {
         return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
             "no domain configured".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     };
-    let status = dns::verify(&stored.domain, resolver.as_ref())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
-    persist(&runtime, &status)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let status = dns::verify(&stored.domain, resolver.as_ref()).await?;
+    persist(&runtime, &status).await?;
     Ok(Json(status))
 }
 
@@ -140,6 +134,6 @@ async fn run_verify(
 async fn verify_domain(
     company: ScopedCompany,
     State(state): State<AppState>,
-) -> Result<Json<DomainStatus>, Response> {
+) -> Result<Json<DomainStatus>, crate::server::Rejection> {
     run_verify(&state, company.runtime).await
 }

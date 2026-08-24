@@ -32,6 +32,16 @@ describe("the console's route table", () => {
     expect(VIEWS).toContain("pages");
   });
 
+  it("retires #/memory from the table after Brain moves under Settings (#1416)", () => {
+    // The shell no longer renders a `view === "memory"` block — the browser
+    // lives at `#/settings/brain`. The legacy address still works, but it is
+    // served by the shell's `REWRITE_RETIRED` (which runs before the
+    // allow-list), not by a `memory` view: keeping a table entry for a surface
+    // the shell cannot render would break the #1311 invariant that every VIEWS
+    // member answers to a render block.
+    expect(VIEWS).not.toContain("memory");
+  });
+
   it("has no duplicate entries", () => {
     expect(new Set(VIEWS).size).toBe(VIEWS.length);
   });
@@ -110,6 +120,13 @@ describe("resolving an address", () => {
     // The fallback is what makes a typo or a genuinely retired address safe;
     // widening the allow-list must not have widened it into accepting anything.
     await visit("#/nope");
+    expect(seen).toEqual(["overview", null]);
+    expect(window.location.hash).toBe("#/overview");
+  });
+
+  it("sends an empty address to the operator overview (#1321)", async () => {
+    await visit("");
+
     expect(seen).toEqual(["overview", null]);
     expect(window.location.hash).toBe("#/overview");
   });

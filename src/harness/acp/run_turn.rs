@@ -15,7 +15,7 @@
 //!   from one that opens on a credential form.
 //! - **Reverse dispatch.** A cloud host hands a task to a runner on someone's
 //!   machine; the runner is an ACP agent as far as this is concerned.
-//! - **Any other harness.** Codex, goose, and anything else that speaks ACP.
+//! - **Any other harness.** Codex, and anything else that speaks ACP.
 //!
 //! ## Why a port rather than an ACP client in here
 //!
