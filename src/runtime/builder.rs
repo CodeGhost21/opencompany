@@ -4164,6 +4164,76 @@ mod test {
         );
     }
 
+    /// The scratch/scopes swaps above leave `ops.facts` untouched: the ops
+    /// struct is inherited wholesale on a rebuild, so the fact store stayed on
+    /// the outgoing engine while memory and context moved to the new one — a
+    /// fact created after a live engine swap was written to the deselected
+    /// engine while its recall mirror went to the new context store. This pins
+    /// the override that keeps `facts` on the selected engine's port family.
+    #[tokio::test]
+    async fn a_rebuild_reapplying_the_engine_replaces_the_fact_store() {
+        use crate::store::{FsContextStore, FsMemoryStore, FsOps, MemoryOverlay};
+
+        // Engine A serves facts; the swap to B must re-point `ops.facts` at B's
+        // store, not keep A's.
+        let home = tmp_home("opencompany-engine-fact-swap-");
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let facts_a: Arc<dyn FactStore> = Arc::new(FsOps::new(mem_a.path().to_path_buf()));
+        let mut overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        overlay_a.facts = Some(facts_a.clone());
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(first.facts(), &facts_a),
+            "engine A's facts are the runtime's before the swap"
+        );
+
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let facts_b: Arc<dyn FactStore> = Arc::new(FsOps::new(mem_b.path().to_path_buf()));
+        let mut overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        overlay_b.facts = Some(facts_b.clone());
+
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_b)
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(swapped.facts(), &facts_b),
+            "the swapped engine's facts must win over the handover's engine A store"
+        );
+
+        // The mirror: switching to the base backend drops the provider's fact
+        // store back onto the base backend, exactly as the first-construction
+        // branch does for an engine that serves no facts.
+        let cleared = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay_cleared()
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(cleared.facts(), &facts_a),
+            "switching to `store` must drop the outgoing provider's fact store"
+        );
+    }
+
     mod scoped_grants {
         use super::*;
 
