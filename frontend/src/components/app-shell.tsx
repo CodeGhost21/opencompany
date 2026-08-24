@@ -1263,6 +1263,8 @@ export function AppShell({
     () => mentionCountsByChannel(mentionFeed),
     [mentionFeed],
   );
+  const mentionFeedRef = useRef(mentionFeed);
+  mentionFeedRef.current = mentionFeed;
   /**
    * The same feed, readable from a callback that must not be rebuilt when it
    * changes.
