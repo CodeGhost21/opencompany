@@ -321,7 +321,6 @@ async fn harness(
         // backend is the fail-closed default outside the runtime builder.
         search: None,
         tenant_search: None,
-        workspace: None,
         workflow_runs: None,
         deep_trace: None,
     };
