@@ -276,13 +276,24 @@ impl BoundMemory {
             .lock()
             .expect("context store cache lock poisoned");
         // Bound the cache at [`SCOPED_CONTEXT_CACHE_CAPACITY`]: an unbounded
-        // scope set must not grow the map without limit. Evict any entry to
-        // make room — HashMap iteration order is arbitrary, and for a cache of
-        // cheap `Arc`s any victim is fine, since the next access to that scope
-        // rebuilds it.
+        // scope set must not grow the map without limit. Evict only an entry
+        // no caller still holds — `Arc::strong_count == 1` means the cache is
+        // the sole holder, so dropping it cannot leave a second facade for one
+        // scope beside the one a running agent already has. Two facades for a
+        // scope would each carry their own `label_lock`, and two concurrent
+        // `put`/`delete_label` read-merge-writes through the pair could
+        // interleave and lose a label claim (#1300). If every entry is still
+        // held, accept the temporary over-capacity: those `Arc`s drain as
+        // their callers drop them, and the next access to an unheld scope
+        // evicts again.
         if !cache.contains_key(&key) && cache.len() >= SCOPED_CONTEXT_CACHE_CAPACITY {
-            let victim = cache.keys().next().expect("non-empty cache").clone();
-            cache.remove(&victim);
+            if let Some(victim) = cache
+                .iter()
+                .find(|(_, facade)| Arc::strong_count(facade) == 1)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&victim);
+            }
         }
         cache.entry(key).or_insert_with(|| Arc::new(make())).clone()
     }
