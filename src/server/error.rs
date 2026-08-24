@@ -29,6 +29,18 @@ impl From<Response> for Rejection {
     }
 }
 
+impl From<ApiError> for Rejection {
+    fn from(error: ApiError) -> Self {
+        Self(Box::new(error.into_response()))
+    }
+}
+
+impl From<OpenCompanyError> for Rejection {
+    fn from(error: OpenCompanyError) -> Self {
+        Self(Box::new(ApiError(error).into_response()))
+    }
+}
+
 impl IntoResponse for Rejection {
     fn into_response(self) -> Response {
         *self.0
