@@ -477,7 +477,6 @@ export function ApprovalsView({
             }
           }}
         />
-        </div>
       </div>
     </div>
   );
