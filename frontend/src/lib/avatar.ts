@@ -113,13 +113,21 @@ export function staticAvatarSrc(ref: string): string | null {
 /**
  * Object URLs for uploaded avatars, keyed by host, company and node id.
  *
- * Module-level and never revoked, which is deliberate rather than sloppy. An
+ * Module-level, and deliberately *cached* rather than revoked on unmount: an
  * avatar is drawn in dozens of places on one screen — chat gutters, facepiles,
  * the members pane, the org chart — and the same faces recur on every page the
  * operator visits. Revoking on unmount would mean refetching a teammate's face
  * each time it scrolled out of a list and back, and per-component caching would
- * fetch the same bytes once per component. The cost is bounded by the number of
- * *uploaded* avatars a company has, each capped at 4 MB by the host.
+ * fetch the same bytes once per component.
+ *
+ * Cached is not unbounded, though — see [`MAX_BLOB_URLS`]. The bound is what
+ * keeps the "keep them" choice honest: the number of distinct uploaded nodes a
+ * long-lived session can touch is not bounded by the company's *current* faces.
+ * Every face change mints a new node (the old one stays in the workspace), and
+ * the host in the key means visiting other hosts multiplies the same set — and
+ * each entry pins a blob of up to 4 MB for as long as it is kept. Past the cap
+ * the oldest entry is dropped and its object URL revoked; a face that was
+ * evicted is simply fetched again the next time it scrolls into view.
  *
  * The host is part of the key because the map outlives a connection switch: the
  * desktop console remounts `AppShell` when it changes hosts, but this module
@@ -132,6 +140,29 @@ export function staticAvatarSrc(ref: string): string | null {
  * request instead of racing N.
  */
 const blobUrls = new Map<string, Promise<string | null>>();
+/** The resolved URL for a cache key, kept separately so eviction can revoke it. */
+const blobUrlValues = new Map<string, string>();
+
+/**
+ * The most distinct uploaded faces the cache keeps at once.
+ *
+ * Far above what any one screen draws; the point of the number is that the
+ * cache is *bounded*, not how big the bound is. Past it, the oldest entry is
+ * dropped and its object URL revoked, so a session that keeps viewing new faces
+ * costs bounded memory and re-fetches a cold face on return — one request per
+ * face, rather than a slowly-growing hoard.
+ */
+const MAX_BLOB_URLS = 64;
+
+/** Drops the oldest entry, revoking its object URL once it has resolved. */
+function evictOldestBlobUrl() {
+  const oldest = blobUrls.keys().next().value;
+  if (oldest === undefined) return;
+  const url = blobUrlValues.get(oldest);
+  if (url) URL.revokeObjectURL(url);
+  blobUrlValues.delete(oldest);
+  blobUrls.delete(oldest);
+}
 
 /**
  * The `src` for any reference, fetching an uploaded one through the client.
