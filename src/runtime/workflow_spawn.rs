@@ -55,7 +55,7 @@ use crate::Result;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyId;
-use crate::ports::{EventLog, WorkflowRun, WorkflowRunContext, WorkflowRunner};
+use crate::ports::{EventLog, RunStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::workflow_outcome::{FailedRun, record_run_finished};
 use crate::runtime::{RunGuard, RunSupervisor};
 
