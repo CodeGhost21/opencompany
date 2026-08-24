@@ -92,13 +92,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function show(client: OpenCompanyClient) {
+async function show(
+  client: OpenCompanyClient,
+  over: { redesign?: boolean; onRedesign?: () => void } = {},
+) {
   await act(async () => {
     root.render(
       createElement(SetupDialog, {
         open: true,
         client,
         company: "acme",
+        redesign: over.redesign,
         onSkip: () => {
           skipped += 1;
         },
@@ -106,6 +110,7 @@ async function show(client: OpenCompanyClient) {
           left += 1;
         },
         onDone: () => {},
+        onRedesign: over.onRedesign ?? (() => {}),
       }),
     );
   });
