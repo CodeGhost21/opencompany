@@ -1400,7 +1400,7 @@ mod test {
         v.push(0x02); // LZW min code size
         v.push(0x00); // empty raster data
         v.push(0x3B); // trailer
-        assert_eq!(gif_animation_cost(&v), Some(256));
+        assert_eq!(gif_animation_cost(&v), Ok(Some(256)));
     }
 
     /// A GIF can hide a flood of full-canvas frames under the byte ceiling: the
