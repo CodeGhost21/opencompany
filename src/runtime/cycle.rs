@@ -60,17 +60,6 @@ use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 /// park cards that silently do nothing when approved.
 pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
 
-/// The effect kind a `repo_publish` approval performs (issue #735) — the
-/// host-side push to the real remote.
-///
-/// `pub(crate)` and defined here, in the always-compiled runtime, rather than in
-/// the `openhuman`-gated `harness::repo` that builds it: `perform_effect` below
-/// matches on it in the default build, where `crate::harness` does not exist. The
-/// tool references it through `crate::runtime::cycle::REPO_PUBLISH_EFFECT`, the
-/// same shape `workflows::delivery` uses for [`EMAIL_SEND_KIND`], so the producer
-/// and this consumer key off one literal.
-pub(crate) const REPO_PUBLISH_EFFECT: &str = "repo.publish";
-
 /// The `error` the terminality backstop stamps on an attempt row whose cycle
 /// ended without settling it (issue #242) — a brain that ignored the dispatch,
 /// not a brain that failed at it.
@@ -1640,203 +1629,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
     if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND {
         crate::runtime::workflow_resume::on_gate_approved(rt, effect).await?;
     }
-    // Issue #735: an approved `repo_publish`. `execute` already staged the agent's
-    // commits onto the mirror's `oc/<company>/<task>` ref (the reversible half);
-    // this is the irreversible half — the host-side push to the real remote, done
-    // only now that the operator has approved. At-most-once comes free from the
-    // `approval:<id>` key the caller holds; a denied or expired approval never
-    // reaches here, which is exactly what leaves the remote untouched.
-    if effect.kind == REPO_PUBLISH_EFFECT {
-        let repo = effect
-            .payload
-            .get("repo")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let branch = effect
-            .payload
-            .get("branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        // The exact commit the approval was bound to at stage time. Pushing this
-        // SHA — not whatever the mirror's branch ref points at now — is what stops
-        // a second publish on the same task from riding in on this approval.
-        let head = effect
-            .payload
-            .get("head")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        // The card this publish belongs to, so a host-side failure can be reported
-        // on it.
-        let task = effect
-            .payload
-            .get("task")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let agent = effect
-            .payload
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let message = effect
-            .payload
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let Some(repos) = rt.repos() else {
-            return Err(crate::error::OpenCompanyError::Unimplemented(
-                "a repository publish was approved but this host has no repository manager \
-                 configured to perform it",
-            ));
-        };
-        // The push is the irreversible half, and it fails the effect — but never
-        // silently (issue #815). A failed push leaves the effect recorded as
-        // executed (the at-most-once guard), so re-approving is a no-op; the
-        // operator has to KNOW it failed and re-run the task, or the publish
-        // vanishes with the change staged in the mirror and nothing on the remote.
-        if let Err(err) = repos.push_published(repo, branch, head).await {
-            // The diagnosis — which can name the remote URL and host paths — stays
-            // in the log; the durable, company-readable note carries a classified
-            // sentence instead (issue #815, the rule #614/#688 set).
-            tracing::warn!(branch, "[repo] could not publish the branch: {err}");
-            note_publish_failure_on_card(
-                rt,
-                task,
-                format!(
-                    "Could not publish `{branch}` to the remote. Nothing reached the remote, and \
-                     this approval will not retry on its own \u{2014} re-run the task to publish \
-                     again."
-                ),
-            )
-            .await;
-            return Err(err);
-        }
-
-        // Issue #736: open a pull request for the pushed branch, best-effort. The
-        // push has landed, so a PR failure must NOT fail the effect — the branch
-        // is on the remote regardless. It is reported instead: the operator is
-        // told, on the task itself, that the branch is up but the PR did not open.
-        let title = repo_publish_pr_title(message);
-        let body = repo_publish_pr_body(agent, task, effect.run_id.as_deref(), message);
-        match repos.open_pull_request(repo, branch, &title, &body).await {
-            Ok(pr) => tracing::info!(
-                number = pr.number,
-                url = %pr.html_url,
-                branch,
-                "[repo] opened a pull request for the published branch"
-            ),
-            Err(err) => {
-                // Same division as the push failure: the raw error to the log,
-                // a classified sentence to the durable note (issue #815).
-                tracing::warn!(
-                    branch,
-                    "[repo] pushed the branch but could not open a pull request: {err}"
-                );
-                note_publish_failure_on_card(
-                    rt,
-                    task,
-                    format!(
-                        "Published `{branch}` to the remote, but the pull request could not be \
-                         opened. The branch is on the remote \u{2014} open a PR from it by hand, or \
-                         approve another publish to retry."
-                    ),
-                )
-                .await;
-            }
-        }
-    }
     Ok(())
-}
-
-/// Whether `task` names a real card in `cards` (issue #815).
-///
-/// The guard that keeps a DM's `dm-*` work key — which `repo_publish` stamps as
-/// the effect's `task`, and which no card owns — from filing a publish-failure
-/// note under a phantom card. The empty id, an unknown id, and a work key all
-/// resolve to nothing.
-fn task_names_a_card(cards: &[TaskRecord], task: &str) -> bool {
-    !task.is_empty() && cards.iter().any(|card| card.id == task)
-}
-
-/// Records a host-side `repo_publish` failure where the operator will see it,
-/// but **only when the work unit is a real card** (issue #815).
-///
-/// A DM's `repo_publish` stamps its `dm-*` work key as the effect's `task`, and
-/// no card owns that id — a [`TaskDiscussionPosted`](CompanyEvent::TaskDiscussionPosted)
-/// under it would file the note against a phantom card. When the id does not
-/// resolve to a card the board post is skipped: the failure is already in the
-/// operator log (the `tracing::warn` at the call site), which is where a `git`
-/// error that can name host paths and the remote URL belongs, rather than in a
-/// durable, company-readable record (the rule #614/#688 set). `text` is a fixed,
-/// classified sentence carrying none of the raw error.
-async fn note_publish_failure_on_card(rt: &CompanyRuntime, task: &str, text: String) {
-    if task.is_empty() {
-        return;
-    }
-    // Resolve to a live card; a `dm-*` work key or an unknown id resolves to
-    // nothing, and the note stays in the log rather than misfiling. A store error
-    // is treated the same way — better a logged-only note than one on a card that
-    // may not exist.
-    let is_card = match rt.tasks().list(&rt.id).await {
-        Ok(cards) => task_names_a_card(&cards, task),
-        Err(err) => {
-            tracing::warn!("[repo] could not resolve the task for a publish-failure note: {err}");
-            false
-        }
-    };
-    if !is_card {
-        return;
-    }
-    if let Err(err) = rt
-        .events
-        .append(
-            &rt.id,
-            CompanyEvent::TaskDiscussionPosted {
-                task_id: task.to_string(),
-                text,
-                by: None,
-            },
-        )
-        .await
-    {
-        tracing::warn!("[repo] could not record the publish failure on the task: {err}");
-    }
-}
-
-/// The title of the pull request a `repo_publish` opens (issue #736): the first
-/// line of the agent's message, bounded, or a plain fallback when it said
-/// nothing.
-fn repo_publish_pr_title(message: &str) -> String {
-    let first = message.trim().lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        "Published by an OpenCompany agent".to_string()
-    } else {
-        first.chars().take(72).collect()
-    }
-}
-
-/// The body of that pull request (issue #736): the agent's message, then task,
-/// run, and agent linkage so an operator landing on the PR can get back to the
-/// card, attempt, and seat that produced it.
-fn repo_publish_pr_body(agent: &str, task: &str, run_id: Option<&str>, message: &str) -> String {
-    let mut body = String::new();
-    let message = message.trim();
-    if !message.is_empty() {
-        body.push_str(message);
-        body.push_str("\n\n");
-    }
-    body.push_str("---\n");
-    body.push_str("Opened host-side by an OpenCompany agent");
-    if !agent.is_empty() {
-        body.push_str(&format!(" (`{agent}`)"));
-    }
-    if !task.is_empty() {
-        body.push_str(&format!(" for task `{task}`"));
-    }
-    if let Some(run_id) = run_id.filter(|run_id| !run_id.is_empty()) {
-        body.push_str(&format!(" in run `{run_id}`"));
-    }
-    body.push('.');
-    body
 }
 
 /// Sends an `email.send` effect via the company's own outbound-mail handle
@@ -2885,6 +2678,7 @@ mod test {
     #[test]
     fn only_a_workflow_message_gets_the_builder_briefing() {
         let msg = |deliverable| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "set up a weekly AEO audit".to_string(),
             by: None,
             chat: None,
@@ -2968,6 +2762,7 @@ mod test {
         );
 
         let ask = |deliverable| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "set up a weekly AEO audit".into(),
             by: None,
             chat: None,
@@ -3043,59 +2838,6 @@ mod test {
         );
     }
 
-    fn card_record(id: &str) -> TaskRecord {
-        TaskRecord {
-            id: id.to_string(),
-            title: "t".to_string(),
-            note: None,
-            column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
-            priority: "medium".to_string(),
-            assignee: "ceo".to_string(),
-            updated_at_millis: 1,
-            origin_chat_id: None,
-            parent_task_id: None,
-            output: None,
-            plan: None,
-            planning_attempts: Vec::new(),
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
-            workflow_proposal: None,
-            origin_run_id: None,
-            origin_workflow_id: None,
-        }
-    }
-
-    /// Issue #247: a publish PR carries both the task and the concrete run that
-    /// produced its approved effect, letting an operator trace it back to the
-    /// exact attempt rather than only the card.
-    #[test]
-    fn a_publish_pr_body_links_its_task_and_run() {
-        let body = repo_publish_pr_body(
-            "developer",
-            "task-247",
-            Some("run-247"),
-            "Add run linkage to publish pull requests.",
-        );
-
-        assert!(body.contains("task `task-247`"), "{body}");
-        assert!(body.contains("run `run-247`"), "{body}");
-    }
-
-    /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
-    /// work key, which no card owns (issue #815).
-    #[test]
-    fn a_publish_note_only_lands_on_a_real_card_not_a_dm_work_key() {
-        let cards = vec![card_record("019ff728-abcd"), card_record("another")];
-        // A real card id resolves.
-        assert!(task_names_a_card(&cards, "019ff728-abcd"));
-        // A DM work key — what `repo_publish` stamps for a DM — owns no card, so
-        // the failure note stays in the log rather than filing under a phantom
-        // card.
-        assert!(!task_names_a_card(&cards, "dm-coder-main"));
-        // An unknown id, the empty id, and an empty board all resolve to nothing.
-        assert!(!task_names_a_card(&cards, "ghost"));
-        assert!(!task_names_a_card(&cards, ""));
-        assert!(!task_names_a_card(&[], "019ff728-abcd"));
-    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3271,6 +3013,7 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hand it off".into(),
             by: None,
@@ -3809,6 +3552,7 @@ mod test {
         context.lists.store(0, Ordering::SeqCst);
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
@@ -3845,6 +3589,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -3877,6 +3622,7 @@ mod test {
         assert_eq!(
             operator[0].event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -3955,6 +3701,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -4016,6 +3763,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4081,6 +3829,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4393,6 +4142,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4438,6 +4188,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4770,6 +4521,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -4850,6 +4602,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "send that email".into(),
                 by: None,
@@ -4907,6 +4660,7 @@ mod test {
                 .unwrap();
             let report = rt
                 .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "file it".into(),
                     by: None,
@@ -4968,6 +4722,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -5039,6 +4794,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -5129,6 +4885,7 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "how are we doing".into(),
             by: None,
@@ -5414,6 +5171,7 @@ mod test {
         );
         assert_eq!(
             cycle_trigger(&[CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hello".into(),
                 by: None,
@@ -5441,6 +5199,7 @@ mod test {
 
         let (ra, rb) = tokio::join!(
             one.run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "a".into(),
                 by: None,
@@ -5448,6 +5207,7 @@ mod test {
                 deliverable: None,
             }]),
             two.run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "b".into(),
                 by: None,
@@ -5499,6 +5259,7 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "send it".into(),
             by: None,
@@ -5823,6 +5584,7 @@ mod test {
             body: serde_json::json!({"text": "raw payload"}),
         };
         let operator = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "please do the thing".into(),
             by: Option::<Actor>::None,
             chat: None,
@@ -5853,6 +5615,7 @@ mod test {
             task: serde_json::json!({"text": "do the thing"}),
         };
         let operator = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "hi".into(),
             by: Option::<Actor>::None,
             chat: None,
@@ -6490,6 +6253,7 @@ mod test {
         };
 
         let chat = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
@@ -6696,6 +6460,7 @@ mod test {
             _ => None,
         };
         let addressed = |chat: &str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "pay the invoice".into(),
             by: None,
@@ -6703,6 +6468,7 @@ mod test {
             deliverable: None,
         };
         let unaddressed = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
@@ -6848,6 +6614,8 @@ mod test {
                 origin_chat_id: None,
             },
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 chat_id: "desk-ops".into(),
                 agent_id: "ops".into(),
@@ -6910,6 +6678,7 @@ mod test {
             _ => None,
         };
         let in_thread = |chat: &str, parent: Option<u64>| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: parent.map(EventSeq::new),
             text: "pay the invoice".into(),
             by: None,
@@ -7372,6 +7141,7 @@ mod test {
 
         // Asking the desk directly (by name) surfaces the handed task...
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "what are you working on?".into(),
             by: None,
@@ -7384,6 +7154,7 @@ mod test {
         // ...and asking with no address (the orchestrator) does NOT get the
         // desk's briefing folded into it.
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "status?".into(),
             by: None,
@@ -7445,6 +7216,7 @@ mod test {
             .await
             .unwrap();
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "what's up?".into(),
             by: None,
@@ -7524,6 +7296,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -7722,6 +7495,7 @@ mod test {
         for _ in 0..5 {
             let report = rt
                 .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "do it".into(),
                     by: None,
@@ -7949,6 +7723,7 @@ mod test {
             .unwrap();
 
         let ask = |text: &str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: text.to_string(),
             by: None,
             chat: None,
@@ -8041,6 +7816,7 @@ mod test {
             .append(
                 rt.id(),
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "hello".into(),
                     by: None,
                     chat: None,
@@ -8054,6 +7830,7 @@ mod test {
             vec![(
                 seq,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "hello".into(),
                     by: None,
                     chat: None,

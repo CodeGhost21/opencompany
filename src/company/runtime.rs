@@ -30,7 +30,7 @@ use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Verdict,
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Mention, Verdict,
 };
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
@@ -269,18 +269,6 @@ pub struct CompanyRuntime {
     /// which is what makes a wedged cron fire and an agent-initiated run as
     /// stoppable from the console as a Run-button one.
     pub(crate) run_supervisor: crate::runtime::RunSupervisor,
-    /// Issue #245: the company's bound repositories and their host-side mirror
-    /// cache, when the runtime was built over a filesystem home.
-    ///
-    /// `None` is a real state, not an omission: the manager is rooted at
-    /// `companies/<slug>/repos/`, so a runtime assembled from injected ports
-    /// with no home (a test harness, an embedding) has no cache to manage and
-    /// the ops routes answer "not wired" rather than inventing a location.
-    ///
-    /// Compiled in every build. Nothing here is agent-facing — there is no
-    /// grant and no tool in this tier — so it needs no feature gate, and the
-    /// forge HTTP client it can optionally hold is the only part that does.
-    pub(crate) repos: Option<Arc<crate::runtime::RepoManager>>,
     /// Issue #243: the live single-use grants minted when an operator approves a
     /// tool call an agent was blocked from making.
     ///
@@ -411,6 +399,11 @@ fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> Comp
             .to_string(),
         steps: Vec::new(),
         task_id: None,
+        // A runtime notice addressed to whoever is reading it. It names no
+        // teammate and no person, so there is nothing to chip and nobody to
+        // ping.
+        mentions: Vec::new(),
+        mention_depth: 0,
     }
 }
 
@@ -470,7 +463,6 @@ impl CompanyRuntime {
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
-            repos: None,
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),
@@ -521,20 +513,6 @@ impl CompanyRuntime {
     /// caching it honest.
     pub fn auth_mode(&self) -> AuthMode {
         self.auth_mode
-    }
-
-    /// Issue #245: attach the repository manager after construction, wired by
-    /// the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the same
-    /// filesystem home the company's bundle hangs off.
-    pub fn set_repos(&mut self, repos: Arc<crate::runtime::RepoManager>) {
-        self.repos = Some(repos);
-    }
-
-    /// The company's bound repositories, if a mirror cache is wired. `None` on
-    /// a runtime built without a filesystem home, where the ops routes report
-    /// the surface as not wired.
-    pub fn repos(&self) -> Option<&Arc<crate::runtime::RepoManager>> {
-        self.repos.as_ref()
     }
 
     /// Issue #29: attach the workflow runner after construction. Wired by the
@@ -2015,6 +1993,22 @@ impl CompanyRuntime {
             // goes to the run or card the work belongs to, and a root belonging
             // to some other channel must not follow it there.
             let parent = self.resolvable_parent(conversation.parent, &chat_id).await;
+            // Scanned host-side from the reply text. The author is passed so a
+            // teammate naming itself in its own answer does not chip itself.
+            let reply_mentions = self
+                .resolve_mentions(
+                    &response.text,
+                    None,
+                    response
+                        .agent
+                        .as_deref()
+                        .map(|id| Actor {
+                            kind: ActorKind::Agent,
+                            id: id.to_string(),
+                        })
+                        .as_ref(),
+                )
+                .await;
             match self
                 .events
                 .append(
@@ -2032,6 +2026,10 @@ impl CompanyRuntime {
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
+                        mentions: reply_mentions,
+                        // Zero, and stays zero: no reply's mentions reach
+                        // dispatch, so no reply is ever a mention hop.
+                        mention_depth: 0,
                     },
                 )
                 .await
@@ -2739,6 +2737,69 @@ impl CompanyRuntime {
         }
     }
 
+    /// Resolve the mentions in one chat message body.
+    ///
+    /// The single seam both journal sites go through, so an operator message
+    /// and an agent reply cannot end up obeying different rules about who
+    /// `@ada` is. Loads the record and the user directory and hands them to
+    /// [`crate::runtime::mentions::resolve`], which does the rest without
+    /// touching IO.
+    ///
+    /// **Never fails a send.** A store that cannot answer means mentions cannot
+    /// be resolved, not that the message cannot be delivered — so a read error
+    /// yields an empty list and is logged. The message still lands; it simply
+    /// draws no chips and pings nobody, which is the same state every message
+    /// journaled before this feature existed is in.
+    pub async fn resolve_mentions(
+        &self,
+        text: &str,
+        supplied: Option<Vec<Mention>>,
+        sender: Option<&Actor>,
+    ) -> Vec<Mention> {
+        // Issue: on the operator-message path this runs BEFORE the journal
+        // append (`mention_responder` reads the resolved mentions off the
+        // journaled event, so the append cannot go first), which puts these
+        // two store reads in front of every chat POST's accept latency. Run
+        // together rather than sequentially — they read different stores and
+        // neither depends on the other's result — to keep that addition close
+        // to the cost of the slower read alone rather than the sum of both.
+        let (record, user_list) =
+            tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
+        let record = match record {
+            Ok(Some(record)) => record,
+            Ok(None) => return Vec::new(),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    error = %err,
+                    "[mentions] the company record could not be read; this message is \
+                     journaled with no mentions"
+                );
+                return Vec::new();
+            }
+        };
+        let mut users = user_list.unwrap_or_else(|err| {
+            tracing::warn!(
+                company = %self.id,
+                error = %err,
+                "[mentions] the user directory could not be read; only teammates and \
+                 desks are resolvable on this message"
+            );
+            Vec::new()
+        });
+        // Suspended users are retained only for attribution and are refused on
+        // every request — they must not be a live mention target here either.
+        users.retain(|u| u.status == crate::ports::users::UserStatus::Active);
+        // Sorted by the same stable key `GET .../chat/mentionables` uses before
+        // it mints slugs (`user_slugs`), so a collision between two same-named
+        // users gets the same `-2`/`-3` suffix here that the picker advertised —
+        // an unsorted `UserStore` order (most-recently-created first) could
+        // otherwise resolve `@sam-2` to a different person than the one the
+        // picker showed under that label.
+        users.sort_by(|a, b| a.id.cmp(&b.id));
+        crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
+    }
+
     /// A status snapshot, loading the company record for name and lifecycle.
     pub async fn status(&self) -> Result<CompanyStatus> {
         let record = self.store.load(&self.id).await?;
@@ -3151,6 +3212,8 @@ mod tests {
         use crate::server::chat_history::owns;
 
         let reply = |chat_id: String| CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id,
             agent_id: "copywriter".to_string(),
@@ -3940,6 +4003,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "pay the invoice".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
@@ -3954,6 +4018,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),
@@ -4013,6 +4078,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "and another thing".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
@@ -4107,6 +4173,7 @@ mod tests {
                     .append(
                         &rt.id,
                         CompanyEvent::OperatorMessage {
+                            mentions: Vec::new(),
                             text: "ship it".into(),
                             by: None,
                             chat: chat.map(str::to_string),
@@ -4138,6 +4205,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),

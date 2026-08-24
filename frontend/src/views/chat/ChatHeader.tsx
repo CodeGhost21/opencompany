@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-react";
 
+import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -126,7 +127,15 @@ function KindIcon({ channel }: { channel: Channel }) {
     const face = dmFace(channel);
     // A DM with no roster entry behind it has nobody to draw — the rail falls
     // back to the same glyph rather than inventing a face for a stranger.
-    return face ? <TeammateAvatar {...face} className="size-6" /> : <CircleDot className={cls} aria-hidden />;
+    return face ? (
+      // The teammate this line is *with* — clicking their face here opens who
+      // they are (issue #1653), same as clicking it in the transcript below.
+      <AgentAvatarButton agentId={channel.member?.id} name={channel.name}>
+        <TeammateAvatar {...face} className="size-6" />
+      </AgentAvatarButton>
+    ) : (
+      <CircleDot className={cls} aria-hidden />
+    );
   }
   if (channel.private) return <Lock className={cls} aria-hidden />;
   return <Hash className={cls} aria-hidden />;
