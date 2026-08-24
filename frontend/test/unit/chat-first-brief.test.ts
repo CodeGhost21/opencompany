@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MessageComposer } from "@/views/chat/MessageComposer";
 import { MessageTimeline } from "@/views/chat/MessageTimeline";
+import type { MessageIntent } from "@/api/tasks";
 import type { Channel } from "@/views/chat/model";
 
 /**
@@ -59,6 +60,18 @@ function renderComposer(prefill?: { text: string; revision: number }) {
   });
 }
 
+function renderComposerForSend(onSend: (text: string, intent?: MessageIntent) => void) {
+  act(() => {
+    root.render(
+      createElement(MessageComposer, {
+        placeholder: "Message #general",
+        onSend,
+        deliverableChoice: true,
+      }),
+    );
+  });
+}
+
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
@@ -104,5 +117,39 @@ describe("the empty-channel first brief", () => {
     expect(
       container.querySelector('[data-testid="composer-deliverable-workflow"]')?.getAttribute("title"),
     ).toBe("Turn this into a repeating workflow.");
+  });
+
+  it("resets a stale mode when the brief replaces the draft", () => {
+    const onSend = vi.fn();
+    renderComposerForSend(onSend);
+
+    // The operator had picked "Just chatting" for the previous draft...
+    act(() => {
+      (
+        container.querySelector('[data-testid="composer-deliverable-chat"]') as HTMLButtonElement
+      ).click();
+    });
+
+    // ...then the first-brief action replaces the draft wholesale.
+    act(() => {
+      root.render(
+        createElement(MessageComposer, {
+          placeholder: "Message #general",
+          onSend,
+          deliverableChoice: true,
+          prefill: { text: "Help us get started.", revision: 1 },
+        }),
+      );
+    });
+    expect(container.querySelector("textarea")?.value).toBe("Help us get started.");
+
+    // The brief is sent as a one-off task, not under the stale "chat" intent —
+    // otherwise its request would be withheld.
+    act(() => {
+      [...container.querySelectorAll("button")].find(
+        (button) => button.getAttribute("aria-label") === "Send",
+      )!.click();
+    });
+    expect(onSend).toHaveBeenCalledWith("Help us get started.", "once");
   });
 });

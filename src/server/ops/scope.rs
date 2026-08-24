@@ -242,7 +242,9 @@ impl FromRequestParts<AppState> for AdminScopedCompany {
                     .extensions
                     .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                     .map(|info| info.0);
-                let admin = require_admin(&parts.headers, state, &runtime, peer).await?;
+                let admin = require_admin(&parts.headers, state, &runtime, peer)
+                    .await
+                    .map_err(IntoResponse::into_response)?;
                 Ok(AdminScopedCompany {
                     runtime,
                     admin: Some(admin),

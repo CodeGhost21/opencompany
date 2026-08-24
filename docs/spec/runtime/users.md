@@ -30,7 +30,7 @@ no roster beyond its single implicit local owner.
 An `admin` is also what the write plane means by authority over the company: the
 routes that decide what the company reaches the world as — its Composio and
 provider connections, its inference provider and key, its mail identity, its
-Telegram bot, its MCP servers — require one. See
+its MCP servers — require one. See
 [the write plane](../../modules/server/authority.md)
 for the table and the reasoning. A `member` reads those surfaces but does not
 change them.
@@ -284,8 +284,7 @@ is never attached ambiently the way a cookie is.
 **A browser gets the cookie unless it asks otherwise, and it only asks when the
 cookie cannot work.** The default is unchanged and is what every same-origin
 console still gets: the token reaches the browser only as `Set-Cookie`, where
-`HttpOnly` keeps it away from JavaScript. Device pairing remains the issuer for
-native clients.
+`HttpOnly` keeps it away from JavaScript.
 
 The exception is the [hub console](hub-console.md), which is cross-origin with
 every host it operates and therefore receives no cookie at all.
@@ -318,66 +317,18 @@ hostile page therefore cannot make someone's browser request the readable
 carrier on its behalf. Anything other than `header` — absent, empty, or a value
 nobody defined — degrades to the cookie rather than to no session.
 
-## Device pairing
+## Device pairing was removed
 
-A **device** is not a second credential system: it is a `SessionRecord` with
-`SessionKind::Device`, a label, and a year-long TTL. That is deliberate over a
-separate storage port — `delete_for_user` is what suspension and admin reset
-call, and a separate device table would be a second thing every one of those
-paths must remember to clear. The failure mode of forgetting is a suspended user
-whose desktop keeps working.
+A desktop client used to enrol itself by redeeming a pairing code an
+already-signed-in human minted (`POST …/devices`, `…/devices/claim`), receiving
+a long-lived `SessionKind::Device` session. Those routes and the **Settings →
+Devices** page are gone: the frontend client holds its own session, so the host
+no longer runs a second enrolment protocol, a second code keyspace and a second
+revocation list beside the one sign-in it already has.
 
-The flow runs the opposite way to OAuth's device flow, which removes a problem
-rather than solving it:
-
-1. A **signed-in** human asks for a pairing code (`POST …/devices`).
-   Authentication has already happened; nothing is pending approval.
-2. They paste it into the desktop client.
-3. The client redeems it (`POST …/devices/claim`) and receives a session token
-   exactly once.
-
-One secret instead of two, no polling, and the code is only ever shown to
-someone already authenticated — where the device-flow variant shows it to an
-anonymous starter.
-
-Pairing codes and login codes share `LoginCodeStore` and are kept apart by
-hashing under a domain prefix rather than by a flag: they are different
-keyspaces, not one keyspace with a check someone could forget.
-
-**Pairing needs a host that has a sign-in.** A `none`-mode company — which is
-every company on a packaged desktop install — will mint and redeem a pairing
-code quite happily and then refuse the resulting session from anywhere but its
-own machine, because `authenticate_session` declines any session on a company
-with no login and `resolve_principal` refuses a non-loopback peer outright. The
-consequence and the reasoning are in
-[sign-in modes](auth-modes.md#none). The desktop as a *client* of a remote host
-is unaffected: that host has a sign-in, which is the whole precondition.
-
-A paired device **cannot mint a pairing code**. Otherwise one compromised
-desktop could quietly enrol further machines that survive revoking it, and
-revocation would stop being a lever.
-
-Routes: `GET/POST …/devices`, `POST …/devices/claim`, `DELETE …/devices/{id}`.
-Listing and revocation are scoped to the caller's own devices by querying
-`list_for_user`, so another user's id is simply not found.
-
-The console half is **Settings → Devices** (`#/settings/devices`,
-`frontend/src/views/DevicesView.tsx`): mint a code, see the machines paired to
-your account, revoke one. It calls `GET/POST …/devices` and `DELETE
-…/devices/{id}` and deliberately never touches `claim` — that redemption belongs
-to the machine being enrolled, so the session token reaches its keychain without
-passing through a webview.
-
-For one release these routes had no caller at all while the desktop's pairing
-prompt told people to go to "Settings → devices" (issue #1476). The prompt now
-reads its destination out of the sub-page table in
-`frontend/src/views/settings-pages.ts`, so a page id that is not a real page
-does not compile.
-
-Every claim failure — unknown, expired, already redeemed, suspended user,
-removed user — returns one indistinguishable response. The route is reachable
-without any credential, and separating them would tell an anonymous caller which
-codes once existed and which accounts are live.
+What is unchanged is the carrier: a client that cannot receive a cookie asks for
+the header carrier (above), and that is still how a non-browser client presents
+a session.
 
 ## Revocation
 
