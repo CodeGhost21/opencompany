@@ -569,7 +569,11 @@ export function StandingPermissions({
                      navigation would hear identical "Revoke" buttons and could
                      take back the wrong one (#1411). `grantSubject` resolves
                      the workflow subject for that second kind. */
-                  aria-label={`Revoke ${grantSubject(g, askerNames)}'s permission: ${grantHeadline(g)}`}
+                  aria-label={`Revoke ${grantSubject(g, askerNames)}'s permission: ${grantHeadline(g)} — ${
+                    g.expires_at_millis <= now
+                      ? "expired"
+                      : `expires ${untilLabel(g.expires_at_millis, now)}`
+                  }`}
                   disabled={busy}
                   onClick={() => {
                     mark(g.id, true);
