@@ -845,7 +845,11 @@ impl MemoryStore for ProviderMemoryStore {
     /// The same asymmetry appears if a `put` or `forget` fails mid-loop: the
     /// error propagates and the traces already processed stay archived. That is
     /// the archive-then-delete order behaving as designed under partial failure
-    /// — a duplicate the next read reconciles, never a loss.
+    /// — a duplicate the next read reconciles, never a loss. What must NOT be
+    /// skipped on that path is the archive bound itself: traces already moved
+    /// by the failed pass are still in the archive, so the prune below runs
+    /// before the error propagates, keeping the tier at its limit even when a
+    /// maintenance pass repeatedly fails partway.
     ///
     /// Every eviction additionally bounds the archive itself to the newest
     /// `n` evicted traces (see [`ProviderMemoryStore::prune_archive`]): a
