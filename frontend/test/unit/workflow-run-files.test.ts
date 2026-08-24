@@ -24,18 +24,19 @@ import { RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 let container: HTMLDivElement;
 let root: Root;
 
-/** A fake client that answers a canned files array and records every path asked
- * for — so a test can prove the fetch is lazy by asserting the sink is empty
- * until the row is expanded. */
+/** A fake client that answers a canned files response and records every path
+ * asked for — so a test can prove the fetch is lazy by asserting the sink is
+ * empty until the row is expanded. */
 function filesClient(
   rows: RunArtifactRow[],
   sink: { calls: string[] },
+  truncated = false,
 ): OpenCompanyClient {
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async <T>(path: string): Promise<T> => {
       sink.calls.push(path);
-      return rows as T;
+      return { files: rows, truncated } as T;
     },
   } as unknown as OpenCompanyClient;
 }
@@ -52,7 +53,9 @@ function deferredFilesClient(deferred: {
     get: async <T>(path: string): Promise<T> => {
       return new Promise<T>((resolve, reject) => {
         deferred.push({
-          resolve: resolve as (rows: RunArtifactRow[]) => void,
+          resolve: (rows) => {
+            resolve({ files: rows, truncated: false } as T);
+          },
           reject,
         });
         void path;
