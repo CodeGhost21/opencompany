@@ -208,14 +208,20 @@ export function resolveAvatarSrc(
     pending = client
       .getBlob(`${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(node)}`)
       .then((blob) => {
-        const url = URL.createObjectURL(blob);
         // Evicted while the fetch was in flight — the key came and went, so
         // nothing will read this URL from the cache again. Revoke it rather
-        // than let it leak.
+        // than let it leak. Unreachable today (in-flight entries are skipped
+        // by eviction); kept as a guard against a future change of that rule.
         if (!blobUrls.has(key)) {
-          URL.revokeObjectURL(url);
+          const orphan = URL.createObjectURL(blob);
+          URL.revokeObjectURL(orphan);
           return null;
         }
+        // Make room before minting the URL: at the cap, drop the oldest
+        // resolved face. This entry is not in `blobUrlValues` yet, so it is
+        // never the one dropped — the URL being handed to the caller survives.
+        if (blobUrlValues.size >= MAX_BLOB_URLS) evictOldestBlobUrl();
+        const url = URL.createObjectURL(blob);
         blobUrlValues.set(key, url);
         return url;
       })
