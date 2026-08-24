@@ -41,10 +41,17 @@ const HARNESS: InferenceStatus = {
   harnessReachable: true,
 } as InferenceStatus;
 
-const ECHO: InferenceStatus = { ...HARNESS, cognition: "echo" } as InferenceStatus;
+const ECHO: InferenceStatus = {
+  ...HARNESS,
+  cognition: "echo",
+} as InferenceStatus;
 
 /** One proposed agent is enough: the build-out's reveal is paced per agent. */
-const AGENT = { name: "Ada", role: "Operations", description: "Runs the desk." };
+const AGENT = {
+  name: "Ada",
+  role: "Operations",
+  description: "Runs the desk.",
+};
 
 function clientWith(
   over: {
@@ -79,7 +86,9 @@ let skipped: number;
 let left: number;
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -127,10 +136,13 @@ async function show(
 }
 
 /** Base UI portals the dialog, so query the document rather than the container. */
-const find = (testId: string) => document.querySelector(`[data-testid="${testId}"]`);
+const find = (testId: string) =>
+  document.querySelector(`[data-testid="${testId}"]`);
 
 const linkNamed = (text: string) =>
-  Array.from(document.querySelectorAll("a")).find((a) => a.textContent?.trim() === text);
+  Array.from(document.querySelectorAll("a")).find(
+    (a) => a.textContent?.trim() === text,
+  );
 
 async function click(el: Element) {
   await act(async () => {
@@ -179,21 +191,31 @@ describe("readiness is the addressed company's, not the host's", () => {
 
   it("warns when this company booted onto a path with no design pass", async () => {
     await show(clientWith({ status: async () => ECHO }));
-    expect(find("setup-inference-notice")?.textContent).toContain("can't reach a model");
+    expect(find("setup-inference-notice")?.textContent).toContain(
+      "can't reach a model",
+    );
   });
 
   it("does not promise a tailored team when readiness could not be read", async () => {
-    await show(clientWith({ status: async () => Promise.reject(new Error("nope")) }));
-    expect(find("setup-inference-notice")?.textContent).toContain("couldn't check");
+    await show(
+      clientWith({ status: async () => Promise.reject(new Error("nope")) }),
+    );
+    expect(find("setup-inference-notice")?.textContent).toContain(
+      "couldn't check",
+    );
   });
 
   it("omits the model CTA when this host can never run the design pass", async () => {
     await show(
-      clientWith({ status: async () => ({ ...ECHO, harnessReachable: false }) }),
+      clientWith({
+        status: async () => ({ ...ECHO, harnessReachable: false }),
+      }),
     );
     // A credential cannot put a harness-less binary on the design path, so the
     // CTA that promises otherwise would be a dead end — say so instead.
-    expect(find("setup-inference-notice")?.textContent).toContain("can't run a model");
+    expect(find("setup-inference-notice")?.textContent).toContain(
+      "can't run a model",
+    );
     expect(linkNamed("Set up a model")).toBeUndefined();
   });
 });
@@ -203,8 +225,13 @@ describe("a stalled readiness check cannot lock the operator in", () => {
     vi.useFakeTimers();
     // A host that never answers: `fetch` has no timeout of its own, and this
     // dialog ignores Esc, the backdrop and the close button.
-    await show(clientWith({ status: () => new Promise<InferenceStatus>(() => {}) }));
-    expect(find("setup-inference-check"), "should be waiting at first").toBeTruthy();
+    await show(
+      clientWith({ status: () => new Promise<InferenceStatus>(() => {}) }),
+    );
+    expect(
+      find("setup-inference-check"),
+      "should be waiting at first",
+    ).toBeTruthy();
     expect(find("setup-question")).toBeNull();
 
     await act(async () => {
@@ -212,8 +239,13 @@ describe("a stalled readiness check cannot lock the operator in", () => {
     });
 
     expect(find("setup-inference-check")).toBeNull();
-    expect(find("setup-question"), "questions withheld indefinitely").toBeTruthy();
-    expect(find("setup-inference-notice")?.textContent).toContain("couldn't check");
+    expect(
+      find("setup-question"),
+      "questions withheld indefinitely",
+    ).toBeTruthy();
+    expect(find("setup-inference-notice")?.textContent).toContain(
+      "couldn't check",
+    );
   });
 });
 
@@ -253,7 +285,10 @@ describe("the finished build-out points at what would actually help", () => {
     await runFlow();
     // The key already worked. Sending this operator to Settings is an
     // instruction that cannot help them.
-    expect(find("setup-add-model"), "sent to fix a credential that worked").toBeNull();
+    expect(
+      find("setup-add-model"),
+      "sent to fix a credential that worked",
+    ).toBeNull();
     // The fix is a better answer, and the retry makes it reachable in place —
     // the Company page's prompt is hidden once the fallback team staffs the
     // company, so "rerun from the Company page" alone would be an unreachable
@@ -298,7 +333,9 @@ describe("the finished build-out points at what would actually help", () => {
     await show(clientWith({ source: "model", reason: null }));
     await runFlow();
     expect(find("setup-add-model")).toBeNull();
-    expect(find("setup-buildout-title")?.textContent).toContain("Your starting team is ready");
+    expect(find("setup-buildout-title")?.textContent).toContain(
+      "Your starting team is ready",
+    );
   });
 
   it("offers a retry and a connection check when a wired model was unreachable", async () => {
@@ -318,9 +355,12 @@ describe("the finished build-out points at what would actually help", () => {
 
   it('"Check connection in Settings" records the redesign debt like the wiring CTA', async () => {
     const redesigned: string[][] = [];
-    await show(clientWith({ source: "fallback", reason: "model_unreachable" }), {
-      onRedesign: (ids) => redesigned.push(ids),
-    });
+    await show(
+      clientWith({ source: "fallback", reason: "model_unreachable" }),
+      {
+        onRedesign: (ids) => redesigned.push(ids),
+      },
+    );
     await runFlow();
     await click(find("setup-check-connection")!);
     // The fallback team is to be replaced when the operator returns from
@@ -346,7 +386,10 @@ describe("the finished build-out points at what would actually help", () => {
 
   it('"Try again" persists the redesign debt the retry is owed', async () => {
     const retried: string[][] = [];
-    const client = clientWith({ source: "fallback", reason: "model_unreachable" });
+    const client = clientWith({
+      source: "fallback",
+      reason: "model_unreachable",
+    });
     client.addTeamMember = async () =>
       ({ id: "fallback-1", role: "Operations" }) as TeamMemberDto;
     await show(client, { onRetry: (ids) => retried.push(ids) });
@@ -365,8 +408,18 @@ describe("a replacing build-out clears the team it replaces", () => {
       source: "fallback",
       reason: "model_unreachable",
       roster: [
-        { id: "a1", name: "Old Ada", role: "Operations", global: false } as TeamMemberDto,
-        { id: "b2", name: "Baseline", role: "Founder", global: true } as TeamMemberDto,
+        {
+          id: "a1",
+          name: "Old Ada",
+          role: "Operations",
+          global: false,
+        } as TeamMemberDto,
+        {
+          id: "b2",
+          name: "Baseline",
+          role: "Founder",
+          global: true,
+        } as TeamMemberDto,
       ],
     });
     // `fallbackIds` is the fallback team the previous pass created, captured
@@ -380,7 +433,10 @@ describe("a replacing build-out clears the team it replaces", () => {
   });
 
   it("removes nothing on a first-run build-out", async () => {
-    const client = clientWith({ source: "fallback", reason: "model_unreachable" });
+    const client = clientWith({
+      source: "fallback",
+      reason: "model_unreachable",
+    });
     await show(client);
     await runFlow();
     expect(client.removed).toEqual([]);
@@ -389,8 +445,18 @@ describe("a replacing build-out clears the team it replaces", () => {
   it("a 'Try again' retry removes only the rows the first pass created", async () => {
     const removed: string[] = [];
     const roster = [
-      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
-      { id: "h2", name: "Hand", role: "Designer", global: false } as TeamMemberDto,
+      {
+        id: "f1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
+      {
+        id: "h2",
+        name: "Hand",
+        role: "Designer",
+        global: false,
+      } as TeamMemberDto,
     ];
     const client = {
       ...clientWith({ source: "fallback", reason: "model_unreachable" }),
@@ -415,7 +481,12 @@ describe("a replacing build-out clears the team it replaces", () => {
   it("a redesign 'Try again' replaces the team the last pass created, not a stale boundary", async () => {
     const removed: string[] = [];
     const roster: TeamMemberDto[] = [
-      { id: "old-1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      {
+        id: "old-1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
     ];
     let created = 0;
     const client = {
@@ -443,10 +514,9 @@ describe("a replacing build-out clears the team it replaces", () => {
     // Without the reset in tryRedesign, the retry's boundary stays the stale
     // old-1 (already gone), so the sweep finds nothing and the first redesign's
     // fallback team is left stacked beside the second pass's — a duplicate.
-    expect(removed, "the first redesign's fallback should be replaced").toEqual([
-      "old-1",
-      "new-1",
-    ]);
+    expect(removed, "the first redesign's fallback should be replaced").toEqual(
+      ["old-1", "new-1"],
+    );
   });
 
   it("a designed replacement settles the redesign debt before the completion screen", async () => {
@@ -454,7 +524,12 @@ describe("a replacing build-out clears the team it replaces", () => {
     const client = clientWith({
       source: "model",
       roster: [
-        { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+        {
+          id: "f1",
+          name: "Fallback",
+          role: "Operations",
+          global: false,
+        } as TeamMemberDto,
       ],
     });
     await show(client, {
@@ -473,7 +548,12 @@ describe("a replacing build-out clears the team it replaces", () => {
   it("a replacement that falls back again re-keys the debt to the new fallback's rows", async () => {
     const settled: (string[] | null)[] = [];
     const roster = [
-      { id: "old-1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      {
+        id: "old-1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
     ];
     let nextId = 0;
     const client = {
@@ -509,7 +589,12 @@ describe("a replacing build-out clears the team it replaces", () => {
     const settled: (string[] | null)[] = [];
     const removed: string[] = [];
     const roster = [
-      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      {
+        id: "f1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
     ];
     const client = {
       ...clientWith(),
@@ -557,7 +642,12 @@ describe("a replacing build-out clears the team it replaces", () => {
   it("keeps the existing team when a replacing build-out creates nothing", async () => {
     const removed: string[] = [];
     const roster = [
-      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      {
+        id: "f1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
     ];
     const client = {
       ...clientWith({ source: "fallback", reason: "model_unreachable" }),
@@ -588,7 +678,12 @@ describe("a replacing build-out clears the team it replaces", () => {
   it("rolls back a partially-landed replacement and keeps the existing team", async () => {
     const removed: string[] = [];
     const roster = [
-      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      {
+        id: "f1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
     ];
     const client = {
       ...clientWith({ source: "fallback", reason: "model_unreachable" }),
@@ -632,7 +727,12 @@ describe("a replacing build-out clears the team it replaces", () => {
     const removed: string[] = [];
     const settled: (string[] | null)[] = [];
     const roster = [
-      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      {
+        id: "f1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
     ];
     const client = {
       ...clientWith({ source: "model" }),
@@ -646,7 +746,11 @@ describe("a replacing build-out clears the team it replaces", () => {
       }),
       addTeamMember: async (body: { role?: string }) => {
         const id = body.role === "Analyst" ? "n2" : "n1";
-        roster.push({ id, role: body.role ?? "", global: false } as TeamMemberDto);
+        roster.push({
+          id,
+          role: body.role ?? "",
+          global: false,
+        } as TeamMemberDto);
         return { id };
       },
       listTeam: async () => roster,
@@ -685,7 +789,12 @@ describe("a replacing build-out clears the team it replaces", () => {
     // The roster the host reports grows as adds land; the second run's sweep
     // iterates it, so it must reflect the row the first run left behind.
     const roster = [
-      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      {
+        id: "f1",
+        name: "Fallback",
+        role: "Operations",
+        global: false,
+      } as TeamMemberDto,
     ];
     let firstRun = true;
     let nextId = 0;
@@ -705,7 +814,12 @@ describe("a replacing build-out clears the team it replaces", () => {
       addTeamMember: async (body: { name?: string; role?: string }) => {
         if (firstRun && body.role === "Analyst") throw new Error("nope");
         const id = ids[nextId++];
-        roster.push({ id, name: body.name ?? "", role: body.role ?? "", global: false } as TeamMemberDto);
+        roster.push({
+          id,
+          name: body.name ?? "",
+          role: body.role ?? "",
+          global: false,
+        } as TeamMemberDto);
         return { id };
       },
       listTeam: async () => roster,

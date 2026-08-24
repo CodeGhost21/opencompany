@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, Loader2, RotateCcw, Sparkles, Users } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  Loader2,
+  RotateCcw,
+  Sparkles,
+  Users,
+} from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { proposeRoster, type ProposedAgent, type RosterFallback } from "@/api/company-setup";
+import {
+  proposeRoster,
+  type ProposedAgent,
+  type RosterFallback,
+} from "@/api/company-setup";
 import { getInferenceStatus } from "@/api/inference";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -46,7 +57,12 @@ const REVEAL_MS = 450;
 type Phase =
   | { kind: "asking"; step: number }
   | { kind: "thinking" }
-  | { kind: "building"; agents: ProposedAgent[]; created: number; fallback: Fallback }
+  | {
+      kind: "building";
+      agents: ProposedAgent[];
+      created: number;
+      fallback: Fallback;
+    }
   | { kind: "done"; agents: ProposedAgent[]; fallback: Fallback }
   | { kind: "failed"; reason: string };
 
@@ -275,7 +291,9 @@ export function SetupDialog({
       void getInferenceStatus(client, company).then(
         (status) => {
           setHarnessReachable(status.harnessReachable !== false);
-          settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable");
+          settle(
+            status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable",
+          );
         },
         () => {
           // Do not silently treat an unreadable status as a configured model.
@@ -312,7 +330,8 @@ export function SetupDialog({
         // failure rather than showing a build-out with nothing in it.
         setPhase({
           kind: "failed",
-          reason: "Your company came back without a team. Try again in a moment.",
+          reason:
+            "Your company came back without a team. Try again in a moment.",
         });
         return;
       }
@@ -323,14 +342,17 @@ export function SetupDialog({
         // `?? "unspecified"` rather than `?? "no_model"`: a fallback the host
         // declined to explain must not be presented as a missing credential.
         fallback:
-          proposal.source === "fallback" ? (proposal.reason ?? "unspecified") : null,
+          proposal.source === "fallback"
+            ? (proposal.reason ?? "unspecified")
+            : null,
       });
     } catch {
       // A real transport or auth failure — the host answers with its reference
       // team rather than an error for anything less.
       setPhase({
         kind: "failed",
-        reason: "We couldn't reach your company. Check the connection and try again.",
+        reason:
+          "We couldn't reach your company. Check the connection and try again.",
       });
     }
   }, [client, company, draft]);
@@ -400,7 +422,7 @@ export function SetupDialog({
       // at this point, before the reset below) — never to "everyone who is not
       // global", which would sweep up teammates added by hand in the meantime.
       const boundary = replacing
-        ? redesignRoster.current ?? new Set(createdIds.current)
+        ? (redesignRoster.current ?? new Set(createdIds.current))
         : null;
       const boundaryIds = boundary ? Array.from(boundary) : [];
       // This run's creations are the boundary of the next redesign's
@@ -491,7 +513,8 @@ export function SetupDialog({
           building.current = false;
           setPhase({
             kind: "failed",
-            reason: "We couldn't build your new team, so we kept the one you have. Try again in a moment.",
+            reason:
+              "We couldn't build your new team, so we kept the one you have. Try again in a moment.",
           });
           return;
         }
@@ -538,7 +561,8 @@ export function SetupDialog({
           building.current = false;
           setPhase({
             kind: "failed",
-            reason: "We couldn't finish replacing your old team, so we kept the one you have. Try again in a moment.",
+            reason:
+              "We couldn't finish replacing your old team, so we kept the one you have. Try again in a moment.",
           });
           return;
         }
@@ -580,9 +604,14 @@ export function SetupDialog({
         data-testid="setup-dialog"
       >
         {inference === "checking" && phase.kind === "asking" && (
-          <div className="flex flex-col items-center gap-3 py-10" data-testid="setup-inference-check">
+          <div
+            className="flex flex-col items-center gap-3 py-10"
+            data-testid="setup-inference-check"
+          >
             <Loader2 className="size-6 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">Checking whether this host can design your team…</p>
+            <p className="text-sm text-muted-foreground">
+              Checking whether this host can design your team…
+            </p>
           </div>
         )}
 
@@ -590,7 +619,9 @@ export function SetupDialog({
           <>
             <DialogHeader>
               <StepDots total={SETUP_STEPS.length} at={phase.step} />
-              <DialogTitle data-testid="setup-question">{step.question}</DialogTitle>
+              <DialogTitle data-testid="setup-question">
+                {step.question}
+              </DialogTitle>
               <DialogDescription>{step.hint}</DialogDescription>
             </DialogHeader>
             {phase.step === 0 && inference !== "ready" && (
@@ -637,7 +668,10 @@ export function SetupDialog({
                 />
               )}
               {problem && (
-                <p className="text-sm text-destructive" data-testid="setup-problem">
+                <p
+                  className="text-sm text-destructive"
+                  data-testid="setup-problem"
+                >
                   {problem}
                 </p>
               )}
@@ -645,33 +679,50 @@ export function SetupDialog({
             <DialogFooter className="sm:justify-between">
               <div className="flex gap-2">
                 {phase.step > 0 && (
-                  <Button variant="ghost" onClick={back} data-testid="setup-back">
+                  <Button
+                    variant="ghost"
+                    onClick={back}
+                    data-testid="setup-back"
+                  >
                     <ArrowLeft className="size-4" />
                     Back
                   </Button>
                 )}
-                <Button variant="ghost" onClick={onSkip} data-testid="setup-skip">
+                <Button
+                  variant="ghost"
+                  onClick={onSkip}
+                  data-testid="setup-skip"
+                >
                   I'll do this later
                 </Button>
               </div>
               <Button onClick={next} data-testid="setup-next">
-                {phase.step + 1 === SETUP_STEPS.length ? "Build my company" : "Next"}
+                {phase.step + 1 === SETUP_STEPS.length
+                  ? "Build my company"
+                  : "Next"}
               </Button>
             </DialogFooter>
           </>
         )}
 
         {phase.kind === "thinking" && (
-          <div className="flex flex-col items-center gap-3 py-10" data-testid="setup-thinking">
+          <div
+            className="flex flex-col items-center gap-3 py-10"
+            data-testid="setup-thinking"
+          >
             <Loader2 className="size-6 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">Designing your team…</p>
+            <p className="text-sm text-muted-foreground">
+              Designing your team…
+            </p>
           </div>
         )}
 
         {(phase.kind === "building" || phase.kind === "done") && (
           <BuildOut
             agents={phase.agents}
-            created={phase.kind === "building" ? phase.created : phase.agents.length}
+            created={
+              phase.kind === "building" ? phase.created : phase.agents.length
+            }
             finished={phase.kind === "done"}
             fallback={phase.fallback}
             harnessReachable={harnessReachable}
@@ -685,13 +736,17 @@ export function SetupDialog({
           <>
             <DialogHeader>
               <DialogTitle>That didn't work</DialogTitle>
-              <DialogDescription data-testid="setup-failed">{phase.reason}</DialogDescription>
+              <DialogDescription data-testid="setup-failed">
+                {phase.reason}
+              </DialogDescription>
             </DialogHeader>
             <DialogFooter className="sm:justify-between">
               <Button variant="ghost" onClick={onSkip}>
                 I'll do this later
               </Button>
-              <Button onClick={() => setPhase({ kind: "asking", step: 0 })}>Try again</Button>
+              <Button onClick={() => setPhase({ kind: "asking", step: 0 })}>
+                Try again
+              </Button>
             </DialogFooter>
           </>
         )}
@@ -814,7 +869,11 @@ function BuildOut({
     <>
       <DialogHeader>
         <div className="mb-1 flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
-          {finished ? <Check className="size-5" /> : <Users className="size-5" />}
+          {finished ? (
+            <Check className="size-5" />
+          ) : (
+            <Users className="size-5" />
+          )}
         </div>
         <DialogTitle data-testid="setup-buildout-title">
           {finished
@@ -838,7 +897,9 @@ function BuildOut({
           return (
             <li
               key={agent.role}
-              data-testid={landed ? "setup-agent-created" : "setup-agent-pending"}
+              data-testid={
+                landed ? "setup-agent-created" : "setup-agent-pending"
+              }
               className={cn(
                 "flex items-center gap-3 rounded-lg border px-3 py-2 transition-opacity duration-300",
                 landed ? "opacity-100" : "opacity-40",
@@ -853,7 +914,9 @@ function BuildOut({
                 {landed ? initials(agent.name) : ""}
               </span>
               <span className="min-w-0">
-                <span className="block truncate text-sm font-medium">{agent.role}</span>
+                <span className="block truncate text-sm font-medium">
+                  {agent.role}
+                </span>
                 <span className="block truncate text-xs text-muted-foreground">
                   {agent.description}
                 </span>
@@ -938,7 +1001,11 @@ function StepDots({ total, at }: { total: number; at: number }) {
           key={i}
           className={cn(
             "h-1.5 rounded-full transition-all",
-            i === at ? "w-6 bg-primary" : i < at ? "w-1.5 bg-primary/60" : "w-1.5 bg-muted",
+            i === at
+              ? "w-6 bg-primary"
+              : i < at
+                ? "w-1.5 bg-primary/60"
+                : "w-1.5 bg-muted",
           )}
         />
       ))}
