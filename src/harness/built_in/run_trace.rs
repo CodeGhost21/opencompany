@@ -170,24 +170,29 @@ impl RunTraceSink {
                 at_millis,
                 step,
             };
-            match self.runs.append_run_step(&self.company, &record).await {
+            let skeleton_written = match self.runs.append_run_step(&self.company, &record).await {
                 Ok(()) => {
                     let mut persisted = self.persisted.lock().expect("run trace count");
                     // A finalized start rewrites its own row rather than adding
                     // one, so the count is the high-water ordinal, not the write
                     // count.
                     *persisted = (*persisted).max(step_seq + 1);
+                    true
                 }
-                Err(err) => tracing::warn!(
-                    company = %self.company,
-                    run = %self.run_id,
-                    step_seq,
-                    error = %err,
-                    "[runs] could not persist a step of an attempt's trace; the turn continues"
-                ),
+                Err(err) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        run = %self.run_id,
+                        step_seq,
+                        error = %err,
+                        "[runs] could not persist a step of an attempt's trace; the turn continues"
+                    );
+                    false
+                }
+            };
+            if !skeleton_written {
+                continue;
             }
-
-            // The unredacted half, written after the skeleton so a reader can
             // never meet a detail whose step does not exist. Best-effort like
             // the step above: a full disk must degrade the record, never fail
             // the turn.
