@@ -144,6 +144,7 @@ export function compareRuns(
 export function RunTracesList({
   runs,
   workflows,
+  company,
   loading,
   onSelectRun,
 }: {
@@ -151,6 +152,8 @@ export function RunTracesList({
   runs: WorkflowRunOutcome[];
   /** For resolving a run's `workflowId` to a name. */
   workflows: WorkflowSummary[];
+  /** Company identity, used to reset company-scoped facets only on a switch. */
+  company: string | null;
   loading: boolean;
   /** Open this run's transcript in the side sheet. Does NOT navigate. */
   onSelectRun: (run: WorkflowRunOutcome) => void;
