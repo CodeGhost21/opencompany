@@ -83,28 +83,51 @@ export function mentionsToClear(
   mainChannelId = MAIN_THREAD_ID,
   visibleThreadIds: ReadonlySet<string> = new Set([channelId]),
   renderedChannelIds: ReadonlySet<string> = new Set(),
+  /**
+   * The loaded transcript's thread replies, keyed by the console id
+   * (`h<seq>`) of the reply to the id of the parent it is folded under.
+   * A mention inside a thread reply must not clear on channel-open alone —
+   * see the gate at the end of the filter.
+   */
+  replyParents: ReadonlyMap<string, string> = new Map(),
+  /** The thread panel currently open, or `null` when none is. */
+  openThreadId: string | null = null,
 ): string[] {
   return notifications
     .filter((n) => {
       if (n.readAt !== undefined || n.kind !== "mention" || n.context === undefined) {
         return false;
       }
+      let inChannel: boolean;
       if (renderedChannelIds.has(n.context)) {
         // A real desk or DM channel id: only opening that exact channel clears
         // it. `isGeneralChat` must not reroute a real desk named `general` onto
         // the default thread — that is how a mention for the real General desk
         // ends up silently cleared by opening a different channel.
-        return n.context === channelId;
-      }
-      if (n.context === channelId) {
+        inChannel = n.context === channelId;
+      } else if (n.context === channelId) {
         // Clear only once the main channel's history is actually on screen —
         // a mention is durable, and clearing it before the named message has
         // loaded would lose the summons for good.
-        return channelId !== mainChannelId || visibleThreadIds.has(channelId);
+        inChannel = channelId !== mainChannelId || visibleThreadIds.has(channelId);
+      } else {
+        // A general-chat spelling names the main channel: opening it clears
+        // those mentions too.
+        inChannel = channelId === mainChannelId && isGeneralChat(n.context);
       }
-      // A general-chat spelling names the main channel: opening it clears
-      // those mentions too.
-      return channelId === mainChannelId && isGeneralChat(n.context);
+      if (!inChannel) return false;
+      // A mention inside a thread reply stays until that reply is actually on
+      // screen. The main timeline folds replies into their parent
+      // (`buildTimeline`), so a collapsed thread hides the text even while the
+      // channel is open — clearing it would lose the summons without the
+      // person ever seeing it. The notification names the message by its host
+      // sequence (`subjectId`); the loaded transcript's reply map keys by the
+      // console's `h<seq>` id, so the two meet through `hostMessageId`. A
+      // message absent from the map is either top-level or outside the loaded
+      // window, and clears as it always did.
+      const replyParent = replyParents.get(hostMessageId(n.subjectId));
+      if (replyParent !== undefined && replyParent !== openThreadId) return false;
+      return true;
     })
     .map((n) => n.id);
 }
