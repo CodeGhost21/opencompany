@@ -119,10 +119,13 @@ impl FromRequestParts<AppState> for ScopedCompany {
         // against it just the same.
         let runtime = match &id {
             Some(id) => state.registry().get(&CompanyId::new(id)).ok_or_else(|| {
-                OpenCompanyError::CompanyNotFound(id.clone())
+                ApiError(OpenCompanyError::CompanyNotFound(id.clone())).into_response()
             })?,
             None => state.registry().sole().ok_or_else(|| {
-                OpenCompanyError::CompanyNotFound("single-company".to_string())
+                ApiError(OpenCompanyError::CompanyNotFound(
+                    "single-company".to_string(),
+                ))
+                .into_response()
             })?,
         };
         let company = runtime.id().clone();
