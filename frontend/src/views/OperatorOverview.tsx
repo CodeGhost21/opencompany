@@ -151,6 +151,14 @@ export function OperatorOverview({
           ),
     [previousVisit, failedRuns],
   );
+  /**
+   * Whether the failed-only read came back at its cap. A full page means the
+   * host may hold older created attempts than this read covers, so "no failed
+   * attempts since the visit" is a claim about the newest [`FAILED_READ_LIMIT`]
+   * only — the empty state below says exactly that instead of pretending the
+   * history is exhausted.
+   */
+  const failedReadCapped = failedRuns.length >= FAILED_READ_LIMIT;
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8" data-testid="operator-overview" data-tour="operator-overview">
