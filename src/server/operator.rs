@@ -9655,4 +9655,35 @@ mode = "full"
             "a teammate named by a noncanonical key has to store dm:<agent-id>"
         );
     }
+
+    /// [`mention_context`] files a mention in the General desk — the default an
+    /// unaddressed message lands in — under the console's canonical main-thread
+    /// id even when this company has no desk named/id `General`. This fixture's
+    /// only desk is `engineering`, so every general-chat spelling would
+    /// otherwise fall through to the raw string and badge a rail row that does
+    /// not exist (issue #1665 follow-up).
+    #[tokio::test]
+    async fn mention_context_maps_unresolvable_general_spellings_to_main() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        for general in ["General", "general", "main", ""] {
+            assert_eq!(
+                mention_context(&runtime, &id, &[], general).await,
+                crate::server::chat_history::MAIN_THREAD_ID,
+                "a mention in the General desk ({general:?}) has to store the console's \
+                 main-thread id, which the rail aliases onto its first rendered desk \
+                 channel"
+            );
+        }
+        // A desk that does resolve keeps its canonical id — the general-chat
+        // mapping must not swallow a real desk.
+        assert_eq!(
+            mention_context(&runtime, &id, &[], "Engineering").await,
+            "engineering",
+            "a real desk keeps its canonical id even when its name looks general"
+        );
+    }
 }
