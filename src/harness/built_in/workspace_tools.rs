@@ -2367,11 +2367,36 @@ pub(crate) async fn mutation_is_owned_by_agent(
     // gate counts them. Write, delete and create touch only the node they
     // name (delete refuses a folder that still holds anything), so those keep
     // the target-only check.
-    if tool.eq_ignore_ascii_case(WORKSPACE_RENAME_TOOL) && entry.node.kind == NodeKind::Folder {
-        return index.subtree_ids(&entry.node.id).iter().all(|id| {
-            let node = &index.all_nodes[*id];
-            node.created_by == own_origin && node.updated_by == own_origin
-        });
+    if tool.eq_ignore_ascii_case(WORKSPACE_RENAME_TOOL) {
+        // A move into a nested folder must meet the same landing-zone rule
+        // `workspace_create` applies to minting one: the destination has to be
+        // owned by this agent, or it is an operator- or teammate-authored
+        // folder the agent may populate only under review. The home root is
+        // the exception — it is the agent's own space whatever its stored
+        // origin, the same carve-out that lets create mint a direct child. A
+        // `new_parent` that trims to nothing means "move to the workspace
+        // root", which the tool refuses; failing closed here keeps the approval
+        // gate in step with the tool's refusal.
+        if let Some(raw) = args.get("new_parent").and_then(Value::as_str) {
+            let Ok(segments) = split_logical_path(raw.trim()) else {
+                return false;
+            };
+            if !workspace.is_own_home(&segments) {
+                let parent_path = segments.join("/");
+                let Ok(parent) = index.resolve(Some(&parent_path), None) else {
+                    return false;
+                };
+                if parent.node.created_by != own_origin || parent.node.updated_by != own_origin {
+                    return false;
+                }
+            }
+        }
+        if entry.node.kind == NodeKind::Folder {
+            return index.subtree_ids(&entry.node.id).iter().all(|id| {
+                let node = &index.all_nodes[*id];
+                node.created_by == own_origin && node.updated_by == own_origin
+            });
+        }
     }
     true
 }
