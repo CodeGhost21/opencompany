@@ -1997,6 +1997,10 @@ async fn notify_mentioned(
             return;
         }
     };
+    let users: Vec<_> = users
+        .into_iter()
+        .filter(|u| u.status == crate::ports::users::UserStatus::Active)
+        .collect();
     let mut audience = crate::runtime::mentions::mentioned_users(&users, mentions);
     // Never notify the author, even when they wrote `@everyone`. `normalize`
     // already drops a direct self-mention, but a broadcast expands to the whole
