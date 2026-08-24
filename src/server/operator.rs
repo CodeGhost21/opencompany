@@ -675,7 +675,11 @@ fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&s
 
 /// Projects a live subscription item into the operator stream's safe wire
 /// shape. A gap is an unpersisted control frame, deliberately structural-only.
-fn project_stream_item(
+fn project_stream_item(item: &EventStreamItem) -> Option<serde_json::Value> {
+    project_stream_item_for_viewer(item, &std::collections::HashMap::new(), &Viewer::Operator)
+}
+
+fn project_stream_item_for_viewer(
     item: &EventStreamItem,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
