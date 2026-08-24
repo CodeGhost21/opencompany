@@ -2351,7 +2351,8 @@ prompt = "Lead decisively."
         assert_eq!(set["harness"], "claude");
 
         // A factory must not widen the vocabulary beyond the coding CLIs.
-        let (status, refusal) = patch_agent(&desktop, &jamie, json!({"harness": "not-a-cli"})).await;
+        let (status, refusal) =
+            patch_agent(&desktop, &jamie, json!({"harness": "not-a-cli"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
     }
 
