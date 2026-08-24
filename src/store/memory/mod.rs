@@ -109,6 +109,15 @@ pub use driver::{
     MemoryDriverConfig, MemoryDriverError, MemoryMode, RemoteDeployment, open_driver,
 };
 
+/// Process-wide cache of per-scope context stores, keyed by the scope label.
+///
+/// Populated lazily on first use of a scope ([`BoundMemory::scoped_context`]),
+/// so one bound engine serves every company and every scope it is asked for
+/// without rebuilding stores. Factored out of the struct field so
+/// `clippy::type-complexity` stays satisfied — the shape is deliberately the
+/// once-init + lock + map + arc composition.
+type ContextStoreCache = Arc<OnceLock<std::sync::Mutex<HashMap<String, Arc<ProviderContextStore>>>>>;
+
 /// A bound memory engine, and the only way to get a memory port out of one.
 ///
 /// Process-scoped, like the `MemoryOverlay` it is opened into: one engine serves
@@ -124,7 +133,7 @@ pub struct BoundMemory {
     class: DriverClass,
     driver_id: String,
     capabilities: Capabilities,
-    context_stores: Arc<OnceLock<std::sync::Mutex<HashMap<String, Arc<ProviderContextStore>>>>>,
+    context_stores: ContextStoreCache,
 }
 
 impl std::fmt::Debug for BoundMemory {
