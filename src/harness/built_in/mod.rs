@@ -3702,6 +3702,35 @@ mod tests {
             overlay_fingerprint(&[], &edited(), &[]),
             "a real persona edit must still move the fingerprint"
         );
+        // The filter is narrow the other way too: a row that changed only the
+        // routing — `model` or `harness` with nothing else set — is not a face
+        // change. The harness reads those fields when it binds a teammate, so
+        // such a row must move the fingerprint or the old binding survives
+        // until restart (codex review note).
+        let routing = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                model: Some("claude-opus-4-5".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &routing(), &[]),
+            "a routing-only edit must still move the fingerprint"
+        );
+        let harness_routing = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                harness: Some("external".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &harness_routing(), &[]),
+            "a harness-only edit must still move the fingerprint"
+        );
     }
 
     /// A removal has to move the same axis: a retired teammate left in a cached
