@@ -116,7 +116,7 @@ pub(crate) async fn require_admin(
         .await
         .ok_or_else(unauthorized)?;
     if !principal.may_administer() {
-        return Err(forbidden());
+        return Err(forbidden().into());
     }
     Ok(principal)
 }
