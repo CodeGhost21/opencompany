@@ -343,6 +343,7 @@ export function PolicySettings({ client, company }: Props) {
     if (!status || saving || tier.value === status.mode) return;
     if (widensAutonomy(status.tiers, status.mode, tier.value)) {
       setPendingReset(false);
+      setPendingCapRaise(null);
       setPendingTier(tier);
       return;
     }
