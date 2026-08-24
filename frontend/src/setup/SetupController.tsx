@@ -206,7 +206,8 @@ export function SetupController({
     // The team exists now, so the tour has something to walk through.
     setUnstaffed(false);
     onCompleted?.();
-  }, [scope, onCompleted]);
+    if (routeOpen) onRouteDismiss?.();
+  }, [scope, onCompleted, routeOpen, onRouteDismiss]);
 
   if (!checked && !force) return null;
   if (!open) return null;
