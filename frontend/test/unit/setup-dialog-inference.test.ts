@@ -476,7 +476,7 @@ describe("a replacing build-out clears the team it replaces", () => {
       }),
       // The first replacement fails on its second write; the retry's writes all
       // land, so the retry reaches the sweep the failure never could.
-      addTeamMember: async (body: { role?: string }) => {
+      addTeamMember: async (body: { name?: string; role?: string }) => {
         if (firstRun && body.role === "Analyst") throw new Error("nope");
         const id = ids[nextId++];
         roster.push({ id, name: body.name ?? "", role: body.role ?? "", global: false } as TeamMemberDto);
