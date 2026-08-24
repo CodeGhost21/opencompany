@@ -498,9 +498,12 @@ export function ChatView({
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
+  const companyScopeRef = useRef(company);
+  companyScopeRef.current = company;
+
   const sections = useMemo(
-    () => (desks ? buildChannels(members, desks) : []),
-    [members, desks],
+    () => (desks ? buildChannels(members, desks, transcripts) : []),
+    [members, desks, transcripts],
   );
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
