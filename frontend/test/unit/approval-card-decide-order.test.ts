@@ -138,10 +138,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       b.getAttribute("aria-label"),
     );
     expect(labelled).toContain(
-      "Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request 1772445600000 — request ${T0} — asked by Ops",
+      `Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0} — asked by Ops`,
     );
     expect(labelled).toContain(
-      "Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request 1772445600000 — request ${T0} — asked by Ops",
+      `Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0} — asked by Ops`,
     );
   });
 
