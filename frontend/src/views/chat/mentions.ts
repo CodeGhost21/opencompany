@@ -273,8 +273,24 @@ function mentionableText(entry: Mentionable): string {
  * survivor as overlapping. Processing from the last mention back lets the
  * survivor claim the freed occurrence first, and a displaced mention re-anchors
  * to the free occurrence closest to where it was rather than to the earliest.
+ *
+ * The reverse scan is a fixed bias: it assumes the *later* duplicate survived,
+ * which is exactly right when the first was deleted and exactly wrong when the
+ * second was. Those two edits produce identical `(text, mentions)` — `@Sam`
+ * with both spans recorded at 0 and 5 — so no text-only rule can serve both,
+ * which is why the caller with the pre-edit text hands it over: `previous`
+ * lets the edited region be recovered, and a mention whose recorded span the
+ * edit touched is the one that was deleted. Dropping it before the reverse
+ * scan runs keeps its same-text sibling's identity instead of re-anchoring the
+ * deleted mention onto the survivor's span. The composer passes the previous
+ * draft on `onChange`; the pick/send/trim paths omit it and keep the historical
+ * behavior.
  */
-export function reconcileMentions(text: string, mentions: Mention[]): Mention[] {
+export function reconcileMentions(
+  text: string,
+  mentions: Mention[],
+  previous?: string,
+): Mention[] {
   const used: Array<[number, number]> = [];
   const out: Mention[] = [];
   const overlaps = (at: number, len: number) =>
@@ -283,6 +299,31 @@ export function reconcileMentions(text: string, mentions: Mention[]): Mention[] 
     used.push([at, at + mention.text.length]);
     out.push({ ...mention, offset: at });
   };
+
+  // The deleted region in `previous`'s coordinates: the common prefix, then
+  // the common suffix. Anything between them is what the edit removed. A pure
+  // insertion collapses the region to empty and no mention is dropped.
+  if (previous && previous !== text) {
+    let prefix = 0;
+    const maxPrefix = Math.min(previous.length, text.length);
+    while (prefix < maxPrefix && previous[prefix] === text[prefix]) prefix += 1;
+    let suffix = 0;
+    const maxSuffix = Math.min(previous.length, text.length) - prefix;
+    while (
+      suffix < maxSuffix &&
+      previous[previous.length - 1 - suffix] === text[text.length - 1 - suffix]
+    ) {
+      suffix += 1;
+    }
+    const deletedStart = prefix;
+    const deletedEnd = previous.length - suffix;
+    if (deletedEnd > deletedStart) {
+      mentions = mentions.filter((m) => {
+        const end = m.offset + m.text.length;
+        return !(m.offset < deletedEnd && end > deletedStart);
+      });
+    }
+  }
 
   for (let i = mentions.length - 1; i >= 0; i--) {
     const mention = mentions[i];
