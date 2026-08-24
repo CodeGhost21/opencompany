@@ -1090,8 +1090,8 @@ export function AppShell({
           // result: the messages belong to the old company and must not
           // repopulate the new company's (just-cleared) transcripts. The
           // re-read is recreated when `company` changes, so the closure's
-          // `company` is the scope it started for and `companyRef` is where
-          // the switch landed — see `onSendFailed`'s identical guard.
+          // `company` is the scope it started for and `scopeRef` is where
+          // the current connection/company scope landed.
           if (
             scopeRef.current.company !== company ||
             scopeRef.current.connection !== scope.connection
