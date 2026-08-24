@@ -1205,7 +1205,7 @@ export function KnowledgeGraph({
     };
     window.addEventListener('keydown', onSlash);
     return () => window.removeEventListener('keydown', onSlash);
-  }, []);
+  }, [covered]);
 
   // The constellation subtree is ~2k SVG elements; memoize it so the physics
   // tick (which re-renders the component every animation frame) reuses the
