@@ -387,6 +387,18 @@ pub struct RuntimeBuilder {
     scratch_context: Option<Arc<dyn ContextStore>>,
     /// Safe agent/desk partitions and archive access from that decorator.
     memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
+    /// Whether the memory-engine selection has been (re)applied to this builder.
+    ///
+    /// Set by [`with_memory_overlay`](Self::with_memory_overlay) and
+    /// [`with_memory_overlay_cleared`](Self::with_memory_overlay_cleared).
+    /// When true, the builder's own memory-family ports are authoritative and
+    /// the handover's are ignored on a rebuild; when false (a rebuild that is
+    /// not about the memory engine, or a boot), the handover's ports are
+    /// inherited rather than duplicated (issue #290). The distinction is what
+    /// makes a live engine swap (`PUT …/memory/engine`) take effect: the new
+    /// overlay's ports must replace the outgoing engine's, never be outranked
+    /// by them.
+    memory_overlay_applied: bool,
     tools: Option<Arc<dyn ToolProvider>>,
     channels: Option<Vec<Arc<dyn ChannelAdapter>>>,
     economy: Option<Arc<dyn AgentEconomy>>,
