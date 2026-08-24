@@ -51,4 +51,20 @@ describe("avatar cache lifecycle", () => {
     releaseAvatar(client(), "acme", id);
     vi.unstubAllGlobals();
   });
+
+  it("enumerates cached node ids only within the caller's scope", async () => {
+    const { resolveAvatarSrc, forgetAvatarNode, cachedAvatarNodeIds } = await import("@/lib/avatar");
+    const { } = setup();
+    const id = node(3);
+    await resolveAvatarSrc(client(), "acme", `blob:${id}`);
+    // The cached face is visible to its own scope and to no other.
+    expect(cachedAvatarNodeIds(client(), "acme")).toEqual([id]);
+    expect(cachedAvatarNodeIds(client(), "other")).toEqual([]);
+    expect(cachedAvatarNodeIds(new OpenCompanyClient({ baseUrl: "https://elsewhere", company: null, operatorToken: null, sessionHeader: null }), "acme")).toEqual([]);
+    // Forgetting it empties the enumeration — the fresh-mount revalidation
+    // path converges to nothing on the next load.
+    forgetAvatarNode(client(), "acme", id);
+    expect(cachedAvatarNodeIds(client(), "acme")).toEqual([]);
+    vi.unstubAllGlobals();
+  });
 });
