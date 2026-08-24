@@ -3738,6 +3738,44 @@ mode = "full"
         state
     }
 
+    /// [`state_with_roster`] over [`dm_prefixed_desk_manifest`].
+    async fn state_with_dm_prefixed_desk(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: dm_prefixed_desk_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), dm_prefixed_desk_manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
     /// One chat request, optionally addressed to a thread.
     fn chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
         Request::builder()
