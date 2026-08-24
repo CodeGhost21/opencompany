@@ -258,11 +258,13 @@ fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
                 i += 1;
                 i = skip_sub_blocks(bytes, i)?;
             }
-            // Image Descriptor: left/top/width/height (8) + packed flags (1).
+            // Image Descriptor: left/top (4) + width/height (4) + packed flags (1).
             0x2C => {
                 saw_descriptor = true;
-                let frame_w = u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?) as u32;
-                let frame_h = u16::from_le_bytes(bytes.get(i + 4..i + 6)?.try_into().ok()?) as u32;
+                let frame_w =
+                    u16::from_le_bytes(bytes.get(i + 4..i + 6)?.try_into().ok()?) as u32;
+                let frame_h =
+                    u16::from_le_bytes(bytes.get(i + 6..i + 8)?.try_into().ok()?) as u32;
                 cost = cost.saturating_add((frame_w as u64) * (frame_h as u64));
                 let packed = *bytes.get(i + 8)?;
                 i += 9;
