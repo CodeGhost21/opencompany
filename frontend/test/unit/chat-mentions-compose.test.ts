@@ -348,6 +348,52 @@ describe("reconcileMentions", () => {
   });
 });
 
+describe("reconcileWrap", () => {
+  const sam: Mention = { target: { kind: "user", id: "u1" }, text: "@Sam", offset: 0 };
+
+  /**
+   * Wrapping a whole mention in `**` keeps its literal intact (`**@Sam**`
+   * still reads `@Sam`) — the mention keeps its target and just shifts past
+   * the leading mark. This is the case `reconcileMentions` would over-drop,
+   * because it treats the entire edited region as deleted.
+   */
+  it("keeps an enclosed mention, shifted past the leading mark", () => {
+    const out = reconcileWrap([{ ...sam, offset: 2 }], 2, 6, "**");
+    expect(out).toEqual([{ ...sam, offset: 4 }]);
+  });
+
+  it("leaves a mention before the selection untouched", () => {
+    const out = reconcileWrap([{ ...sam, offset: 0 }], 5, 8, "**");
+    expect(out).toEqual([{ ...sam, offset: 0 }]);
+  });
+
+  it("shifts a mention after the selection past both marks", () => {
+    const out = reconcileWrap([{ ...sam, offset: 3 }], 0, 3, "**");
+    expect(out).toEqual([{ ...sam, offset: 7 }]);
+  });
+
+  /**
+   * The failure `wrap` has to prevent: a Bold insertion *inside* the picked
+   * `@Sam` (selection `[1, 4)`) breaks the literal, so send-time text-only
+   * reconciliation would re-anchor it onto an unrelated hand-typed `@Sam` and
+   * ping its target on the wrong span. The broken mention has to go instead.
+   */
+  it("drops a mention whose span an insertion point falls inside", () => {
+    const out = reconcileWrap([{ ...sam, offset: 0 }], 1, 4, "**");
+    expect(out).toEqual([]);
+  });
+
+  it("shifts a mention whose span merely abuts the selection", () => {
+    const out = reconcileWrap([{ ...sam, offset: 0 }], 0, 4, "**");
+    expect(out).toEqual([{ ...sam, offset: 2 }]);
+  });
+
+  it("handles a caret-only wrap at a mention's start", () => {
+    const out = reconcileWrap([{ ...sam, offset: 5 }], 5, 5, "**");
+    expect(out).toEqual([{ ...sam, offset: 9 }]);
+  });
+});
+
 describe("mentionRegex", () => {
   /**
    * The rule that keeps a chip honest: it is a claim that somebody was
