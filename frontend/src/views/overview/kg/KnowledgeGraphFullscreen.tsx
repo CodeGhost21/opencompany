@@ -59,7 +59,9 @@ export function KnowledgeGraphFullscreen({
    * again, so the offset is reverted and the paddles rise into the band the
    * sheet leaves instead of staying centred underneath it.
    */
-  const clearOfRail = hasDetail ? 'right-[316px] max-[820px]:right-2' : 'right-2';
+  const clearOfRail = hasDetail
+    ? 'right-[316px] max-[820px]:right-3 max-[639px]:right-2'
+    : 'right-2 max-[899px]:right-3 max-[639px]:right-2';
   /**
    * Mid-height normally; in the band above the bottom sheet when there is one.
    *
@@ -179,8 +181,17 @@ export function KnowledgeGraphFullscreen({
           </div>
         )}
 
-        {/* compact legend — bottom-left, always on */}
-        {legendSlot && <div className="absolute bottom-5 left-5 z-10">{legendSlot}</div>}
+        {/* compact legend — bottom-left, always on. It must be bounded by the
+            canvas, rather than its contents: at phone widths the old fixed row
+            extended past the right edge with no way to reach its last kinds. */}
+        {legendSlot && (
+          <div
+            data-testid="kg-legend"
+            className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] sm:bottom-5 sm:left-5 sm:max-w-[calc(100%-2.5rem)]"
+          >
+            {legendSlot}
+          </div>
+        )}
 
         {/* side paddles: slim, hugging the canvas edges at mid-height — you
             turn the wheel from where you're already looking, never the top.
@@ -193,17 +204,17 @@ export function KnowledgeGraphFullscreen({
               onClick={() => step(-1)}
               aria-label="Previous department"
               title="Previous pillar (←)"
-              className={`absolute left-2 z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text ${paddleTop}`}
+              className={`absolute left-2 z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text max-[899px]:left-3 max-[899px]:h-20 max-[899px]:w-10 max-[639px]:left-2 max-[639px]:h-14 max-[639px]:w-8 ${paddleTop}`}
             >
-              <ChevronLeft className="h-7 w-7" />
+              <ChevronLeft className="h-7 w-7 max-[899px]:h-6 max-[899px]:w-6 max-[639px]:h-5 max-[639px]:w-5" />
             </button>
             <button
               onClick={() => step(1)}
               aria-label="Next department"
               title="Next pillar (→)"
-              className={`absolute z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text ${clearOfRail} ${paddleTop}`}
+              className={`absolute z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text max-[899px]:h-20 max-[899px]:w-10 max-[639px]:h-14 max-[639px]:w-8 ${clearOfRail} ${paddleTop}`}
             >
-              <ChevronRight className="h-7 w-7" />
+              <ChevronRight className="h-7 w-7 max-[899px]:h-6 max-[899px]:w-6 max-[639px]:h-5 max-[639px]:w-5" />
             </button>
           </>
         )}

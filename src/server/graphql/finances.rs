@@ -78,8 +78,8 @@ impl FinancesGql {
         self.inner.balance_usd
     }
 
-    /// The monthly budget, USD.
-    async fn budget_usd(&self) -> f64 {
+    /// The monthly budget, USD; `null` when no cap is set.
+    async fn budget_usd(&self) -> Option<f64> {
         self.inner.budget_usd
     }
 

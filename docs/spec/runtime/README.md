@@ -113,10 +113,6 @@ Supporting docs:
   it
 - [config.md](config.md) — configuration and the one-key story
 - [setup.md](setup.md) — the first-run setup flow that writes it
-- [repos.md](repos.md) — bound repositories: the host-side mirror cache, how a
-  credential reaches git without entering argv, the environment or any file, the
-  alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
-  of same-user confinement
 - [../security/agent-isolation.md](../security/agent-isolation.md) — the threat
   model behind that limit: what confines an agent today, what does not, and what
   a prompt-injected agent with `shell` can still do after every planned control
@@ -189,7 +185,7 @@ port returns the crate `Result<T>`.
 | *(default)* | kernel, fs store, hosted brain client, operator API |
 | `tiny` | TinyAgents embedding (existing flag; used by stub brain and local workers) |
 | `sqlite` | SQLite store implementations |
-| `tinycortex` | TinyCortex `MemoryStore`/`ContextStore` adapters |
+| `tinymemory` | Hosted/null memory engine seam (`MemoryProvider` contract) |
 | `tinyplace` | tiny.place economy adapter and A2A routes |
 | `sidecar` | Node sidecar brain for self-hosters |
 

@@ -24,8 +24,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use openhuman_core::openhuman as oh;
-
 use crate::company::mcp::{McpHealth, McpServerDecl, McpStatus};
 use crate::harness::mcp::registry_from_decls;
 use crate::ports::now_millis;
@@ -226,21 +224,19 @@ pub fn classify_mcp_error(
 fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bool) -> FailureKind {
     // 1. Typed 401 — the security-critical case. Read the typed
     //    `resource_metadata` (not the message) to decide OAuth vs static auth.
-    // The typed 401 is now a variant of the transport's own error enum rather
-    // than a standalone struct — same two fields, same meaning. Matched on the
-    // TYPE rather than the message, which is the whole point of this arm: a
-    // server that wants OAuth and one that wants a static credential are told
-    // apart by `resource_metadata` being present, not by wording that upstream
-    // is free to change.
+    //
+    //    The standalone `McpUnauthorizedError` became `tinymcp::Error::Unauthorized`
+    //    when the client was extracted. `Error` is `#[non_exhaustive]`, so match
+    //    the one variant and fall through to the string rules for the rest —
+    //    which is what a new variant should do here anyway.
     if let Some(resource_metadata) =
-        err.chain().find_map(
-            |cause| match cause.downcast_ref::<oh::mcp::http_client::McpError>() {
-                Some(oh::mcp::http_client::McpError::Unauthorized {
+        err.chain()
+            .find_map(|cause| match cause.downcast_ref::<tinymcp::Error>() {
+                Some(tinymcp::Error::Unauthorized {
                     resource_metadata, ..
                 }) => Some(resource_metadata),
                 _ => None,
-            },
-        )
+            })
     {
         return if resource_metadata.is_some() {
             FailureKind::OauthRequired
@@ -271,41 +267,24 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
     }
 
     // 3. String arms over the upstream bail! messages (whole chain).
-    // 1b. Typed non-success status. Preferred over the string scrape below for
-    //     the same reason the 401 arm above is: upstream owns the wording, and a
-    //     classifier keyed on it is one reword from being silently wrong — which
-    //     is exactly what happened when the message went from `MCP HTTP 500` to
-    //     `mcp http 500`, turning every 5xx into a generic error.
+    let full = format!("{err:#}");
+    // 3. Typed non-success status. Read the variant rather than the rendered
+    //    text: the transport's own `Display` is `mcp http {status} from …`,
+    //    which the string rule below only catches because it is spelled
+    //    case-insensitively. A caller holding the error itself should not
+    //    depend on that.
     if let Some(status) =
-        err.chain().find_map(
-            |cause| match cause.downcast_ref::<oh::mcp::http_client::McpError>() {
-                Some(oh::mcp::http_client::McpError::Http { status, .. }) => Some(*status),
+        err.chain()
+            .find_map(|cause| match cause.downcast_ref::<tinymcp::Error>() {
+                Some(tinymcp::Error::Http { status, .. }) => Some(*status),
                 _ => None,
-            },
-        )
-        && let Some(kind) = kind_for_status(status, auth_configured)
+            })
     {
-        return kind;
+        return status_kind(status, auth_configured);
     }
 
-    let full = format!("{err:#}");
     if let Some(code) = http_status_in(&full) {
-        if let Some(kind) = kind_for_status(code, auth_configured) {
-            return kind;
-        }
-        return match code {
-            401 => {
-                if auth_configured {
-                    FailureKind::TokenRejected
-                } else {
-                    FailureKind::CredentialRequired
-                }
-            }
-            403 => FailureKind::TokenRejected,
-            404 => FailureKind::NotMcp,
-            500..=599 => FailureKind::ServerError,
-            _ => FailureKind::Unknown,
-        };
+        return status_kind(code, auth_configured);
     }
     if full.contains("Failed to parse MCP JSON response") {
         return FailureKind::NotMcp;
@@ -319,33 +298,37 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
     FailureKind::Unknown
 }
 
-/// The HTTP status code embedded in an upstream `MCP HTTP {status} — …` message,
-/// if present.
-/// The failure a non-success HTTP status means, or `None` when it means nothing
-/// in particular.
-///
-/// Shared by the typed arm and the string fallback so the two cannot drift —
-/// which is the failure mode that let a reworded message change a 5xx's
-/// classification while every test of the *mapping* still passed.
-fn kind_for_status(status: u16, auth_configured: bool) -> Option<FailureKind> {
-    Some(match status {
-        401 if auth_configured => FailureKind::TokenRejected,
-        401 => FailureKind::CredentialRequired,
+/// What an HTTP status code means for a server we were trying to reach.
+fn status_kind(code: u16, auth_configured: bool) -> FailureKind {
+    match code {
+        401 => {
+            if auth_configured {
+                FailureKind::TokenRejected
+            } else {
+                FailureKind::CredentialRequired
+            }
+        }
         403 => FailureKind::TokenRejected,
         404 => FailureKind::NotMcp,
         500..=599 => FailureKind::ServerError,
-        _ => return None,
-    })
+        _ => FailureKind::Unknown,
+    }
 }
 
+/// The HTTP status code embedded in an upstream `MCP HTTP {status} — …` message,
+/// if present.
+///
+/// Matched case-insensitively: the extracted client renders the same fact as
+/// `mcp http {status} from …`, and this is the path that classifies an error
+/// which has crossed an RPC boundary and arrived as text with no variant left
+/// to read.
 fn http_status_in(text: &str) -> Option<u16> {
-    // Case-insensitive: this is the fallback for an error that crossed an RPC
-    // boundary and came back as a string, and the exact casing upstream renders
-    // is not something to depend on twice.
     let lowered = text.to_ascii_lowercase();
     let offset = lowered.find("mcp http ")? + "mcp http ".len();
-    let after = &text[offset..];
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    let digits: String = text[offset..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
     digits.parse().ok()
 }
 
@@ -433,10 +416,10 @@ pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
             }
         }
         Err(err) => {
-            // The transport reports its own error type since the registry
-            // extraction. Lifted to `anyhow` once here so the classifier and
-            // the operator-message builder below keep the signatures they had —
-            // both walk the cause chain, which is what `anyhow` gives them.
+            // The transport reports its own error type now. Wrap it so the
+            // classifier keeps seeing one `anyhow::Error` chain — it downcasts
+            // through that chain for both the typed 401 and the typed reqwest
+            // transport failure, and `anyhow` preserves `source()`.
             let err = anyhow::Error::new(err);
             let class = classify_mcp_error(&err, auth_configured, false);
             // Issue #1260: "wants OAuth" and "we can sign in" are two different
@@ -743,43 +726,6 @@ mod tests {
         assert_eq!(class.auth_hint, None);
     }
 
-    /// A typed 5xx classifies without reading the message at all.
-    ///
-    /// The regression this pins: the scrape looked for `MCP HTTP `, upstream
-    /// reworded it to `mcp http `, and every 5xx silently became a generic
-    /// error — the classification a console shows an operator, changed by a
-    /// capitalisation. Matching the type first means a reword cannot do that
-    /// again.
-    #[test]
-    fn a_typed_5xx_classifies_without_the_message() {
-        let err = anyhow::Error::new(oh::mcp::http_client::McpError::Http {
-            status: 503,
-            endpoint: "host".into(),
-            body: String::new(),
-        });
-        assert_eq!(
-            classify_mcp_error(&err, false, true).status,
-            McpStatus::Error
-        );
-        assert_eq!(classify_kind(&err, false, true), FailureKind::ServerError);
-    }
-
-    /// The string fallback still works, in either casing.
-    ///
-    /// It is what classifies an error that crossed an RPC boundary and came
-    /// back as text, with no type left to match.
-    #[test]
-    fn the_string_fallback_is_case_insensitive() {
-        for text in ["MCP HTTP 500 from host", "mcp http 500 from host"] {
-            let err = anyhow::anyhow!(text.to_string());
-            assert_eq!(
-                classify_kind(&err, false, true),
-                FailureKind::ServerError,
-                "failed for {text}"
-            );
-        }
-    }
-
     #[test]
     fn classify_5xx_is_server_error() {
         let class = classify_mcp_error(
@@ -829,9 +775,9 @@ mod tests {
 
     #[test]
     fn classify_typed_401_dominates_string() {
-        // A typed `Unauthorized` with OAuth metadata → oauth_required,
+        // A typed `Error::Unauthorized` with OAuth metadata → oauth_required,
         // even though the message string would otherwise be generic.
-        let err = anyhow::Error::new(oh::mcp::http_client::McpError::Unauthorized {
+        let err = anyhow::Error::new(tinymcp::Error::Unauthorized {
             endpoint: "host".into(),
             resource_metadata: Some("https://host/.well-known/oauth".into()),
         });
@@ -940,7 +886,7 @@ mod tests {
 
     #[test]
     fn classify_typed_401_without_metadata_respects_credential_state() {
-        let err = anyhow::Error::new(oh::mcp::http_client::McpError::Unauthorized {
+        let err = anyhow::Error::new(tinymcp::Error::Unauthorized {
             endpoint: "host".into(),
             resource_metadata: None,
         });

@@ -1,0 +1,49 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a newsroom is defined by — the flow
+# it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-sourcing-standard"
+title = "Set up the sourcing standard"
+priority = "high"
+note = """
+State what this newsroom requires before a claim is published: how many \
+sources, what makes one independent, and what goes on `sources`.
+
+The standard is the masthead. A newsroom that decides it story by story \
+decides it under deadline pressure, which is when it decides it worst.
+
+Done when the standard is a `decisions` row and `sources` is kept to it.\
+"""
+
+[[task]]
+id = "set-up-the-corrections-policy"
+title = "Set up the corrections policy"
+priority = "high"
+note = """
+Decide how a mistake is corrected — how fast, how visibly, and what opens \
+a `corrections` row — while there is nothing to correct.
+
+Written afterwards, a corrections policy is written by whoever most wants \
+the mistake to be small.
+
+Done when the policy is recorded and public.\
+"""
+
+[[task]]
+id = "set-up-the-story-slate"
+title = "Set up the story slate"
+priority = "medium"
+note = """
+Get what is being worked on onto `stories`, each with its stage and \
+whether it has cleared the sourcing standard.
+
+Done when nothing is in progress that does not have a row.\
+"""
