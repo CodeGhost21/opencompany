@@ -8902,7 +8902,7 @@ mode = "full"
         chat: Option<&str>,
         fail_continuation: bool,
     ) -> MultiParkCompany {
-        multi_park_company_run(home, parks, chat, fail_continuation, None).await
+        multi_park_company_run(home, parks, chat, fail_continuation, None, None).await
     }
 
     /// [`multi_park_company`], with the parked effects stamped as a workflow
@@ -8913,6 +8913,7 @@ mode = "full"
         chat: Option<&str>,
         fail_continuation: bool,
         run_id: Option<&str>,
+        continuation_mention: Option<&str>,
     ) -> MultiParkCompany {
         let decisions = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -8929,6 +8930,7 @@ mode = "full"
                 rt: rt_slot.clone(),
                 fail_continuation,
                 run_id: run_id.map(str::to_string),
+                continuation_mention: continuation_mention.map(str::to_string),
             })),
         )
         .await;
