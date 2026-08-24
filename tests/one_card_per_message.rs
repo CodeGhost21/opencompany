@@ -139,12 +139,16 @@ fn persona_line_skips_the_tool_policy_boundary_for_both_persona_forms() {
 - Risk: low
 
 ";
-    let unnamed = format!("{base}You are the Chief Executive at Acme. Speak in the first person as this role.");
+    let unnamed = format!(
+        "{base}You are the Chief Executive at Acme. Speak in the first person as this role."
+    );
     assert_eq!(
         persona_line(&unnamed),
         "You are the Chief Executive at Acme. Speak in the first person as this role."
     );
-    let named = format!("{base}You are Alex, the Content Writer at Acme. Speak in the first person as this role.");
+    let named = format!(
+        "{base}You are Alex, the Content Writer at Acme. Speak in the first person as this role."
+    );
     assert_eq!(
         persona_line(&named),
         "You are Alex, the Content Writer at Acme. Speak in the first person as this role."
