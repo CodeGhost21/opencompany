@@ -434,6 +434,11 @@ pub async fn resolve(
     }
     match sniff_image(&bytes) {
         Some(sniffed) => {
+            // The bytes are a supported format; now make sure they are not a
+            // decompression bomb. A hand-typed `blob:` can name any binary this
+            // host holds, and one that claims 65535×65535 in a few compressed
+            // bytes would make every surface that draws a face allocate it.
+            check_image_dimensions(&bytes)?;
             // The bytes and the stored type have to agree, because the type a
             // node was stored under is a claim by whoever uploaded it: the
             // generic workspace route keeps the declared `Content-Type`, and
