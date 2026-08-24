@@ -596,6 +596,7 @@ export function StandingPermissions({
                     {expired
                       ? "expired"
                       : `expires ${untilLabel(g.expires_at_millis, now)}`}{" "}
+                    · grant {index + 1} of {grants.length}{" "}
                     ·{g.verdict === "deny" ? "declined" : "granted"}{" "}
                     {timeAgo(g.at_millis, now)} by{" "}
                     {granterLabel(g, granterNames)}
