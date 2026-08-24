@@ -554,6 +554,7 @@ impl RuntimeBuilder {
             inbound_context: None,
             scratch_context: None,
             memory_scopes: None,
+            memory_overlay_applied: false,
             tools: None,
             channels: None,
             economy: None,
