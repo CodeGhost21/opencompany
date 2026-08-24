@@ -2804,7 +2804,7 @@ export function WorkflowsView({
           panel makes that structural: the index cannot grow run chrome by
           accident, because the slot it would mount in does not exist there. */}
       {!detailOpen ? (
-        <div className="relative flex-1">
+        <div className="relative flex-1 min-h-0">
           {!loadingList && workflows.length === 0 ? (
             // Issue #813's on-ramp, which used to live behind the canvas's
             // empty selection. An empty company now lands here instead, so this
