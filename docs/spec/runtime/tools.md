@@ -53,11 +53,15 @@ list is how it comes off — for every teammate at once, whatever their own
 it, so a company that means to withhold one namespace writes the rest of the
 list out and leaves that one off.
 
-`repo` is the one gateable namespace the default withholds, and not as a
-preference: a host on filesystem storage refuses to boot a company whose
-allow-list names it, because a repository credential would sit on that
-filesystem in plaintext. A MongoDB-backed company that wants it adds `repo.*`
-here and on the teammates that need it.
+The default withholds the credential-gated `chargebee`, `hosting` and `paypal`
+integrations, and `repo`. The first three are opt-in by name because each is a
+company-specific third-party integration — `hosting` publishes the workspace to
+the public internet and provisions databases the company pays for. `repo` is
+withheld for a different reason, and not as a preference: a host on filesystem
+storage refuses to boot a company whose allow-list names it, because a
+repository credential would sit on that filesystem in plaintext. A
+MongoDB-backed company that wants it adds `repo.*` here and on the teammates
+that need it.
 
 **Desk — `[[group_chat]].tools`.** A department's ceiling. A company organises
 its teammates into desks — a finance desk, a creative desk — and this is where
