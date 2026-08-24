@@ -225,6 +225,7 @@ describe("readiness is the addressed company's, not the host's", () => {
     const client = {
       ...clientWith({}),
       get: async (path: string) => {
+        if (path.endsWith("/auth/me")) return ME_ADMIN;
         const company = path.split("/").at(-2) ?? "?";
         asked.push(company);
         return new Promise<InferenceStatus>((resolve) => {
