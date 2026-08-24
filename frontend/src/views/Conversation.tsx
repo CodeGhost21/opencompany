@@ -97,10 +97,19 @@ export function Conversation({
   onSendDetached,
   onSendFailed,
   openTurns,
+  onThreadViewed,
 }: Props) {
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
   // On mobile, the list and the chat share the pane — track which is showing.
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("chat");
+
+  // A thread view is the mention-badge's read path on this surface (see the
+  // prop doc): report it when the thread changes and as its transcript grows,
+  // so a mention whose subject just loaded can clear the moment it is on
+  // screen rather than waiting for another visit.
+  useEffect(() => {
+    onThreadViewed?.(active.id, new Set(active.messages.map((m) => m.id)));
+  }, [active.id, active.messages.length, onThreadViewed]);
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
