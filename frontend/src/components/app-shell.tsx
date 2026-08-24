@@ -1222,6 +1222,7 @@ export function AppShell({
    */
   const [mentionFeed, setMentionFeed] = useState<NotificationDto[]>([]);
   const mentionFeedRevision = useRef(0);
+  const mentionFeedVersion = mentionFeedRevision.current;
   const refreshMentions = useCallback(() => {
     const requestCompany = company;
     const revision = ++mentionFeedRevision.current;
