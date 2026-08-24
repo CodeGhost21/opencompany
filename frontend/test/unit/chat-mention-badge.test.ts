@@ -60,8 +60,7 @@ describe("mentionCountsByChannel", () => {
       general: 1,
     });
   });
-
-
+  it("is empty for an empty feed", () => {
     expect(mentionCountsByChannel([])).toEqual({});
   });
 
