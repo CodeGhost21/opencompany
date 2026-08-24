@@ -147,12 +147,12 @@ export function stripCodeRegions(text: string): string {
   // CommonMark allows a fence up to three spaces of indentation, so both the
   // opening and closing delimiters accept it — a fence indented by three spaces
   // renders as code, and an `@` inside it must not open the picker either. A
-  // closing fence may be followed only by spaces or tabs, never by text:
-  // `````not-a-close``` is still inside the block in CommonMark, so it must
-  // not close the mask early and unmask a later `@` the renderer still shows
-  // as code.
+  // closing fence may be followed only by spaces or tabs (or a CR in a CRLF
+  // line ending), never by text: `````not-a-close``` is still inside the block
+  // in CommonMark, so it must not close the mask early and unmask a later `@`
+  // the renderer still shows as code.
   const fence =
-    /^ {0,3}([`~]{3,})[^\n]*\n?([\s\S]*?)(?:^ {0,3}\1[`~]*[ \t]*$|$)/gm;
+    /^ {0,3}([`~]{3,})[^\n]*\n?([\s\S]*?)(?:^ {0,3}\1[`~]*[ \t\r]*$|$)/gm;
   for (const m of text.matchAll(fence)) {
     if (m.index !== undefined) blank(m.index, m.index + m[0].length);
   }
