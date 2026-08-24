@@ -146,6 +146,8 @@ describe("the autonomy direction", () => {
     const { client, put } = makeClient(status("supervised"));
     await mount(client);
     const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
+    const noCap = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("No cap"));
+    noCap?.click();
     await type(input, "   ");
     await act(async () => {
       [...container.querySelectorAll("button")]
