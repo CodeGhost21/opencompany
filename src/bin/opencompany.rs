@@ -932,10 +932,10 @@ async fn live_ports(
     // Every refusal lives in the lib (`store::select::refuse_bundle_env`)
     // where the feature lanes execute its tests; the bin only reports.
     opencompany::store::refuse_bundle_env(&settings, home_was_flagged)?;
-    let (store, events, mut memory, mut context, mut facts) = match open_storage(&settings, home)
+    let (store, events, mut memory, mut context, mut facts, mut scopes) = match open_storage(&settings, home)
         .await?
     {
-        Some(h) => (h.company, h.events, h.memory, h.context, Some(h.facts)),
+        Some(h) => (h.company, h.events, h.memory, h.context, Some(h.facts), None),
         // The fs default: the same ports the old hardwired path built,
         // plus the fs fact store the old path silently left behind.
         None => (
