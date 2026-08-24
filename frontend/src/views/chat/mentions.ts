@@ -436,7 +436,10 @@ export function utf8ByteLength(s: string): number {
 function closesMention(text: string, idx: number): boolean {
   const ch = text[idx];
   if (ch === undefined) return true;
-  return /[\s,;.!?:)\]}'"]/.test(ch);
+  // Mirrors `closes_mention` in `src/runtime/mentions.rs`: only ASCII whitespace
+  // or ASCII punctuation closes. JavaScript `\s` is wider and would truncate an
+  // alias at a pasted non-breaking space the host keeps inside the mention.
+  return /[ \t\n\r,;.!?:)\]}'"]/.test(ch);
 }
 
 /**
