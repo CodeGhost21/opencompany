@@ -274,8 +274,12 @@ describe("resetting to the manifest's policy", () => {
     const initial: PolicyStatus = {
       mode: "full",
       alwaysApprove: ["shell"],
+      autoApproveUnderUsd: null,
+      approvalTtlHours: 24,
       manifestMode: "full",
       manifestAlwaysApprove: [],
+      manifestAutoApproveUnderUsd: null,
+      manifestApprovalTtlHours: null,
       overridden: true,
       setBy: "someone",
       takesEffect: "on the next turn",
