@@ -66,13 +66,37 @@ export function AttemptCard({ run, nowMs, turn, focusStep, onOpen }: Props) {
   }, [state]);
   // `onOpen` rides an effect rather than the click handler so the cards that
   // start open and the cards that auto-open on trouble announce themselves too.
-  // The step length is a dependency on purpose: while a live attempt's trace
-  // grows between polls, an open card must re-read the unredacted half or the
-  // new steps would keep empty deep panes until it is closed and reopened. The
-  // length is the cheap signal — a step status transition alone does not re-read.
+  // The signature is a dependency on purpose: while a live attempt's trace
+  // progresses between polls — a new step, or an existing one whose status
+  // flips as a tool call completes and its result lands — an open card must
+  // re-read the unredacted half or the steps would keep empty deep panes until
+  // it is closed and reopened. Length alone misses the in-place transition:
+  // completing a call rewrites an existing ordinal without adding one. The
+  // signature deliberately excludes `deep` — the fetch this effect drives is
+  // what fills it, so depending on it would re-read forever.
+  const stepsSignature = useMemo(
+    () =>
+      run.steps
+        .map((s) =>
+          [
+            s.seq,
+            s.atMillis,
+            s.kind,
+            s.status,
+            s.label,
+            s.detail,
+            s.result,
+            s.failure,
+            s.truncated,
+            s.elapsedMs,
+          ].join(":"),
+        )
+        .join("|"),
+    [run.steps],
+  );
   useEffect(() => {
     if (open) onOpen?.(run.id);
-  }, [open, run.id, run.steps.length, onOpen]);
+  }, [open, run.id, stepsSignature, onOpen]);
   const elapsed =
     (run.finishedAtMillis ?? nowMs) - (run.startedAtMillis ?? run.createdAtMillis);
   // `cachedInput` is a subset of `input` (prompt_tokens_details.cached_tokens),
