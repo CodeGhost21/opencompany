@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
+import type { ChatMentionDto } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import type {
   DeliveryReport,
@@ -40,6 +41,14 @@ export type CompanyStreamEvent =
        * that predates persisted threads.
        */
       parentId?: string;
+      /**
+       * Who this reply names, as the host resolved them (issue #1645).
+       *
+       * Absent when the event predates the field, and on a host that does not
+       * project mentions onto the SSE feed. The same mentions are always
+       * available through `chat/history` (see {@link fromHistory}).
+       */
+      mentions?: ChatMentionDto[];
     }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
   | {
@@ -405,6 +414,14 @@ export interface AgentReplyEvent {
    * `h` prefix.
    */
   parentId?: string;
+  /**
+   * Who this reply names, as the host resolved them (issue #1645).
+   *
+   * Absent when the event predates the field, and on a host that does not
+   * project mentions onto the SSE feed. The same mentions are always
+   * available through  (see {@link fromHistory}).
+   */
+  mentions?: ChatMentionDto[];
 }
 
 interface Options {
@@ -903,6 +920,10 @@ export function handleEvent(
         // Issue #364: and lands in the same thread a reload would put it in,
         // rather than arriving in the channel and jumping on the next refresh.
         parentId: event.parentId,
+        // Issue #1645: who this reply names, projected from the stored event.
+        // Absent when the host's projection omits it; the same mentions are
+        // always available through `chat/history` (see {@link fromHistory}).
+        mentions: event.mentions,
       });
       break;
     // Issue #379. No toast: the rising-edge "needs a sign-off" toast off the

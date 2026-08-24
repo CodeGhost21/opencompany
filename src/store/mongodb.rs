@@ -68,6 +68,21 @@ fn mongo_err(e: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("mongodb error: {e}"))
 }
 
+/// Whether the driver classified this error as worth trying again.
+///
+/// Asks the driver rather than matching on the message, because the driver is
+/// the thing that knows: it attaches these labels from the server's own reply
+/// and its view of the topology. `SystemOverloadedError` is a shared cluster
+/// asking to be called back shortly, which is precisely the case that used to
+/// kill a booting tenant (#1716).
+#[cfg(feature = "mongodb")]
+fn is_retryable(err: &mongodb::error::Error) -> bool {
+    use mongodb::error::{RETRYABLE_ERROR, RETRYABLE_WRITE_ERROR, SYSTEM_OVERLOADED_ERROR};
+    err.contains_label(RETRYABLE_ERROR)
+        || err.contains_label(RETRYABLE_WRITE_ERROR)
+        || err.contains_label(SYSTEM_OVERLOADED_ERROR)
+}
+
 /// How a port-contract limit maps onto a MongoDB `find`.
 ///
 /// An enum with a distinct `Empty` arm, rather than the `Option<i64>` this used
@@ -522,6 +537,18 @@ impl MongoStore {
         // is.
         const INDEX_CONCURRENCY: usize = 10;
 
+        /// How many times one index creation is retried before giving up.
+        ///
+        /// Only errors the driver itself labels retryable are retried; a wrong
+        /// key spec fails on the first attempt as it always did.
+        const INDEX_RETRIES: u32 = 4;
+
+        /// Base backoff between retries, doubled each attempt: 100ms, 200ms,
+        /// 400ms, 800ms — 1.5s in total, which is short against a 60s startup
+        /// budget and long enough to outlast the load-shedding actually
+        /// observed.
+        const INDEX_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
         let extra: [(&str, IndexModel); 11] = [
             ("owners", unique(doc! {"company_id": 1})),
             // Issue #241: the cross-replica arbiter. This unique compound index
@@ -598,31 +625,77 @@ impl MongoStore {
         // one index no longer decides whether the other forty-three exist.
         let results: Vec<Result<()>> = futures::stream::iter(plans.into_iter().chain(extra))
             .map(|(name, index)| async move {
-                self.collection(name)
-                    .create_index(index)
-                    .await
-                    .map(|_| ())
-                    .map_err(|err| mongo_err(format!("index on `{name}`: {err}")))
+                let mut backoff = INDEX_RETRY_BACKOFF;
+                let mut attempt = 0;
+                loop {
+                    match self.collection(name).create_index(index.clone()).await {
+                        Ok(_) => return Ok(()),
+                        // The driver classifies its own errors, so retry exactly
+                        // what it says is retryable rather than guessing from the
+                        // message. `SystemOverloadedError` in particular is the
+                        // server asking to be called back shortly — treating it
+                        // as fatal is reading "try again" as "give up".
+                        Err(err) if attempt < INDEX_RETRIES && is_retryable(&err) => {
+                            tracing::warn!(
+                                collection = name, attempt = attempt + 1, %err,
+                                "index creation returned a retryable error; retrying"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            backoff *= 2;
+                            attempt += 1;
+                        }
+                        Err(err) => {
+                            return Err(mongo_err(format!("index on `{name}`: {err}")));
+                        }
+                    }
+                }
             })
             .buffer_unordered(INDEX_CONCURRENCY)
             .collect()
             .await;
 
+        let total = results.len();
         let failures: Vec<_> = results
             .into_iter()
             .filter_map(std::result::Result::err)
             .collect();
         let failed = failures.len();
-        match failures.into_iter().next() {
-            // The count matters: one failing index is a different problem from
-            // every index failing, and the first error alone cannot tell them
-            // apart.
-            Some(first) if failed > 1 => Err(mongo_err(format!(
-                "{failed} indexes failed; first: {first}"
-            ))),
-            Some(first) => Err(first),
-            None => Ok(()),
+        let Some(first) = failures.into_iter().next() else {
+            return Ok(());
+        };
+
+        // An index that could not be created is LOUD but not fatal.
+        //
+        // This used to return `Err`, which failed the store's construction and
+        // took the process down with it. Under Kubernetes that was a crash-loop
+        // and the next attempt usually succeeded. Under the microVM runtime the
+        // workload is PID 1, so its exit panics the guest kernel and the tenant
+        // is simply gone — five of two hundred tenants died that way in one
+        // ramp, because a shared Atlas cluster shed load while they all booted
+        // at once (#1716).
+        //
+        // Indexes are a performance property, not a correctness precondition
+        // for the process existing: every query here is correct without them,
+        // only slower, and the next boot re-runs this. Refusing to start is the
+        // strictly worse failure, and it is the same judgement this file already
+        // makes one function below — "a store that will not boot is worse than
+        // one whose oldest run rows are not yet filterable by desk".
+        //
+        // The count matters and is kept: one failing index is a different
+        // problem from every index failing, and the first error alone cannot
+        // tell them apart.
+        if failed > 1 {
+            tracing::error!(
+                failed, total, first = %first,
+                "some indexes could not be created; serving without them"
+            );
+        } else {
+            tracing::error!(
+                failed, total, error = %first,
+                "an index could not be created; serving without it"
+            );
         }
+        Ok(())
     }
 
     fn collection(&self, name: &str) -> Collection<Document> {
@@ -4618,15 +4691,24 @@ mod test {
         Some(Arc::new(store))
     }
 
-    /// One failing index must not stop the other forty-three from being created.
+    /// One failing index must not stop the other forty-three from being
+    /// created, **nor stop the store from opening at all**.
+    ///
+    /// Two properties in one test, because they have the same setup.
     ///
     /// `ensure_indexes` runs concurrently, so a short-circuit would drop
     /// in-flight driver operations mid-await — and an operation cancelled after
     /// its request is sent but before its reply is read leaves a connection the
     /// pool cannot safely reuse. That hazard does not exist in a sequential
     /// loop; it arrived with the concurrency, so it is pinned here.
+    ///
+    /// And the failure is now reported by logging rather than by refusing to
+    /// construct the store (#1716). Returning `Err` here took the whole process
+    /// down; under the microVM runtime the workload is PID 1, so that panicked
+    /// the guest kernel and the tenant was gone. Indexes are a performance
+    /// property, not a precondition for the process existing.
     #[tokio::test]
-    async fn every_index_is_attempted_even_when_one_fails() {
+    async fn a_failing_index_stops_neither_the_other_indexes_nor_the_boot() {
         let Some(store) = store().await else { return };
 
         // `store()` has already run `ensure_indexes` once, so the assertion has
@@ -4652,14 +4734,12 @@ mod test {
             .await
             .expect("seed the conflicting index");
 
-        let err = store
+        // The store must still open. A tenant that cannot boot because one
+        // index conflicts is strictly worse than one serving without it.
+        store
             .ensure_indexes()
             .await
-            .expect_err("the conflicting index should make this fail");
-        assert!(
-            format!("{err}").contains("owners"),
-            "the error should name the collection that failed: {err}"
-        );
+            .expect("a conflicting index must not stop the store from opening");
 
         // The point: the run continued past the failure and recreated the index
         // dropped above. A short-circuit would leave it absent.

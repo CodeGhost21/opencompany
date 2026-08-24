@@ -158,12 +158,13 @@ describe("the empty-channel first brief", () => {
     );
 
     // The brief is sent as a one-off task, not under the stale "chat" intent —
-    // otherwise its request would be withheld.
+    // otherwise its request would be withheld. No mention directory is loaded
+    // here, so the mentions arg is absent (undefined) rather than an empty list.
     act(() => {
       [...container.querySelectorAll("button")]
         .find((button) => button.getAttribute("aria-label") === "Send")!
         .click();
     });
-    expect(onSend).toHaveBeenCalledWith("Help us get started.", "once");
+    expect(onSend).toHaveBeenCalledWith("Help us get started.", "once", undefined);
   });
 });
