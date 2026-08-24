@@ -1944,7 +1944,7 @@ async fn draft_from_description(
         }
         // A read the drafter could not proceed without (the company record) — a
         // genuine 500, not a model answer.
-        Err(err) => Err(ApiError(err).into_response()),
+        Err(err) => Err(ApiError(err).into_response().into()),
     }
 }
 
@@ -2244,7 +2244,7 @@ async fn fix_from_run(
             }))
         }
         // A read the drafter could not proceed without — a genuine 500.
-        Err(err) => Err(ApiError(err).into_response()),
+        Err(err) => Err(ApiError(err).into_response().into()),
     }
 }
 
