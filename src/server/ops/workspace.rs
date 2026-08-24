@@ -147,6 +147,17 @@ pub fn router() -> Router<AppState> {
             "/workspace/{node_id}",
             patch(rename_move).delete(delete_node),
         ))
+        // Chat attachments (issue #1682) enter on their own route but land in
+        // the same blob store as a workspace upload, so the handler lives here
+        // beside `upload` to share `resolve_mime`, the filename sanitizer,
+        // `admit_upload` and `create_binary` verbatim. It carries the identical
+        // body-limit layer, for the identical reason — an unbounded multipart
+        // body must not be buffered, and the store speaks first on policy.
+        .merge(
+            scoped("/chat/upload", post(chat_upload)).layer(DefaultBodyLimit::max(
+                crate::runtime::UPLOAD_BODY_LIMIT_BYTES as usize,
+            )),
+        )
 }
 
 /// A workspace node as the console renders it.
@@ -855,6 +866,133 @@ async fn upload(
             Ok(Json(FsNode::from_node(stored, None)))
         }
     }
+}
+
+/// A stored chat attachment, as the composer needs it back (issue #1682).
+///
+/// The compact counterpart of [`FsNode`]: a chat attachment is not a tree node
+/// the console edits, so the send path needs only the id to reference it and
+/// the name / mime / size to draw a pending chip. Every field is the **store's**
+/// — the id it generated, the name it stored under, the mime it resolved, the
+/// length it measured — never the client's claim, which is the same discipline
+/// the send route re-applies when it re-resolves the id.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentRef {
+    node_id: String,
+    name: String,
+    mime: String,
+    size: u64,
+}
+
+/// `POST …/chat/upload` — multipart upload of one file to attach to a chat
+/// message (issue #1682).
+///
+/// The byte-transfer half of a two-step send: the client uploads here, gets a
+/// stable [`AttachmentRef`] back, and then posts the ordinary JSON `/chat`
+/// message carrying that node id. Decoupling the two keeps the synchronous,
+/// turn-running `/chat` POST off the bytes.
+///
+/// # Binary-only, unlike [`upload`]
+///
+/// The workspace `upload` stores a UTF-8 text file as an editable prose note,
+/// because a Markdown file in the tree earns a diffable, backlinkable editor. A
+/// chat attachment earns none of that — it is a file hung on a message, not a
+/// document someone maintains — so this always stores bytes, whatever the
+/// encoding. The download path is then 100% shared: the file is served by the
+/// existing hardened `GET …/workspace/blob/{node_id}` (issue #667), so no new
+/// serve is added and the `nosniff` + closed inline allow-list already cover it.
+///
+/// Everything that can refuse still refuses first, and in the same words:
+/// `admit_upload` gates size and quota, the body-limit layer backstops an
+/// unbounded body, and the last-segment filename sanitizer keeps a browser's
+/// full path from reaching the store.
+async fn chat_upload(
+    company: ScopedCompany,
+    mut multipart: Multipart,
+) -> Result<Json<AttachmentRef>, ApiError> {
+    let mut file: Option<(String, Option<String>, Vec<u8>)> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| multipart_error(e, "malformed multipart upload"))?
+    {
+        // Only the `file` part is read; a browser's `FormData` may carry other
+        // fields this route has no use for, and ignoring them keeps an upload
+        // from failing over a stray part.
+        if field.name() == Some("file") {
+            let name = field
+                .file_name()
+                .map(str::to_string)
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError(OpenCompanyError::InvalidRequest(
+                        "the uploaded file has no filename".to_string(),
+                    ))
+                })?;
+            let declared = field.content_type().map(str::to_string);
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| multipart_error(e, "unreadable file part"))?;
+            file = Some((name, declared, bytes.to_vec()));
+        }
+    }
+
+    let Some((name, declared, bytes)) = file else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "the upload carried no `file` part".to_string(),
+        )));
+    };
+    // The last path segment only, then named under the workspace rule — the
+    // same sanitizer `upload` applies, so a browser's full path never reaches
+    // the store and a client string never reaches a filesystem path.
+    let name = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&name)
+        .trim()
+        .to_string();
+    let name = kebab_name_or(&name, &name);
+    let mime = resolve_mime(&name, declared.as_deref());
+
+    // Size + quota, decided by the store so a company's configured cap is
+    // honoured rather than the global default — identical to `upload`.
+    company
+        .runtime
+        .workspace()
+        .admit_upload(company.id(), &name, bytes.len() as u64)
+        .await?;
+
+    let node = WorkspaceNode {
+        id: generate_id(),
+        name: name.clone(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: crate::ports::now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        // A chat attachment is bytes, never a note — so it is a binary node
+        // whatever its encoding, and the text branch `upload` owns is skipped.
+        mime: Some(mime.clone()),
+        size: None,
+        sha256: None,
+    };
+    company
+        .runtime
+        .workspace()
+        .create_binary(company.id(), &node, &bytes)
+        .await?;
+
+    Ok(Json(AttachmentRef {
+        node_id: node.id,
+        name,
+        mime,
+        // The stored length is exactly what was written — `create_binary`
+        // measures the same bytes — so it needs no re-read to report.
+        size: bytes.len() as u64,
+    }))
 }
 
 /// The media type to store a upload under.
