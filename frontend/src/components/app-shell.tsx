@@ -1010,6 +1010,20 @@ export function AppShell({
   // it must survive renders without itself provoking one, and the drain that
   // reads it is triggered by the channel map landing, not by this set changing.
   const pendingReReadRef = useRef<Set<string>>(new Set());
+  // Mirrors `chatChannelByThread` so `reReadSettledThread`'s `.then()` always
+  // reads the map's current value instead of the one closed over when the
+  // request started (issue #1701 follow-up). `reReadSettledThread` is
+  // recreated whenever `chatChannelByThread` changes — if a `getChatHistory`
+  // response lands *after* the map-populating render but its callback closure
+  // predates that render (the request started while the map was still
+  // empty), reading state directly would see the stale empty map even though
+  // the drain effect below already ran with the fresh one — parking the
+  // thread with nothing left to trigger its replay. Reading this ref instead
+  // means the response always sees whatever the map holds *now*.
+  const chatChannelByThreadRef = useRef(chatChannelByThread);
+  useEffect(() => {
+    chatChannelByThreadRef.current = chatChannelByThread;
+  }, [chatChannelByThread]);
   // The latest company, so an async completion started for one company can
   // tell whether it still belongs to the active scope (issue #1000).
   const companyRef = useRef(company);
@@ -1074,7 +1088,7 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = chatChannelByThread[threadId];
+          const channelId = chatChannelByThreadRef.current[threadId];
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
           // (issue #1701). The `threads` fold above still ran; park the id so
@@ -1096,7 +1110,10 @@ export function AppShell({
           /* offline — the next hydration pass still rebuilds it */
         });
     },
-    [client, company, chatChannelByThread],
+    // Deliberately excludes `chatChannelByThread`: the callback reads the map
+    // through `chatChannelByThreadRef` (always current) instead, so its
+    // identity no longer churns on every map update — see the ref's doc above.
+    [client, company],
   );
 
   // Replay any thread parked by the branch above once its channel becomes
