@@ -2167,7 +2167,7 @@ export function AppShell({
               onSendDetached={onSendDetached}
               onSendFailed={onSendFailed}
               onSendStale={onSendStale}
-              scopeCompanyRef={companyRef}
+          scopeRef={scopeRef}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
               unread={unread}
