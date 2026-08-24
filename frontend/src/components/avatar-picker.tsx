@@ -7,7 +7,7 @@
 // two pickers would be two places for the accepted formats, the size ceiling
 // and the reset affordance to drift apart.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ImagePlus, Loader2, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 
