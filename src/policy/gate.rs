@@ -671,14 +671,12 @@ impl ApprovalGate for ManifestApprovalGate {
             return Ok(PolicyDecision::RequireApproval);
         }
 
-        let mode = policy.mode.clone();
-        let decision = match mode.as_str() {
-            "full" => PolicyDecision::Allow,
-            "readonly" => PolicyDecision::RequireApproval,
-            "supervised" | "auto" => Self::evaluate_supervised_with_policy(&policy, effect),
-            _ => PolicyDecision::RequireApproval,
-        };
-        Ok(decision)
+        // Mode dispatch against the held snapshot. A word with no arm is not a
+        // tier — the manifest validator rejects anything outside `POLICY_MODES`
+        // before a company loads — so `None` here means a path that reached a
+        // `Policy` without validation. It fails safe: require approval.
+        Ok(Self::mode_decision(&policy, &policy.mode, effect)
+            .unwrap_or(PolicyDecision::RequireApproval))
     }
 
     async fn park(&self, _company: &CompanyId, effect: Effect) -> Result<ApprovalId> {
