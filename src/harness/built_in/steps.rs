@@ -448,9 +448,8 @@ impl StepTrace {
                 };
                 let seq = *seq;
                 buf.push_str(delta);
-                self.thinking_pending_bytes = self
-                    .thinking_pending_bytes
-                    .saturating_add(delta.len());
+                self.thinking_pending_bytes =
+                    self.thinking_pending_bytes.saturating_add(delta.len());
                 if self.thinking_pending_bytes < DEEP_THINK_FLUSH_BYTES {
                     return Vec::new();
                 }
