@@ -128,13 +128,16 @@ async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, Response> {
     let Some(user) = actor_id(&company) else {
         return Err(unauthorized());
     };
-    let rows = company
+    let mut rows = company
         .runtime
         .notifications()
         .list(company.id(), &user)
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    let unread = rows.iter().filter(|v| v.read_at.is_none()).count();
+    // The badge only needs unread mentions. Keep the polled response bounded so
+    // an old notification history cannot make every five-second refresh grow.
+    rows.retain(|view| view.read_at.is_none() && view.notification.kind == "mention");
+    let unread = rows.len();
     Ok(Json(FeedDto {
         notifications: rows.into_iter().map(NotificationDto::from).collect(),
         unread,
