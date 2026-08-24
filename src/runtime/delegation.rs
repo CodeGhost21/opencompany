@@ -2737,23 +2737,22 @@ impl<'a> DelegationRunner<'a> {
         orchestrator::orchestrator_id(&self.record.effective_agents()).unwrap_or_default()
     }
 
-    /// Whether `responder` has any way to hand work to somebody else — the
-    /// orchestrator always does, and an ordinary teammate does only when its
-    /// manifest row names a `delegates_to` allowlist (`build.rs` wires
-    /// `spawn_task`/`delegate_to_desk`/`delegate_to_teammate` on exactly that
-    /// condition; an overlay teammate has no `delegates_to` field at all and
-    /// so never qualifies here either).
-    ///
-    /// Read before the "also mentioned" turn context is worded (see
-    /// [`Self::run`]): telling a responder with no hand-off tool at all to
-    /// "hand work to them" is an instruction it cannot follow, and the honest
-    /// phrasing differs.
-    fn responder_can_delegate(&self, responder: &str) -> bool {
-        responder == self.orchestrator_id()
-            || self
-                .record
-                .effective_agent(responder)
-                .is_some_and(|agent| !agent.delegates_to.is_empty())
+    /// Whether `responder` can reach at least one of the specifically mentioned
+    /// teammates. The orchestrator can reach every roster teammate; ordinary
+    /// responders are constrained by desk peers and their `delegates_to` list.
+    fn responder_can_reach_mentioned(&self, responder: &str) -> bool {
+        if responder == self.orchestrator_id() {
+            return true;
+        }
+        let Some(agent) = self.record.effective_agent(responder) else {
+            return false;
+        };
+        let reachable = delegation_tools::teammate_targets(
+            &self.record,
+            responder,
+            &agent.delegates_to,
+        );
+        self.also_mentioned.iter().any(|target| reachable.contains(target))
     }
 
     /// The voice a note this drain appends is recorded under.
