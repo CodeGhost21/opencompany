@@ -1100,7 +1100,24 @@ mod test {
     fn unreadable_content_is_dropped_rather_than_failing_the_read() {
         let facts = ns("acme", Scope::Facts);
         let entry = entry_in(&facts, "not json at all");
-        assert!(decode::<FactRecord>(&entry, &facts).is_none());
+        // The `warnings_from` wrapper is LOAD-BEARING, not decoration: a corrupt
+        // decode must always run under a subscriber, or tracing's global
+        // callsite-interest cache can freeze this warn callsite to `never` for
+        // the whole process. A bare test thread has no subscriber, so its
+        // `get_default` is the global NoSubscriber whose `register_callsite`
+        // answers `Interest::never()` — and once cached, every later capture of
+        // this same callsite (in `warnings_from`) is silently dropped. The race
+        // needs the thread-local sink to have already raised the global max
+        // level to WARN, which `decode_classifies`'s own sink does concurrently,
+        // so `unreadable_content` — run bare — was exactly the poisoner that
+        // made the corruption warning intermittently vanish in CI.
+        let warnings = warnings_from(|| {
+            assert!(decode::<FactRecord>(&entry, &facts).is_none());
+        });
+        assert!(
+            warnings.contains("memory entry in our namespace failed to decode"),
+            "unreadable content in our namespace must be reported: {warnings:?}"
+        );
     }
 
     // The range-widening behavior `peek` relies on is pinned where the helper
