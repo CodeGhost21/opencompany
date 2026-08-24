@@ -304,8 +304,16 @@ pub fn build_agent(
     {
         // These config-free tools read OpenHuman's live process registry, so
         // installs and lifecycle changes are visible without rebuilding agents.
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool));
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool));
+        tools.push(Box::new(
+            oh::mcp::registry::tools::McpRegistryListToolsTool::new(Arc::new(
+                oh::config::Config::default(),
+            )),
+        ));
+        tools.push(Box::new(
+            oh::mcp::registry::tools::McpRegistryToolCallTool::new(Arc::new(
+                oh::config::Config::default(),
+            )),
+        ));
     }
 
     // Granted file tools, sandboxed to this agent's own workspace directory. An
