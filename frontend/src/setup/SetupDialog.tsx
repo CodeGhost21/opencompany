@@ -652,6 +652,7 @@ function BuildOut({
   created,
   finished,
   fallback,
+  harnessReachable,
   onDone,
   onRedesign,
   onTryAgain,
@@ -664,6 +665,12 @@ function BuildOut({
    * model designed this one. Said out loud below, and it decides the CTA.
    */
   fallback: Fallback;
+  /**
+   * Whether this host could ever run the design path. `false` makes the
+   * "Add a model in Settings" action a dead end — a credential cannot put a
+   * harness-less binary on the design path, so the CTA is omitted.
+   */
+  harnessReachable: boolean;
   onDone: () => void;
   /**
    * The completion screen's "Add a model in Settings" action: close and send the
