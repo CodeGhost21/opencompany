@@ -56,7 +56,7 @@ export function AttemptCard({ run, nowMs, focusStep }: Props) {
         </span>
         <span className="truncate text-sm font-medium">{run.agentId}</span>
         {run.nodeId && (
-          <Badge variant="secondary" className="shrink-0 text-[10px]">
+          <Badge variant="secondary" className="shrink-0 text-3xs">
             {run.nodeId}
           </Badge>
         )}
@@ -105,7 +105,7 @@ export function AttemptCard({ run, nowMs, focusStep }: Props) {
               ))}
             </ul>
           )}
-          <p className="text-muted-foreground border-border/60 border-t px-3 py-1.5 text-[10px]">
+          <p className="text-muted-foreground border-border/60 border-t px-3 py-1.5 text-3xs">
             started {relativeTime(run.startedAtMillis ?? run.createdAtMillis)}
             {" · "}
             in {run.usage.inputTokens.toLocaleString()} · out{" "}
