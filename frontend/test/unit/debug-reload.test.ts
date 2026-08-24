@@ -25,6 +25,7 @@ function clientWith(roster: TeamMemberDto[]): OpenCompanyClient {
 }
 
 let container: HTMLDivElement;
+let root: ReturnType<typeof createRoot>;
 
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -32,16 +33,18 @@ beforeEach(() => {
   window.location.hash = "#/overview";
   container = document.createElement("div");
   document.body.appendChild(container);
+  root = createRoot(container);
 });
 
 afterEach(() => {
+  act(() => root.unmount());
   container.remove();
   localStorage.clear();
 });
 
 async function mount(client: OpenCompanyClient, deepLinked = false) {
   await act(async () => {
-    createRoot(container).render(
+    root.render(
       createElement(ConnectionScopeProvider, {
         scope: SCOPE,
         children: createElement(SetupController, { client, company: null, deepLinked }),
@@ -50,52 +53,43 @@ async function mount(client: OpenCompanyClient, deepLinked = false) {
   });
 }
 
-describe("debug reload", () => {
-  it("traces debt across settings reload", async () => {
-    window.location.hash = "#/overview";
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        createElement(ConnectionScopeProvider, {
-          scope: SCOPE,
-          children: createElement(SetupController, { client: clientWith(BASELINE), company: null }),
-        }),
-      );
-    });
-    // simulate leave: mark resuming
-    const { markSetupResuming } = await import("@/setup/state");
-    markSetupResuming(SCOPE);
+const dialog = () => document.querySelector('[data-testid="setup-dialog"]');
+
+const modelLink = () =>
+  Array.from(document.querySelectorAll("a")).find((a) => a.textContent?.trim() === "Set up a model");
+
+async function goTo(hash: string) {
+  await act(async () => {
+    window.location.hash = hash;
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+}
+
+async function leaveForModelSettings() {
+  const link = modelLink();
+  await act(async () => {
+    (link as HTMLElement).click();
+  });
+  await goTo("#/settings/connections");
+}
+
+describe("debug exact test", () => {
+  it("replicates the reload test", async () => {
+    await mount(clientWith(BASELINE));
+    await leaveForModelSettings();
     await act(async () => root.unmount());
-    console.log("after mount1+leave, resuming:", setupResuming(SCOPE));
 
-    // mount #2 on settings
-    window.location.hash = "#/settings/connections";
-    const root2 = createRoot(container);
-    await act(async () => {
-      root2.render(
-        createElement(ConnectionScopeProvider, {
-          scope: SCOPE,
-          children: createElement(SetupController, { client: clientWith(BASELINE), company: null, deepLinked: true }),
-        }),
-      );
-    });
-    console.log("after mount2, resuming:", setupResuming(SCOPE));
+    root = createRoot(container);
+    await mount(clientWith(BASELINE), true);
+    console.log("after mount2 on settings, dialog:", !!dialog(), "resuming:", setupResuming(SCOPE));
 
     window.location.hash = "#/overview";
-    console.log("after hash set, resuming:", setupResuming(SCOPE));
-    await act(async () => root2.unmount());
-    console.log("after unmount2, resuming:", setupResuming(SCOPE));
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    console.log("after hash set+unmount, resuming:", setupResuming(SCOPE));
+    await mount(clientWith(BASELINE), true);
 
-    const root3 = createRoot(container);
-    await act(async () => {
-      root3.render(
-        createElement(ConnectionScopeProvider, {
-          scope: SCOPE,
-          children: createElement(SetupController, { client: clientWith(BASELINE), company: null, deepLinked: true }),
-        }),
-      );
-    });
-    console.log("after mount3, resuming:", setupResuming(SCOPE));
+    console.log("after mount3, dialog:", !!dialog(), "resuming:", setupResuming(SCOPE));
     expect(true).toBe(true);
   });
 });
