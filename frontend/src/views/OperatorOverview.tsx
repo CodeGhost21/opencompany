@@ -244,6 +244,7 @@ export function OperatorOverview({
             <RunRows
               state={runLoad}
               runs={failuresSinceVisit}
+              deskIds={deskIds}
               empty={
                 failedReadCapped
                   ? `No failed attempts since your previous visit appear in the newest ${FAILED_READ_LIMIT} recorded — the host caps the read here.`
