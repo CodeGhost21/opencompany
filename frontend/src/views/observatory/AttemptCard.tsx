@@ -39,9 +39,16 @@ interface Props {
    * only by the card `turn` matches — a `step` must never open every card.
    */
   focusStep?: number | null;
+  /**
+   * Fired when the card opens — including the cards that start open (a deep
+   * link's turn, an auto-opened failure) — so the parent can fetch the
+   * unredacted half only for attempts a reader actually opened. Fires once per
+   * open and again on each reopen; the parent keeps it as fresh as it wants.
+   */
+  onOpen?: (runId: string) => void;
 }
 
-export function AttemptCard({ run, nowMs, turn, focusStep }: Props) {
+export function AttemptCard({ run, nowMs, turn, focusStep, onOpen }: Props) {
   const focused = turn === run.id;
   const state = runState(run);
   const [open, setOpen] = useState(() => opensItself(run) || focused);
@@ -55,6 +62,11 @@ export function AttemptCard({ run, nowMs, turn, focusStep }: Props) {
     }
     previousState.current = state;
   }, [state]);
+  // `onOpen` rides an effect rather than the click handler so the cards that
+  // start open and the cards that auto-open on trouble announce themselves too.
+  useEffect(() => {
+    if (open) onOpen?.(run.id);
+  }, [open, run.id, onOpen]);
   const elapsed =
     (run.finishedAtMillis ?? nowMs) - (run.startedAtMillis ?? run.createdAtMillis);
   // `cachedInput` is a subset of `input` (prompt_tokens_details.cached_tokens),
