@@ -48,6 +48,16 @@ use futures::StreamExt;
 use crate::Result;
 use crate::error::OpenCompanyError;
 
+/// The leading bytes that announce each accepted format.
+///
+/// Hoisted so `sniff_image` and [`image_dimensions`] read the same signatures
+/// and cannot drift apart — one checks *that* the bytes name a format, the
+/// other *what size* the format the bytes name claims.
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const JPEG_SIGNATURE: &[u8] = b"\xff\xd8\xff";
+const GIF_SIGNATURE_87: &[u8] = b"GIF87a";
+const GIF_SIGNATURE_89: &[u8] = b"GIF89a";
+
 /// The mascots shipped with the console, one file per colourway.
 ///
 /// **Must stay in step with `frontend/public/avatars/blob-<flavour>.webp` and
