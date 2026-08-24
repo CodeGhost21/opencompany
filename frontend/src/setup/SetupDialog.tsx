@@ -375,6 +375,15 @@ export function SetupDialog({
             {phase.step === 0 && inference !== "ready" && (
               <InferenceNotice unavailable={inference === "unavailable"} onLeave={onLeave} />
             )}
+            {phase.step === 0 && replacing && (
+              <Alert data-testid="setup-redesign-notice">
+                <AlertTitle>You already have a team</AlertTitle>
+                <AlertDescription>
+                  Answering these questions again will replace the standard team
+                  on this company with one designed from your answers.
+                </AlertDescription>
+              </Alert>
+            )}
             <div className="grid gap-2 py-2">
               <Label htmlFor={`setup-${step.key}`} className="sr-only">
                 {step.question}
