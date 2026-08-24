@@ -15,15 +15,18 @@ function entry(over: Partial<TimelineEntry> = {}): TimelineEntry {
 
 describe("task-detail wait presentation", () => {
   it("keeps only completed approval waits in the timeline", () => {
-    expect(
-      groupTimeline([
-        entry({ seq: 4, waitedMillis: 8_000 }),
-        entry({ seq: 5, kind: "dispatched", label: "Resumed work" }),
-      ]),
-    ).toMatchObject([
+    const items = groupTimeline([
+      entry({ seq: 4, waitedMillis: 8_000 }),
+      entry({ seq: 5, kind: "dispatched", label: "Resumed work" }),
+    ]);
+    expect(items).toMatchObject([
       { row: "wait", key: "wait-4", millis: 8_000 },
       { row: "group", key: "4" },
       { row: "group", key: "5" },
     ]);
+    // The live wait on a parked card is `AwaitingApprovalRow`'s, not a timeline
+    // band (issue #1354) — a `wait-live` row here would duplicate it.
+    expect(items.some((item) => item.live)).toBe(false);
+    expect(items.some((item) => item.key === "wait-live")).toBe(false);
   });
 });
