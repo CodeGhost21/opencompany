@@ -63,8 +63,8 @@ struct MentionableAgentDto {
 
 /// One person the composer can offer.
 ///
-/// **Id and label only.** See the module note: this is deliberately not the
-/// admin user record, and must not grow toward it.
+/// **Id, label, and chosen face only.** See the module note: this is
+/// deliberately not the admin user record, and must not grow toward it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MentionablePersonDto {
@@ -73,6 +73,11 @@ struct MentionablePersonDto {
     /// How this person is named to their colleagues — the same label their
     /// messages are attributed with.
     label: String,
+    /// The person's collaboration-facing avatar reference, when they chose
+    /// one. This carries no login or contact identity and is already shown in
+    /// chat alongside the person's authored messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     /// A short typable alias, disambiguated across the company.
     ///
     /// **Not a handle and not stored.** Recomputed on every read, so a rename
