@@ -95,7 +95,15 @@ export function isLive(run: ObservatoryRun): boolean {
   return run.phase === "active";
 }
 
-const RUN_FIELDS = `
+/**
+ * The run shape for a query. `deep` adds the unredacted half — reasoning, raw
+ * tool arguments and raw output — which **carries secrets by construction**, so
+ * it is selected only for the single run a reader actually opened, never for a
+ * list. Who may read it at all is decided server-side, beside the approval rule
+ * (`approval_visibility.rs`); the console asks and the host answers.
+ */
+function runFields(deep: boolean): string {
+  return `
   id
   agentId
   attempt
@@ -122,9 +130,13 @@ const RUN_FIELDS = `
     failure
     truncated
     elapsedMs
-    deep { reasoning arguments output displayDetail iteration clipped }
+    ${deep ? "deep { reasoning arguments output displayDetail iteration clipped }" : ""}
   }
 `;
+}
+
+const RUN_FIELDS = runFields(false);
+const RUN_FIELDS_WITH_DEEP = runFields(true);
 
 const RUNS_QUERY = `
   query ObservatoryRuns($company: ID!, $workflowRunId: ID, $taskId: ID, $limit: Int!) {
@@ -138,7 +150,7 @@ const RUNS_QUERY = `
 
 const RUN_QUERY = `
   query ObservatoryRun($company: ID!, $id: ID!) {
-    company(id: $company) { agentRun(id: $id) { ${RUN_FIELDS} } }
+    company(id: $company) { agentRun(id: $id) { ${RUN_FIELDS_WITH_DEEP} } }
   }
 `;
 
