@@ -250,6 +250,26 @@ export function SetupDialog({
     if (redesign) setReplacing(true);
   }, [redesign]);
 
+  // The actions the notice offers are an admin's, and only the host knows the
+  // operator's role — ask it, rather than have the controller thread a guess
+  // down. A host with no user plane (auth mode "none") or a role read that
+  // fails transiently leaves `canManage` at its default, which keeps the CTA
+  // as before rather than withdrawing it from an operator we could not ask.
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const who = await me(client, company);
+        if (live) setCanManage(who.role === "admin");
+      } catch {
+        // Unreadable — keep the default (see the state's doc comment).
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
   // A missing model is a supported configuration, but it changes what all
   // three answers can achieve. Learn that before asking for any of them: the
   // host's roster endpoint deliberately succeeds with a curated team on this
