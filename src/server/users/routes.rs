@@ -1131,6 +1131,24 @@ async fn edit_me(
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
         return Err(no_session());
     };
+    // A temporary password is for replacing itself, not for spending on the
+    // account's public name or face. An admin who reset a password knows the
+    // value, so a session opened with one must not be able to change what the
+    // rest of the company sees before the user has chosen a private one; the
+    // deliberately-public `GET` stays open so they can still read who they are
+    // and land on the set-password route. Same refusal
+    // [`refuse_until_password_changed`](crate::server::platform_auth::refuse_until_password_changed)
+    // returns for the routes that go through the extractors.
+    if principal.must_change_password {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "set a new password before continuing",
+                "code": "password_change_required",
+            })),
+        )
+            .into_response());
+    }
     let mut user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
