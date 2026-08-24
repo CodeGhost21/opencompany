@@ -443,4 +443,45 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       ),
     ).not.toBeNull();
   });
+
+  it("names a workflow gate's broad approve after the workflow, not a teammate (#1411)", async () => {
+    // A native `workflow.approve` gate carries no agent — the broader scope's
+    // subject is the workflow itself (issue #1098) — so picking it must not
+    // tell a screen-reader user that a "teammate" is being granted the tool.
+    const gate: ApprovalSummary = {
+      ...APPROVAL,
+      id: "gate-1",
+      kind: "workflow.approve",
+      workflow_id: "deploy",
+      agent: "",
+      payload: { args: { command: "deploy" } },
+    };
+
+    await act(async () => {
+      root.render(
+        createElement(ApprovalCard, {
+          approval: gate,
+          now: T0 + 60_000,
+          askerNames: new Map([["ops", "Ops"]]),
+          deciding: null,
+          batchIndex: 1,
+          batchTotal: 1,
+          onDecide: () => {},
+        }),
+      );
+    });
+
+    // Pick the broader scope — the radio commits to a duration immediately.
+    const tool = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+    ).find((radio) => !radio.checked);
+    expect(tool, "the broader-scope radio should render").not.toBeUndefined();
+    await act(async () => {
+      tool!.click();
+    });
+
+    expect(approveButton().getAttribute("aria-label")).toContain(
+      "let this workflow use this tool for 1 hour",
+    );
+  });
 });
