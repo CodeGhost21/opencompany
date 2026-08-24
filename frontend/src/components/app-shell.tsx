@@ -62,8 +62,10 @@ import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { VIEWS, type View } from "@/lib/console-routes";
+import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -103,8 +105,8 @@ import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
+import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { SettingsSection } from "@/views/SettingsSection";
-import { isSettingsPage } from "@/views/settings-pages";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
 // React Flow is heavy and only used here — load it on demand.
@@ -162,7 +164,7 @@ function SidebarNavigation({
         {NAV.map((item) => (
           <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
             <SidebarMenuButton
-              isActive={view === item.view}
+              isActive={isNavigationActive(item.view, view)}
               tooltip={item.label}
               onClick={() => navigate(item.view)}
               className={RESTING_ROW}
@@ -274,47 +276,6 @@ const MAIN_CONTENT_ID = "main-content";
  * outright, and this only governs the no-segment case.
  */
 const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
-
-/**
- * `#/tasks` with no card named the board page, which is retired (issue #1140).
- * `#/memory` is the Brain browser's legacy address after it moved under
- * Settings (issue #1416).
- *
- * Each retired route lands at its current home, so a bookmark, a habit, or a
- * link written before the move still reaches the intended surface rather than
- * a 404. `#/tasks/<malformed>` names no card, so it goes to the board; a real
- * `#/tasks/<id>` returns `null` from here and resolves untouched.
- *
- * Module scope, because `useHashView` holds this in a `useCallback` dependency
- * list: an inline arrow would be a new identity on every render and would
- * re-resolve the route on each one.
- */
-const REWRITE_RETIRED = (
-  head: string,
-  sub: string | null,
-): [View, string | null] | null => {
-  if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
-  if (head === "memory") return ["settings", "brain"];
-  // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
-  // Team and Workspace. Do not render General under an address that names no
-  // page: a bookmark or shared link must say where it actually lands.
-  if (head === "settings" && sub !== null && !isSettingsPage(sub)) return ["settings", "general"];
-  // Bare `#/team` is the Company page now (issue #1141). It rendered the
-  // teammate card grid from a route with no nav entry, so nobody arrived at it;
-  // the grid is Company's Cards half, and leaving `#/team` answering as well
-  // would leave two live addresses drawing one grid with no relationship
-  // between them. A named teammate is untouched — `#/team/<agentId>` is the
-  // detail sub-page (issue #264), it is what the org chart's rows and the chat
-  // pane's chips link to, and it is deliberately a page so it can be linked.
-  if (head === "team" && !sub) return ["company", null];
-  // `#/connections` predates the split into OAuth / MCP / Inference; the
-  // accounts it named are the OAuth page.
-  if (head === "connections") return ["settings", "oauth"];
-  if (head === "oauth") return ["settings", "oauth"];
-  if (head === "mcp") return ["settings", "mcp"];
-  if (head === "people") return ["settings", "people"];
-  return null;
-};
 
 const LEGACY_CONNECT_QUERY_KEYS = ["connected", "connect_error", "provider"] as const;
 
@@ -513,6 +474,15 @@ export function AppShell({
   const [setupOpen, setSetupOpen] = useState(true);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
+  // `#/setup` is an intentional, manual recovery path. It is a route rather
+  // than a nav page: setup remains a dialog over the ordinary console, but the
+  // address works for staffed companies and after someone has skipped. Entering
+  // it forces the dialog open; leaving it (Back, or an edit) hands the dialog
+  // back to `SetupController`'s `routeOpen` edge, which closes what the route
+  // opened.
+  useEffect(() => {
+    if (view === "setup") setSetupForced(true);
+  }, [view]);
   /**
    * Did this mount start on a view the operator named?
    *
@@ -830,6 +800,7 @@ export function AppShell({
   // the operator's first message on a fresh page load.
   useEffect(() => {
     let cancelled = false;
+    const requestCompany = company;
     // Another company's channel ids are another namespace. Drop this one's
     // addressing up front rather than routing the next company's events into
     // channels that no longer exist, and start the unread floor again so the
@@ -843,6 +814,18 @@ export function AppShell({
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
+    // Another company's transcripts are another namespace too: a channel id
+    // is this company's desk id or a `dm:<roster-id>`, and a provisioned
+    // company is built from the same manifests, so ids recur across
+    // companies. A transcript left behind by a switch would paint the
+    // previous company's conversation onto the new company's identically
+    // named channel — and since the active-DM rail and unread counts derive
+    // from `transcripts`, a DM the previous company talked in would look
+    // active here before this company's own history has anything to say.
+    // Drop them; the hydration below repopulates this company's channels
+    // from its own history. The updater returns the same object when there
+    // is nothing to drop, so this does not re-render the shell for a no-op.
+    setTranscripts((t) => (Object.keys(t).length === 0 ? t : {}));
 
     // Then replace that mount-time floor with the one the host remembers for
     // this person (issue #755). Until this lands the browser floor stands, so
@@ -856,7 +839,7 @@ export function AppShell({
     client
       .readState(company)
       .then(({ markers }) => {
-        if (cancelled || markers.length === 0) return;
+          if (cancelled || requestCompany !== company || markers.length === 0) return;
         setLastViewedChannel((viewed) => mergeReadFloors(viewed, markers));
       })
       .catch(() => {
@@ -872,7 +855,7 @@ export function AppShell({
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
-          if (cancelled || entries.length === 0) return;
+          if (cancelled || requestCompany !== company || entries.length === 0) return;
           const hydrated = fromHistory(entries);
           setThreads((ts) =>
             ts.map((t) => {
@@ -905,7 +888,7 @@ export function AppShell({
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
-          if (cancelled) return;
+          if (cancelled || requestCompany !== company) return;
           if (entries.length === 0) {
             // An empty answer is still an answer, and the only thing that ever
             // makes the "start of your direct message" copy true.
@@ -929,7 +912,7 @@ export function AppShell({
     client
       .listDesks(company)
       .then(async (desks) => {
-        if (cancelled) return;
+        if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
         // that 404s `/team` keeps its desks rather than losing the whole list.
@@ -967,6 +950,7 @@ export function AppShell({
         // Host without `/desks`, or offline — keep the static default
         // threads, but the operator/General line still deserves a
         // rehydration attempt (it's the one every deployment has).
+        if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         defaultThreads().forEach((t) => hydrate(t.id));
         setChatChannelByThread(channelMap(fallbackDesks, []));
@@ -1017,12 +1001,15 @@ export function AppShell({
    * that effect. {@link reReadSettledThread} is that case; see its doc.
    */
   const mountedRef = useRef(true);
-  // The latest company, so an async completion started for one company can
-  // tell whether it still belongs to the active scope (issue #1000).
-  const companyRef = useRef(company);
+  // The latest full browser scope, so async completions cannot cross either a
+  // company switch or an in-place connection reconfiguration. `client` is part
+  // of the scope: `reseat` edits a host address by swapping the client while
+  // preserving the connection id, so connection+company alone do not move on
+  // reconfiguration — only the client instance does.
+  const scopeRef = useRef({ connection: scope.connection, company, client });
   useEffect(() => {
-    companyRef.current = company;
-  }, [company]);
+    scopeRef.current = { connection: scope.connection, company, client };
+  }, [scope.connection, company, client]);
   useEffect(() => {
     // Re-armed on mount, which is not redundant with the initial `true`:
     // `main.tsx` renders under `StrictMode`, so in development React mounts,
@@ -1072,6 +1059,17 @@ export function AppShell({
         .getChatHistory(threadId, company)
         .then((entries) => {
           if (!mountedRef.current || entries.length === 0) return;
+          // A company switch while the re-read was in flight invalidates the
+          // result: the messages belong to the old company and must not
+          // repopulate the new company's (just-cleared) transcripts. The
+          // re-read is recreated when `company` changes, so the closure's
+          // `company` is the scope it started for and `scopeRef` is where
+          // the current connection/company scope landed.
+          if (
+            scopeRef.current.company !== company ||
+            scopeRef.current.connection !== scope.connection ||
+            scopeRef.current.client !== client
+          ) return;
           const hydrated = fromHistory(entries);
           setThreads((ts) =>
             ts.map((t) => {
@@ -1522,6 +1520,27 @@ export function AppShell({
     });
   }, []);
   /**
+   * A chat POST that resolved for a company the operator has since left
+   * (issue #1000).
+   *
+   * The turn and its reply are durably journaled in the OLD company's
+   * history, so nothing about them belongs in the active scope. But the
+   * send bracket `onSendStart` armed for the thread must still be released:
+   * if the echo suppression were left up, `agent_reply` frames for the
+   * thread would be captured into `pendingPostThreadsRef` and never
+   * rendered. So release the held frames — discarding them, because history
+   * re-reads them back when the operator returns — and lift the
+   * suppression. Pointedly NOT `onSendDetached`: that renders the held
+   * frames and arms an `openTurns` row, folding the old company's reply
+   * into the active company's state, which is exactly the cross-company
+   * leak the company guard exists to stop. Not `onSendEnd` either: it may
+   * clear a live step timeline or the `activeTurnThreadRef` fallback that a
+   * *current* company's own in-flight POST is using.
+   */
+  const onSendStale = useCallback((threadId: string) => {
+    pendingPostThreadsRef.current.detached(threadId);
+  }, []);
+  /**
    * The host accepted the turn and handed back its id instead of its answer
    * (issue #983).
    *
@@ -1604,7 +1623,11 @@ export function AppShell({
           // A company switch that happened while the request was in flight
           // invalidates the result: the rows belong to the old company and
           // would restore a stale turn into the new company's openTurns map.
-          if (companyRef.current !== company) return;
+          if (
+            scopeRef.current.company !== company ||
+            scopeRef.current.connection !== scope.connection ||
+            scopeRef.current.client !== client
+          ) return;
           const open = openTurnsFromRuns(runs);
           // The fold's whole list for this thread, not just its head: the POST
           // died mid-queue, so any rows the host kept are this turn's kin and
@@ -2059,7 +2082,7 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
-          {view === "overview" && (
+          {(view === "overview" || view === "setup") && (
             <OperatorOverview
               client={client}
               company={company}
@@ -2124,6 +2147,8 @@ export function AppShell({
               onSendEnd={onSendEnd}
               onSendDetached={onSendDetached}
               onSendFailed={onSendFailed}
+              onSendStale={onSendStale}
+          scopeRef={scopeRef}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
               unread={unread}
@@ -2180,7 +2205,12 @@ export function AppShell({
               }}
               // Back, and a deleted card, go to the board — which is the
               // `tasks` ledger. Through `navigate` so the address follows.
-              onLeave={() => navigate("ledgers", BOARD_LEDGER)}
+              onLeave={() =>
+                navigate("ledgers", BOARD_LEDGER, {
+                  [LEDGER_VIEW_PARAM]:
+                    readLedgerViewMode() === "list" ? "list" : null,
+                })
+              }
             />
           )}
           {/*
@@ -2222,7 +2252,11 @@ export function AppShell({
               // A board card leaves for its own screen. The board renders
               // here; the card's timeline, plan, discussion and attempts stay
               // where they already work.
-              onOpenCard={(id) => navigate("tasks", id)}
+              onOpenCard={(id, mode) =>
+                navigate("tasks", id, {
+                  [LEDGER_VIEW_PARAM]: mode === "list" ? "list" : null,
+                })
+              }
               // Issue #464: the board learns that work appeared. The same
               // counter the chat's in-flight strip reads, so a card opened from
               // chat lands on the board without a reload.
@@ -2401,6 +2435,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
+          {view === "not-found" && <UnknownRouteView address={sub} />}
         </ContentSurface>
         </AgentProfileProvider>
 
@@ -2433,6 +2468,7 @@ export function AppShell({
         client={client}
         company={company}
         force={setupForced}
+        routeOpen={view === "setup"}
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
@@ -2443,6 +2479,7 @@ export function AppShell({
           setSetupCompleted(true);
           setView("company");
         }}
+        onRouteDismiss={() => setView("overview")}
       />
 
       <TourController

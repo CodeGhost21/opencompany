@@ -852,7 +852,6 @@ function RunDetailPanel({
             detail && (
               <TimelineList
                 entries={detail.steps}
-                now={now}
                 empty={
                   <Note>
                     {live
