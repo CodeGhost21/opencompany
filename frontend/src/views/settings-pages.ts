@@ -10,10 +10,10 @@
 
 import {
   Blocks,
+  BrainCircuit,
   ChartColumnBig,
   Globe,
-  Laptop,
-  Plug,
+  KeyRound,
   Search,
   type LucideIcon,
   Settings2,
@@ -37,11 +37,13 @@ export const SETTINGS_PAGES = [
     hint: "Who can sign in, and as what",
     group: "identity",
   },
-  // Beside People because it answers the same question one scope smaller: People
-  // is who may sign in, this is which machines already have.
-  { id: "devices", label: "Devices", icon: Laptop, hint: "Machines paired to your account", group: "identity" },
-  { id: "connections", label: "Connections", icon: Plug, hint: "Third-party accounts", group: "integrations" },
+  // One question per page. "Connections" carried five — third-party accounts,
+  // MCP servers, inference, channels, repositories — so each was something an
+  // operator scrolled past on the way to another. The first three are pages
+  // now; the last two left the product.
+  { id: "oauth", label: "OAuth", icon: KeyRound, hint: "Third-party accounts you act through", group: "integrations" },
   { id: "mcp", label: "MCP Servers", icon: Blocks, hint: "Tool servers and their tools", group: "integrations" },
+  { id: "inference", label: "Inference", icon: BrainCircuit, hint: "The model teammates think with", group: "integrations" },
   // A credential form belongs beside what it unlocks. An operator looking for
   // "where do I put my Vercel token" searches for hosting, so it sits here
   // rather than inside a third-party-accounts drawer.

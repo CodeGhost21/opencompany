@@ -257,13 +257,10 @@ test("a card drags from Working to Done, and the board scrolls to get there", as
   // to collapse anything, returns without pinning a single rail, and the empty
   // Done column folds itself into one on the next commit — failing the
   // `toHaveCount(0)` below on a board this test never pinned. So wait for the
-  // fold to land before offering it a pin. The board's own collapse state is
-  // the only signal that changes with that re-render — the columns exist
-  // before and after, only their `data-collapsed` flips — so wait for a column
-  // to actually fold.
+  // fold to land before offering it a pin.
   await expect
-    .poll(() => board(page).locator('[data-collapsed="true"]').count())
-    .toBeGreaterThan(0);
+    .poll(async () => (await board(page).locator('[data-collapsed="true"]').count()) > 0)
+    .toBe(true);
 
   // And expand *again*, because narrowing the window is what created the rails.
   // `openBoard` ran `expandAll` at 1280px, where three phases fit and the board
