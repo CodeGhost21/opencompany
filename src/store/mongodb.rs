@@ -5397,6 +5397,77 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// The prune ranks by RUN and keeps the newest `MAX` runs whole — and a run
+    /// that fell past the cap survives once it is written to again. The
+    /// conformance suite never crosses the cap, so the aggregation the prune
+    /// uses to rank, and the re-verification that spares a refreshed run, are
+    /// exercised here against the real server.
+    #[tokio::test]
+    async fn deep_trace_prune_keeps_the_newest_runs_and_spares_a_refreshed_one() {
+        use crate::ports::deep_trace::{
+            MAX_DEEP_RUNS_PER_COMPANY, RunStepDetailRecord, TurnStepDetail,
+        };
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("pruner");
+        let detail = |run: &str, seq: u32, at: u64, reasoning: &str| RunStepDetailRecord {
+            run_id: run.to_string(),
+            step_seq: seq,
+            at_millis: at,
+            detail: TurnStepDetail {
+                reasoning: Some(reasoning.to_string()),
+                ..TurnStepDetail::default()
+            },
+        };
+        // Fill past the cap with two rows per run, so the prune must drop whole
+        // runs rather than tear them.
+        let cap = MAX_DEEP_RUNS_PER_COMPANY;
+        for i in 0..cap + 2 {
+            let run = format!("r{i:03}");
+            s.append_step_detail(&company, &detail(&run, 0, (i * 2) as u64, "first"))
+                .await
+                .unwrap();
+            s.append_step_detail(&company, &detail(&run, 1, (i * 2 + 1) as u64, "second"))
+                .await
+                .unwrap();
+        }
+        // The two oldest runs fell past the cap and are gone whole…
+        assert!(
+            s.list_step_details(&company, "r000").await.unwrap().is_empty(),
+            "r000 ranked oldest and must be pruned"
+        );
+        assert!(s.list_step_details(&company, "r001").await.unwrap().is_empty());
+        // …and every surviving run kept both rows.
+        for i in 2..cap + 2 {
+            let run = format!("r{i:03}");
+            assert_eq!(
+                s.list_step_details(&company, &run).await.unwrap().len(),
+                2,
+                "{run} must survive whole"
+            );
+        }
+        // A run that already ranked stale is written to again — the concurrent
+        // refresh the delete's re-verification exists to protect. The next
+        // append's prune must keep it, not delete what it just received.
+        s.append_step_detail(
+            &company,
+            &detail("r000", 2, 1_000_000, "refreshed after ranking stale"),
+        )
+        .await
+        .unwrap();
+        let refreshed = s.list_step_details(&company, "r000").await.unwrap();
+        assert_eq!(
+            refreshed.len(),
+            1,
+            "a refreshed run is not deleted by the prune that follows"
+        );
+        assert_eq!(
+            refreshed[0].detail.reasoning.as_deref(),
+            Some("refreshed after ranking stale"),
+            "the refreshed detail is the one that survives"
+        );
+        drop_db(&s).await;
+    }
+
     #[tokio::test]
     async fn conformance_run_store_workflow_join() {
         let Some(s) = store().await else { return };
