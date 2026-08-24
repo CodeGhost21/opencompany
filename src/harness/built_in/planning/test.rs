@@ -1626,8 +1626,6 @@ async fn add_overlay_agent(runtime: &Arc<CompanyRuntime>, id: &str, role: &str, 
             role: role.to_string(),
             description: Some(description.to_string()),
             tools: Vec::new(),
-            model: None,
-            harness: None,
         });
     runtime.store().save(&record).await.expect("save");
 }

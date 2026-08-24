@@ -152,7 +152,6 @@ export function ApprovalRow({
   approvals,
   now,
   askerNames,
-  chatChannelByThread,
   thread,
   compact = false,
   deciding,
@@ -164,7 +163,6 @@ export function ApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
-  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The channel this inline row is already rendered inside. */
   thread?: ApprovalThreadLink | null;
   /** Render as a quiet interruption inside a chat transcript (#1330). */
@@ -394,7 +392,6 @@ export function ApprovalRow({
             approval={lead}
             now={now}
             askerNames={askerNames}
-            chatChannelByThread={chatChannelByThread}
             thread={thread}
             status={
               busy

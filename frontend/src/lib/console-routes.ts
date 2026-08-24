@@ -48,6 +48,7 @@ export type View =
   | "ledgers"
   | "team"
   | "workspace"
+  | "memory"
   | "approvals"
   | "workflows"
   | "pages"
@@ -102,6 +103,7 @@ const ROUTABLE: Record<View, true> = {
    */
   team: true,
   workspace: true,
+  memory: true,
   approvals: true,
   workflows: true,
   /**

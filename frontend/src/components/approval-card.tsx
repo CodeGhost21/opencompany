@@ -49,7 +49,6 @@ import {
 } from "@/lib/language";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import { workflowHref } from "@/lib/task-output";
 import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
@@ -132,36 +131,18 @@ export function ApprovalMeta({
   approval: a,
   now,
   askerNames,
-  chatChannelByThread,
   thread,
   status,
 }: {
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
-  /** Host thread id → console channel id, resolved with `channelIdForThread`. */
-  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The chat channel that raised this request, when the host named one. */
   thread?: ApprovalThreadLink | null;
   /** Trailing status text ("Waiting for the teammate…", "Approved"), if any. */
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
-  const conversationChannelId = a.thread ? (chatChannelByThread?.[a.thread] ?? null) : null;
-  const workflowId = workflowIdForApproval(a);
-  const workflowRunHref =
-    workflowId && a.workflow_run_id ? workflowHref(workflowId, a.workflow_run_id) : null;
-  // The "Asked in" link above renders straight from `thread`, which the host
-  // resolved against the desk/roster on its own — independent of the shell's
-  // separate chat-topology hydration. When that hydration is still in flight
-  // (or failed), `chatChannelByThread` is empty but the origin is still
-  // visibly available, so counting `thread` keeps the footer from saying
-  // "Origin unavailable" underneath a live link.
-  const hasOriginLink =
-    thread != null ||
-    taskId !== null ||
-    conversationChannelId !== null ||
-    workflowRunHref !== null;
   // An id the roster does not know still beats no attribution at all — the
   // operator can at least tell two askers apart.
   const asker = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
@@ -210,36 +191,6 @@ export function ApprovalMeta({
             <SquareKanban className="size-3 shrink-0" />
             Open the card
           </a>
-          <span aria-hidden>·</span>
-        </>
-      )}
-      {conversationChannelId && (
-        <>
-          <a
-            href={`#/chat/${encodeURIComponent(conversationChannelId)}`}
-            className="flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 font-medium text-accent-foreground transition-opacity hover:opacity-80"
-          >
-            <MessageSquare className="size-3 shrink-0" />
-            Open the conversation
-          </a>
-          <span aria-hidden>·</span>
-        </>
-      )}
-      {workflowRunHref && (
-        <>
-          <a
-            href={workflowRunHref}
-            className="flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 font-medium text-accent-foreground transition-opacity hover:opacity-80"
-          >
-            <Workflow className="size-3 shrink-0" />
-            Open the run
-          </a>
-          <span aria-hidden>·</span>
-        </>
-      )}
-      {!hasOriginLink && (
-        <>
-          <span>Origin unavailable</span>
           <span aria-hidden>·</span>
         </>
       )}
@@ -292,25 +243,6 @@ export function ApprovalMeta({
       )}
     </div>
   );
-}
-
-/**
- * The only workflow approval shape that carries both parts of the run address.
- *
- * `workflow_run_id` names a run but the console route also needs its workflow.
- * Native `workflow.approve` effects carry that id as a **top-level summary
- * field** (`ApprovalSummary.workflow_id`), projected by the host from the raw
- * parked effect rather than from the display payload — the payload is redacted
- * and role redaction (#618) strips it from a member reader, and the run link
- * must survive for the member holding the stalled workflow up. A tool call
- * parked by a workflow carries neither field. Never infer the workflow from a
- * run id: it has no global namespace and could send the operator to a
- * different workflow.
- */
-function workflowIdForApproval(approval: ApprovalSummary): string | null {
-  if (approval.kind !== "workflow.approve") return null;
-  const workflowId = approval.workflow_id;
-  return typeof workflowId === "string" && workflowId.length > 0 ? workflowId : null;
 }
 
 /**

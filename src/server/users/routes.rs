@@ -25,7 +25,7 @@
 //! kind of grant, not a second one: eligibility only, minted on redemption,
 //! revoked by unsetting the source.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -99,13 +99,6 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct RequestCode {
     email: String,
-    /// Where the console should land after this magic-link sign-in, carried as
-    /// a URL fragment (`#/company`). Only setup's hand-off asks for one today;
-    /// a normal sign-in omits it and lands wherever it always did. The value is
-    /// mailed inside the login link, so it is validated to a conservative
-    /// fragment subset — see [`redirect_fragment`].
-    #[serde(default)]
-    redirect: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,19 +144,6 @@ struct HubProvidersResult {
     /// Empty on every host with no hub wired, which is how the console knows to
     /// render the magic-link form alone rather than buttons that lead nowhere.
     providers: Vec<HubProviderOption>,
-}
-
-/// What the console may ask a hub sign-in to return to, beyond its company.
-#[derive(Debug, Deserialize)]
-struct HubProvidersQuery {
-    /// The console destination the hub sign-in should land on, asked as a
-    /// *query* parameter because the console's fragment cannot survive the
-    /// OAuth round trip — the hub appends `token=…&key=auth` to the return URI
-    /// it was given, and anything after a `#` there would swallow them. Only
-    /// setup's dead-link recovery forwards a destination today (`from=setup`);
-    /// every other sign-in omits it and lands wherever it always did.
-    #[serde(default)]
-    from: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,14 +652,7 @@ async fn request_code(
 
     // Deliver. A send failure must not change the response — it would report
     // that the address exists.
-    let delivered = deliver_code(
-        &state,
-        &runtime,
-        &email,
-        &plaintext,
-        body.redirect.as_deref(),
-    )
-    .await;
+    let delivered = deliver_code(&state, &runtime, &email, &plaintext).await;
 
     // Echoing the code makes local development work with no mail server. It is
     // also, literally, returning a credential in an HTTP response — so it is
@@ -738,53 +711,8 @@ pub(crate) fn echoes_code_in_response(state: &AppState) -> bool {
     state.config().is_local_only() && !mail_transport_wired(state)
 }
 
-/// The safe subset of a URL fragment a mailed login link may carry.
-///
-/// Only the fragment part of a link is ever client-supplied, and a value that
-/// cannot be honoured is dropped rather than refused — a malformed redirect
-/// must not block sign-in. The set is deliberately small: fragment characters
-/// that route the console (`#/company`), with nothing that could break the
-/// link out of a mail client's linkification (`@`, whitespace, control
-/// characters).
-fn redirect_fragment(redirect: &str) -> Option<String> {
-    let safe = redirect.starts_with('#')
-        && redirect.len() <= 128
-        && redirect.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(b, b'#' | b'/' | b'?' | b'&' | b'=' | b'-' | b'_' | b'.')
-        });
-    safe.then(|| redirect.to_string())
-}
-
-/// The safe subset of a hub sign-in destination hint.
-///
-/// `from` is carried in the hub's return URI as a query parameter — a fragment
-/// would swallow the hub's own `token=` on the way back, which is why this is
-/// not a [`redirect_fragment`]. It is round-tripped through an external service
-/// and back into the console's address bar, so it is validated to a slug
-/// subset (`setup`, today): a value that cannot be honoured is dropped rather
-/// than refused, exactly like [`redirect_fragment`].
-fn redirect_from(from: &str) -> Option<&str> {
-    let safe = from.len() <= 32
-        && from
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
-    safe.then_some(from)
-}
-
 /// Mails the magic link. Returns whether it was actually sent.
-///
-/// `redirect`, when present, is appended to the link so the console lands on
-/// the fragment the requester asked for (setup's `#/company`, for example)
-/// rather than its default view. Sanitized by [`redirect_fragment`]: an
-/// invalid value means the link is mailed without it, never refused.
-async fn deliver_code(
-    state: &AppState,
-    runtime: &CompanyRuntime,
-    email: &str,
-    code: &str,
-    redirect: Option<&str>,
-) -> bool {
+async fn deliver_code(state: &AppState, runtime: &CompanyRuntime, email: &str, code: &str) -> bool {
     // Asked through the shared predicate so "can this host mail at all" has one
     // answer: the throttle and the dev echo both branch on it, and a second
     // spelling here is how those three drift apart.
@@ -796,10 +724,7 @@ async fn deliver_code(
         return false;
     };
     let base = state.config().host_base_url();
-    let mut link = format!("{base}/login?company={}&code={code}", runtime.id().as_ref());
-    if let Some(fragment) = redirect.and_then(redirect_fragment) {
-        link.push_str(&fragment);
-    }
+    let link = format!("{base}/login?company={}&code={code}", runtime.id().as_ref());
     let company_name = load_manifest(runtime)
         .await
         .ok()
@@ -887,17 +812,9 @@ fn hub_refused(code: &'static str, message: &'static str) -> Response {
 ///
 /// Carries `?company=` so the console lands scoped to the company it left from.
 /// The hub appends its own `token=…&key=auth` with `&`, so the two coexist.
-///
-/// `from`, when the console asked for one, names the destination the sign-in
-/// should land on. It rides here as a query parameter (a fragment would capture
-/// the hub's `token=` on the way back) and is validated by [`redirect_from`].
-fn console_redirect_uri(state: &AppState, company: &CompanyId, from: Option<&str>) -> String {
+fn console_redirect_uri(state: &AppState, company: &CompanyId) -> String {
     let origin = state.config().host_base_url();
-    let mut uri = format!("{}/?company={}", origin.trim_end_matches('/'), company);
-    if let Some(from) = from.and_then(redirect_from) {
-        uri.push_str(&format!("&from={from}"));
-    }
-    uri
+    format!("{}/?company={}", origin.trim_end_matches('/'), company)
 }
 
 /// `GET …/auth/hub` — the ecosystem sign-in buttons, ready to render.
@@ -909,7 +826,6 @@ fn console_redirect_uri(state: &AppState, company: &CompanyId, from: Option<&str
 async fn hub_providers(
     company: PublicCompany,
     State(state): State<AppState>,
-    Query(query): Query<HubProvidersQuery>,
 ) -> Json<HubProvidersResult> {
     // No exchange means no way to check a token that came back, so there is no
     // honest button to offer. Refusing here — rather than at redemption — is
@@ -925,7 +841,7 @@ async fn hub_providers(
             providers: Vec::new(),
         });
     }
-    let redirect_uri = console_redirect_uri(&state, company.runtime.id(), query.from.as_deref());
+    let redirect_uri = console_redirect_uri(&state, company.runtime.id());
     // The same judgement one step earlier in the flow. A hosted console's
     // `https` origin is refused by the hub's redirect gate with a `400` raised
     // before the provider handshake begins (issue #512), so the button is not

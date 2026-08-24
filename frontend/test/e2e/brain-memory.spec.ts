@@ -1,10 +1,16 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * The Settings → Brain (operator memory) surface, end to end against the real FactStore.
+ * The Brain (operator memory) surface, end to end against the real FactStore.
  *
- * This flow exercises `…/memory` and needs no inference, so it runs on the
- * default Console E2E lane rather than the live-brain lane.
+ * History: parked by issue #302 inside `wiring.spec.ts` when the console
+ * stopped listing Brain, with a comment promising it would be un-skipped the
+ * day the surface was relisted. That day came with the memory-engine work —
+ * and the test moved OUT of `wiring.spec.ts` rather than un-skipping in
+ * place, because that file is gated on `PW_LIVE_BRAIN` (it proves the mocked
+ * inference chain) while this flow exercises `…/memory` and needs no
+ * inference at all. Here it runs on the default `Console E2E` lane, not just
+ * the live-brain one.
  */
 
 // The first-run product tour opens a Radix dialog over the console; every
@@ -22,9 +28,9 @@ test.beforeEach(async ({ page }) => {
 test("operator adds a Brain memory that persists across reload and can be deleted", async ({
   page,
 }) => {
-  // Settings → Brain reads the real FactStore over `…/memory`; adding a note must
+  // The Brain tab reads the real FactStore over `…/memory`; adding a note must
   // survive a reload (proving it hit the backend, not localStorage) and delete
-  // must remove it. The legacy `#/memory` address must land here too.
+  // must remove it.
   await page.goto("/#/memory");
   await expect(page.getByRole("heading", { name: "Brain", level: 1 })).toBeVisible();
 
@@ -40,7 +46,7 @@ test("operator adds a Brain memory that persists across reload and can be delete
   // Reload: a localStorage stub would survive too, so also assert the health
   // strip counts a real backend item.
   await page.reload();
-  await page.goto("/#/settings/brain");
+  await page.goto("/#/memory");
   await expect(page.getByTestId("memory-card").filter({ hasText: title })).toBeVisible({
     timeout: 30_000,
   });

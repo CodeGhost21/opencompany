@@ -1060,8 +1060,6 @@ role = "Chief Executive"
             role: "Growth".to_string(),
             description: None,
             tools: tools.into_iter().map(str::to_string).collect(),
-            model: None,
-            harness: None,
         }
     }
 

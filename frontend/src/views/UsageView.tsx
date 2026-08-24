@@ -95,18 +95,18 @@ const EMPTY_USAGE: UsageDto = {
 export function UsageView({ client, company }: Props) {
   const [range, setRange] = useState("30d");
   const [data, setData] = useState<UsageDto | null>(null);
-  const [usageFailed, setUsageFailed] = useState(false);
+  const [usageUnavailable, setUsageUnavailable] = useState(false);
   useEffect(() => {
     let alive = true;
     setData(null);
-    setUsageFailed(false);
+    setUsageUnavailable(false);
     client
       .usage(range, company)
       .then((usage) => {
         if (alive) setData(usage);
       })
       .catch(() => {
-        if (alive) setUsageFailed(true);
+        if (alive) setUsageUnavailable(true);
       });
     return () => {
       alive = false;
@@ -118,19 +118,19 @@ export function UsageView({ client, company }: Props) {
   // Capability budgets (issue #108) — the one live-wired card on this view.
   const [caps, setCaps] = useState<CapabilityStatusDto | null>(null);
   const [capsLoaded, setCapsLoaded] = useState(false);
-  const [capsFailed, setCapsFailed] = useState(false);
+  const [capsUnavailable, setCapsUnavailable] = useState(false);
   useEffect(() => {
     let alive = true;
     setCaps(null);
     setCapsLoaded(false);
-    setCapsFailed(false);
+    setCapsUnavailable(false);
     client
       .capabilityStatus(company)
       .then((status) => {
         if (alive) setCaps(status);
       })
       .catch(() => {
-        if (alive) setCapsFailed(true);
+        if (alive) setCapsUnavailable(true);
       })
       .finally(() => {
         if (alive) setCapsLoaded(true);
@@ -164,11 +164,11 @@ export function UsageView({ client, company }: Props) {
           </Select>
         </div>
 
-        {usageFailed ? (
-          <Alert data-testid="usage-load-error">
+        {usageUnavailable ? (
+          <Alert data-testid="usage-unavailable">
             <TriangleAlert className="size-4" />
             <AlertDescription>
-              Couldn&apos;t check usage. Totals and charts are unavailable; reload to try again.
+              This host does not report usage, so totals and charts are unavailable.
             </AlertDescription>
           </Alert>
         ) : null}
@@ -292,11 +292,11 @@ export function UsageView({ client, company }: Props) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {capsFailed ? (
-              <Alert data-testid="usage-capabilities-load-error">
+            {capsUnavailable ? (
+              <Alert data-testid="capability-status-unavailable">
                 <TriangleAlert className="size-4" />
                 <AlertDescription>
-                  Couldn&apos;t check capability status. Grants and budgets are unavailable; reload to try again.
+                  This host does not report capability status, so grants and budgets are unavailable.
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -313,7 +313,7 @@ export function UsageView({ client, company }: Props) {
                   <CapabilityRow key={tier.namespace} tier={tier} />
                 ))}
               </div>
-            ) : capsLoaded && caps?.configured && caps.total ? null : capsFailed ? null : (
+            ) : capsLoaded && caps?.configured && caps.total ? null : capsUnavailable ? null : (
               <p className="py-2 text-sm text-muted-foreground">
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
@@ -355,8 +355,8 @@ export type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 /**
  * The media-generation capability (issue #109) is opt-in per tool grant and
  * gated on a managed platform credential, so it gets its own status row rather
- * than a token-budget bar. Five states: not compiled into this build, unknown,
- * not granted, granted-but-awaiting-credential, and active. A `media` token budget,
+ * than a token-budget bar. Four states: not compiled into this build, not
+ * granted, granted-but-awaiting-credential, and active. A `media` token budget,
  * if set, still surfaces as its own bar above via the tiers loop.
  */
 function MediaStatusRow({ caps }: { caps: CapabilityStatusDto }) {
@@ -377,10 +377,9 @@ function MediaStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   );
 }
 
-export function mediaStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+function mediaStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
   if (caps.mediaInBuild === false) return { label: "Not in this build", variant: "outline" };
-  if (caps.mediaGranted === undefined) return { label: "Couldn't check", variant: "outline" };
-  if (caps.mediaGranted === false) return { label: "Not granted", variant: "secondary" };
+  if (!caps.mediaGranted) return { label: "Not granted", variant: "secondary" };
   if (!caps.mediaCredentialConfigured)
     return { label: "Awaiting credential", variant: "destructive" };
   return { label: "Active", variant: "default" };
@@ -431,8 +430,7 @@ export function composioStatus(caps: CapabilityStatusDto): {
   variant: BadgeVariant;
 } {
   if (caps.composioInBuild === false) return { label: "Not in this build", variant: "outline" };
-  if (caps.composioGranted === undefined) return { label: "Couldn't check", variant: "outline" };
-  if (caps.composioGranted === false) return { label: "Not granted", variant: "secondary" };
+  if (!caps.composioGranted) return { label: "Not granted", variant: "secondary" };
   if (caps.composioCredentialSource === undefined)
     return { label: "Couldn't check", variant: "outline" };
   if (caps.composioCredentialSource === "none")
@@ -478,8 +476,7 @@ function SearchStatusRow({ caps }: { caps: CapabilityStatusDto }) {
 
 export function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
   if (caps.searchInBuild === false) return { label: "Not in this build", variant: "outline" };
-  if (caps.searchGranted === undefined) return { label: "Couldn't check", variant: "outline" };
-  if (caps.searchGranted === false) return { label: "Not granted", variant: "secondary" };
+  if (!caps.searchGranted) return { label: "Not granted", variant: "secondary" };
   // A company on its own provider is working whatever the host's managed
   // credential says, and the daily cap below does not apply to it — that cap
   // bounds the platform's bill, and this company is paying its own. Checked
@@ -545,7 +542,7 @@ export function publishStatus(caps: CapabilityStatusDto): {
 } {
   if (caps.publishInBuild === false) return { label: "Not in this build", variant: "outline" };
   if (caps.publishGranted === undefined) return { label: "Couldn't check", variant: "outline" };
-  if (caps.publishGranted === false) return { label: "Not granted", variant: "secondary" };
+  if (!caps.publishGranted) return { label: "Not granted", variant: "secondary" };
   return { label: "Active", variant: "default" };
 }
 

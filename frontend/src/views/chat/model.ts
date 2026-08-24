@@ -226,29 +226,6 @@ export function resolveDmChannelId(id: string, members: TeamMember[]): string | 
   return match ? dmChannelId(match) : null;
 }
 
-/**
- * The channel id a `#/chat/<id>` hash segment names, with the URL escaping
- * undone.
- *
- * The hash router hands views its raw segments without decoding, while hrefs
- * that mint channel links — an approval card's "Open the conversation" pill —
- * write them with `encodeURIComponent`, so a DM id arrives as `dm%3A<agent-id>`
- * rather than `dm:<agent-id>`. Decode here, the same boundary
- * `taskIdFromSegment` keeps for `#/tasks/<id>`.
- *
- * On a malformed escape the raw segment comes back rather than `null`: a
- * typo'd address should still surface as an unknown channel (issue #370's
- * notice), not silently collapse onto the fallback.
- */
-export function channelIdFromSegment(segment: string | null): string | null {
-  if (!segment) return null;
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return segment;
-  }
-}
-
 function nameHash(name: string): string {
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;

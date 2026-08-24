@@ -183,10 +183,6 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             role: "Head of Support".to_string(),
             description: Some("Answers customer mail and escalates refunds.".to_string()),
             tools: vec!["docs.*".to_string(), "web".to_string()],
-            // Both set, so a backend that drops either fails here — the same
-            // reason `tools` is non-empty on this one and empty on the next.
-            model: Some("claude-sonnet-4".to_string()),
-            harness: Some("claude".to_string()),
         },
         OverlayAgent {
             id: "pax_ivory".to_string(),
@@ -194,11 +190,6 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             role: "Analyst".to_string(),
             description: None,
             tools: Vec::new(),
-            // The absent half of the pair: `None` must rehydrate as `None`,
-            // never as an empty string pinning the teammate to a nameless
-            // harness.
-            model: None,
-            harness: None,
         },
     ]
 }
@@ -244,11 +235,6 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         description: Some(String::new()),
         tools: Some(vec!["docs.*".to_string()]),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
-        // Set rather than defaulted: this fixture exists to prove a store
-        // round-trips the whole override, so every field it gains needs a real
-        // value here or the new ones are covered by nothing.
-        model: Some("claude-opus-4-5".to_string()),
-        harness: Some("laptop".to_string()),
     }]
 }
 

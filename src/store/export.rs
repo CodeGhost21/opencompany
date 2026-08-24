@@ -1519,8 +1519,6 @@ mod test {
             role: "Design".into(),
             description: Some("Owns the brand".into()),
             tools: Vec::new(),
-            model: None,
-            harness: None,
         }];
         // That teammate added to the `eng` desk through the membership overlay.
         let desk_members = vec![OverlayDeskMember {
