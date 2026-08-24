@@ -24,6 +24,7 @@ import {
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useApprovalDeadline } from "@/hooks/use-approval-deadline";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { useStableList } from "@/hooks/use-stable-list";
 import {
