@@ -582,8 +582,15 @@ impl ManifestApprovalGate {
 
     /// The supervised-mode checkpoint taxonomy.
     fn evaluate_supervised(&self, effect: &Effect) -> PolicyDecision {
-        let policy = self.policy.read().expect("policy lock poisoned");
-        let cap = policy.auto_approve_under_usd;
+        let cap = self
+            .policy
+            .read()
+            .expect("policy lock poisoned")
+            .auto_approve_under_usd;
+        Self::evaluate_supervised_with_cap(effect, cap)
+    }
+
+    fn evaluate_supervised_with_cap(effect: &Effect, cap: Option<f64>) -> PolicyDecision {
         match effect.group() {
             // Spend under the cap (strict `<`) is auto-allowed; at/over the cap,
             // with no cap, or with an unknown amount, it parks.
