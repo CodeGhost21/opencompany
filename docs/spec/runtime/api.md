@@ -41,8 +41,12 @@ POST   /api/v1/companies/{id}/export           export bundle (tar)
 POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transitions
 ```
 
-Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
-with no `{id}`.
+`GET …/notifications` returns only unread `mention` notifications addressed to the
+signed-in human, newest first. Each row includes its subject, title, creation
+ time, and optional chat context; `unread` is the returned count. Machine
+credentials, which have no person identity, receive `401`. `PUT` accepts an
+optional `ids` array and returns the remaining unread count. An omitted or null
+`ids` value marks all notifications for that person; an empty array marks none.
 
 The `/feedback/board/...` routes are a **proxy** of the TinyHumans hub's shared
 board, spent with this instance's credential so a browser never holds one. An
