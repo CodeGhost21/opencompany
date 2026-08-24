@@ -22,6 +22,7 @@ import { MAIN_THREAD_ID } from "@/lib/chat";
  */
 export function mentionCountsByChannel(
   notifications: readonly NotificationDto[],
+  mainChannelId = MAIN_THREAD_ID,
 ): Record<string, number> {
   const out: Record<string, number> = {};
   // Defensive against a caller handing us something that is not a list. The
