@@ -466,3 +466,45 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
   });
   return changed ? next : messages;
 }
+
+/**
+ * Fold one `chat/history` response into a live transcript (issue #1690).
+ *
+ * `chat/history` is the host's authoritative, **oldest-first** record for a
+ * thread; a live transcript is that record plus whatever has not been
+ * journaled yet — the operator's own optimistic bubbles, minted with
+ * browser-local `m<seq>` ids the host does not know. Folding the response in
+ * is therefore neither prepend nor append but *reconstruction*, and the two
+ * rules below are what make that safe:
+ *
+ * 1. **Persisted rows take the history's own order.** A reply the live SSE
+ *    path missed lands after the message it follows (a plain append/prepend
+ *    rule could put it *before* the transcript), and a gap the SSE path
+ *    dropped is filled in its correct position rather than tacked on after
+ *    the tail — `[1, 3]` + history `[1, 2, 3]` must merge to `[1, 2, 3]`,
+ *    never `[1, 3, 2]`.
+ * 2. **Rows the host has not persisted yet stay at the tail.** Optimistic
+ *    sends are always the newest lines, so the tail is the only position
+ *    history implies for them; their relative order is preserved.
+ *
+ * Rows the history names that are already on screen are kept as the caller's
+ * own objects (reactions and other local decoration survive the re-fetch)
+ * rather than replaced by the freshly-projected copy. When nothing differs the
+ * input array is returned unchanged, so a caller can bail out of a state write
+ * and React can skip a re-render.
+ */
+export function mergeHistoryInOrder(
+  existing: ChatMessage[],
+  hydrated: ChatMessage[],
+): ChatMessage[] {
+  const historyIds = new Set(hydrated.map((m) => m.id));
+  const byId = new Map(existing.map((m) => [m.id, m]));
+  // The persisted rows, in the host's own order — keeping the transcript's
+  // copy of a row that is already there, falling back to the fresh one.
+  const persisted = hydrated.map((m) => byId.get(m.id) ?? m);
+  const optimistic = existing.filter((m) => !historyIds.has(m.id));
+  const merged = [...persisted, ...optimistic];
+  return merged.length === existing.length && merged.every((m, i) => m === existing[i])
+    ? existing
+    : merged;
+}
