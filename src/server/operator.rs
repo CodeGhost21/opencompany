@@ -608,6 +608,12 @@ async fn company_events(
     let company = scope.id().clone();
     tracing::debug!(company = %company, "operator SSE stream opening");
     let guard = SseStreamGuard(company.clone());
+    let viewer = scope
+        .actor
+        .as_ref()
+        .map(|actor| Viewer::User(actor.id.clone()))
+        .unwrap_or(Viewer::Operator);
+    let authors = author_labels(&scope.runtime).await.unwrap_or_default();
     let durable = scope
         .runtime
         .events()
@@ -615,7 +621,7 @@ async fn company_events(
         .filter_map(move |item| {
             // Keep the teardown guard alive for the life of the stream.
             let _ = &guard;
-            let event = project_stream_item(&item)
+            let event = project_stream_item(&item, &authors, &viewer)
                 .map(|value| Ok(Event::default().data(value.to_string())));
             std::future::ready(event)
         });
