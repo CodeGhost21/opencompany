@@ -363,7 +363,26 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   );
 }
 
+/**
+ * Joins a fetched deep half onto the freshest list skeleton of the same run.
+ *
+ * The list is the authority for which steps exist — it is refetched on the
+ * visible poll, so it can be ahead of the open-time deep read. The deep read
+ * contributes only each step's unredacted companion, matched by `seq`; a step
+ * the deep read has not seen keeps `null`, which the renderer already treats as
+ * "no deep trace for this step".
+ */
+function withDeep(list: ObservatoryRun, deep?: ObservatoryRun): ObservatoryRun {
+  if (!deep) return list;
+  const deepBySeq = new Map(deep.steps.map((s) => [s.seq, s.deep]));
+  return {
+    ...list,
+    steps: list.steps.map((s) => ({ ...s, deep: deepBySeq.get(s.seq) ?? null })),
+  };
+}
+
 /** On the index, group attempts by the workflow run that spawned them. */
+function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
   const grouped = useMemo(() => [...byWorkflowRun(runs).entries()], [runs]);
   if (grouped.length === 0) return null;
   return (
