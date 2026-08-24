@@ -281,6 +281,24 @@ describe("reconcileMentions", () => {
     expect(out[0].offset).toBe(0);
   });
 
+  /**
+   * The mirror image of the test above, and why the composer hands the
+   * pre-edit text over. Deleting the *second* of two `@Sam @Sam` mentions
+   * leaves the first's text — but `@Sam` with both spans recorded is input-
+   * identical to the first-deleted case, so no text-only rule can tell them
+   * apart. The deleted region in `previous` picks out the mention the edit
+   * actually removed, and the surviving first Sam keeps its identity instead
+   * of being dropped and pinging the deleted second Sam.
+   */
+  it("keeps the first duplicate when the second is deleted", () => {
+    const a: Mention = { target: { kind: "user", id: "a" }, text: "@Sam", offset: 0 };
+    const b: Mention = { target: { kind: "user", id: "b" }, text: "@Sam", offset: 5 };
+    const out = reconcileMentions("@Sam", [a, b], "@Sam @Sam");
+    expect(out).toHaveLength(1);
+    expect(out[0].target).toEqual(a.target);
+    expect(out[0].offset).toBe(0);
+  });
+
   it("keeps the selected identity when an identical span is inserted before it", () => {
     const selected: Mention = {
       target: { kind: "user", id: "selected" },
