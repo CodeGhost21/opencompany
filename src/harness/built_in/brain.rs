@@ -5720,6 +5720,19 @@ members = ["engineer"]
         );
     }
 
+    /// `@everyone` from the console's default thread (`chat: "main"`) expands
+    /// against the General desk, not no desk at all. The console-only alias is
+    /// not a desk key `resolve_desk_id` knows, so the brain folds it — and the
+    /// other General-desk spellings — to the General desk id before expanding.
+    #[test]
+    fn everyone_desk_folds_the_main_thread_alias_to_general() {
+        assert_eq!(HarnessBrain::everyone_desk(None), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("")), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("main")), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("General")), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("eng_desk")), "eng_desk");
+    }
+
     /// The default responder is the `orchestrator`-tier agent, even when it is
     /// not first on the roster.
     #[test]
