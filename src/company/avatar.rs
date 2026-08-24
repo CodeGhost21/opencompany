@@ -435,6 +435,20 @@ pub fn check_image_dimensions(bytes: &[u8]) -> Result<()> {
              {MAX_AVATAR_DIMENSION}×{MAX_AVATAR_DIMENSION}."
         )));
     }
+    // A GIF is deliberately allowed to move, so it is the one format whose
+    // single-frame size does not bound what a viewer decodes: every frame is
+    // repainted each cycle. The walk above the byte ceiling counts how much
+    // painting that is, and a cycle far over the cap is a bomb too.
+    if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89) {
+        if let Some(cost) = gif_animation_cost(bytes) {
+            if cost > MAX_AVATAR_ANIMATED_PIXELS {
+                return Err(OpenCompanyError::InvalidRequest(format!(
+                    "that GIF animates {cost} pixels per cycle — an avatar's \
+                     animation may total at most {MAX_AVATAR_ANIMATED_PIXELS}."
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
