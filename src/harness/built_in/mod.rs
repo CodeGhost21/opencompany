@@ -3540,9 +3540,12 @@ mod tests {
     /// the fingerprint stable would keep the harness gate enforcing the old
     /// threshold until restart. `auto_approve_under_usd`'s outer/inner options
     /// are both states: no override, an explicit no-cap (`Some(None)`), and a
-    /// finite cap must each be distinct.
+    /// finite cap must each be distinct. The deadline is deliberately NOT in the
+    /// fingerprint — the roster snapshot carries no TTL, and the deadline lives
+    /// in the live gate, so a deadline-only edit must not discard agent sessions
+    /// for a rebuild that could not apply it.
     #[test]
-    fn the_policy_fingerprint_moves_when_the_cap_or_deadline_does() {
+    fn the_policy_fingerprint_moves_when_the_cap_does() {
         let base = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, None, None)));
         let explicit_none =
             policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, Some(None), None)));
@@ -3570,7 +3573,11 @@ mod tests {
             "no-cap and a finite cap are different states"
         );
         assert_ne!(finite, tighter, "a different cap value must rebuild");
-        assert_ne!(base, deadline, "a deadline edit must rebuild");
+        assert_eq!(
+            base, deadline,
+            "a deadline-only edit must NOT rebuild: the roster snapshot carries no TTL, \
+             so a rebuild could not apply it and would only discard live agent sessions"
+        );
         // Re-setting the same cap is a no-op, like re-setting the same tier.
         assert_eq!(
             finite,
