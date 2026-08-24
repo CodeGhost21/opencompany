@@ -139,6 +139,30 @@ impl RunTraceSink {
             // The lock is released before the awaits below — a store write must
             // never be held across the mutex the collector re-enters per event.
             .push(event);
+        self.persist(emitted).await;
+    }
+
+    /// Flushes a thinking run the stream never got to close.
+    ///
+    /// [`record`](Self::record) closes an open thought only when the next event
+    /// gives it a reason to — visible text or a tool call. A turn that *ends*
+    /// mid-thought — a reply, an abort, an error — has neither, so the tail of
+    /// reasoning below the interim flush threshold would sit in the trace
+    /// unpersisted. The collector calls this after the stream drains, so a
+    /// failed or interrupted turn still keeps the reasoning that led to its end.
+    /// No-op when nothing is open.
+    pub async fn flush(&self) {
+        let emitted = self
+            .trace
+            .lock()
+            .expect("run trace")
+            .finish();
+        self.persist(emitted).await;
+    }
+
+    /// Writes one batch of emitted steps to the run store and — when this host
+    /// retains deep traces — their unredacted companions.
+    async fn persist(&self, emitted: Vec<(u32, TurnStep, Option<TurnStepDetail>)>) {
         for (step_seq, step, detail) in emitted {
             if step_seq >= MAX_RUN_STEPS {
                 continue;
