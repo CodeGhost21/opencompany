@@ -789,7 +789,11 @@ export function ApprovalCard({
             /* `decisionLabel`, not `approvalAction`: two same-kind cards read
                identically from the kind alone, and button-only screen-reader
                navigation never hears the card body (#1411). */
-            aria-label={`Decline: ${decisionLabel(a, askerNames, now)} — request ${a.at_millis}${
+            aria-label={`Decline: ${decisionLabel(a, askerNames, now)} — ${
+              declineScope.kind === "tool"
+                ? `don't ask again for this tool for ${grantDurationLabel(declineScope.expiresInMillis)}`
+                : "just this once"
+            } — request ${a.at_millis}${
               batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
             }`}
             disabled={deciding !== null}
