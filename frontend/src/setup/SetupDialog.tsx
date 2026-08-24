@@ -986,24 +986,23 @@ function BuildOut({
             credential may have been rejected (Settings), so the route is
             offered alongside the retry rather than instead of it.
           */}
-          {fallback === "no_model" && harnessReachable && (
-            canManage ? (
-              <a
-                href="#/settings/connections"
-                onClick={onRedesign}
-                data-testid="setup-add-model"
-                className={buttonVariants({ variant: "outline" })}
-              >
-                Add a model in Settings
-              </a>
-            ) : (
-              <span
-                className="text-sm text-muted-foreground"
-                data-testid="setup-add-model-member"
-              >
-                Ask an admin to add a model, or carry on with the standard team.
-              </span>
-            )
+          {fallback === "no_model" && harnessReachable && canManage === true && (
+            <a
+              href="#/settings/connections"
+              onClick={onRedesign}
+              data-testid="setup-add-model"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              Add a model in Settings
+            </a>
+          )}
+          {fallback === "no_model" && harnessReachable && canManage === false && (
+            <span
+              className="text-sm text-muted-foreground"
+              data-testid="setup-add-model-member"
+            >
+              Ask an admin to add a model, or carry on with the standard team.
+            </span>
           )}
           {fallback === "not_designable" && (
             <Button
