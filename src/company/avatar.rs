@@ -482,14 +482,83 @@ pub async fn resolve(
                 .and_then(|m| m.split(';').next())
                 .map(str::trim)
                 .map(str::to_ascii_lowercase);
-            if essence.as_deref() == Some(sniffed) {
-                Ok(stored)
-            } else {
-                Err(not_an_image())
+            if essence.as_deref() != Some(sniffed) {
+                return Err(not_an_image());
             }
+            // These bytes are a valid avatar — but *where* they live decides
+            // whether they stay valid. A `blob:` reference can name any binary
+            // this host holds, and publishing an artifact rewrites its node's
+            // bytes under the same id, so a face that pointed at one would
+            // silently become whatever the next publish wrote — a 60 MB PDF or
+            // a 65535×65535 header — without ever passing the checks above
+            // again. Copy the validated bytes into the avatars folder so every
+            // stored reference names bytes this host validated and nothing
+            // rewrites. A node already there is itself such a copy (or the
+            // upload route's own), so it is returned untouched.
+            if !avatar_node_is_immutable(workspace, company, &node).await? {
+                return store_validated_avatar(workspace, company, &bytes, sniffed).await;
+            }
+            Ok(stored)
         }
         None => Err(not_an_image()),
     }
+}
+
+/// Whether the node already lives under the [`AVATARS_FOLDER`] — i.e. it was
+/// created by the avatar upload route or by a prior [`resolve`] copy, both of
+/// which store validated bytes that nothing rewrites.
+///
+/// The folder name, not a stored flag, is the test: the upload route is the
+/// only writer to `avatars/`, and its guarantee is that a face there is one
+/// this host validated. A node with no parent, or under any other folder, has
+/// no such guarantee — the generic workspace upload and the artifact mirror
+/// both write elsewhere.
+async fn avatar_node_is_immutable(
+    workspace: &dyn crate::ports::WorkspaceStore,
+    company: &crate::ports::types::CompanyId,
+    node: &WorkspaceNode,
+) -> Result<bool> {
+    let Some(parent_id) = node.parent_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some((parent, _)) = workspace.read(company, parent_id).await? else {
+        return Ok(false);
+    };
+    Ok(parent.name == AVATARS_FOLDER)
+}
+
+/// Mints a fresh binary node holding already-validated avatar bytes, under the
+/// [`AVATARS_FOLDER`], and answers with the `blob:` reference to store.
+///
+/// The immutable copy behind [`resolve`]'s referent rule: bytes are validated
+/// once, here, against the same checks the upload route applies, and the node
+/// they land in is never rewritten.
+async fn store_validated_avatar(
+    workspace: &dyn crate::ports::WorkspaceStore,
+    company: &crate::ports::types::CompanyId,
+    bytes: &[u8],
+    sniffed: &str,
+) -> Result<String> {
+    // Adopt-or-create like the upload route, so two writers at the same moment
+    // cannot race a second `avatars/` folder into the tree.
+    let folder = workspace
+        .adopt_or_create_folder(company, None, AVATARS_FOLDER, WorkspaceOrigin::Operator)
+        .await?;
+    let id = crate::ports::generate_id();
+    let node = WorkspaceNode {
+        name: format!("avatar-{id}"),
+        id: id.clone(),
+        kind: NodeKind::File,
+        parent_id: Some(folder.id().to_string()),
+        updated_at_millis: crate::ports::now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: Some(sniffed.to_string()),
+        size: None,
+        sha256: None,
+    };
+    let stored = workspace.create_binary(company, &node, bytes).await?;
+    Ok(format!("blob:{}", stored.id))
 }
 
 /// The refusal a `blob:` reference gets when its bytes are not a supported
