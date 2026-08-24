@@ -316,10 +316,11 @@ pub(crate) async fn resolve_runs(
     Ok(rows
         .into_iter()
         .map(|record| {
+            let id = record.id.clone();
             assemble(
                 record,
-                steps_by_run.get(&record.id).cloned().unwrap_or_default(),
-                details_by_run.get(&record.id).cloned().unwrap_or_default(),
+                steps_by_run.get(&id).cloned().unwrap_or_default(),
+                details_by_run.get(&id).cloned().unwrap_or_default(),
             )
         })
         .collect())
