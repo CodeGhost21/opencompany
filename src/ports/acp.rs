@@ -28,7 +28,7 @@
 //!   operator's own `claude-agent-acp`, against their existing subscription.
 //! - **Reverse dispatch.** A cloud host hands a task to a runner on someone's
 //!   machine; the runner is an ACP agent as far as this is concerned.
-//! - **Any other harness.** Codex, goose, and anything else that speaks ACP.
+//! - **Any other harness.** Codex, and anything else that speaks ACP.
 
 use std::sync::Arc;
 
@@ -110,8 +110,11 @@ pub trait AcpAgentFactory: Send + Sync {
     /// `agent` is one of `ACP_AGENTS` (the manifest already validated this).
     /// `model`, when set, is forwarded to that agent's own startup lever
     /// where this build knows one — see the implementation's own docs for
-    /// which agents that currently covers. `workspace_root` is the same root
-    /// the embedded engine roots a company's agent workspaces under
+    /// which agents that currently covers. `agent_models` is the harness's
+    /// own agents' per-agent overrides (issue #1245's follow-up), keyed by
+    /// agent id — an agent absent from the map takes `model`, the harness's
+    /// own default, unchanged. `workspace_root` is the same root the
+    /// embedded engine roots a company's agent workspaces under
     /// (`HarnessDeps::workspace_root`) — the factory has no other way to
     /// learn it, since it is built once and shared across every company the
     /// host runs, not constructed fresh per company.
@@ -119,6 +122,7 @@ pub trait AcpAgentFactory: Send + Sync {
         &self,
         agent: &str,
         model: Option<&str>,
+        agent_models: &std::collections::HashMap<String, String>,
         workspace_root: &std::path::Path,
     ) -> Result<Arc<dyn AcpAgent>>;
 }
