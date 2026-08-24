@@ -3967,6 +3967,59 @@ mod test {
             );
         }
 
+        /// A request glob whose `*` is glued to an explicit opt-in namespace
+        /// (`search*`, `workspace.write*`) is stored *verbatim* by the write
+        /// path, and the wiring predicates reject the glued spelling —
+        /// `grants_search_explicit` wants `search` or a `search.`-descendant,
+        /// `grants_workspace_write_explicit` wants the two exact tokens. So even
+        /// a company that holds the namespace must not have `allow_covers`
+        /// promise a grant that will silently fail to wire; the console's
+        /// `companyCovers` mirror pins the same rule.
+        #[test]
+        fn a_glued_star_opt_in_request_is_not_covered() {
+            let allow = strings(&[
+                "search",
+                "workspace",
+                "media",
+                "composio",
+                "chargebee",
+                "hosting",
+                "paypal",
+                "mcp:*",
+            ]);
+            for grant in [
+                "search*",
+                "workspace*",
+                "workspace.write*",
+                "media*",
+                "composio*",
+                "chargebee*",
+                "hosting*",
+                "paypal*",
+            ] {
+                assert!(
+                    !allow_covers(&allow, grant),
+                    "glued-star `{grant}` must not be covered"
+                );
+            }
+        }
+
+        /// The separator-broken opt-in spellings — the ones the wiring
+        /// predicates actually accept — stay covered even when they end in a
+        /// `*`: `search.web*` strips to a `search.`-descendant that
+        /// `grants_search_explicit` accepts verbatim, `workspace.write` is an
+        /// exact write token, and `mcp:notion*` is a colon-scoped prefix.
+        #[test]
+        fn a_separator_broken_opt_in_request_stays_covered() {
+            let allow = strings(&["search", "workspace", "media", "mcp:*"]);
+            assert!(allow_covers(&allow, "search.*"));
+            assert!(allow_covers(&allow, "search.web*"));
+            assert!(allow_covers(&allow, "workspace.write"));
+            assert!(allow_covers(&allow, "media.*"));
+            assert!(allow_covers(&allow, "media.image*"));
+            assert!(allow_covers(&allow, "mcp:notion*"));
+        }
+
         /// Runs the three-level narrowing over `&str` slices, so each case below
         /// reads as the table row it is.
         fn scope(company: &[&str], desks: &[&[&str]], agent: &[&str]) -> Vec<String> {
