@@ -127,7 +127,10 @@ describe("resolveAvatarSrc bounded cache", () => {
     for (const id of ids.slice(65)) {
       await resolveAvatarSrc(client(), "acme", `blob:${id}`);
     }
-    expect(revokeObjectURL).toHaveBeenCalledTimes(2); // faces 0 and 1, not 64
+    // The cap is enforced while the 65th is held — faces 0, 1 and 2 get
+    // evicted at the 65th, 66th and 67th insertions — but never the held
+    // 64th, which is still in flight and therefore skipped.
+    expect(revokeObjectURL).toHaveBeenCalledTimes(3);
 
     release();
     const url = await inFlight;
