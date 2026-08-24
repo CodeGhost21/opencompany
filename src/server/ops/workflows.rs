@@ -1795,6 +1795,22 @@ struct RunArtifactRow {
     task_title: Option<String>,
 }
 
+/// `GET …/workflows/runs/{rid}/artifacts` response. A wrapper rather than a
+/// bare array so a run whose file count exceeds [`MAX_RUN_ARTIFACTS`] can say
+/// so — the same `truncated` contract [`get_run_output`] uses for its per-node
+/// snapshot — instead of silently dropping the older rows and letting the
+/// console present the list as exhaustive.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunArtifactsResponse {
+    /// The run's files, newest first (the sort `run_artifacts` applies).
+    files: Vec<RunArtifactRow>,
+    /// Whether older rows were cut by [`MAX_RUN_ARTIFACTS`]. `false` for every
+    /// run in practice — the cap is a defensive ceiling, not a page size — but
+    /// a caller that sees `true` knows the list is not the whole story.
+    truncated: bool,
+}
+
 /// `GET …/workflows/runs/{rid}/artifacts` (both scope forms) — the files one
 /// past run produced, for the run inspector's "Files associated" section
 /// (issue #1684).
