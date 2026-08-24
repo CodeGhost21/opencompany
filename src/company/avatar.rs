@@ -690,6 +690,21 @@ mod test {
         assert_eq!(image_dimensions(&webp_vp8(192, 192)).unwrap(), (192, 192));
     }
 
+    /// The VP8 height is a full 14 bits, not 10: the top four bits live in the
+    /// fourth byte of the frame, and a parse that dropped them measured a
+    /// 4096×16383 frame as 4096×1023 — under the dimension cap, so the
+    /// decompression-bomb check let a 67-megapixel frame through.
+    #[test]
+    fn vp8_height_uses_all_fourteen_bits() {
+        let (w, h) = (MAX_AVATAR_DIMENSION, 16383);
+        let tall = webp_vp8(w, h);
+        assert_eq!(image_dimensions(&tall).unwrap(), (w, h));
+        assert!(
+            check_image_dimensions(&tall).is_err(),
+            "a 4096×16383 frame must be refused, not measured as 4096×1023"
+        );
+    }
+
     #[test]
     fn size_check_accepts_a_reasonable_image() {
         for ok in [
