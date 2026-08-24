@@ -134,6 +134,7 @@ describe("resolving an address", () => {
   // follows it) is what keeps a bookmark or habit written before the move alive.
   it.each([
     ["#/connections", "settings", "oauth"],
+    ["#/memory", "settings", "brain"],
     ["#/oauth", "settings", "oauth"],
     ["#/mcp", "settings", "mcp"],
     ["#/people", "settings", "people"],
