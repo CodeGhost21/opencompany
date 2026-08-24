@@ -991,18 +991,29 @@ async fn chat_upload(
     // attach. The stored name is what `resolve_attachments` later reads back
     // as the display name, so a repeat filename is honestly shown suffixed
     // rather than silently dropped.
-    if let Err(OpenCompanyError::Conflict(_)) = company
+    //
+    // Matched in full — codex review finding — rather than `if let
+    // Err(Conflict(_)) = ...`, which let every OTHER failure (a filesystem,
+    // SQLite, or MongoDB write error) fall through as if the first attempt
+    // had succeeded: the composer would show a node that was never stored,
+    // and the later `/chat` POST would 400 resolving a reference that names
+    // nothing.
+    match company
         .runtime
         .workspace()
         .create_binary(company.id(), &node, &bytes)
         .await
     {
-        node.name = disambiguate_name(&name, &id);
-        company
-            .runtime
-            .workspace()
-            .create_binary(company.id(), &node, &bytes)
-            .await?;
+        Ok(_) => {}
+        Err(OpenCompanyError::Conflict(_)) => {
+            node.name = disambiguate_name(&name, &id);
+            company
+                .runtime
+                .workspace()
+                .create_binary(company.id(), &node, &bytes)
+                .await?;
+        }
+        Err(other) => return Err(ApiError(other)),
     }
 
     Ok(Json(AttachmentRef {
