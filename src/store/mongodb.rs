@@ -2478,9 +2478,49 @@ impl crate::ports::deep_trace::DeepTraceStore for MongoStore {
                 .map(|(id, seen)| (id.as_str(), *seen))
                 .collect();
             if !doomed.is_empty() {
+                // The ranking promised a run written to since is spared WHOLE,
+                // so recency is re-checked one final time, at the delete: a
+                // candidate holding any row newer than the `seen` the ranking
+                // recorded was refreshed after the verification pass, and it
+                // survives entire — deleting its older rows while keeping the
+                // new one would leave exactly the torn trace the run-level
+                // ranking exists to prevent. The delete predicate below still
+                // excludes rows newer than `seen`, so a write that lands after
+                // this check cannot lose the data it just wrote either.
+                let mut live = coll
+                    .aggregate(vec![
+                        doc! {
+                            "$match": {
+                                "company_id": company.as_ref(),
+                                "$or": doomed
+                                    .iter()
+                                    .map(|(id, seen)| {
+                                        doc! {
+                                            "run_id": id,
+                                            "at_ms": {"$gt": seen},
+                                        }
+                                    })
+                                    .collect::<Vec<_>>(),
+                            }
+                        },
+                        doc! {"$group": {"_id": "$run_id"}},
+                    ])
+                    .await
+                    .map_err(mongo_err)?;
+                let mut refreshed: std::collections::HashSet<String> = Default::default();
+                while let Some(row) = live.try_next().await.map_err(mongo_err)? {
+                    refreshed.insert(get_str(&row, "_id")?.to_string());
+                }
+                let doomed: Vec<(&str, i64)> = doomed
+                    .into_iter()
+                    .filter(|(id, _)| !refreshed.contains(*id))
+                    .collect();
+                if doomed.is_empty() {
+                    return Ok(());
+                }
                 // The delete is itself conditional on the recency the ranking
                 // observed, not just on the run id: a writer that refreshes one
-                // of these runs after the verification above but before this
+                // of these runs after the freshness check above but before this
                 // delete would otherwise have its brand-new detail rows removed
                 // by a `delete_many` keyed on `run_id` alone. `at_ms` is
                 // monotone per run, so "row is at or below the recency we saw"
