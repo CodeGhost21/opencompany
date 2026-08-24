@@ -275,7 +275,8 @@ export function MessageComposer({
       {!compact && (
         <p className="mt-1.5 px-1 text-2xs text-muted-foreground">
           <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
-          <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new line
+          <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new
+          line
         </p>
       )}
     </div>

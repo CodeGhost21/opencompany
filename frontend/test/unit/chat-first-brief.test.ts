@@ -60,7 +60,9 @@ function renderComposer(prefill?: { text: string; revision: number }) {
   });
 }
 
-function renderComposerForSend(onSend: (text: string, intent?: MessageIntent) => void) {
+function renderComposerForSend(
+  onSend: (text: string, intent?: MessageIntent) => void,
+) {
   act(() => {
     root.render(
       createElement(MessageComposer, {
@@ -73,7 +75,9 @@ function renderComposerForSend(onSend: (text: string, intent?: MessageIntent) =>
 }
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -89,8 +93,8 @@ describe("the empty-channel first brief", () => {
     const onStartBrief = vi.fn();
     renderTimeline(onStartBrief);
 
-    const brief = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent?.includes("Give the team a brief"),
+    const brief = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Give the team a brief"),
     );
     expect(brief).toBeDefined();
     expect(container.textContent).not.toContain("Create teammate");
@@ -108,14 +112,20 @@ describe("the empty-channel first brief", () => {
     renderComposer({ text: "Plan our first month.", revision: 2 });
     expect(textarea?.value).toBe("Plan our first month.");
 
-    expect(container.querySelector('[data-testid="composer-deliverable-chat"]')?.getAttribute("title")).toBe(
-      "Chat without automatically creating a task.",
-    );
-    expect(container.querySelector('[data-testid="composer-deliverable-once"]')?.getAttribute("title")).toBe(
-      "Ask the team to do this once.",
-    );
     expect(
-      container.querySelector('[data-testid="composer-deliverable-workflow"]')?.getAttribute("title"),
+      container
+        .querySelector('[data-testid="composer-deliverable-chat"]')
+        ?.getAttribute("title"),
+    ).toBe("Chat without automatically creating a task.");
+    expect(
+      container
+        .querySelector('[data-testid="composer-deliverable-once"]')
+        ?.getAttribute("title"),
+    ).toBe("Ask the team to do this once.");
+    expect(
+      container
+        .querySelector('[data-testid="composer-deliverable-workflow"]')
+        ?.getAttribute("title"),
     ).toBe("Turn this into a repeating workflow.");
   });
 
@@ -126,7 +136,9 @@ describe("the empty-channel first brief", () => {
     // The operator had picked "Just chatting" for the previous draft...
     act(() => {
       (
-        container.querySelector('[data-testid="composer-deliverable-chat"]') as HTMLButtonElement
+        container.querySelector(
+          '[data-testid="composer-deliverable-chat"]',
+        ) as HTMLButtonElement
       ).click();
     });
 
@@ -141,14 +153,16 @@ describe("the empty-channel first brief", () => {
         }),
       );
     });
-    expect(container.querySelector("textarea")?.value).toBe("Help us get started.");
+    expect(container.querySelector("textarea")?.value).toBe(
+      "Help us get started.",
+    );
 
     // The brief is sent as a one-off task, not under the stale "chat" intent —
     // otherwise its request would be withheld.
     act(() => {
-      [...container.querySelectorAll("button")].find(
-        (button) => button.getAttribute("aria-label") === "Send",
-      )!.click();
+      [...container.querySelectorAll("button")]
+        .find((button) => button.getAttribute("aria-label") === "Send")!
+        .click();
     });
     expect(onSend).toHaveBeenCalledWith("Help us get started.", "once");
   });
