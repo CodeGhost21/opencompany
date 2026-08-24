@@ -628,6 +628,58 @@ describe("a replacing build-out clears the team it replaces", () => {
     expect(removed).toEqual(["n1"]);
   });
 
+  it("rolls back the new team and keeps the debt when the sweep of the old one fails", async () => {
+    const removed: string[] = [];
+    const settled: (string[] | null)[] = [];
+    const roster = [
+      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+    ];
+    const client = {
+      ...clientWith({ source: "model" }),
+      post: async () => ({
+        agents: [
+          { name: "Ada", role: "Operations", description: "Runs the desk." },
+          { name: "Bo", role: "Analyst", description: "Covers the numbers." },
+        ],
+        template: "ecommerce",
+        source: "model",
+      }),
+      addTeamMember: async (body: { role?: string }) => {
+        const id = body.role === "Analyst" ? "n2" : "n1";
+        roster.push({ id, role: body.role ?? "", global: false } as TeamMemberDto);
+        return { id };
+      },
+      listTeam: async () => roster,
+      removeTeamMember: async (agentId: string) => {
+        removed.push(agentId);
+        // The sweep of the old team fails: the new team is in place, but the old
+        // row survives — the redesign must not report completion over it.
+        if (agentId === "f1") throw new Error("nope");
+      },
+      removed,
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    await show(client, {
+      redesign: true,
+      fallbackIds: ["f1"],
+      onReplacementComplete: (ids) => settled.push(ids),
+    });
+    await answer("setup-field-industry", "E-commerce — homeware");
+    await answer("setup-field-teamHint", "");
+    await answer("setup-field-automate", "");
+    for (let i = 0; i < 40 && !find("setup-failed"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+    }
+    // The new rows are rolled back so the company is left with the old team, and
+    // the flow fails rather than claiming a completed replacement.
+    expect(find("setup-failed")).toBeTruthy();
+    expect(removed).toEqual(["f1", "n1", "n2"]);
+    // The debt is kept: onReplacementComplete was never asked to settle it, so a
+    // reload before the retry still reopens the redesign over the old boundary.
+    expect(settled).toEqual([]);
+  });
+
   it("a retry after a refused rollback still replaces every row it must", async () => {
     const removed: string[] = [];
     // The roster the host reports grows as adds land; the second run's sweep
