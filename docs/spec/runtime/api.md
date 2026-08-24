@@ -23,6 +23,7 @@ GET    /api/v1/companies/{id}/chat/history     one desk's transcript (?desk=<thr
 POST   /api/v1/companies/{id}/chat/messages/{seq}/reactions
                                                { "emoji": "👍", "on": true } → 204
 GET    /api/v1/companies/{id}/events?since=SEQ SSE stream of events/effects (work feed)
+GET    /api/v1/companies/{id}/approvals        pending approvals
 GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
 PUT    /api/v1/companies/{id}/notifications  mark notifications read (`{ "ids": [...] }`; empty body or null ids marks all)
 POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
@@ -40,6 +41,9 @@ GET    /api/v1/companies/{id}/memory/traces    inspect working memory (debug)
 POST   /api/v1/companies/{id}/export           export bundle (tar)
 POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transitions
 ```
+
+Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
+with no `{id}`.
 
 `GET …/notifications` returns only unread `mention` notifications addressed to the
 signed-in human, newest first. Each row includes its subject, title, creation
