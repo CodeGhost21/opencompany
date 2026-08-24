@@ -188,11 +188,14 @@ export function SetupController({
       const wasRedesigning = setupRedesign(scope);
       const returned = (wasResuming || wasRedesigning) && !onModelSettings();
       // A reload on the destination page is not a return, and consuming the
-      // debt there would strand the later return. On a reload after navigating
-      // back, the debt is consumed here and the dialog opens immediately.
+      // resume there would strand the later return. On a reload after navigating
+      // back, the resume is paid here and the dialog opens immediately. The
+      // redesign debt is *not* paid by the return that reopens it — it names
+      // the team to replace, and a reload or crash between this reopen and the
+      // build-out must still find it, or the fallback team would leave the gate
+      // reporting staffed and the owed redesign would be unreachable.
       if (returned) {
         if (wasResuming) clearSetupResuming(scope);
-        if (wasRedesigning) clearSetupRedesign(scope);
       }
       const resume = returned && (wasRedesigning || empty);
       setRedesigning(wasRedesigning && returned);
