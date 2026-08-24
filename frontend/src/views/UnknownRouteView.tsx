@@ -2,6 +2,7 @@ import { MapPinOff } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { withHostParam } from "@/hooks/use-host-route";
 
 /** Explains a hash address that the console does not recognize. */
 export function UnknownRouteView({ address }: { address: string | null }) {
@@ -19,7 +20,11 @@ export function UnknownRouteView({ address }: { address: string | null }) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button render={<a href="#/overview" />}>Go to Overview</Button>
+          {/* Same host-scope rule as every recovery anchor: a new tab boots with
+              the address as written, and a `#/overview` without `?host=` would
+              land on the bootstrap/default host instead of the one the operator
+              was on (issue #1417 review). */}
+          <Button render={<a href={withHostParam("overview")} />}>Go to Overview</Button>
         </CardContent>
       </Card>
     </div>
