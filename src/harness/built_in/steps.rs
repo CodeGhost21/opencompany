@@ -2530,8 +2530,9 @@ mod tests {
                 .filter_map(|(_, _, d)| d.as_ref())
                 .filter_map(|d| d.reasoning.clone())
                 .collect();
-            assert!(
-                reasoning.iter().any(|r| r == "I should run the program"),
+            assert_eq!(
+                reasoning.concat(),
+                "I should run the program",
                 "the tail before a tool call was lost: {reasoning:?}"
             );
         }
