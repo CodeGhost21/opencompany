@@ -2011,8 +2011,12 @@ impl CompanyRuntime {
         };
         match crate::runtime::assignee::resolve(&record, desk) {
             crate::runtime::assignee::AssigneeResolution::Agent(agent) => format!("dm:{agent}"),
-            crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. } => desk_id,
-            // Unassigned, empty, unknown, or ambiguous: nothing canonical to
+            // A desk with no member to work it is still a real desk with a real
+            // rail channel, so it files under the same canonical id as one with
+            // a lead — a memberless `"Sales"` still has to badge `#sales`.
+            crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. }
+            | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => desk_id,
+            // Unassigned, unknown, or ambiguous: nothing canonical to
             // badge. A general-chat spelling — `"General"` (the default for an
             // unaddressed message), `"main"`, or `""` — still names the General
             // desk, the console's default thread, so it has to file under the
