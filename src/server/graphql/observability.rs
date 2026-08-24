@@ -275,6 +275,7 @@ pub(crate) async fn resolve_runs(
     let filter = RunFilter {
         task_id,
         workflow_run_id,
+        agent_id: None,
         statuses: Vec::new(),
         limit: Some(limit.clamp(1, 200) as usize),
     };
