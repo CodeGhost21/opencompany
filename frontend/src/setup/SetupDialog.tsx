@@ -328,6 +328,11 @@ export function SetupDialog({
    * one.
    */
   const tryRedesign = useCallback(() => {
+    // The build-out effect leaves the guard set once it has run; without this a
+    // second submit lands on "Creating your team…" and the effect exits without
+    // entering — no teammate is created and no phase follows, so the dialog
+    // stalls with no way out.
+    building.current = false;
     setReplacing(true);
     setPhase({ kind: "asking", step: 0 });
   }, []);
