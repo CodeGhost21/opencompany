@@ -216,6 +216,31 @@ export function rankMentionables(
 }
 
 /**
+ * The mentions a replacement `[start, end)` destroys, dropped from `mentions`.
+ *
+ * A picker selection replaces the token under the caret, and any mention whose
+ * recorded span the range touches no longer exists in the draft — its text was
+ * overwritten. It has to be dropped **before** the new mention is reconciled,
+ * or the replaced identity survives as a span that text-only reconciliation
+ * re-anchors onto an unrelated same-text occurrence: in `@Sam then @Sam`,
+ * replacing the picked first `@Sam` with `@engineer` would otherwise move
+ * Sam's selected identity onto the second, hand-typed `@Sam` and notify the
+ * wrong person.
+ *
+ * Non-overlapping mentions are kept; `reconcileMentions` shifts them past the
+ * edit as usual.
+ */
+export function mentionsOutsideRange(
+  mentions: readonly Mention[],
+  range: { start: number; end: number },
+): Mention[] {
+  return mentions.filter((m) => {
+    const end = m.offset + m.text.length;
+    return !(m.offset < range.end && end > range.start);
+  });
+}
+
+/**
  * Replaces the active `@query` with `entry`, and says where the caret lands.
  *
  * A trailing space is appended so the next word does not extend the mention —
