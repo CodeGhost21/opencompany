@@ -1433,12 +1433,13 @@ mod test {
         );
         // Frames may be sub-rectangles of the canvas; each one is still paid for.
         assert_eq!(
-            webp_animation_cost(&webp_animated((4096, 4096), &[(128, 128)])),
-            Ok(Some(16_384))
+            webp_animation_cost(&webp_animated((4096, 4096), &[(128, 128)]))
+                .unwrap(),
+            Some(16_384)
         );
         // Not a WebP, and a WebP with no ANMF chunks: nothing to count.
-        assert_eq!(webp_animation_cost(PNG_SIGNATURE), Ok(None));
-        assert_eq!(webp_animation_cost(&webp_vp8x(16, 16)), Ok(None));
+        assert_eq!(webp_animation_cost(PNG_SIGNATURE).unwrap(), None);
+        assert_eq!(webp_animation_cost(&webp_vp8x(16, 16)).unwrap(), None);
     }
 
     /// The APNG walker pays for the default image (the canvas, frame 0 of the
