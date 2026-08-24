@@ -15,6 +15,7 @@ export const REWRITE_RETIRED = (
   sub: string | null,
 ): [View, string | null] | null => {
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
+  if (head === "memory") return ["settings", "brain"];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
   // page: a bookmark or shared link must say where it actually lands.
