@@ -177,8 +177,8 @@ describe("companyCovers", () => {
     // and the wiring predicates reject the glued spelling — the card would
     // render the saved grant as effective while the tools stay unwired. The
     // preview must not promise them, even when the company holds the namespace.
-    const allow = ["search", "workspace", "media", "composio", "chargebee", "hosting", "paypal"];
-    for (const glob of ["search*", "workspace*", "workspace.write*", "media*", "composio*", "chargebee*", "hosting*", "paypal*"]) {
+    const allow = ["search", "workspace", "media", "composio", "chargebee", "hosting", "paypal", "mcp:*"];
+    for (const glob of ["search*", "workspace*", "workspace.write*", "media*", "composio*", "chargebee*", "hosting*", "paypal*", "mcp*"]) {
       expect(companyCovers(allow, glob)).toBe(false);
     }
   });
