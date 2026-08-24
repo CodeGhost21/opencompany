@@ -388,3 +388,87 @@ describe("resetting to the manifest's policy", () => {
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
 });
+
+describe("changing the spend cap", () => {
+  it("confirms a direct cap raise with the before-and-after threshold", async () => {
+    const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 5 };
+    const { client, put } = makeClient(initial);
+    await mount(client);
+
+    const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
+    await type(input, "100");
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save cap"))!
+        .click();
+    });
+    expect(put).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Let teammates do more on their own?");
+    expect(document.body.textContent).toContain("Today spend under $5 asks nothing.");
+    expect(document.body.textContent).toContain("Raising the cap to 100");
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+    });
+    expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { autoApproveUnderUsd: 100 });
+  });
+
+  it("sends a tightening cap change in one click", async () => {
+    const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 100 };
+    const { client, put } = makeClient(initial);
+    await mount(client);
+
+    const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
+    await type(input, "25");
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save cap"))!
+        .click();
+      await Promise.resolve();
+    });
+    expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { autoApproveUnderUsd: 25 });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+  });
+
+  it("keeps an unsaved always-ask edit when saving the deadline", async () => {
+    const { client } = makeClient(status("supervised"));
+    await mount(client);
+
+    await type(
+      container.querySelector<HTMLInputElement>("#always-approve")!,
+      "shell, http_request",
+    );
+    const deadline = container.querySelector<HTMLInputElement>("#approval-deadline")!;
+    await type(deadline, "48");
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save deadline"))!
+        .click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector<HTMLInputElement>("#always-approve")?.value).toBe(
+      "shell, http_request",
+    );
+  });
+
+  it("keeps an unsaved spend-cap edit when saving the deadline", async () => {
+    const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 10 };
+    const { client } = makeClient(initial);
+    await mount(client);
+
+    const spend = container.querySelector<HTMLInputElement>("#spend-cap")!;
+    await type(spend, "25");
+    const deadline = container.querySelector<HTMLInputElement>("#approval-deadline")!;
+    await type(deadline, "48");
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save deadline"))!
+        .click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector<HTMLInputElement>("#spend-cap")?.value).toBe("25");
+  });
+});
