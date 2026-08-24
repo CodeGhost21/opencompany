@@ -317,7 +317,7 @@ async fn set_policy(
     {
         return Err(refusal(
             "`autoApproveUnderUsd` must be a non-negative number.",
-        ));
+        ).into());
     }
 
     let write_lock = company_write_lock(company.id());
