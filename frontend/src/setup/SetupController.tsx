@@ -206,6 +206,13 @@ export function SetupController({
   // return is actually handled — a roster read that fails transiently keeps it,
   // so a later navigation or reload can retry the resume.
   useEffect(() => {
+    // A return handled while the company is switching is a return handled for a
+    // company the controller no longer renders. The listener is removed on the
+    // switch but the in-flight roster read is not, so without this guard the
+    // callback would reopen setup over the *new* company — and the dialog it
+    // opened would then run replacement against that company's roster. Mirror
+    // the gate read above: cleanup marks the read stale, the callback checks.
+    let cancelled = false;
     const arrive = () => {
       if (onModelSettings()) return;
       const wasResuming = setupResuming(scope);
@@ -214,6 +221,7 @@ export function SetupController({
       void client
         .listTeam(company)
         .then((roster) => {
+          if (cancelled) return;
           // The return is handled only with the roster read in hand. Consuming
           // the debt before it could not tell a transient failure from a handled
           // return: the dialog would stay shut (correctly — the roster is
@@ -240,7 +248,10 @@ export function SetupController({
         });
     };
     window.addEventListener("hashchange", arrive);
-    return () => window.removeEventListener("hashchange", arrive);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("hashchange", arrive);
+    };
   }, [scope, company, client]);
 
   // The Team page's prompt reopens setup after a skip.
