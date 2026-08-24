@@ -463,6 +463,32 @@ describe("mentionsOutsideChannel", () => {
       "ceo",
     ]);
   });
+
+  it("expands a desk mention to its members for the channel check", () => {
+    const desk: Mention = {
+      target: { kind: "desk", id: "eng" },
+      text: "@eng",
+      offset: 0,
+    };
+    const deskRow: Mentionable = {
+      target: { kind: "desk", id: "eng" },
+      label: "eng",
+      aliases: ["eng", "engineering"],
+      memberIds: ["engineer", "ceo"],
+    };
+    expect(
+      mentionsOutsideChannel([desk], ["engineer"], [deskRow]),
+    ).toEqual(["ceo"]);
+  });
+
+  it("leaves a desk mention alone when membership is not supplied", () => {
+    const desk: Mention = {
+      target: { kind: "desk", id: "eng" },
+      text: "@eng",
+      offset: 0,
+    };
+    expect(mentionsOutsideChannel([desk], ["engineer"])).toEqual([]);
+  });
 });
 
 describe("resolvableMentions", () => {
