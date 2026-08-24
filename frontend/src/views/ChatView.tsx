@@ -763,7 +763,7 @@ export function ChatView({
         // below reads the response's shape and never this argument.
         true,
       );
-      if (scopeCompany !== company) {
+      if (scopeCompany !== companyScopeRef.current) {
         outcome = "failed";
         if (chatId) onSendStale?.(chatId);
         return;
@@ -803,7 +803,7 @@ export function ChatView({
       onReply?.();
     } catch (err) {
       outcome = "failed";
-      if (scopeCompany !== company) {
+      if (scopeCompany !== companyScopeRef.current) {
         if (chatId) onSendStale?.(chatId);
         return;
       }
