@@ -1274,7 +1274,7 @@ export function AppShell({
    * latest value, instead of capturing the empty array it was created with.
    */
   const onChannelViewed = useCallback(
-    (channelId: string, historyPending: boolean) => {
+    (channelId: string, historyPending: boolean, _mentionFeedRevision?: number) => {
       activeChatChannelRef.current = channelId;
       // Clear only THIS channel's mentions, and only once its history is
       // actually on screen. A mention is durable and there is no
