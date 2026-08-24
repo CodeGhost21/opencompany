@@ -138,6 +138,14 @@ async function leaveForModelSettings() {
   await act(async () => {
     (link as HTMLElement).click();
   });
+  // The anchor's onClick does not preventDefault, so jsdom queues its own
+  // navigation to Settings as a deferred task. Drain it *before* driving the
+  // hash change below — a macrotask queued before this flush must have run by
+  // the time it lands, so it cannot later fire into a remount and revert the
+  // address to Settings when a return (or reload) has moved it to the console.
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
   // jsdom does not follow the anchor's href, so drive the navigation it implies.
   await goTo("#/settings/connections");
 }
