@@ -261,6 +261,7 @@ export function PolicySettings({ client, company }: Props) {
   useEffect(() => {
     setPendingTier(null);
     setPendingReset(false);
+    setPendingCapRaise(null);
   }, [client, company]);
 
   // Deliberately silent about its own failure, and deliberately not part of
