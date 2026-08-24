@@ -212,7 +212,7 @@ function useAvatarSrc(ref: string): string | null {
     return () => {
       live = false;
     };
-  }, [client, company, ref, immediate]);
+  }, [client, company, ref, immediate, forgot]);
 
   return src;
 }
