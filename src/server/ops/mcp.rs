@@ -363,14 +363,20 @@ fn dto_from_decl(
 /// id, matching `bucket_usage`.
 pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<String>)> {
     let allow = &record.manifest.tools.allow;
-    let names = roster_display_names(&record.effective_agents(), &record.overlay_agents);
+    // The roster as it *effectively* stands, exactly as `build_roster` builds
+    // it: a teammate an operator edited keeps its edits (an override `tools`
+    // line replaces the manifest's), and a retired teammate is not on the
+    // roster at all. Reading the raw manifest half here made `reachableBy`
+    // track the blueprint while the harness and the Team tab's Tools card
+    // tracked the edit — so granting or revoking `mcp:*` on a manifest
+    // teammate never moved the Connections surface.
+    let effective = record.effective_agents();
+    let names = roster_display_names(&effective, &record.overlay_agents);
     let roster_agent = |id: &str| RosterAgentDto {
         id: id.to_string(),
         name: names.get(id).cloned().unwrap_or_else(|| id.to_string()),
     };
-    let mut grants: Vec<(RosterAgentDto, Vec<String>)> = record
-        .manifest
-        .agents
+    let mut grants: Vec<(RosterAgentDto, Vec<String>)> = effective
         .iter()
         .map(|agent| {
             (
