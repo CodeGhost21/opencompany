@@ -179,6 +179,10 @@ CREATE TABLE IF NOT EXISTS runs (
     -- does, and `task_id = ?` never matches it — which is what a per-card
     -- filter wants.
     task_id    TEXT,
+    -- The index mirror of `run_json`'s `workflowRunId`, on the same terms as
+    -- `task_id` above: NULL reads as "belongs to no workflow", and
+    -- `workflow_run_id = ?` never matches it.
+    workflow_run_id TEXT,
     -- Issue #1573: the desk the attempt was dispatched to, mirrored out of
     -- `run_json` so the console's per-teammate history is an indexed read
     -- rather than a scan. Nullable only so the additive `ALTER` on an existing
@@ -193,6 +197,11 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
 CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
+-- NOTE: `runs_by_workflow_run` is deliberately NOT here. `CREATE TABLE IF NOT
+-- EXISTS` is a no-op on a database that predates `workflow_run_id`, so an index
+-- over that column would fail outright on exactly the legacy databases the
+-- additive step below exists for. It is created in `from_conn`, after
+-- `add_column_if_missing` has guaranteed the column.
 -- `runs_by_agent` is deliberately NOT here; see `heal_runs_agent_id`.
 CREATE TABLE IF NOT EXISTS run_steps (
     company_id TEXT NOT NULL,
@@ -202,6 +211,16 @@ CREATE TABLE IF NOT EXISTS run_steps (
     step_json  TEXT NOT NULL,
     PRIMARY KEY (company_id, run_id, step_seq)
 );
+CREATE TABLE IF NOT EXISTS run_step_details (
+    company_id  TEXT NOT NULL,
+    run_id      TEXT NOT NULL,
+    step_seq    INTEGER NOT NULL,
+    at_ms       INTEGER NOT NULL,
+    detail_json TEXT NOT NULL,
+    PRIMARY KEY (company_id, run_id, step_seq)
+);
+CREATE INDEX IF NOT EXISTS run_step_details_by_recency
+    ON run_step_details (company_id, at_ms);
 CREATE TABLE IF NOT EXISTS workflow_revisions (
     company_id    TEXT NOT NULL,
     id            TEXT NOT NULL,
@@ -584,6 +603,20 @@ impl SqliteStore {
         // insert on a constraint the record no longer has. Idempotent: it reads
         // the live schema and does nothing once the constraint is gone.
         relax_runs_task_id_nullability(&conn)?;
+        // The workflow-run join. Nullable with no default, so every existing row
+        // keeps `workflow_run_id IS NULL` — which is TRUE for them, not a
+        // placeholder: a run minted before workflow nodes recorded anything
+        // genuinely belongs to no workflow. No backfill.
+        //
+        // ORDER IS LOAD-BEARING: it runs AFTER the rebuild above, which recreates
+        // `runs` from a fixed column list and would drop this column (and its
+        // index) on any database old enough to need that rebuild.
+        add_column_if_missing(&conn, "runs", "workflow_run_id", "TEXT")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS runs_by_workflow_run \
+             ON runs (company_id, workflow_run_id);",
+        )
+        .map_err(sql_err)?;
         // Issue #1573: the `agent_id` mirror column, its backfill and its index.
         // After the rebuild above, which owns the table's shape on the one path
         // that replaces it wholesale.
@@ -2398,6 +2431,102 @@ impl crate::ports::run_output::WorkflowRunOutputStore for SqliteStore {
     }
 }
 
+#[async_trait]
+impl crate::ports::deep_trace::DeepTraceStore for SqliteStore {
+    async fn append_step_detail(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::deep_trace::RunStepDetailRecord,
+    ) -> Result<()> {
+        use crate::ports::deep_trace::MAX_DEEP_RUNS_PER_COMPANY;
+        let json = serde_json::to_string(&record.detail)?;
+        let mut guard = self.conn();
+        // Upsert + prune in ONE transaction, so a reader never observes an
+        // over-cap set. The prune keeps whole RUNS, not the newest rows: ranking
+        // rows would leave a surviving run holding a torn half of its own trace,
+        // which reads as the agent stopping mid-thought rather than as a prune.
+        // A run's recency is the newest `at_ms` any of its rows carries.
+        let tx = guard.transaction().map_err(sql_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO run_step_details \
+             (company_id, run_id, step_seq, at_ms, detail_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                company.as_ref(),
+                record.run_id,
+                record.step_seq as i64,
+                record.at_millis as i64,
+                json,
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            "DELETE FROM run_step_details \
+             WHERE company_id = ?1 AND run_id NOT IN (\
+                 SELECT run_id FROM run_step_details \
+                 WHERE company_id = ?1 \
+                 GROUP BY run_id \
+                 ORDER BY MAX(at_ms) DESC, run_id DESC LIMIT ?2)",
+            params![company.as_ref(), MAX_DEEP_RUNS_PER_COMPANY as i64],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn list_step_details(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Vec<crate::ports::deep_trace::RunStepDetailRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT step_seq, at_ms, detail_json FROM run_step_details \
+                 WHERE company_id = ?1 AND run_id = ?2 ORDER BY step_seq ASC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), run_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (step_seq, at_ms, json) = row.map_err(sql_err)?;
+            out.push(crate::ports::deep_trace::RunStepDetailRecord {
+                run_id: run_id.to_string(),
+                step_seq: step_seq as u32,
+                at_millis: at_ms as u64,
+                detail: serde_json::from_str(&json)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn purge_deep_trace(&self, company: &CompanyId, run_id: Option<&str>) -> Result<u64> {
+        let conn = self.conn();
+        let removed = match run_id {
+            Some(id) => conn
+                .execute(
+                    "DELETE FROM run_step_details WHERE company_id = ?1 AND run_id = ?2",
+                    params![company.as_ref(), id],
+                )
+                .map_err(sql_err)?,
+            None => conn
+                .execute(
+                    "DELETE FROM run_step_details WHERE company_id = ?1",
+                    params![company.as_ref()],
+                )
+                .map_err(sql_err)?,
+        };
+        Ok(removed as u64)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
@@ -2451,6 +2580,8 @@ impl crate::ports::runs::RunStore for SqliteStore {
             task_id: spec.task_id,
             agent_id: spec.agent_id,
             chat_id: spec.chat_id,
+            workflow_run_id: spec.workflow_run_id,
+            node_id: spec.node_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2463,12 +2594,13 @@ impl crate::ports::runs::RunStore for SqliteStore {
         };
         tx.execute(
             "INSERT INTO runs \
-             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (company_id, id, task_id, workflow_run_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.workflow_run_id,
                 run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
@@ -2508,13 +2640,15 @@ impl crate::ports::runs::RunStore for SqliteStore {
     ) -> Result<()> {
         let json = serde_json::to_string(run)?;
         let conn = self.conn();
-        // `status` and `task_id` are mirrored out of the blob so the indexes
-        // can answer a filtered list without deserializing every row.
+        // `status`, `task_id` and `workflow_run_id` are mirrored out of the blob
+        // so the indexes can answer a filtered list without deserializing every
+        // row.
         conn.execute(
             "INSERT INTO runs \
-             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             (company_id, id, task_id, workflow_run_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT(company_id, id) DO UPDATE SET task_id = excluded.task_id, \
+             workflow_run_id = excluded.workflow_run_id, \
              agent_id = excluded.agent_id, \
              status = excluded.status, attempt = excluded.attempt, \
              created_ms = excluded.created_ms, run_json = excluded.run_json",
@@ -2522,6 +2656,7 @@ impl crate::ports::runs::RunStore for SqliteStore {
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.workflow_run_id,
                 run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
@@ -2546,6 +2681,10 @@ impl crate::ports::runs::RunStore for SqliteStore {
         if let Some(task_id) = &filter.task_id {
             args.push(task_id.clone());
             sql.push_str(&format!(" AND task_id = ?{}", args.len()));
+        }
+        if let Some(workflow_run_id) = &filter.workflow_run_id {
+            args.push(workflow_run_id.clone());
+            sql.push_str(&format!(" AND workflow_run_id = ?{}", args.len()));
         }
         if let Some(agent_id) = &filter.agent_id {
             args.push(agent_id.clone());
@@ -4316,6 +4455,16 @@ mod test {
     #[tokio::test]
     async fn conformance_run_reaper() {
         conformance::assert_run_reaper(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_deep_trace_store() {
+        conformance::assert_deep_trace_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_run_store_workflow_join() {
+        conformance::assert_run_store_workflow_join(store()).await;
     }
 
     #[tokio::test]
