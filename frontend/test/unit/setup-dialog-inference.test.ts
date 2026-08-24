@@ -220,6 +220,23 @@ describe("readiness is the addressed company's, not the host's", () => {
     expect(linkNamed("Set up a model")).toBeUndefined();
   });
 
+  it("does not claim no model can run when a hosted brain is the one without the design pass", async () => {
+    // A `hosted`/`sidecar`/`custom` deployment runs a model — this binary just
+    // cannot design a roster from it. "can't run a model" would be a lie, so the
+    // copy says the team can't be designed with one instead.
+    for (const cognition of ["hosted", "sidecar", "custom"] as const) {
+      await show(
+        clientWith({
+          status: async () =>
+            ({ ...ECHO, cognition, harnessReachable: false }) as InferenceStatus,
+        }),
+      );
+      const notice = find("setup-inference-notice");
+      expect(notice?.textContent).toContain("can't design your team with a model");
+      expect(notice?.textContent).not.toContain("can't run a model");
+    }
+  });
+
   it("names the restart a configured company is waiting on instead of offering to set up a model again", async () => {
     // A company that booted with no inference source and had a credential saved
     // afterwards is *configured* — offering "Set up a model" again would send
