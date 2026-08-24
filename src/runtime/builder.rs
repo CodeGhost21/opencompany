@@ -226,11 +226,17 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     if literal == "composio" || literal.starts_with("composio.") {
         return crate::company::grants_composio_explicit(allow);
     }
+    if literal == "chargebee" || literal.starts_with("chargebee.") {
+        return crate::company::grants_chargebee_explicit(allow);
+    }
+    if literal == "hosting" || literal.starts_with("hosting.") {
+        return crate::company::grants_hosting_explicit(allow);
+    }
+    if literal == "paypal" || literal.starts_with("paypal.") {
+        return crate::company::grants_paypal_explicit(allow);
+    }
     if literal == "search" || literal.starts_with("search.") {
         return crate::company::grants_search_explicit(allow);
-    }
-    if literal == "repo" || literal.starts_with("repo.") {
-        return crate::company::grants_repo_explicit(allow);
     }
 
     // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
