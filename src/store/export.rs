@@ -388,6 +388,11 @@ impl BundleContents {
         for trace in &self.traces {
             memory.save_trace(&self.id, trace.clone()).await?;
         }
+        if let Some(scopes) = scopes {
+            scopes
+                .restore_archived_traces(&self.id, &self.archived_traces)
+                .await?;
+        }
         for chunk in &self.context {
             context
                 .put(
