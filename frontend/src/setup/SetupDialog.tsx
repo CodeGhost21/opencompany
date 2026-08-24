@@ -22,6 +22,7 @@ import {
   buildOutLabel,
   draftIsSubmittable,
   emptySetupDraft,
+  staffedTeam,
   stepProblem,
   type SetupDraft,
 } from "@/lib/company-setup";
