@@ -1995,18 +1995,19 @@ impl CompanyRuntime {
     ///
     /// The roster check goes through [`crate::runtime::assignee::resolve`] for
     /// its desk-first ordering: the same one `responder_for` uses, so a desk
-    /// whose id happens to match a teammate id still stores the desk id. The
-    /// human user directory is deliberately consulted **only** when the store
-    /// will not answer — never ahead of that resolution, or a desk id matching
-    /// a human id would be misclassified as `dm:<id>`. The
-    /// resolution carries the **canonical** id (issue #214), so a key typed as
-    /// a display name — `chat: "Engineering"` for a desk whose id is
-    /// `engineering` — stores the canonical id, which is what the rail's
-    /// channel ids are built from. A `dm:`-prefixed key goes through the same
-    /// resolution with the prefix split off, so a noncanonical address —
-    /// `dm:BACKEND_ENGINEER`, `dm:<display name>` — still stores
-    /// `dm:<canonical-agent-id>` and badges the rail's real DM channel rather
-    /// than one that does not exist.
+    /// whose id happens to match a teammate id still stores the desk id, and a
+    /// desk literally named `dm:<…>` keeps that id instead of being displaced
+    /// by the `dm:`-stripped retry. The human user directory is deliberately
+    /// consulted **only** when the store will not answer — never ahead of that
+    /// resolution, or a desk id matching a human id would be misclassified as
+    /// `dm:<id>`. The resolution carries the **canonical** id (issue #214), so
+    /// a key typed as a display name — `chat: "Engineering"` for a desk whose
+    /// id is `engineering` — stores the canonical id, which is what the rail's
+    /// channel ids are built from. A `dm:`-prefixed key is tried **as sent**
+    /// first and only split for the retry when it names nothing — so a
+    /// noncanonical address — `dm:BACKEND_ENGINEER`, `dm:<display name>` —
+    /// still stores `dm:<canonical-agent-id>` and badges the rail's real DM
+    /// channel rather than one that does not exist.
     pub(crate) async fn mention_context(
         &self,
         id: &CompanyId,
