@@ -79,6 +79,14 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   // route's attempts — including raw deep-trace bodies — cannot paint the
   // current route.
   const reloadGeneration = useRef(0);
+  // The unredacted half of the attempts a reader has actually opened, keyed by
+  // run id. The list read deliberately selects no deep bodies — they can hold
+  // credentials and file contents — so a card's deep panes are fetched here,
+  // and only here, when the card opens, and joined onto the freshest list
+  // skeleton in the render below. A route change clears the map, and bumps
+  // `deepGeneration`, so one company's raw bodies cannot outlive its route.
+  const [deepByRun, setDeepByRun] = useState<Record<string, ObservatoryRun>>({});
+  const deepGeneration = useRef(0);
 
   // Navigating between runs (following an Observatory link to another run)
   // changes `runId` while this view stays mounted, and such links deliberately
