@@ -372,7 +372,14 @@ and treating everyone else's work as part of the team being replaced. The
 completion screen's in-place "Try again" records the same debt (the rows the
 failed pass just created) before restarting the questions, so a reload or crash
 before that replacement lands can reopen setup in redesign mode rather than
-leaving the gate reporting staffed with no way back in.
+leaving the gate reporting staffed with no way back in. The debt is settled the
+moment the replacement lands, not when the operator clicks a completion action:
+a designed replacement clears it (the owed redesign is done, exactly as
+finishing setup would), a replacement that fell back again re-keys it to the new
+fallback's rows, and a rollback that could not remove every partial row extends
+it to name the survivors — so a reload on the completion screen, or before a
+retry after a refused rollback, never reopens against a boundary the landing
+just deleted or misses a row it left behind.
 
 ## How we know it is someone's first time
 
