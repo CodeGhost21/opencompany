@@ -814,7 +814,7 @@ export function AgentDetailView({
               )}
             </Section>
 
-            <Tools agent={agent} />
+            <Tools agent={agent} saving={saving} onSave={(globs) => saveTools(globs)} />
             <HarnessAndModel
               agent={agent}
               harnesses={harnesses}
