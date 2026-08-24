@@ -26,9 +26,9 @@
 //! privacy argument and the use case are absent. Same `401` as
 //! [`read_state`](super::read_state), and for the same reason.
 
+use crate::server::error::Rejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use crate::server::error::Rejection;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;

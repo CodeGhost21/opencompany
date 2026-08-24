@@ -117,18 +117,16 @@ async fn run_verify(
     let Some(resolver) = state.connections().dns.clone() else {
         return Err(super::not_wired("domain verification").into());
     };
-    let stored = load_domain(&runtime)
-        .await?;
+    let stored = load_domain(&runtime).await?;
     let Some(stored) = stored else {
         return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
             "no domain configured".to_string(),
         ))
-        .into_response().into());
+        .into_response()
+        .into());
     };
-    let status = dns::verify(&stored.domain, resolver.as_ref())
-        .await?;
-    persist(&runtime, &status)
-        .await?;
+    let status = dns::verify(&stored.domain, resolver.as_ref()).await?;
+    persist(&runtime, &status).await?;
     Ok(Json(status))
 }
 

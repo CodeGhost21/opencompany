@@ -164,10 +164,7 @@ async fn list_users(
 ) -> Result<Json<Vec<UserSummary>>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     require_admin(&headers, &state, &runtime, peer).await?;
-    let users = runtime
-        .users()
-        .list_users(runtime.id())
-        .await?;
+    let users = runtime.users().list_users(runtime.id()).await?;
     Ok(Json(users.into_iter().map(UserSummary::from).collect()))
 }
 
@@ -181,19 +178,12 @@ async fn list_invites(
     let runtime = company.runtime.clone();
     require_admin(&headers, &state, &runtime, peer).await?;
     let now = now_millis();
-    let mut invites = runtime
-        .users()
-        .list_invites(runtime.id())
-        .await?;
+    let mut invites = runtime.users().list_invites(runtime.id()).await?;
     // Manifest admins are eligible without an invite record. Showing only the
     // stored ones would render a list that contradicts who can actually log in.
     let stored: Vec<String> = invites.iter().map(|i| i.email.clone()).collect();
-    let users = runtime
-        .users()
-        .list_users(runtime.id())
-        .await?;
-    let synthetic = manifest_admin_invites(state.config(), &runtime, now)
-        .await?;
+    let users = runtime.users().list_users(runtime.id()).await?;
+    let synthetic = manifest_admin_invites(state.config(), &runtime, now).await?;
     for invite in synthetic {
         let already_a_user = users.iter().any(|u| u.email == invite.email);
         if !stored.contains(&invite.email) && !already_a_user {
@@ -406,8 +396,7 @@ async fn invite(
         return Err(refusal.into());
     }
     let admin = require_admin(&headers, &state, &runtime, peer).await?;
-    let identity = body
-        .identity(runtime.auth_mode())?;
+    let identity = body.identity(runtime.auth_mode())?;
     let now = now_millis();
     if runtime
         .users()
@@ -419,7 +408,8 @@ async fn invite(
             "{} is already a member",
             LoginIdentity::parse(&identity).label()
         )))
-        .into_response().into());
+        .into_response()
+        .into());
     }
     let mut record = InviteRecord {
         id: generate_id(),
@@ -432,10 +422,7 @@ async fn invite(
         notified_at_millis: None,
     };
     // The store enforces one invite per address; a clash surfaces as 409.
-    runtime
-        .users()
-        .upsert_invite(runtime.id(), &record)
-        .await?;
+    runtime.users().upsert_invite(runtime.id(), &record).await?;
 
     // Strictly after the grant lands. Mailing first would tell someone they
     // were invited by a request that then 409'd on a duplicate or failed in the
@@ -499,7 +486,8 @@ async fn revoke_invite(
              [users].admins there instead"
                 .to_string(),
         ))
-        .into_response().into());
+        .into_response()
+        .into());
     }
     if invite_id.starts_with("platform:") {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
@@ -507,7 +495,8 @@ async fn revoke_invite(
              unset it there instead"
                 .to_string(),
         ))
-        .into_response().into());
+        .into_response()
+        .into());
     }
     let removed = runtime
         .users()
@@ -558,10 +547,7 @@ async fn update_user(
         user.display_name = Some(name);
     }
     user.updated_at_millis = now_millis();
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await?;
+    runtime.users().upsert_user(runtime.id(), &user).await?;
 
     // Suspension must bite now, not at cookie expiry. resolve_principal also
     // re-checks status per request; this closes the window and frees the rows.
@@ -615,10 +601,7 @@ async fn reset_password(
     user.password_hash = Some(hash);
     user.must_change_password = true;
     user.updated_at_millis = now_millis();
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await?;
+    runtime.users().upsert_user(runtime.id(), &user).await?;
 
     // Every session goes: a reset is what you do when you believe the account
     // is compromised, so leaving live sessions running would defeat it.
@@ -670,7 +653,8 @@ async fn load_user(
             ApiError(OpenCompanyError::InvalidRequest(format!(
                 "no user {user_id}"
             )))
-            .into_response().into()
+            .into_response()
+            .into()
         })
 }
 
@@ -682,10 +666,7 @@ async fn ensure_not_last_admin(
     if target.role != UserRole::Admin || target.status != UserStatus::Active {
         return Ok(());
     }
-    let users = runtime
-        .users()
-        .list_users(runtime.id())
-        .await?;
+    let users = runtime.users().list_users(runtime.id()).await?;
     let others = users
         .iter()
         .filter(|u| {
@@ -696,7 +677,8 @@ async fn ensure_not_last_admin(
         return Err(ApiError(OpenCompanyError::Conflict(
             "this is the company's last admin; promote someone else first".to_string(),
         ))
-        .into_response().into());
+        .into_response()
+        .into());
     }
     Ok(())
 }

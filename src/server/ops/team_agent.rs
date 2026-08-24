@@ -489,9 +489,7 @@ async fn edit_agent(
         .store()
         .load(company.id())
         .await?
-        .ok_or_else(|| {
-            OpenCompanyError::CompanyNotFound(company.id().to_string())
-        })?;
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
 
     // Identity before validation, so an unknown id is a 404 rather than a
     // complaint about the shape of a body nobody could have applied anyway.
@@ -509,7 +507,8 @@ async fn edit_agent(
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         )))
-        .into_response().into());
+        .into_response()
+        .into());
     }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
 
@@ -619,11 +618,7 @@ async fn edit_agent(
         }
     }
 
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await?;
+    company.runtime.store().save(&record).await?;
 
     // The caller either passed `require_admin` above or sent no `tools`, so
     // re-resolve rather than assume: an admin editing only a name must still

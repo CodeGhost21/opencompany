@@ -434,13 +434,13 @@ async fn run_test(
     let Some(sender) = state.connections().mail.clone() else {
         return Err(super::not_wired("smtp test send").into());
     };
-    let creds = load_credentials(&runtime)
-        .await?;
+    let creds = load_credentials(&runtime).await?;
     let Some(creds) = creds else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "no SMTP credentials configured".to_string(),
         ))
-        .into_response().into());
+        .into_response()
+        .into());
     };
     let to = body.to.unwrap_or_else(|| creds.from_email.clone());
     let email = OutboundEmail {

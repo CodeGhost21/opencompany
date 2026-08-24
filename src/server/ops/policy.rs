@@ -363,7 +363,9 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
         .load(company.id())
         .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response().into()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 

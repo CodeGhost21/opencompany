@@ -28,10 +28,10 @@
 //! renewal *is* the stop signal. A console that closes mid-word therefore
 //! clears itself with no teardown to get wrong.
 
+use crate::server::error::Rejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use crate::server::error::Rejection;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};

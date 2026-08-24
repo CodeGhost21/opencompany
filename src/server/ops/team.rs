@@ -506,11 +506,7 @@ async fn add_member(
             ..Default::default()
         });
     }
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await?;
+    company.runtime.store().save(&record).await?;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
@@ -655,11 +651,7 @@ async fn set_budget(
     // One override per teammate: replace in place rather than accumulating, so
     // `effective_budget`'s first-match read can never see a stale row.
     record.upsert_budget_override(entry);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -690,11 +682,7 @@ async fn clear_budget(
     }
 
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -735,7 +723,9 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
         .load(company.id())
         .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response().into()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 

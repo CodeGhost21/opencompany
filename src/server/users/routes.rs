@@ -519,7 +519,8 @@ async fn mint_session(
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "this company's id cannot carry a session cookie".to_string(),
         ))
-        .into_response().into());
+        .into_response()
+        .into());
     };
     let plaintext = create_session(
         runtime,
@@ -543,7 +544,8 @@ async fn mint_session(
             return Err(ApiError(OpenCompanyError::InvalidRequest(
                 "this company's id cannot carry a session header".to_string(),
             ))
-            .into_response().into());
+            .into_response()
+            .into());
         };
         return Ok(Json(SignInResult {
             user: me_result(company, user),
@@ -597,8 +599,7 @@ async fn request_code(
     let email = normalize_email(&body.email);
     let now = now_millis();
 
-    let eligible = eligibility(state.config(), &runtime, &email, now)
-        .await?;
+    let eligible = eligibility(state.config(), &runtime, &email, now).await?;
     let Some(_role) = eligible else {
         // Unknown or uninvited: no code, no mail, same answer.
         return Ok(Json(RequestCodeResult {
@@ -647,10 +648,7 @@ async fn request_code(
         .login_codes()
         .delete_for_email(runtime.id(), &email)
         .await?;
-    runtime
-        .login_codes()
-        .create(runtime.id(), &record)
-        .await?;
+    runtime.login_codes().create(runtime.id(), &record).await?;
 
     // Deliver. A send failure must not change the response — it would report
     // that the address exists.
@@ -777,14 +775,11 @@ async fn verify_code(
 
     // The address comes from the *code*, never from the request: otherwise
     // anyone holding any valid link could name whoever they liked.
-    let Some(role) = eligibility(state.config(), &runtime, &code.email, now)
-        .await?
-    else {
+    let Some(role) = eligibility(state.config(), &runtime, &code.email, now).await? else {
         // Eligibility can lapse between mailing and clicking.
         return Err(invalid_login().into());
     };
-    let user = upsert_from_eligibility(&runtime, &code.email, role, now)
-        .await?;
+    let user = upsert_from_eligibility(&runtime, &code.email, role, now).await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -939,9 +934,7 @@ async fn hub_sign_in(
 
     let email = normalize_email(&identity.email);
     let now = now_millis();
-    let Some(role) = eligibility(state.config(), &runtime, &email, now)
-        .await?
-    else {
+    let Some(role) = eligibility(state.config(), &runtime, &email, now).await? else {
         // Signed in to the ecosystem, but not a person this company knows. A
         // distinct code so the console can say "ask an admin to invite you"
         // instead of "that sign-in is dead".
@@ -949,8 +942,7 @@ async fn hub_sign_in(
             hub_refused("not_a_member", "that account has no access to this company").into(),
         );
     };
-    let user = upsert_from_eligibility(&runtime, &email, role, now)
-        .await?;
+    let user = upsert_from_eligibility(&runtime, &email, role, now).await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -1092,10 +1084,7 @@ async fn set_password(
     // Whatever prompted the change is now satisfied.
     user.must_change_password = false;
     user.updated_at_millis = now;
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await?;
+    runtime.users().upsert_user(runtime.id(), &user).await?;
 
     // Every *other* session is revoked: changing a password is what someone
     // does when they think a session is stolen, so leaving the others live
@@ -1155,8 +1144,7 @@ async fn wallet_challenge(
     };
 
     let identity = LoginIdentity::Wallet(address.clone()).key();
-    let eligible = eligibility(state.config(), &runtime, &identity, now)
-        .await?;
+    let eligible = eligibility(state.config(), &runtime, &identity, now).await?;
     if eligible.is_none() {
         return Ok(Json(wallet::unpersisted_challenge(
             runtime.id(),
@@ -1197,14 +1185,11 @@ async fn wallet_verify(
     // The address comes from the challenge record, never from this request, so
     // eligibility is re-checked against the wallet that actually signed.
     let identity = LoginIdentity::Wallet(address).key();
-    let Some(role) = eligibility(state.config(), &runtime, &identity, now)
-        .await?
-    else {
+    let Some(role) = eligibility(state.config(), &runtime, &identity, now).await? else {
         // Eligibility can lapse between the challenge and the answer.
         return Err(invalid_login().into());
     };
-    let user = upsert_from_eligibility(&runtime, &identity, role, now)
-        .await?;
+    let user = upsert_from_eligibility(&runtime, &identity, role, now).await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 

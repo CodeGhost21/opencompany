@@ -149,11 +149,7 @@ struct DeskDto {
 /// when the company defines none (the console then falls back to its static
 /// default threads).
 async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::server::Rejection> {
-    let record = scope
-        .runtime
-        .store()
-        .load(scope.id())
-        .await?;
+    let record = scope.runtime.store().load(scope.id()).await?;
     let desks = record
         .map(|record| {
             // Manifest (blueprint) desks first, then operator-created overlay
@@ -2525,14 +2521,13 @@ async fn chat_history_response(
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let viewer = history_viewer(headers, state, company, peer).await?;
-    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
-        .await?;
+    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
         .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
         .min(CHAT_HISTORY_PAGE_LIMIT);
-    let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
-        .await?;
+    let messages =
+        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit).await?;
     Ok(Json(
         messages
             .into_iter()
@@ -2604,11 +2599,8 @@ async fn attribution_audit_response(
         .store()
         .load(runtime.id())
         .await?
-        .ok_or_else(|| {
-            OpenCompanyError::CompanyNotFound(company.to_string())
-        })?;
-    let audit = channel_attributed_replies(&runtime, &record)
-        .await?;
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
+    let audit = channel_attributed_replies(&runtime, &record).await?;
     Ok(Json(AttributionAuditDto {
         replies: audit.replies,
         affected: audit.affected,
@@ -2699,17 +2691,13 @@ async fn react_to_message(
     body: ReactionBody,
 ) -> Result<StatusCode, crate::server::Rejection> {
     let by = chat_actor(headers, state, company, peer).await?;
-    let message_seq =
-        parse_message_id(&seq)?;
+    let message_seq = parse_message_id(&seq)?;
     validate_emoji(&body.emoji)?;
     // The target must be a message. Without this the route would happily hang a
     // reaction off an approval, a lifecycle change, or a sequence position that
     // has never existed — none of which any reader could render, and all of
     // which would sit in the log forever claiming otherwise.
-    let target = runtime
-        .events()
-        .read_from(company, message_seq, 1)
-        .await?;
+    let target = runtime.events().read_from(company, message_seq, 1).await?;
     let is_message = target
         .first()
         .filter(|stored| stored.seq == message_seq)
@@ -2721,7 +2709,9 @@ async fn react_to_message(
         });
     if !is_message {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}"))).into_response().into(),
+            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
+                .into_response()
+                .into(),
         );
     }
     runtime
