@@ -2326,9 +2326,7 @@ async fn workflow_tool_slugs(
         .load(company.runtime.id())
         .await
         .map_err(|err| ApiError(err).into_response())?
-        .ok_or_else(|| {
-            OpenCompanyError::CompanyNotFound(company.runtime.id().to_string())
-        })?;
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.runtime.id().to_string()))?;
     // `None` — no harness deps on this runtime — means the wiring is unknowable,
     // not that nothing is wired. Both helpers below read it that way: `slugs`
     // falls back to the grant-only set and `unwired` stays empty, which is the
