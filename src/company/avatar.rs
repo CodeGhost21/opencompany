@@ -911,16 +911,6 @@ fn not_an_image() -> OpenCompanyError {
     )
 }
 
-/// The refusal for an animation whose block or chunk stream ends after its
-/// frames have begun. A browser decodes the frames that are present, so the
-/// per-cycle cap is what bounds it; accepting it as a still would be the exact
-/// bypass the walkers' `Err` exists to close.
-fn truncated_animation() -> OpenCompanyError {
-    OpenCompanyError::InvalidRequest(
-        "that image is a truncated animation, so it can't be an avatar.".to_string(),
-    )
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
