@@ -62,6 +62,7 @@ import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { VIEWS, type View } from "@/lib/console-routes";
 import { taskIdFromSegment } from "@/lib/task-route";
@@ -2180,7 +2181,12 @@ export function AppShell({
               }}
               // Back, and a deleted card, go to the board — which is the
               // `tasks` ledger. Through `navigate` so the address follows.
-              onLeave={() => navigate("ledgers", BOARD_LEDGER)}
+              onLeave={() =>
+                navigate("ledgers", BOARD_LEDGER, {
+                  [LEDGER_VIEW_PARAM]:
+                    readLedgerViewMode() === "list" ? "list" : null,
+                })
+              }
             />
           )}
           {/*
@@ -2222,7 +2228,11 @@ export function AppShell({
               // A board card leaves for its own screen. The board renders
               // here; the card's timeline, plan, discussion and attempts stay
               // where they already work.
-              onOpenCard={(id) => navigate("tasks", id)}
+              onOpenCard={(id, mode) =>
+                navigate("tasks", id, {
+                  [LEDGER_VIEW_PARAM]: mode === "list" ? "list" : null,
+                })
+              }
               // Issue #464: the board learns that work appeared. The same
               // counter the chat's in-flight strip reads, so a card opened from
               // chat lands on the board without a reload.
