@@ -474,6 +474,9 @@ export function PolicySettings({ client, company }: Props) {
       apply(
         await setPolicy(client, company, { approvalTtlHours: hours }),
         "Approval deadline updated",
+        // An unsaved always-ask edit and a half-typed cap are the operator's;
+        // the PUT only touched the deadline.
+        { alwaysAsk: !dirty, spendCap: false },
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save the deadline.");
