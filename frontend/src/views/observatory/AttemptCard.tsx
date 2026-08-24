@@ -44,7 +44,17 @@ interface Props {
 export function AttemptCard({ run, nowMs, turn, focusStep }: Props) {
   const focused = turn === run.id;
   const [open, setOpen] = useState(() => opensItself(run) || focused);
+  const previousState = useRef(state);
   const state = runState(run);
+  useEffect(() => {
+    if (
+      (previousState.current === "running" || previousState.current === "done") &&
+      (state === "failed" || state === "blocked")
+    ) {
+      setOpen(true);
+    }
+    previousState.current = state;
+  }, [state]);
   const elapsed =
     (run.finishedAtMillis ?? nowMs) - (run.startedAtMillis ?? run.createdAtMillis);
   // `cachedInput` is a subset of `input` (prompt_tokens_details.cached_tokens),
