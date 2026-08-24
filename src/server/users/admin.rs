@@ -554,6 +554,7 @@ async fn update_user(
         user.status = status;
     }
     if let Some(name) = body.display_name {
+        super::validate_display_name(&name)?;
         user.display_name = Some(name);
     }
     user.updated_at_millis = now_millis();
