@@ -286,14 +286,14 @@ impl BoundMemory {
         // held, accept the temporary over-capacity: those `Arc`s drain as
         // their callers drop them, and the next access to an unheld scope
         // evicts again.
-        if !cache.contains_key(&key) && cache.len() >= SCOPED_CONTEXT_CACHE_CAPACITY {
-            if let Some(victim) = cache
+        if !cache.contains_key(&key)
+            && cache.len() >= SCOPED_CONTEXT_CACHE_CAPACITY
+            && let Some(victim) = cache
                 .iter()
                 .find(|(_, facade)| Arc::strong_count(facade) == 1)
                 .map(|(k, _)| k.clone())
-            {
-                cache.remove(&victim);
-            }
+        {
+            cache.remove(&victim);
         }
         cache.entry(key).or_insert_with(|| Arc::new(make())).clone()
     }
