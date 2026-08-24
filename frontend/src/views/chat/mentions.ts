@@ -300,9 +300,18 @@ export function reconcileMentions(
     out.push({ ...mention, offset: at });
   };
 
-  // The deleted region in `previous`'s coordinates: the common prefix, then
-  // the common suffix. Anything between them is what the edit removed. A pure
-  // insertion collapses the region to empty and no mention is dropped.
+  // The edited region in `previous`'s coordinates: the common prefix, then the
+  // common suffix. Anything between them is what the edit removed. A mention
+  // whose span the edit touched is dropped before the reverse scan, so a
+  // broken mention cannot re-anchor onto an unrelated same-text occurrence.
+  //
+  // The overlap test covers both kinds of edit: a deletion (or replacement)
+  // leaves a non-empty `[deletedStart, deletedEnd)` that overlaps the span,
+  // while a pure insertion collapses the region to `[p, p)` — empty by length
+  // but still meaning "the insertion point `p` sits strictly inside the span",
+  // which is exactly the case where an inserted character broke the mention
+  // text. So the filter runs unconditionally; guarding on `deletedEnd >
+  // deletedStart` would let the insertion case slip through and re-anchor.
   if (previous && previous !== text) {
     let prefix = 0;
     const maxPrefix = Math.min(previous.length, text.length);
@@ -317,12 +326,10 @@ export function reconcileMentions(
     }
     const deletedStart = prefix;
     const deletedEnd = previous.length - suffix;
-    if (deletedEnd > deletedStart) {
-      mentions = mentions.filter((m) => {
-        const end = m.offset + m.text.length;
-        return !(m.offset < deletedEnd && end > deletedStart);
-      });
-    }
+    mentions = mentions.filter((m) => {
+      const end = m.offset + m.text.length;
+      return !(m.offset < deletedEnd && end > deletedStart);
+    });
   }
 
   for (let i = mentions.length - 1; i >= 0; i--) {
