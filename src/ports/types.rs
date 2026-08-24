@@ -190,6 +190,136 @@ pub struct Actor {
     pub id: String,
 }
 
+// ---------------------------------------------------------------------------
+// Mentions
+// ---------------------------------------------------------------------------
+
+/// Who a mention points at.
+///
+/// Deliberately **not** [`Actor`]: `@everyone` is a *scope*, not an actor, and
+/// `Actor` is a closed `{kind, id}` pair with no room for one. Modelling the
+/// broadcast token as a first-class variant is what keeps it readable on
+/// reload and in export — expanding it into N literal `@name`s at compose time
+/// (the shape `block/buzz` uses for its team mentions) loses the fact that the
+/// message was addressed to the *room* the moment it is journaled.
+///
+/// Internally tagged under `kind`, matching [`CompanyEvent`]'s own discipline,
+/// so every stored mention is self-describing.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum MentionTarget {
+    /// A roster teammate, by its `[[agent]].id`. The only variant that can
+    /// change who answers a message — see `crate::runtime::mentions`.
+    Agent {
+        /// The teammate's roster id.
+        id: String,
+    },
+    /// A human collaborator, by [`UserRecord::id`](crate::ports::users::UserRecord).
+    ///
+    /// Carried as an **id**, never as the typed label: a human has no handle in
+    /// this system (only a display name that can change and is not unique), so
+    /// resolving a mention by re-parsing text later would silently re-point it
+    /// after a rename. The literal the author typed lives in [`Mention::text`].
+    User {
+        /// The collaborator's user id.
+        id: String,
+    },
+    /// A desk, by its `[[group_chat]].id` — `@#engineering`.
+    Desk {
+        /// The desk's id.
+        id: String,
+    },
+    /// `@everyone` / `@channel`. Notifies every human in the company and puts
+    /// every roster agent on the addressed desk into the answering turn's
+    /// context.
+    ///
+    /// **Not a fan-out.** One operator message still spawns exactly one turn;
+    /// the mentioned agents are named *to* that turn, which spreads the work
+    /// through the existing gated delegation seam if it judges that it should.
+    Everyone,
+}
+
+impl MentionTarget {
+    /// The roster teammate this mention names, or `None` for every other
+    /// variant. The single accessor dispatch routing is allowed to consult.
+    pub fn agent_id(&self) -> Option<&str> {
+        match self {
+            Self::Agent { id } => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The human collaborator this mention names, or `None` for every other
+    /// variant.
+    pub fn user_id(&self) -> Option<&str> {
+        match self {
+            Self::User { id } => Some(id.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// One mention inside one chat message.
+///
+/// **Structured and authoritative.** The message body keeps the literal text
+/// the author typed, byte for byte, and this list says who that text actually
+/// resolved to at the moment it was sent. Two properties follow, and both are
+/// the reason it is stored this way rather than re-derived from the body:
+///
+/// * A rename never rewrites history. `@Jane` stays `@Jane` in the transcript
+///   and still resolves to the same person after they become `Jane Doe`.
+/// * Quoting a message cannot re-ping anybody, because a quote carries text
+///   and no mention rows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mention {
+    /// Who is mentioned.
+    pub target: MentionTarget,
+    /// The literal span the author typed — `@alice`, `@Jane Doe`, `@everyone`.
+    ///
+    /// What the renderer highlights, and **never** re-derived from the target's
+    /// current name. A chip that disagreed with the surrounding prose would be
+    /// a worse lie than no chip at all.
+    pub text: String,
+    /// Byte offset of [`Self::text`] within the message body.
+    ///
+    /// Carrying the span is what lets a multi-word human label (`@Jane Doe`)
+    /// work with no handle and no slug: the renderer highlights a known range
+    /// instead of regexing the body for something it hopes is a name.
+    pub offset: usize,
+    /// Render-only: draw the chip, but do not notify and do not route.
+    ///
+    /// Inverted (`quiet` rather than `notify`) so the `false` default means
+    /// "this pings", and the key is therefore omitted from the wire on every
+    /// ordinary mention. This is `block/buzz`'s two-tag split — `["p", id]`
+    /// notifies, `["mention", id]` only renders — collapsed into one field,
+    /// because a single list with a flag round-trips additively where two
+    /// parallel lists would not.
+    ///
+    /// Set by the server, never by the client: it is how a mention whose target
+    /// has since left the roster is demoted rather than dropped. The chip
+    /// disappears, the text stays, nobody is pinged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
+}
+
+/// How many mentions one message may carry as *pings*.
+///
+/// The blast-radius limit, and the reason `@everyone` needs no separate cap.
+/// Past this the tail is demoted to [`Mention::quiet`] rather than deleted —
+/// the spans survive, so what a reader sees still matches what the author
+/// wrote, and only the notifying stops. Same value `block/buzz` settled on.
+pub const MENTION_CAP: usize = 50;
+
+/// `skip_serializing_if` for [`CompanyEvent::AgentReply::mention_depth`].
+///
+/// A free function rather than `u8::eq(&0)` because `skip_serializing_if` takes
+/// a path, and this is the one place the "omitted means zero" contract for that
+/// field is written down.
+fn is_zero_depth(depth: &u8) -> bool {
+    *depth == 0
+}
+
 /// An operator's resolution of a parked approval.
 ///
 /// The HTTP body uses the lowercase strings `"approve"` / `"deny"`. The
@@ -355,6 +485,22 @@ pub enum CompanyEvent {
         /// words are unchanged, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deliverable: Option<MessageIntent>,
+        /// Who this message names, resolved at send time.
+        ///
+        /// The body keeps the literal `@text`; this says who it pointed at, so
+        /// the transcript renders the same chips a reload does and routing has
+        /// something to consult that is not a regex over prose. Populated from
+        /// the console's picker when it sends one, and otherwise extracted
+        /// host-side from the text — either way re-validated against the live
+        /// roster before it is journaled, so a stale client cannot ping a
+        /// teammate that no longer exists.
+        ///
+        /// Additive on exactly the `by` / `chat` / `parent` / `deliverable`
+        /// terms above: an empty list is skipped, so every already-persisted
+        /// message serializes byte-for-byte as it did before this field, and no
+        /// stored record migrates.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<Mention>,
     },
     /// A turn was **accepted** for an operator message (issue #983) — the
     /// transcript line that says the company took the work on.
@@ -621,6 +767,29 @@ pub enum CompanyEvent {
         /// `task_id` above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<EventSeq>,
+        /// Who this reply names, extracted host-side from its text.
+        ///
+        /// Rendered as chips exactly like an operator message's, and — unlike
+        /// an operator message's — **never consulted by dispatch**. That
+        /// asymmetry is the mention-loop fuse: there is no code path from a
+        /// reply's mentions to a turn, so an agent naming another agent draws a
+        /// chip and files nothing to run. The edge does not exist, which is a
+        /// stronger guarantee than an edge that is disabled.
+        ///
+        /// Additive on the same terms as `task_id` and `parent` above.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<Mention>,
+        /// How many mention hops produced this reply.
+        ///
+        /// **Reserved, and zero on every reply today.** The agent-to-agent
+        /// dispatch edge described above is off, so nothing increments this.
+        /// It ships now because it is the gate that would bound the edge if it
+        /// were ever turned on (`depth >= 2` refuses), and shipping the field
+        /// with the feature costs one omitted-when-zero key — where adding it
+        /// later would be a wire change made under pressure, at exactly the
+        /// moment a loop was being chased.
+        #[serde(default, skip_serializing_if = "is_zero_depth")]
+        mention_depth: u8,
     },
     /// A reaction was set or cleared on one chat message (issue #364).
     ///
@@ -1460,30 +1629,16 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
-    /// A call inside a `sub_workflow` child ran **without** being offered for
-    /// approval, on a company whose policy would have parked the same call at
-    /// the top level (issue #617).
+    /// A legacy audit record for a call inside a `sub_workflow` child that ran
+    /// without being offered for approval (issue #617).
     ///
-    /// # Why this is a journal line and not a fix
+    /// # Compatibility
     ///
-    /// A child graph is resolved and run *inside* the engine, so its nodes never
-    /// reach the gate pass that #460 and #614 added. Gating them is not
-    /// available: tinyflows cannot resume a child across the sub-workflow
-    /// boundary, and a paused child halts the parent with an unresumable error —
-    /// so marking the child's node would convert a run that works into one that
-    /// fails with no card to decide. Until the engine can resume across that
-    /// boundary, the honest thing is to keep running and **say so**.
-    ///
-    /// That is what this records. An operator auditing what the company was
-    /// asked to approve would otherwise see a hole with nothing explaining it;
-    /// this turns the hole into a line naming the child, the node and the call.
-    /// It is an audit record of a known limitation, not a decision anybody made.
-    ///
-    /// Journaled best-effort at child *resolution*, so it lands whether or not
-    /// the child's node is ultimately reached — the point is that the call was
-    /// never offered, and a run that stops earlier for another reason does not
-    /// make that less true. Deliberately **not** written for a dry run, which
-    /// executes nothing.
+    /// This was emitted by the audit-only interim while tinyflows could not
+    /// propagate a child approval to the parent. Current runs gate child graphs
+    /// before the engine executes them, so new records are no longer emitted.
+    /// The variant remains to deserialize existing append-only journals and to
+    /// preserve their operator-visible history.
     ///
     /// Additive: an entirely new `kind`, so no journal written before it existed
     /// carries it, and its presence changes how no existing variant serializes.
@@ -2016,7 +2171,7 @@ pub struct ChunkMeta {
     /// re-`put` of an identical (body, label) is a no-op everywhere (#1300).
     /// A *new* label on an existing body stamps per-label on fs/sqlite and
     /// reports the address's first-write stamp on the single-record backends
-    /// (mongodb, the provider facade, the tinycortex engine) — so read
+    /// (mongodb, the provider facade) — so read
     /// freshness as the max across chunks rather than assuming one row per
     /// body.
     #[serde(default)]
@@ -4263,6 +4418,92 @@ mod test {
         serde_json::from_str(&json).expect("deserialize")
     }
 
+    /// The additive proof this repo asks of every new journal field: a message
+    /// carrying no mentions must serialize **byte-for-byte** as it did before
+    /// the field existed, so no stored record migrates and the cross-backend
+    /// round-trip needs no special case.
+    #[test]
+    fn a_message_with_no_mentions_serializes_as_it_did_before_the_field() {
+        let event = CompanyEvent::OperatorMessage {
+            text: "hello".to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(json, r#"{"kind":"OperatorMessage","text":"hello"}"#);
+    }
+
+    /// The same for a reply, whose `mention_depth` is a `u8` and would
+    /// otherwise serialize as a literal `0` on every reply ever written.
+    #[test]
+    fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
+        let event = CompanyEvent::AgentReply {
+            chat_id: "general".to_string(),
+            agent_id: "ceo".to_string(),
+            text: "hi".to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"hi"}"#
+        );
+    }
+
+    /// And the other direction: a record written before either field existed
+    /// still loads, which is what `#[serde(default)]` is there for.
+    #[test]
+    fn a_message_journaled_before_mentions_existed_still_loads() {
+        let stored = r#"{"kind":"OperatorMessage","text":"hello"}"#;
+        let event: CompanyEvent = serde_json::from_str(stored).expect("deserialize");
+        match event {
+            CompanyEvent::OperatorMessage { mentions, .. } => assert!(mentions.is_empty()),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_mention_round_trips_with_its_target_and_span() {
+        let mention = Mention {
+            target: MentionTarget::Agent {
+                id: "engineer".to_string(),
+            },
+            text: "@engineer".to_string(),
+            offset: 4,
+            quiet: false,
+        };
+        assert_eq!(round_trip(&mention), mention);
+        // `quiet` is omitted when false, so an ordinary mention stays small on
+        // the wire and in the journal.
+        let json = serde_json::to_string(&mention).expect("serialize");
+        assert!(!json.contains("quiet"), "{json}");
+    }
+
+    #[test]
+    fn every_mention_target_round_trips() {
+        for target in [
+            MentionTarget::Agent {
+                id: "engineer".to_string(),
+            },
+            MentionTarget::User {
+                id: "u1".to_string(),
+            },
+            MentionTarget::Desk {
+                id: "engineering".to_string(),
+            },
+            MentionTarget::Everyone,
+        ] {
+            assert_eq!(round_trip(&target), target);
+        }
+    }
+
     // ── Issue #174: cycle usage carries cost, and folds ─────────────────────
 
     /// A cycle with nothing to report writes nothing, and any single non-zero
@@ -4494,6 +4735,8 @@ mod test {
 
         // A tool-less reply serializes without the `steps` key.
         let tool_less = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "main".to_string(),
@@ -4506,6 +4749,8 @@ mod test {
 
         // A reply with a timeline round-trips it.
         let with_steps = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "main".to_string(),
@@ -4545,6 +4790,8 @@ mod test {
 
         // An untagged reply keeps the legacy wire shape exactly.
         let untagged = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "main".to_string(),
             agent_id: "ceo".to_string(),
@@ -4559,6 +4806,8 @@ mod test {
 
         // A dispatch-produced reply carries the key and round-trips.
         let tagged = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".to_string(),
             agent_id: "ceo".to_string(),
@@ -4729,6 +4978,7 @@ mod test {
         }
 
         let threaded = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: Some(EventSeq::new(41)),
             text: "a follow-up".into(),
             by: None,
@@ -4743,6 +4993,8 @@ mod test {
         );
 
         let answered = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: Some(EventSeq::new(41)),
             task_id: None,
             chat_id: "studio".into(),
@@ -4897,6 +5149,7 @@ mod test {
     #[test]
     fn a_chat_intent_journals_under_the_same_key_and_absence_stays_absent() {
         let chatting = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "morning all".into(),
             by: None,
             chat: None,
@@ -4916,6 +5169,7 @@ mod test {
         );
 
         let unmarked = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "morning all".into(),
             by: None,
             chat: None,
@@ -4938,6 +5192,7 @@ mod test {
         assert_eq!(
             event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -4953,6 +5208,7 @@ mod test {
         // export/import and the fs/sqlite/mongo round-trip stay green without
         // touching a single stored record.
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
@@ -4968,6 +5224,7 @@ mod test {
     #[test]
     fn an_attributed_message_round_trips_with_its_actor() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: Some(Actor {
@@ -4998,6 +5255,7 @@ mod test {
     fn company_event_variants_round_trip_tagged() {
         let events = vec![
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,

@@ -443,6 +443,17 @@ pub struct RuntimeBuilder {
     /// the next container replacement.
     journal_store: Option<Arc<dyn crate::ports::journal::JournalStore>>,
     seed_dir: Option<PathBuf>,
+    /// Whether this company's board is seeded with setup cards on first boot.
+    ///
+    /// Off by default, and deliberately **not** inferred from `seed_dir` the way
+    /// workspace seeding is. Ledger seeding runs on every company because a
+    /// company that tracks nothing is broken; a company with an empty board is
+    /// merely new. Cards, meanwhile, are visible state that tests and fixtures
+    /// count — `tests/one_card_per_message.rs` asserts exact board sizes against
+    /// a company built straight from this builder — so an unconditional baseline
+    /// would quietly turn those assertions into statements about the baseline.
+    /// The product entry points turn it on; nothing else does.
+    seed_tasks: bool,
     /// The repo-level shared skill library, passed to the harness so a pre-fix
     /// registry install (whose stored `SKILL.md` is a one-line stub) is healed
     /// from the live library. Empty when no repo checkout backs the host.
@@ -557,6 +568,7 @@ impl RuntimeBuilder {
             login_codes: None,
             journal_store: None,
             seed_dir: None,
+            seed_tasks: false,
             skills_registry: Arc::from([]),
             template_provenance: None,
             feedback: None,
@@ -879,6 +891,17 @@ impl RuntimeBuilder {
     /// tree is seeded from on first build. Without it, no seeding runs.
     pub fn with_seed_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.seed_dir = Some(dir.into());
+        self
+    }
+
+    /// Seeds the board with the baseline's setup cards, plus whatever the seed
+    /// directory's own `tasks.toml` adds, on this company's **first** boot.
+    ///
+    /// Opt-in, so a test or a fixture that boots a company gets the empty board
+    /// it is asserting about. Call it from a product entry point — where a real
+    /// operator is about to look at a real board — and nowhere else.
+    pub fn with_task_seeding(mut self, seed: bool) -> Self {
+        self.seed_tasks = seed;
         self
     }
 
@@ -1924,6 +1947,27 @@ impl RuntimeBuilder {
         // company.toml + meta.json; the append-only ledger file is left untouched,
         // so an existing ledger survives a rebuild.
         let existing = store.load(&id).await?;
+
+        // Boot lifecycle: the setup work this company starts with, put on the
+        // board once and never again.
+        //
+        // Gated on `existing.is_none()` — this `store.load` is the last moment a
+        // first boot is distinguishable, because the `store.save` at the end of
+        // this function makes every later boot a returning one. That is a
+        // stronger gate than "the board is empty", which the ledger seeder can
+        // afford and this cannot: clearing the board is routine, and a card an
+        // operator deleted coming back on the next restart is the runtime
+        // arguing with them.
+        //
+        // `handover` is the rebuild arm: a rebuilt company is already running
+        // and already has whatever board it has.
+        if self.seed_tasks
+            && handover.is_none()
+            && existing.is_none()
+            && ops.tasks.list(&id).await?.is_empty()
+        {
+            seed_tasks(&ops, &self.manifest, &id, self.seed_dir.as_deref()).await?;
+        }
         let lifecycle = existing
             .as_ref()
             .map(|r| r.lifecycle.clone())
@@ -2130,114 +2174,6 @@ impl RuntimeBuilder {
         // business, or the workflow phase would have to ask again.
         let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
-
-        // Issue #752: a company whose roster holds `repo` does not come up on a
-        // backend that keeps secrets as plaintext on this container's disk.
-        //
-        // The bind-time refusal in `RepoManager::bind` covers new credentials.
-        // It cannot cover a company that bound one *before* this gate existed —
-        // that credential is already sitting on `/data`, and its agents would
-        // keep checking out under it forever. So the same condition is asked
-        // again here, where the answer is "this company does not start", and an
-        // operator restarting a tenant finds out at the moment they can still
-        // act on it.
-        //
-        // Read over the **effective roster**, not `[tools].allow` alone: an
-        // agent naming `tools = ["repo"]` under a company allow-list of `["*"]`
-        // holds an explicit `repo` grant that `grants_repo_explicit(&allow)`
-        // does not see, because the wildcard deliberately does not confer the
-        // namespace. Checking only the company line would miss exactly the
-        // configuration a wildcard company is most likely to have.
-        //
-        // NOT feature-gated, for the reason `build_agent` states about the repo
-        // tools themselves: a control compiled only under `openhuman` is a
-        // control most CI lanes never type-check.
-        if self.storage_kind.secrets_are_plaintext_on_disk() {
-            let roster_holds_repo =
-                crate::company::grants_repo_explicit(&self.manifest.tools.allow)
-                    || self
-                        .manifest
-                        .agents
-                        .iter()
-                        .map(|agent| {
-                            agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
-                        })
-                        .chain(overlay_agents.iter().map(|overlay| {
-                            agent_effective_grants(&self.manifest.tools.allow, &overlay.tools)
-                        }))
-                        .any(|grants| crate::company::grants_repo_explicit(&grants));
-            if roster_holds_repo {
-                return Err(crate::error::OpenCompanyError::Config(
-                    crate::store::plaintext_secret_refusal(self.storage_kind),
-                ));
-            }
-        }
-
-        // Issue #245: the company's repository mirror cache, rooted at the same
-        // `companies/<slug>/` prefix the bundle uses so a company's whole
-        // footprint sits in one subtree — and therefore inside the one quota
-        // walk `DataLayout::usage_bytes` already does.
-        //
-        // Built here rather than lazily in the route because the location is a
-        // property of *this* runtime's home, and a route that had to derive it
-        // would be the second place that knows where a company's bytes live.
-        //
-        // The cache is capped by the same `tree_quota_bytes` that bounds the
-        // workspace tree: both answer "how much may one company hold on this
-        // host", and a mirror is company-held binary payload like any other. It
-        // needs no new knob, and a hosted tenant that already sets one gets the
-        // cache covered without touching its config.
-        let repos = {
-            let manager = crate::runtime::RepoManager::new(
-                id.clone(),
-                Bundle::new(home.clone(), &id).repos_dir(),
-                secrets.clone(),
-            )
-            .with_quota(self.workspace_quota.tree_quota_bytes)
-            // Issue #752: the manager refuses a bind when a credential would
-            // land as plaintext on this container's disk, so it has to be told
-            // which backend is actually serving secrets.
-            .with_storage_kind(self.storage_kind);
-            // The forge REST client (pull-request metadata + diff). Without the
-            // feature there is no HTTP client to give it, and the PR route says
-            // so rather than answering with an empty diff. Shadowed rather than
-            // reassigned, the same way `ops::router` folds in its feature-gated
-            // fragment.
-            #[cfg(feature = "github")]
-            let manager =
-                manager.with_host(std::sync::Arc::new(crate::runtime::HttpRepoHost::new()));
-            std::sync::Arc::new(manager)
-        };
-
-        // Issue #245, agent half: the bindings, read once here so the
-        // synchronous `build_agent` can name them in a tool description and
-        // resolve against them. Read only when the company explicitly grants
-        // `repo` — everything else has no repository tools to feed — and a
-        // read error degrades to empty with a warning rather than failing a
-        // boot over a capability the company may not even use.
-        // `HarnessPool::ensure` re-reads this every turn, so a bind, a rotation
-        // or a revoke lands without a restart; this is only the first value.
-        #[cfg(feature = "openhuman")]
-        let repo_bindings = if crate::company::grants_repo_explicit(&self.manifest.tools.allow) {
-            repos.list().await.unwrap_or_else(|err| {
-                tracing::warn!(
-                    company = %id,
-                    error = %err,
-                    "reading the repository bindings failed; agents start with none"
-                );
-                Vec::new()
-            })
-        } else {
-            Vec::new()
-        };
-
-        // Issue #245: a checkout's lifecycle is one turn's, and a host killed
-        // mid-turn ends no turn — so whatever the last process left under
-        // `<harness>/<company>/*/workspace/repos` is deleted before this one
-        // starts. Tenant-scoped (issue #664): it walks this company's subtree
-        // and nothing above it.
-        #[cfg(feature = "openhuman")]
-        crate::harness::repo::sweep_orphaned_checkouts(&home.join("harness"), &id).await;
 
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
@@ -2517,6 +2453,10 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                // The company's own MCP store, so the
+                                // registry tools on the belt read the same
+                                // installs REST does.
+                                mcp_home: Some(home.join("mcp")),
                                 workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to
@@ -2731,18 +2671,6 @@ impl RuntimeBuilder {
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
                                 workspace: Some(ops.workspace.clone()),
-                                // Issue #245, agent half: the SAME manager the
-                                // console's bind/revoke routes write through
-                                // (wired onto the runtime below), so an operator
-                                // binding a repository is what the next turn's
-                                // `repo_checkout` resolves against — and the
-                                // one thing in this process holding the token.
-                                repos: Some(repos.clone()),
-                                repo_bindings,
-                                // One ledger per company runtime, shared by every
-                                // agent's tools and claimed per turn by the
-                                // brain's `CheckoutJanitor`.
-                                checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
@@ -3063,7 +2991,6 @@ impl RuntimeBuilder {
                 AuthMode::from_str(&self.manifest.users.mode).unwrap_or_default()
             }),
         );
-        runtime.set_repos(repos);
         // Install-wide MCP defaults (issue #527) — set before anything resolves
         // the effective server set, so the first resolution already sees them.
         runtime.set_default_mcp_servers(self.default_mcp_servers.clone());
@@ -3337,6 +3264,105 @@ async fn seed_ledgers(
     Ok(())
 }
 
+/// Seeds a company's board with the setup work it starts with: the global
+/// baseline ([`crate::globals::tasks`]) plus whatever its own bundle adds under
+/// `companies/<name>/tasks.toml`.
+///
+/// Runs only on a company's first boot, and only when the caller opted in — see
+/// the call site and [`RuntimeBuilder::with_task_seeding`].
+///
+/// # Why this cannot dispatch anything
+///
+/// Two independent reasons, because one would be a footgun:
+///
+/// * A seed card has no authorable column ([`crate::company::task_file`]), so
+///   every card written here is [`COLUMN_TODO`](crate::ports::tasks::COLUMN_TODO).
+/// * The write goes through `ops.tasks.upsert` — the plain store — and never
+///   through [`CompanyRuntime::upsert_task`](crate::company::CompanyRuntime::upsert_task),
+///   which is the single site that edge-fires a dispatch or a planning pass.
+///
+/// So a company can boot with fifty cards on it and spend nothing.
+///
+/// # Precedence and ordering
+///
+/// A company's own card **wins** on a shared id: bundle cards are applied after
+/// the baseline's, replacing rather than duplicating, which is how every other
+/// global surface resolves an id collision. A baseline card the manifest
+/// disables (`[globals] disable = ["task:<id>"]`) is dropped before either.
+///
+/// Timestamps are staggered **descending** so the authored order is the order
+/// the board shows. The board sorts by `updated_at_millis` descending, and cards
+/// written inside one millisecond tie — a tie the fs backend happens to break by
+/// insertion order and SQLite does not, which would make the board's reading
+/// order depend on which backend a tenant runs.
+///
+/// A malformed bundle file is a warning and not a boot failure, exactly as it is
+/// for a bundle ledger: `content_test` fails CI on a shipped template that has
+/// one, so this arm is for a hand-edited bundle, where reaching the console to
+/// fix it beats refusing to start.
+async fn seed_tasks(
+    ops: &OpsStores,
+    manifest: &CompanyManifest,
+    id: &CompanyId,
+    seed_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let seeds = resolve_seed_cards(&manifest.globals.disable, seed_dir, |err| {
+        tracing::warn!(company = %id, "company setup cards not seeded ({err})");
+    });
+
+    // Descending from now, one millisecond apart, so the first card authored is
+    // the first card read.
+    let now = crate::ports::now_millis();
+    for (index, seed) in seeds.iter().enumerate() {
+        let at = now.saturating_sub(index as u64);
+        let card = seed.to_record(at);
+        debug_assert_eq!(card.column, crate::ports::tasks::COLUMN_TODO);
+        ops.tasks.upsert(id, &card).await?;
+    }
+
+    Ok(())
+}
+
+/// The cards a company would be seeded with: the baseline minus what the
+/// manifest disables, with the bundle's own applied over the top.
+///
+/// Split out from [`seed_tasks`] so the precedence and the opt-out are testable
+/// without standing up a store — the write loop above is the only part that
+/// needs one, and it does nothing a test could not read off this list.
+///
+/// `on_error` is called with a bundle file that would not load. It is a callback
+/// rather than a `Result` because a bad bundle file must not stop a boot: the
+/// company still gets the baseline, and `content_test` is what makes a shipped
+/// template's bad file fatal.
+fn resolve_seed_cards(
+    disable: &[String],
+    seed_dir: Option<&std::path::Path>,
+    on_error: impl FnOnce(crate::error::OpenCompanyError),
+) -> Vec<crate::company::TaskSeed> {
+    let mut seeds: Vec<crate::company::TaskSeed> = crate::globals::tasks()
+        .iter()
+        .filter(|seed| !crate::globals::disabled(disable, "task", &seed.id))
+        .cloned()
+        .collect();
+
+    if let Some(dir) = seed_dir {
+        match crate::company::load_dir_tasks(dir) {
+            Ok(bundled) => {
+                for seed in bundled {
+                    // A company's own card wins outright rather than merging
+                    // field by field, the way its own ledger and its own agent
+                    // supersede the baseline's.
+                    seeds.retain(|global| global.id != seed.id);
+                    seeds.push(seed);
+                }
+            }
+            Err(err) => on_error(err),
+        }
+    }
+
+    seeds
+}
+
 /// Auto-wires the tiny.place economy for a discoverable company (feature build).
 ///
 /// Returns `None` unless `[place].discoverable` is set and a `@handle` is
@@ -3581,6 +3607,124 @@ mod test {
             .prefix(prefix)
             .tempdir()
             .expect("tempdir")
+    }
+
+    mod seed_cards {
+        use super::*;
+
+        fn bundle(body: &str) -> tempfile::TempDir {
+            let dir = tmp_home("opencompany-seed-cards-");
+            std::fs::write(dir.path().join("tasks.toml"), body).expect("write tasks.toml");
+            dir
+        }
+
+        fn resolve(disable: &[&str], dir: Option<&std::path::Path>) -> Vec<String> {
+            let disable: Vec<String> = disable.iter().map(|d| (*d).to_string()).collect();
+            resolve_seed_cards(&disable, dir, |err| {
+                panic!("unexpected load failure: {err}")
+            })
+            .into_iter()
+            .map(|seed| seed.id)
+            .collect()
+        }
+
+        /// A company with no bundle still gets the baseline: a
+        /// platform-provisioned tenant carries no `companies/<name>` directory
+        /// and is still a company somebody has to start using.
+        #[test]
+        fn a_company_with_no_bundle_gets_the_baseline() {
+            let ids = resolve(&[], None);
+            assert!(!ids.is_empty(), "the baseline must seed something");
+            let baseline: Vec<String> = crate::globals::tasks()
+                .iter()
+                .map(|seed| seed.id.clone())
+                .collect();
+            assert_eq!(ids, baseline);
+        }
+
+        /// The bundle's cards land after the baseline's, so the setup work every
+        /// company shares is read first.
+        #[test]
+        fn a_bundle_appends_its_own_cards_after_the_baseline() {
+            let dir = bundle("[[task]]\nid = \"set-up-the-thing\"\ntitle = \"Set up the thing\"\n");
+            let ids = resolve(&[], Some(dir.path()));
+            assert_eq!(
+                ids.last().map(String::as_str),
+                Some("set-up-the-thing"),
+                "{ids:?}"
+            );
+            assert_eq!(ids.len(), crate::globals::tasks().len() + 1);
+        }
+
+        /// A bundle card of the same id **replaces** the baseline's rather than
+        /// duplicating it — the precedence every other global surface uses.
+        #[test]
+        fn a_bundle_card_supersedes_the_baseline_card_of_the_same_id() {
+            let shared = &crate::globals::tasks()[0].id;
+            let dir = bundle(&format!(
+                "[[task]]\nid = \"{shared}\"\ntitle = \"Ours instead\"\n"
+            ));
+            let seeds = resolve_seed_cards(&[], Some(dir.path()), |err| panic!("{err}"));
+            let matching: Vec<&crate::company::TaskSeed> =
+                seeds.iter().filter(|s| &s.id == shared).collect();
+            assert_eq!(matching.len(), 1, "the id must not appear twice");
+            assert_eq!(matching[0].title, "Ours instead");
+            assert_eq!(seeds.len(), crate::globals::tasks().len());
+        }
+
+        /// `[globals].disable` drops a baseline card, using the same
+        /// `<kind>:<id>` vocabulary that already drops a baseline agent,
+        /// workflow, skill or ledger.
+        #[test]
+        fn disable_drops_one_baseline_card_and_keeps_the_rest() {
+            let dropped = crate::globals::tasks()[0].id.clone();
+            let ids = resolve(&[&format!("task:{dropped}")], None);
+            assert!(!ids.contains(&dropped), "{ids:?}");
+            assert_eq!(ids.len(), crate::globals::tasks().len() - 1);
+        }
+
+        /// A bundle file that will not load costs its own cards and nothing
+        /// else. Refusing the boot would strand a hand-edited bundle where the
+        /// console that could fix it is unreachable.
+        #[test]
+        fn a_malformed_bundle_file_still_leaves_the_baseline() {
+            let dir = bundle("[[task]\nid = ");
+            let mut reported = None;
+            let seeds = resolve_seed_cards(&[], Some(dir.path()), |err| {
+                reported = Some(err.to_string());
+            });
+            assert!(
+                reported.is_some(),
+                "the failure must be reported, not swallowed"
+            );
+            assert_eq!(seeds.len(), crate::globals::tasks().len());
+        }
+
+        /// Every seeded card is To-do, whatever it came from. `in_progress`
+        /// dispatches a run and `planning` bills a pass, so this is the property
+        /// that keeps a freshly provisioned company from spending money at boot.
+        #[test]
+        fn every_seeded_card_is_todo() {
+            let dir = bundle("[[task]]\nid = \"ours\"\ntitle = \"Ours\"\n");
+            for seed in resolve_seed_cards(&[], Some(dir.path()), |err| panic!("{err}")) {
+                let card = seed.to_record(0);
+                assert_eq!(card.column, crate::ports::tasks::COLUMN_TODO, "{}", seed.id);
+            }
+        }
+
+        /// Seeding is opt-in. `tests/one_card_per_message.rs` asserts exact board
+        /// sizes against a company built straight from this builder, so a
+        /// baseline that arrived unasked would quietly turn those assertions into
+        /// statements about the baseline.
+        #[test]
+        fn task_seeding_is_off_unless_a_caller_asks_for_it() {
+            let home = tmp_home("opencompany-seed-flag-");
+            let manifest: CompanyManifest =
+                toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest");
+            let builder = RuntimeBuilder::new(home.path().to_path_buf(), manifest);
+            assert!(!builder.seed_tasks, "board seeding must default to off");
+            assert!(builder.with_task_seeding(true).seed_tasks);
+        }
     }
 
     /// Automatic Git checkpoints are opt-in and stay off unless the operator
@@ -5411,122 +5555,6 @@ needs_reason = true
         toml::from_str(toml_src).expect("valid manifest")
     }
 
-    // ---- issue #752: `repo` needs a backend that keeps secrets off disk ----
-
-    /// A company that already bound a repository predates the bind-time gate,
-    /// so the *restart* is where it has to be caught. A repo-granted company on
-    /// an fs host does not come up.
-    #[tokio::test]
-    async fn a_repo_granted_company_does_not_boot_on_a_plaintext_secret_backend() {
-        let home = tmp_home("oc-752-boot-");
-        let manifest = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["repo", "shell"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(CompanyId::new("acme"))
-            // The default, spelled out: this is what a local `serve` is.
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect_err("an fs host must refuse to bring up a repo-granted company");
-        let message = err.to_string();
-        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
-        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
-        assert!(message.contains("`repo` grant"), "{message}");
-    }
-
-    /// The wildcard case, which a check against `[tools].allow` alone would let
-    /// through: `*` deliberately does **not** confer `repo`, so the company line
-    /// reads as ungranted while the agent naming `repo` explicitly holds it.
-    #[tokio::test]
-    async fn an_agent_that_names_repo_under_a_wildcard_company_is_caught_too() {
-        let home = tmp_home("oc-752-boot-wildcard-");
-        let manifest = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["*"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            tools = ["repo"]
-            "#,
-        );
-        // The company line itself is not an explicit grant — if it were, this
-        // test would pass for the wrong reason.
-        assert!(!crate::company::grants_repo_explicit(&manifest.tools.allow));
-        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect_err("an agent-level `repo` grant must be caught at boot");
-        assert!(err.to_string().contains("OPENCOMPANY_STORAGE=fs"), "{err}");
-    }
-
-    /// The other side, without which the two above only prove the check is on:
-    /// the same company boots on the backend that keeps secrets out of the
-    /// container, and a company that grants no `repo` boots on fs unaffected.
-    #[tokio::test]
-    async fn the_same_company_boots_where_secrets_leave_the_container() {
-        let home = tmp_home("oc-752-boot-ok-");
-        let granted = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["repo", "shell"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        RuntimeBuilder::new(home.path().to_path_buf(), granted)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Mongodb)
-            .build()
-            .await
-            .expect("mongodb-backed secrets must clear the #752 boot gate");
-
-        let ungranted_home = tmp_home("oc-752-boot-ungranted-");
-        let ungranted = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["shell", "web"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        RuntimeBuilder::new(ungranted_home.path().to_path_buf(), ungranted)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect("a company without `repo` is untouched by this gate");
-    }
-
-    // ---- `[policy]` override across a rebuild (issue #562) ----------------
-
     fn seed_policy(mode: &str, always: &[&str], under: Option<f64>) -> Policy {
         Policy {
             mode: mode.to_string(),
@@ -6689,6 +6717,7 @@ needs_reason = true
             .unwrap();
 
         let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: text.to_string(),
             by: None,
@@ -6837,6 +6866,7 @@ needs_reason = true
 
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hello design".to_string(),
                 by: None,
@@ -6955,6 +6985,7 @@ needs_reason = true
         // lead `eng2`, not the blueprint lead `eng1`.
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "who leads?".to_string(),
                 by: None,

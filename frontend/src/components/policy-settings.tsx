@@ -19,6 +19,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -72,6 +82,66 @@ interface Props {
   company: string | null;
 }
 
+/** Whether moving through the host-provided tier order gives agents more autonomy. */
+export function widensAutonomy(
+  tiers: PolicyStatus["tiers"],
+  from: string,
+  to: string,
+): boolean {
+  const fromIndex = tiers.findIndex((tier) => tier.value === from);
+  const toIndex = tiers.findIndex((tier) => tier.value === to);
+  return fromIndex !== -1 && toIndex > fromIndex;
+}
+
+/**
+ * ASCII-only case-insensitive equality, mirroring `str::eq_ignore_ascii_case`.
+ *
+ * `String.prototype.toLowerCase()` is NOT the same comparison: it folds
+ * Unicode case, so `"Ä".toLowerCase() === "ä"` while the host treats the two
+ * as different effect kinds. The confirmation must agree with the gate itself,
+ * so only ASCII letters fold here and every other code unit must match exactly.
+ */
+function asciiEqualsIgnoreCase(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const ca = a.charCodeAt(i);
+    const cb = b.charCodeAt(i);
+    if (ca === cb) continue;
+    // Folding an ASCII letter is OR-ing in bit 0x20. Anything that does not
+    // land in 'a'..'z' after the fold is not an ASCII letter, so it cannot be
+    // a case pair.
+    const lowerA = ca | 0x20;
+    const lowerB = cb | 0x20;
+    if (lowerA !== lowerB || lowerA < 0x61 || lowerA > 0x7a) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether `list` still gates `target`, mirroring the host matcher
+ * (`src/policy/always_approve.rs::matches`): exact or a leading dotted segment,
+ * ASCII-case-insensitive, on a segment boundary.
+ *
+ * A reset drops the whole override, always-ask list included, so an effective
+ * entry the manifest's list does not gate is a fence a reset would silently
+ * take down. This is the "would the reset let something through that used to
+ * ask" test, and it must agree with the gate itself or the confirmation would
+ * contradict the behaviour it describes.
+ */
+export function gatedBy(list: string[], target: string): boolean {
+  const t = target.trim();
+  return list.some((entry) => {
+    const e = entry.trim();
+    if (e === "") return false;
+    if (asciiEqualsIgnoreCase(t, e)) return true;
+    return (
+      t.length > e.length &&
+      t[e.length] === "." &&
+      asciiEqualsIgnoreCase(t.slice(0, e.length), e)
+    );
+  });
+}
+
 /**
  * The autonomy tier and the always-ask list (issue #562).
  *
@@ -110,6 +180,19 @@ export function PolicySettings({ client, company }: Props) {
   const [draftSpend, setDraftSpend] = useState("");
   const [noSpendCap, setNoSpendCap] = useState(false);
   const [draftDeadline, setDraftDeadline] = useState("");
+  // A looser tier changes what teammates can do without stopping for approval.
+  // Keep the target, rather than a boolean, so the dialog can compare the
+  // host-provided consequences that actually apply to this deployment.
+  const [pendingTier, setPendingTier] = useState<PolicyStatus["tiers"][number] | null>(
+    null,
+  );
+  // A reset restores the manifest's tier AND always-ask list, so the widening
+  // check must run on it too — otherwise "Use the manifest's policy" is a
+  // one-click way around the confirmation the tier buttons get, and the same
+  // for always-ask gates the manifest does not carry. Remember which action
+  // the dialog is confirming so the confirm button performs the same one the
+  // operator asked for.
+  const [pendingReset, setPendingReset] = useState(false);
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
@@ -151,6 +234,16 @@ export function PolicySettings({ client, company }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The confirmation dialog holds a choice reviewed against ONE company's
+  // policy. If the scope changes while it is open, that pending action no
+  // longer describes what the operator looked at — confirming would loosen or
+  // reset the NEW company under a dialog about the old one. Drop it on scope
+  // change rather than bind it to the originating company.
+  useEffect(() => {
+    setPendingTier(null);
+    setPendingReset(false);
+  }, [client, company]);
 
   // Deliberately silent about its own failure, and deliberately not part of
   // `load`: these are suggestions under a free-text box. A host that cannot
@@ -212,6 +305,49 @@ export function PolicySettings({ client, company }: Props) {
     } finally {
       setSaving(false);
     }
+  };
+
+  const requestTier = (tier: PolicyStatus["tiers"][number]) => {
+    if (!status || saving || tier.value === status.mode) return;
+    if (widensAutonomy(status.tiers, status.mode, tier.value)) {
+      setPendingReset(false);
+      setPendingTier(tier);
+      return;
+    }
+    void chooseTier(tier.value);
+  };
+
+  // Always-ask gates an operator added that a reset would drop — entries the
+  // manifest's list does not gate. The tier-widening test misses these: the
+  // tiers can agree while the lists disagree, and restoring the manifest then
+  // still widens what gets through, so it earns the same confirmation and the
+  // dialog names it.
+  const removedAlwaysAsk =
+    status?.alwaysApprove.filter(
+      (entry) => !gatedBy(status.manifestAlwaysApprove, entry),
+    ) ?? [];
+
+  const requestReset = () => {
+    if (!status || saving) return;
+    // The manifest's tier can be MORE autonomous than the override an operator
+    // set — resetting would restore that looser tier, so it earns the same
+    // widening confirmation as picking the tier directly. So does dropping
+    // always-ask gates the manifest does not carry: a reset removes the whole
+    // override, and an effective entry the manifest list does not gate is a
+    // fence that silently comes down even when the tiers agree.
+    const manifestTier = status.tiers.find(
+      (tier) => tier.value === status.manifestMode,
+    );
+    if (
+      manifestTier &&
+      (widensAutonomy(status.tiers, status.mode, status.manifestMode) ||
+        removedAlwaysAsk.length > 0)
+    ) {
+      setPendingReset(true);
+      setPendingTier(manifestTier);
+      return;
+    }
+    void reset();
   };
 
   const saveAlways = async () => {
@@ -326,20 +462,29 @@ export function PolicySettings({ client, company }: Props) {
         ) : (
           <>
             <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                More freedom to act ↓
+              </p>
               {status.tiers.map((tier) => {
                 const active = tier.value === status.mode;
+                const looser = tier.value === "auto" || tier.value === "full";
                 return (
                   <button
                     key={tier.value}
                     type="button"
                     disabled={saving}
-                    onClick={() => void chooseTier(tier.value)}
+                    onClick={() => requestTier(tier)}
                     aria-pressed={active}
+                    data-testid={`policy-tier-${tier.value}`}
                     className={cn(
                       "w-full rounded-md border p-3 text-left transition-colors",
                       "disabled:cursor-not-allowed disabled:opacity-60",
+                      looser &&
+                        "border-status-blocked/40 bg-status-blocked-soft hover:bg-status-blocked-soft",
                       active
-                        ? "border-primary bg-primary/5"
+                        ? looser
+                          ? "ring-1 ring-status-blocked/30"
+                          : "border-primary bg-primary/5"
                         : "hover:bg-muted/50",
                     )}
                   >
@@ -361,6 +506,85 @@ export function PolicySettings({ client, company }: Props) {
                 Takes effect {status.takesEffect}.
               </p>
             </div>
+
+            <AlertDialog
+              open={pendingTier !== null}
+              onOpenChange={(open) => {
+                if (!open) {
+                  setPendingTier(null);
+                  setPendingReset(false);
+                }
+              }}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    Let teammates do more on their own?
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {pendingTier && (
+                      <>
+                        {pendingTier.value !== status.mode && (
+                          <>
+                            Instead of:{" "}
+                            {
+                              status.tiers.find(
+                                (tier) => tier.value === status.mode,
+                              )?.description
+                            }{" "}
+                            With {pendingTier.label}: {pendingTier.description}
+                            {" "}
+                          </>
+                        )}
+                        {pendingReset && (
+                          <>
+                            {pendingTier.value !== status.mode
+                              ? "This also"
+                              : "This"}{" "}
+                            replaces the current always-ask list with the
+                            manifest's list:{" "}
+                            {status.manifestAlwaysApprove.length > 0
+                              ? status.manifestAlwaysApprove.join(", ")
+                              : "none"}
+                            {removedAlwaysAsk.length > 0 &&
+                              `; ${removedAlwaysAsk.join(", ")} ${
+                                removedAlwaysAsk.length === 1
+                                  ? "stops"
+                                  : "stop"
+                              } always asking for approval`}
+                            .
+                          </>
+                        )}
+                      </>
+                    )}
+                  </AlertDialogDescription>
+                  <p className="text-sm text-muted-foreground">
+                    {pendingReset
+                      ? "Reset replaces the whole policy override, including the always-ask list."
+                      : dirty
+                        ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
+                        : "Your always-ask list still wins, even on Full."}
+                  </p>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Keep current setting</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => {
+                      if (pendingReset) {
+                        void reset();
+                      } else if (pendingTier) {
+                        void chooseTier(pendingTier.value);
+                      }
+                    }}
+                    data-testid="policy-tier-confirm"
+                  >
+                    {pendingReset
+                      ? "Revert to the manifest's policy"
+                      : `Use ${pendingTier?.label}`}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
 
             <div className="space-y-2">
               <Label htmlFor="spend-cap">Spend without asking, under</Label>
@@ -491,7 +715,7 @@ export function PolicySettings({ client, company }: Props) {
                   size="sm"
                   variant="outline"
                   disabled={saving}
-                  onClick={() => void reset()}
+                  onClick={() => requestReset()}
                 >
                   <RotateCcw className="mr-1 h-3 w-3" />
                   Use the manifest's policy

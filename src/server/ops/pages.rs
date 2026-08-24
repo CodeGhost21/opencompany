@@ -4,7 +4,8 @@
 //! ```text
 //! GET …/pages                    every page's manifest, for the nav
 //! GET …/pages/{slug}             a fixed HTML shell that mounts the page
-//! GET …/pages/{slug}/bundle.mjs  the page's compiled JS, streamed
+//! GET …/pages/{slug}/bootstrap.mjs  the fixed mounting module (capability-gated)
+//! GET …/pages/{slug}/bundle.mjs  the page's compiled JS, streamed (capability-gated)
 //! ```
 //!
 //! See `docs/spec/runtime/pages.md` for the full design. The load-bearing
@@ -30,8 +31,13 @@
 //! [`crate::company::workspace_scaffold`], the same way `harness::pages_tools`
 //! does.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 use axum::body::Body;
-use axum::extract::Path;
+use axum::extract::{FromRequestParts, Path, Query, RawPathParams};
+use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -39,6 +45,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::company::runtime::CompanyRuntime;
 use crate::company::workspace_scaffold::{
     PAGE_COMPILED_MIME, PAGE_COMPILED_NAME, PAGE_MANIFEST_NAME, PAGES_ROOT,
 };
@@ -58,18 +65,151 @@ use crate::server::ops::{ScopedCompany, scoped};
 /// request this origin makes. `frame-ancestors 'self'` keeps the shell from
 /// being embedded anywhere but this console.
 const PAGES_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
-     connect-src 'none'; frame-ancestors 'self'";
+     font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'";
 
 /// Builds the pages route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/pages", get(list_pages))
         .merge(scoped("/pages/{slug}", get(page_shell)))
+        .merge(scoped("/pages/{slug}/bootstrap.mjs", get(page_bootstrap)))
         .merge(scoped("/pages/{slug}/bundle.mjs", get(bundle)))
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct SlugPath {
     slug: String,
+}
+
+/// The capability query parameter the shell embeds in its module URLs.
+///
+/// Only the two module routes parse it; everything else stays session-
+/// authenticated exactly as before.
+#[derive(Debug, serde::Deserialize)]
+struct ModuleCapQuery {
+    /// The short-lived capability minted by the shell ([`mint_module_cap`]).
+    oc_cap: String,
+}
+
+/// How long a minted page-module capability stays valid.
+///
+/// The shell mints one per load and the module graph (bootstrap + bundle) is
+/// fetched within the first moments of that load; a minute of slack covers a
+/// slow network without leaving a replayable token lying around.
+const MODULE_CAP_TTL: Duration = Duration::from_secs(60);
+
+/// One minted capability's scope: which page it authorizes and when it stops.
+struct ModuleCap {
+    company: CompanyId,
+    slug: String,
+    expires_at: Instant,
+}
+
+/// The live set of minted capabilities, keyed by the token itself.
+///
+/// The two module routes consume these instead of a session. They must: the
+/// opaque-origin page iframe cannot attach the operator's session cookie to
+/// its module imports (docs/spec/runtime/pages.md §5), so the shell — which
+/// *can* authenticate, because the iframe loads it by navigation — mints an
+/// unguessable token here and embeds it in the module URLs. The map is bounded
+/// by real page loads and lazily swept on every access, so it stays small;
+/// entries also die with the process, which is fine because each is minted
+/// fresh per shell load and lives at most [`MODULE_CAP_TTL`].
+static MODULE_CAPS: OnceLock<Mutex<HashMap<String, ModuleCap>>> = OnceLock::new();
+
+fn module_caps() -> &'static Mutex<HashMap<String, ModuleCap>> {
+    MODULE_CAPS.get_or_init(Default::default)
+}
+
+/// Mints an unguessable, short-lived capability for one page's module graph.
+fn mint_module_cap(company: &CompanyId, slug: &str) -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .expect("the OS CSPRNG is unavailable; cannot mint a page-module capability");
+    let cap = hex_encode(&bytes);
+    let mut caps = module_caps()
+        .lock()
+        .expect("page-module capability map lock");
+    // Lazy sweep: drop everything that has expired since the last access.
+    caps.retain(|_, c| c.expires_at > Instant::now());
+    caps.insert(
+        cap.clone(),
+        ModuleCap {
+            company: company.clone(),
+            slug: slug.to_string(),
+            expires_at: Instant::now() + MODULE_CAP_TTL,
+        },
+    );
+    cap
+}
+
+/// Whether `cap` currently authorizes this company's `slug` module graph.
+///
+/// Bound to the company *and* the slug, so a capability minted for one page
+/// cannot open another page's bundle, and a capability minted for one company
+/// cannot be replayed against another.
+fn validate_module_cap(cap: &str, company: &CompanyId, slug: &str) -> bool {
+    let mut caps = module_caps()
+        .lock()
+        .expect("page-module capability map lock");
+    caps.retain(|_, c| c.expires_at > Instant::now());
+    caps.get(cap)
+        .is_some_and(|c| c.company == *company && c.slug == slug && c.expires_at > Instant::now())
+}
+
+/// Lowercase-hex encoding for a capability token: URL-safe and unguessable.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // Infallible: writing to a String never fails.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Resolves the addressed company exactly as [`ScopedCompany`] does, but
+/// admits the request without a session.
+///
+/// The two module routes are the sole consumers. An opaque-origin sandboxed
+/// iframe cannot attach the operator's session cookie to its module imports,
+/// so the shell — an authenticated navigation — mints a short-lived capability
+/// and embeds it in the module URLs; these routes validate that capability
+/// ([`validate_module_cap`]) in the handler, against the company *and* the
+/// slug, instead of a session. Nothing else is ever registered behind this
+/// extractor, so the capability's reach is exactly the module graph.
+struct ModuleScopedCompany {
+    runtime: Arc<CompanyRuntime>,
+}
+
+impl FromRequestParts<AppState> for ModuleScopedCompany {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let id = RawPathParams::from_request_parts(parts, state)
+            .await
+            .ok()
+            .and_then(|params| {
+                params
+                    .iter()
+                    .find(|(key, _)| *key == "id")
+                    .map(|(_, value)| value.to_string())
+            });
+        let runtime = match &id {
+            Some(id) => state.registry().get(&CompanyId::new(id)).ok_or_else(|| {
+                ApiError(OpenCompanyError::CompanyNotFound(id.clone())).into_response()
+            })?,
+            None => state.registry().sole().ok_or_else(|| {
+                ApiError(OpenCompanyError::CompanyNotFound(
+                    "single-company".to_string(),
+                ))
+                .into_response()
+            })?,
+        };
+        Ok(ModuleScopedCompany { runtime })
+    }
 }
 
 /// One page's manifest, as the console nav consumes it.
@@ -227,10 +367,16 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
 
 /// The fixed HTML shell that mounts a page's compiled module (not agent
 /// content). Extracted from the route so the shell's load-bearing invariants
-/// — the React namespace import, the slug-relative bundle path, the absolute
-/// SDK CSS link, the import map — are unit-testable instead of living only in
-/// a route that needs a full workspace to exercise.
-fn page_shell_html(slug: &str) -> String {
+/// — the React namespace import, the slug-relative bootstrap path, the
+/// shell-minted capability, the unconditional SDK load, the import map — are
+/// unit-testable instead of living only in a route that needs a full workspace
+/// to exercise.
+///
+/// `cap` is the short-lived capability minted by the authenticated shell route
+/// ([`mint_module_cap`]); it rides the bootstrap module's URL so the module
+/// graph, which the opaque-origin iframe fetches without a session cookie, can
+/// still be authorized server-side.
+fn page_shell_html(slug: &str, cap: &str) -> String {
     format!(
         r#"<!doctype html>
 <html>
@@ -253,17 +399,67 @@ fn page_shell_html(slug: &str) -> String {
 <body>
 <div id="root"></div>
 <script type="module">
-  import * as React from "react";
-  import * as ReactDOM from "react-dom/client";
-  import Page from "./{slug}/bundle.mjs";
-  const root = ReactDOM.createRoot(document.getElementById("root"));
-  root.render(React.createElement(Page));
+  import "@opencompany/site";
 </script>
+<script type="module" src="./{slug}/bootstrap.mjs?oc_cap={cap}"></script>
 </body>
 </html>
 "#,
         slug = slug,
+        cap = cap,
     )
+}
+
+/// The fixed external module that mounts one page bundle.
+///
+/// Served from the [`page_bootstrap`] route with the shell-minted capability
+/// interpolated into the bundle's own import URL. The shell is the only
+/// authenticated party in the load chain; the capability it mints is what lets
+/// the opaque-origin module graph fetch the authenticated bundle — a static
+/// import's URL is resolved against the importing module's own URL, so the
+/// `?oc_cap` query has to be threaded here explicitly or the bundle request
+/// would drop it.
+fn page_bootstrap_body(cap: &str) -> String {
+    format!(
+        r#"import * as React from "react";
+import * as ReactDOM from "react-dom/client";
+import Page from "./bundle.mjs?oc_cap={cap}";
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(Page));
+"#,
+        cap = cap
+    )
+}
+
+async fn page_bootstrap(
+    ModuleScopedCompany { runtime }: ModuleScopedCompany,
+    Query(query): Query<ModuleCapQuery>,
+    Path(SlugPath { slug }): Path<SlugPath>,
+) -> Result<Response, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let company = runtime.id();
+    if !validate_module_cap(&query.oc_cap, company, &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let pages = all_pages(runtime.workspace().as_ref(), company).await?;
+    if !pages.iter().any(|(name, _)| name == &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let body = page_bootstrap_body(&query.oc_cap);
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, PAGE_COMPILED_MIME)
+        .body(Body::from(body))
+        .map_err(|e| {
+            ApiError(OpenCompanyError::Store(format!(
+                "page bootstrap failed: {e}"
+            )))
+        })?;
+    apply_pages_headers(response.headers_mut());
+    apply_page_module_cors_headers(response.headers_mut());
+    Ok(response)
 }
 
 /// `GET {scope}/pages/{slug}` — a fixed HTML shell that mounts the page.
@@ -283,7 +479,12 @@ async fn page_shell(
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
 
-    let html = page_shell_html(&slug);
+    // This route is session-authenticated — the iframe loads the shell by
+    // navigation, which does attach the cookie — but the module graph it points
+    // at does not get that cookie. Mint the capability the graph needs here,
+    // bound to this company and page, and hand it out in the module URLs.
+    let cap = mint_module_cap(company.id(), &slug);
+    let html = page_shell_html(&slug, &cap);
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -296,13 +497,18 @@ async fn page_shell(
 
 /// `GET {scope}/pages/{slug}/bundle.mjs` — the page's compiled JS, streamed.
 async fn bundle(
-    company: ScopedCompany,
+    ModuleScopedCompany { runtime }: ModuleScopedCompany,
+    Query(query): Query<ModuleCapQuery>,
     Path(SlugPath { slug }): Path<SlugPath>,
 ) -> Result<Response, ApiError> {
     if !valid_slug(&slug) {
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
-    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
+    let company = runtime.id();
+    if !validate_module_cap(&query.oc_cap, company, &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let pages = all_pages(runtime.workspace().as_ref(), company).await?;
     let Some((_, bundle)) = pages.into_iter().find(|(name, _)| name == &slug) else {
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     };
@@ -312,15 +518,31 @@ async fn bundle(
         ))));
     };
 
-    let Some((node, stream)) = company
-        .runtime
-        .workspace()
-        .read_bytes(company.id(), &compiled.id)
-        .await?
-    else {
-        return Err(ApiError(OpenCompanyError::NotFound(format!(
-            "page {slug} bundle"
-        ))));
+    // The compiled bundle reaches the tree two ways: `pages_write` stores it as
+    // a *binary* node (`mime` set, size and sha256 computed by the store), while
+    // an operator creating `page.compiled.mjs` through the console — or a test
+    // seeding the tree over the workspace API — stores it as a plain text file.
+    // Both hold the same JS bytes, so serve whichever kind the node is; a route
+    // that served only one would 404 a legitimate page over a storage detail
+    // that has nothing to do with what the module graph needs.
+    let (node, body) = if compiled.is_binary() {
+        let Some((node, stream)) = runtime
+            .workspace()
+            .read_bytes(company, &compiled.id)
+            .await?
+        else {
+            return Err(ApiError(OpenCompanyError::NotFound(format!(
+                "page {slug} bundle"
+            ))));
+        };
+        (node, Body::from_stream(stream))
+    } else {
+        let Some((node, content)) = runtime.workspace().read(company, &compiled.id).await? else {
+            return Err(ApiError(OpenCompanyError::NotFound(format!(
+                "page {slug} bundle"
+            ))));
+        };
+        (node, Body::from(content))
     };
 
     let mut response = Response::builder()
@@ -334,12 +556,13 @@ async fn bundle(
     if let Some(size) = node.size {
         response = response.header(header::CONTENT_LENGTH, size);
     }
-    let mut response = response.body(Body::from_stream(stream)).map_err(|e| {
+    let mut response = response.body(body).map_err(|e| {
         ApiError(OpenCompanyError::Store(format!(
             "bundle response failed: {e}"
         )))
     })?;
     apply_pages_headers(response.headers_mut());
+    apply_page_module_cors_headers(response.headers_mut());
     Ok(response)
 }
 
@@ -361,6 +584,30 @@ fn apply_pages_headers(headers: &mut axum::http::HeaderMap) {
     );
 }
 
+/// Allows the opaque-origin page iframe to load a module response.
+///
+/// The shell deliberately omits `allow-same-origin`, which makes module
+/// imports send `Origin: null` — every module in the graph is a CORS request
+/// from that null origin. Module scripts always fetch with CORS, so the
+/// response must admit the origin explicitly. `Access-Control-Allow-Origin:
+/// null` matches the opaque origin exactly; `Access-Control-Allow-Credentials:
+/// true` is harmless (the frame sends no credentials) and keeps the pair
+/// consistent across every module the shell references. This precise response
+/// pair is therefore required for the pages module graph; the general CORS
+/// middleware cannot provide it because same-origin console deployments leave
+/// that middleware disabled.
+pub(crate) fn apply_page_module_cors_headers(headers: &mut axum::http::HeaderMap) {
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("null"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+        HeaderValue::from_static("true"),
+    );
+    headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,47 +623,37 @@ mod tests {
     }
 
     #[test]
-    fn shell_imports_the_react_namespace_before_using_create_element() {
-        let html = page_shell_html("revenue");
-        // Bug this guards (PR #985): the shell called `React.createElement`
-        // without ever importing `React`, so every page threw a ReferenceError
-        // on first render.
-        let module_script = html
-            .split("<script type=\"module\">")
-            .nth(1)
-            .expect("the shell has a module script");
-        let react_import = module_script.lines().find(|l| l.contains("React"));
+    fn shell_embeds_the_minted_capability_in_the_bootstrap_url() {
+        let html = page_shell_html("revenue", "cap-abc123");
+        // The module graph is fetched by the opaque-origin iframe without a
+        // session cookie, so the shell hands the capability it minted over in
+        // the bootstrap module's URL — the only authenticated party in the
+        // load chain is the shell route itself.
         assert!(
-            react_import.is_some(),
-            "no `React` import in: {module_script}"
+            html.contains(
+                "<script type=\"module\" src=\"./revenue/bootstrap.mjs?oc_cap=cap-abc123\"></script>"
+            ),
+            "the bootstrap module URL must carry the shell-minted capability"
         );
     }
 
     #[test]
     fn shell_bundle_path_is_relative_to_the_shells_own_url() {
-        let html = page_shell_html("revenue");
+        let html = page_shell_html("revenue", "cap");
         // Bug this guards (PR #985): the shell imported `./bundle.mjs`, which
         // resolves against `…/pages/{slug}` (no trailing slash) to
         // `…/pages/bundle.mjs` — the shell route with slug "bundle.mjs", which
-        // fails `valid_slug` and 404s. `./{slug}/bundle.mjs` resolves to the
-        // registered bundle route.
-        let module_script = html
-            .split("<script type=\"module\">")
-            .nth(1)
-            .expect("the shell has a module script");
+        // fails `valid_slug` and 404s. `./{slug}/bootstrap.mjs` resolves to the
+        // registered bootstrap route.
         assert!(
-            module_script.contains("from \"./revenue/bundle.mjs\""),
-            "bundle import must name the slug explicitly: {module_script}"
-        );
-        assert!(
-            !module_script.contains("from \"./bundle.mjs\""),
-            "the bare `./bundle.mjs` form must not return: {module_script}"
+            html.contains("src=\"./revenue/bootstrap.mjs"),
+            "the bootstrap module must be relative to the shell URL"
         );
     }
 
     #[test]
     fn shell_links_the_sdk_css_and_maps_react_jsx_runtime_to_the_sdk_bundle() {
-        let html = page_shell_html("revenue");
+        let html = page_shell_html("revenue", "cap");
         // Bug this guards (PR #985): the SDK's `index.css` was built and
         // shipped but never linked, so every page rendered unstyled.
         assert!(
@@ -428,6 +665,78 @@ mod tests {
         assert!(
             html.contains("\"react/jsx-runtime\": \"/pages-sdk/react.mjs\""),
             "react/jsx-runtime must resolve to the SDK's React bundle"
+        );
+    }
+
+    #[test]
+    fn bootstrap_threads_the_capability_to_the_bundle_import() {
+        let body = page_bootstrap_body("cap-def456");
+        // A static import's URL is resolved against the importing module's own
+        // URL, so the `?oc_cap` query on the bootstrap URL does NOT propagate
+        // to its `./bundle.mjs` import — the bootstrap must pass the validated
+        // capability along explicitly or the bundle request would 404.
+        assert!(
+            body.contains("from \"./bundle.mjs?oc_cap=cap-def456\""),
+            "the bootstrap must thread the capability into the bundle import"
+        );
+    }
+
+    #[test]
+    fn capability_is_bound_to_its_company_and_slug() {
+        let company = CompanyId::new("acme");
+        let other_company = CompanyId::new("globex");
+        let cap = mint_module_cap(&company, "revenue");
+
+        assert!(validate_module_cap(&cap, &company, "revenue"));
+        // A capability minted for one company cannot open another company's
+        // module graph…
+        assert!(!validate_module_cap(&cap, &other_company, "revenue"));
+        // …nor another page in the same company.
+        assert!(!validate_module_cap(&cap, &company, "finance"));
+        assert!(!validate_module_cap(&cap, &company, "revenue-2"));
+        // An unknown token is never valid.
+        assert!(!validate_module_cap("deadbeef", &company, "revenue"));
+    }
+
+    #[test]
+    fn capability_tokens_are_url_safe() {
+        let cap = mint_module_cap(&CompanyId::new("acme"), "revenue");
+        assert!(
+            cap.bytes().all(|b| b.is_ascii_hexdigit()),
+            "capability must be hex-encoded to ride a URL: {cap}"
+        );
+    }
+
+    #[test]
+    fn bundle_cors_headers_allow_the_opaque_origin_with_credentials() {
+        let mut headers = axum::http::HeaderMap::new();
+        apply_page_module_cors_headers(&mut headers);
+
+        assert_eq!(
+            headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+            "null"
+        );
+        assert_eq!(
+            headers
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(headers.get(header::VARY).unwrap(), "Origin");
+    }
+
+    #[test]
+    fn shell_loads_the_page_sdk_even_for_a_page_that_does_not_import_it() {
+        let html = page_shell_html("revenue", "cap");
+        // The toast click relay (`toast-click-through.ts`) forwards a click on
+        // a toast over this frame to the page SDK's own listener
+        // (`pages-sdk/client.ts`), so the SDK must be present in every frame —
+        // including a static page whose own bundle never imports it. Without
+        // the shell import, a relayed click into such a page would reach no
+        // listener and the control beneath the toast would stay blocked.
+        assert!(
+            html.contains("import \"@opencompany/site\";"),
+            "the shell must load the page SDK itself: {html}"
         );
     }
 }

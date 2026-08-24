@@ -270,7 +270,7 @@ struct SetPolicy {
 
 /// `GET {scope}/policy` — the tier in force, what the manifest would restore,
 /// and the selectable tiers with their consequences.
-async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, Response> {
+async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let record = load_record(&company).await?;
     Ok(Json(PolicyDto::build(&record)))
 }
@@ -283,7 +283,7 @@ async fn set_policy(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPolicy>,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
 
     if body.mode.is_none()
@@ -294,7 +294,8 @@ async fn set_policy(
         return Err(refusal(
             "Nothing to set. Send a policy field — or `DELETE` \
              this endpoint to go back to the manifest's policy.",
-        ));
+        )
+        .into());
     }
 
     // Validate against the same list `company.toml` is validated against, so a
@@ -308,7 +309,8 @@ async fn set_policy(
         return Err(refusal(&format!(
             "`mode` must be one of {} — you sent `{mode}`.",
             POLICY_MODES.join(", ")
-        )));
+        ))
+        .into());
     }
     if let Some(Some(cap)) = body.auto_approve_under_usd
         && (!cap.is_finite() || cap < 0.0)
@@ -387,7 +389,7 @@ async fn clear_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -411,25 +413,29 @@ fn refusal(message: &str) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, message.to_string()).into_response()
 }
 
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 
-async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), Response> {
+async fn save(
+    company: &ScopedCompany,
+    record: &CompanyRecord,
+) -> Result<(), crate::server::Rejection> {
     company
         .runtime
         .store()
         .save(record)
         .await
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 #[cfg(test)]

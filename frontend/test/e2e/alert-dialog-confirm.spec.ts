@@ -111,7 +111,11 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   await expect(card).toBeVisible({ timeout: 30_000 });
 
   // Open the card's detail screen, then its edit dialog, then ask to delete.
-  await card.click();
+  // The open action lives on the title button, not the whole card (issue #1391):
+  // the wrapper is a drag surface, and the centre of a freshly created card
+  // happens to sit on the title today but would drift below it as soon as the
+  // card grew a note or an assignee.
+  await card.getByTestId("task-card-open").click();
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   await page.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(dialog(page)).toContainText("Delete");

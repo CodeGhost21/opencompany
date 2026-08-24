@@ -337,6 +337,35 @@ are unchanged by this redesign. A list's own screen still renders through
 that one shared component; only how the operator arrives at that screen
 (Rule 2) and how the list came to exist (Rules 3–4) move.
 
+## Rule 6: navigation and routing are separate promises
+
+A sidebar row answers “where should an operator start?”; a route answers
+“what address can still be opened?” They are deliberately different. A view
+without a `NAV` row in `frontend/src/components/app-shell.tsx` must fit exactly
+one of these treatments:
+
+- **Discoverable elsewhere.** Feedback has no main-nav row because the sidebar
+  footer links to it.
+- **A deep-link destination.** Bare `#/tasks` and `#/team` redirect to their
+  successors, while their detail addresses stay routable because cards and
+  teammate links name them. Agent-authored Pages can likewise be intentionally
+  direct-URL-only.
+- **Parked but reachable.** A complete operator surface can keep its route,
+  host API, and tests while it is absent from navigation. It must render a
+  persistent, plain-language notice explaining that it is not in console
+  navigation, that its data remains live, and how it can be reached. Inbox is
+  the current example.
+- **Retired.** Remove the render surface and route it through
+  `REWRITE_RETIRED` to the real successor. Do not leave a complete page
+  pretending to be a live navigation destination when it has neither a
+  discoverable entry point nor a parked notice.
+
+`VIEWS` in `frontend/src/lib/console-routes.ts` is the routing allow-list, not
+the navigation model: no surface gains or loses an address merely by adding or
+removing a sidebar row. A future change that parks a complete surface must add
+its visible notice in the same change; a future change that retires one must
+replace the route deliberately.
+
 ## What stays out of scope
 
 - `LedgerSpec`, the fold, `LedgerStore`, the derived-Markdown guard, and every

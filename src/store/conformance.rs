@@ -320,6 +320,7 @@ pub async fn assert_isolation_by_company(
         .append(
             &alpha,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "a".into(),
                 by: None,
@@ -554,6 +555,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e0".into(),
                 by: None,
@@ -567,6 +569,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e1".into(),
                 by: None,
@@ -586,6 +589,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e2".into(),
                 by: None,
@@ -621,6 +625,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
             .append(
                 &alpha,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: format!("a{expected}"),
                     by: None,
@@ -638,6 +643,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
         .append(
             &beta,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "b0".into(),
                 by: None,
@@ -682,6 +688,7 @@ pub async fn assert_event_subscription_surfaces_gap(events: Arc<dyn EventLog>) {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: format!("event {seq}"),
                     by: None,
@@ -716,6 +723,7 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
                 .append(
                     &id,
                     CompanyEvent::OperatorMessage {
+                        mentions: Vec::new(),
                         parent: None,
                         text: text.to_string(),
                         by: None,
@@ -987,6 +995,7 @@ pub async fn assert_export_totality(
     let mut appended = Vec::new();
     for i in 0..4 {
         let ev = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: format!("event {i}"),
             by: None,
@@ -2459,21 +2468,6 @@ pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutput
 /// `mcp/<name>/auth`, `harness/<id>/…`). **Every value is an obviously fake
 /// placeholder**; nothing here resembles a live credential.
 ///
-/// # One property this does NOT yet assert, and why
-///
-/// **Two distinct keys must stay distinct.** They do not on the filesystem
-/// backend: `Bundle::secret` slugs the key through
-/// [`slug`](crate::store::paths), which folds every character outside
-/// `[A-Za-z0-9._-]` to `_` and is therefore not injective, so `mcp/acme
-/// prod/auth` and `mcp/acme_prod/auth` are one file. SQLite and MongoDB keep
-/// them apart. Two MCP servers whose names differ only by such a character
-/// consequently share one credential on fs — issue #1510, found while writing
-/// this function.
-///
-/// The case is left out rather than added-and-failing because the fix is an
-/// on-disk filename change with a migration to think about, not a test fix.
-/// It is named here so the gap is countable instead of silent, which is the
-/// same complaint #1505 was filed about one level up.
 pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
@@ -2549,7 +2543,123 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "writing unrelated keys disturbed an existing secret"
     );
 
-    // 4. Overwrite replaces. A backend that appended, or that served a cached or
+    // 4. Keys remain distinct even when a filesystem-safe filename needs to
+    // encode them differently. MCP server names are trimmed but otherwise
+    // accepted verbatim, so these are two valid server credential keys.
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme prod/auth",
+            SecretValue("token-for-space-name".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme_prod/auth",
+            SecretValue("token-for-underscore-name".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/acme prod/auth").await.as_deref(),
+        Some("token-for-space-name"),
+        "a distinct key with a space was overwritten by its underscore variant"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/acme_prod/auth").await.as_deref(),
+        Some("token-for-underscore-name"),
+        "a distinct key with an underscore was overwritten by its space variant"
+    );
+
+    // Letter case is the same hazard one level down: on case-insensitive
+    // volumes (macOS, Windows) `mcp/Acme/auth` and `mcp/acme/auth` are one
+    // path, and a backend that let them share a file would overwrite one
+    // server's credential with another's. `validate_servers` treats them as
+    // two valid names.
+    secrets
+        .set(
+            &alpha,
+            "mcp/Acme/auth",
+            SecretValue("token-for-upper-case".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme/auth",
+            SecretValue("token-for-lower-case".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/Acme/auth").await.as_deref(),
+        Some("token-for-upper-case"),
+        "a distinct key that differs only in case was overwritten by its lower-case variant"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/acme/auth").await.as_deref(),
+        Some("token-for-lower-case"),
+        "a distinct key that differs only in case was overwritten by its upper-case variant"
+    );
+
+    // Windows strips trailing periods from a path component, so `foo` and
+    // `foo.` are one directory entry there — the filesystem backend has to
+    // encode the trailing dot, and every backend has to keep the two keys
+    // apart regardless.
+    secrets
+        .set(&alpha, "foo", SecretValue("token-for-plain".to_string()))
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "foo.",
+            SecretValue("token-for-trailing-dot".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("token-for-plain"),
+        "a distinct key ending in a period was overwritten by its plain variant"
+    );
+    assert_eq!(
+        read(&alpha, "foo.").await.as_deref(),
+        Some("token-for-trailing-dot"),
+        "a distinct key ending in a period lost its own value"
+    );
+
+    // A key that is itself shaped like a legacy filename must not alias another
+    // key. On the filesystem backend the canonical namespace and the legacy
+    // slug fallback have to stay disjoint, so `key-foo` must not read the value
+    // written for `foo`, and writing `key-foo` must not touch `foo`.
+    secrets
+        .set(&alpha, "foo", SecretValue("value-for-foo".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "key-foo").await,
+        None,
+        "reading a key-shaped legacy slug reached another key's value"
+    );
+    secrets
+        .set(
+            &alpha,
+            "key-foo",
+            SecretValue("value-for-key-foo".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("value-for-foo"),
+        "writing a key-shaped legacy slug deleted another key"
+    );
+
+    // 5. Overwrite replaces. A backend that appended, or that served a cached or
     //    stale row, would hand a rotated credential's *predecessor* to the next
     //    outbound call — which fails as an authentication error days later, far
     //    from the rotation that caused it.
@@ -2567,7 +2677,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "an overwritten secret still reads as its previous value"
     );
 
-    // 5. Clearing writes an empty value, and an empty value is NOT absence. This
+    // 6. Clearing writes an empty value, and an empty value is NOT absence. This
     //    distinction is load-bearing: `clear_auth`/`clear_key` clear a credential
     //    by writing `""`, and a backend that collapsed that into "unset" would
     //    fall back to whatever the manifest or the environment supplies — so the
@@ -2582,7 +2692,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "a cleared secret decayed into an unset one, so the revocation did not take"
     );
 
-    // 6. ISOLATION — the property with security consequences. `beta` has written
+    // 7. ISOLATION — the property with security consequences. `beta` has written
     //    nothing, and must not observe `alpha`'s credentials under any key.
     for key in [
         "inference/key",
@@ -2597,7 +2707,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         );
     }
 
-    // 7. And the isolation holds in both directions once `beta` writes the SAME
+    // 8. And the isolation holds in both directions once `beta` writes the SAME
     //    key: neither company sees the other's value. A backend that keyed only
     //    on `key` (dropping the company scope) passes step 6 and fails here,
     //    because until `beta` writes there is nothing for the missing scope to
@@ -2622,7 +2732,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
          is not part of the key"
     );
 
-    // 8. A key that exists only for `beta` is still absent for `alpha`, which is
+    // 9. A key that exists only for `beta` is still absent for `alpha`, which is
     //    the mirror of step 6 and catches a scope applied on write but not read.
     secrets
         .set(
@@ -2719,8 +2829,8 @@ pub async fn assert_fact_store(facts: Arc<dyn FactStore>) {
 /// backend keeps one claim per (addr, label) since #1300 (see
 /// [`assert_identical_body_two_labels`]), but a *new* label on an existing
 /// body stamps per-label on fs/sqlite and keeps the address's first-write
-/// stamp on the single-record backends (mongodb, the provider facade, the
-/// tinycortex engine). Readers of the stamp take the max across chunks for
+/// stamp on the single-record backends (mongodb, the provider facade).
+/// Readers of the stamp take the max across chunks for
 /// that reason.
 pub async fn assert_context_chunk_stamps(context: Arc<dyn ContextStore>) {
     let alpha = CompanyId::new("alpha");
@@ -5293,6 +5403,98 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
     );
     assert!(
         runs.list_runs(&alpha, &RunFilter::active())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // -- the per-desk filter (issue #1573) -----------------------------------
+    //
+    // In a company of its own so it disturbs none of the counts above, which
+    // are asserted exactly.
+    //
+    // Three things have to hold, and only the first is obvious. A desk's
+    // history spans **cards and card-less chat turns** alike, because both are
+    // recorded attempts at work by that desk — a filter that saw only
+    // dispatches would hide every conversation an operator had with the
+    // teammate. It composes with the other predicates rather than replacing
+    // them. And it stops at the company boundary like every other read here.
+    let gamma = CompanyId::new("gamma");
+    runs.create_run(&gamma, NewRun::for_task("g1", "card", "engineer"))
+        .await
+        .unwrap();
+    runs.create_run(&gamma, NewRun::for_chat("g2", "general", "engineer"))
+        .await
+        .unwrap();
+    runs.create_run(&gamma, NewRun::for_task("g3", "card", "ceo"))
+        .await
+        .unwrap();
+    runs.create_run(&alpha, NewRun::for_task("g4", "card", "engineer"))
+        .await
+        .unwrap();
+
+    let mut engineer = runs
+        .list_runs(&gamma, &RunFilter::for_agent("engineer"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect::<Vec<_>>();
+    // Sorted rather than compared in list order: all three rows are minted in
+    // the same millisecond, so `sort_newest_first` breaks the tie on `attempt`
+    // and `id`, and pinning that here would assert the tiebreak rather than the
+    // filter. The ordering itself is already pinned above.
+    engineer.sort();
+    assert_eq!(
+        engineer,
+        ["g1", "g2"],
+        "one desk's attempts, cards and card-less chat turns alike, and nobody \
+         else's — not the other desk in this company, not the same desk in another"
+    );
+
+    assert_eq!(
+        runs.list_runs(&gamma, &RunFilter::for_agent("ceo"))
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        ["g3"]
+    );
+
+    // Composes with `task_id`: the desk's attempts *at one card*.
+    assert_eq!(
+        runs.list_runs(
+            &gamma,
+            &RunFilter {
+                agent_id: Some("engineer".into()),
+                ..RunFilter::for_task("card")
+            }
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect::<Vec<_>>(),
+        ["g1"],
+        "the desk and card predicates intersect rather than either winning"
+    );
+
+    // …and with `statuses`. Every gamma row is still `Pending`.
+    assert!(
+        runs.list_runs(
+            &gamma,
+            &RunFilter::for_agent("engineer").with_status(RunStatus::Succeeded)
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+
+    // A desk nobody ran is empty, not an error — a removed teammate's id, or a
+    // typo, must not look like a broken read.
+    assert!(
+        runs.list_runs(&gamma, &RunFilter::for_agent("nobody"))
             .await
             .unwrap()
             .is_empty()

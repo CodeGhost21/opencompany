@@ -131,16 +131,7 @@ pub const MAX_ARTIFACT_BODY_BYTES: usize = 256 * 1024;
 /// would fire every time — asking an agent whether its own transcript is a
 /// deliverable. That is not a tuning detail; it is the difference between a
 /// feature and a permanent false positive.
-/// **Third-party content the agent did not write** — `repos`. Issue #245's
-/// agent tier clones a bound repository into `workspace/repos/<key>` and spills
-/// an oversized pull-request diff beside it. Both are somebody else's source,
-/// both appear as thousands of "new" files the moment `repo_checkout` runs, and
-/// neither is ever this company's deliverable. Without this the nudge would
-/// fire after every checkout, asking an agent whether a third party's
-/// repository is something it meant to publish — the same permanent false
-/// positive the runtime-bookkeeping family above exists to prevent, from the
-/// other direction.
-const SCAN_SKIP_DIRS: [&str; 8] = [
+const SCAN_SKIP_DIRS: [&str; 7] = [
     "node_modules",
     "target",
     "sessions",
@@ -148,7 +139,6 @@ const SCAN_SKIP_DIRS: [&str; 8] = [
     "artifacts",
     "checkpoints",
     "tinyagents_store",
-    crate::harness::repo::CHECKOUT_SUBDIR,
 ];
 
 /// File names the scan ignores wherever they appear.
@@ -310,7 +300,7 @@ pub struct PendingPublishQueue {
     /// the load-bearing part: a refused file is by definition **not** staged,
     /// so it must not be visible to [`sources`](Self::sources). See that
     /// method's note.
-    refusals: Arc<Mutex<Vec<String>>>,
+    refusals: Arc<Mutex<BTreeMap<PublishRefusalScope, Vec<String>>>>,
     destination: Arc<Mutex<PublishDestination>>,
 }
 
@@ -331,7 +321,12 @@ impl PendingPublishQueue {
     /// agent-facing copy and will be reworded, and the day it is, the operator's
     /// notice silently stops appearing with every test still green.
     pub fn push_refusal(&self, source: String) {
-        self.refusals.lock().expect("publish refusals").push(source);
+        self.refusals
+            .lock()
+            .expect("publish refusals")
+            .entry(Self::current_refusal_scope())
+            .or_default()
+            .push(source);
     }
 
     /// Takes every refusal recorded so far (FIFO), emptying the bucket.
@@ -343,7 +338,24 @@ impl PendingPublishQueue {
     /// conversation to say it in.
     pub fn drain_refusals(&self) -> Vec<String> {
         let mut guard = self.refusals.lock().expect("publish refusals");
-        std::mem::take(&mut *guard)
+        guard
+            .remove(&Self::current_refusal_scope())
+            .unwrap_or_default()
+    }
+
+    /// Claims one workflow run's refusal bucket.
+    ///
+    /// `PublishArtifactTool` is constructed once for a cached roster agent, so
+    /// it cannot carry a run id. The task-local scope lets its live refusal
+    /// write and this run's drain meet on the same shared queue handle.
+    #[must_use = "the claim discards its run's refused publishes on drop"]
+    pub fn claim_refusals_for_run(&self, run_id: impl Into<String>) -> PublishRefusalClaim {
+        let scope = PublishRefusalScope::Run(run_id.into());
+        self.clear_refusals_in(&scope);
+        PublishRefusalClaim {
+            queue: self.clone(),
+            scope,
+        }
     }
 
     /// Where staged publishes are currently headed.
@@ -380,7 +392,7 @@ impl PendingPublishQueue {
     /// re-run would report a refusal against a turn that never asked.
     pub fn clear(&self) {
         self.inner.lock().expect("publish queue").clear();
-        self.refusals.lock().expect("publish refusals").clear();
+        self.clear_refusals_in(&Self::current_refusal_scope());
     }
 
     /// Drains every staged publish (FIFO), emptying the queue.
@@ -412,6 +424,60 @@ impl PendingPublishQueue {
     /// How many publishes are staged.
     pub fn queued(&self) -> usize {
         self.inner.lock().expect("publish queue").len()
+    }
+
+    fn current_refusal_scope() -> PublishRefusalScope {
+        CURRENT_REFUSAL_SCOPE
+            .try_with(Clone::clone)
+            .unwrap_or(PublishRefusalScope::Unscoped)
+    }
+
+    fn clear_refusals_in(&self, scope: &PublishRefusalScope) {
+        self.refusals
+            .lock()
+            .expect("publish refusals")
+            .remove(scope);
+    }
+}
+
+/// Which turn owns a refused publish.
+///
+/// The queue handle is shared by cached roster tools, so workflow runs are
+/// separated by an ambient key rather than by replacing that handle per run.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum PublishRefusalScope {
+    /// Chat and task turns retain the historical company-wide bucket.
+    #[default]
+    Unscoped,
+    /// One workflow run, keyed by its unique run id.
+    Run(String),
+}
+
+tokio::task_local! {
+    /// The workflow run whose refusal bucket the current task uses.
+    static CURRENT_REFUSAL_SCOPE: PublishRefusalScope;
+}
+
+/// A workflow run's claim on its own refused-publish bucket.
+pub struct PublishRefusalClaim {
+    queue: PendingPublishQueue,
+    scope: PublishRefusalScope,
+}
+
+impl PublishRefusalClaim {
+    /// Runs `fut` in this claim's scope, routing refusal writes and drains to
+    /// this run's bucket even though the tool itself belongs to a cached agent.
+    pub async fn scoped<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        CURRENT_REFUSAL_SCOPE.scope(self.scope.clone(), fut).await
+    }
+}
+
+impl Drop for PublishRefusalClaim {
+    fn drop(&mut self) {
+        self.queue.clear_refusals_in(&self.scope);
     }
 }
 
