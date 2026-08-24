@@ -410,15 +410,34 @@ export function SetupDialog({
       // completion over a roster it never finished building.
       if (boundary) {
         if (createdCount < agents.length) {
-          // Keep the old team, and keep the next retry's boundary covering both
-          // the rows this pass was meant to replace and the rows it did create,
-          // so a successful retry replaces the whole partial attempt. The
-          // return-from-Settings boundary is a captured Set that would otherwise
-          // shadow those rows on the next retry, so it is let go now that the
-          // expanded boundary lives in `createdIds`.
-          createdIds.current = [...boundaryIds, ...createdThisRun];
-          redesignRoster.current = null;
+          // A replacement that did not fully land must not leave a partial new
+          // team stacked beside the one it was meant to replace. Roll the rows
+          // this run created back before failing, so the redesign is atomic —
+          // either the whole replacement is in place or the company is exactly
+          // as it was. A ref is lost on reload, so keeping the rows in a ref
+          // (as this block once did) strands them for a later retry that can no
+          // longer name them; skipping clears the stored debt, stranding them
+          // for good. Rolling back removes the rows themselves instead.
+          const kept: string[] = [];
+          for (const id of createdThisRun) {
+            if (cancelled) return;
+            try {
+              await client.removeTeamMember(id, company);
+            } catch {
+              // A rollback that could not land leaves its row in place. It stays
+              // in the boundary rather than being stranded for the next retry to
+              // miss, and the captured Set — which predates this run and cannot
+              // name it — is let go so it does not shadow that expanded boundary.
+              kept.push(id);
+            }
+          }
           if (cancelled) return;
+          if (kept.length) {
+            createdIds.current = [...boundaryIds, ...kept];
+            redesignRoster.current = null;
+          } else {
+            createdIds.current = boundaryIds;
+          }
           building.current = false;
           setPhase({
             kind: "failed",
