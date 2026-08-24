@@ -1133,3 +1133,37 @@ fn scoped_context_keeps_facades_still_held() {
         "the cache should stop growing once held facades drain"
     );
 }
+
+#[test]
+fn scoped_context_drains_back_to_capacity() {
+    // A burst of live scopes can push the cache past its capacity while every
+    // entry has an external holder. Once those holders drop, the next miss
+    // must drain the whole surplus back to the cap — not replace a single
+    // entry and reinsert, which would leave the process-lifetime map
+    // permanently oversized: every later miss would evict exactly one unheld
+    // entry and insert its replacement, so the surplus would never shrink.
+    let mem = engine();
+    let cache = mem
+        .context_stores
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+
+    let cap = super::SCOPED_CONTEXT_CACHE_CAPACITY;
+    let burst = 64;
+
+    // Grow the cache past the cap while keeping every facade alive.
+    let held: Vec<_> = (0..cap + burst)
+        .map(|i| mem.agent_context(&format!("agent-{i}")))
+        .collect();
+    assert_eq!(cache.lock().unwrap().len(), cap + burst);
+
+    // Drop the holders: every entry is now held by the cache alone and
+    // evictable. One miss must drain the entire surplus (plus room for the
+    // key being inserted), walking the map back to exactly its capacity.
+    drop(held);
+    let _drain = mem.agent_context("agent-drain");
+    assert_eq!(
+        cache.lock().unwrap().len(),
+        cap,
+        "a miss after holders drop must drain the cache back to its capacity"
+    );
+}
