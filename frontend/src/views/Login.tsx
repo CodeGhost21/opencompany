@@ -23,7 +23,7 @@ import {
 } from "@/api/auth";
 import { connectWallet, hasWallet, NoWalletError, signMessage } from "@/lib/wallet";
 import { resendLabel, secondsUntilResend } from "@/views/login/resend";
-import { arrivedViaSetupHandoff, SETUP_HANDOFF_FRAGMENT, setupHandoffFragment } from "@/setup/state";
+import { arrivedViaSetupHandoff, SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
