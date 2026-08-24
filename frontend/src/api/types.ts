@@ -1880,8 +1880,8 @@ export interface MentionableAgentDto {
 /**
  * One person the picker can offer.
  *
- * Id and label only, by design — this is deliberately not the admin user
- * record, and must not grow toward it.
+ * Id, label, and chosen face only, by design — this is deliberately not the
+ * admin user record, and must not grow toward it.
  */
 export interface MentionablePersonDto {
   id: string;
