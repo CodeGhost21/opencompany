@@ -505,6 +505,55 @@ describe("a replacing build-out clears the team it replaces", () => {
     expect(client.removed).toEqual(["old-1"]);
   });
 
+  it("a refused rollback re-keys the durable debt to include the row it could not remove", async () => {
+    const settled: (string[] | null)[] = [];
+    const removed: string[] = [];
+    const roster = [
+      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+    ];
+    const client = {
+      ...clientWith(),
+      post: async () => ({
+        agents: [
+          { name: "Ada", role: "Operations", description: "Runs the desk." },
+          { name: "Bo", role: "Analyst", description: "Covers the numbers." },
+        ],
+        template: "ecommerce",
+        source: "model",
+      }),
+      // One of two replacements lands, then the rollback of that row is refused
+      // — the row survives and must be named by the durable boundary.
+      addTeamMember: async (body: { role?: string }) => {
+        if (body.role === "Analyst") throw new Error("nope");
+        return { id: "n1" };
+      },
+      listTeam: async () => roster,
+      removeTeamMember: async (agentId: string) => {
+        removed.push(agentId);
+        if (agentId === "n1") throw new Error("nope");
+      },
+      removed,
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    await show(client, {
+      redesign: true,
+      fallbackIds: ["f1"],
+      onReplacementComplete: (ids) => settled.push(ids),
+    });
+    await answer("setup-field-industry", "E-commerce — homeware");
+    await answer("setup-field-teamHint", "");
+    await answer("setup-field-automate", "");
+    for (let i = 0; i < 40 && !find("setup-failed"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+    }
+    expect(find("setup-failed")).toBeTruthy();
+    // The kept row n1 survives the failed rollback; the durable debt must now
+    // name it alongside the original boundary, so a reload before the retry
+    // still replaces it rather than leaving it stacked beside the new team.
+    expect(settled).toEqual([["f1", "n1"]]);
+  });
+
   it("keeps the existing team when a replacing build-out creates nothing", async () => {
     const removed: string[] = [];
     const roster = [
