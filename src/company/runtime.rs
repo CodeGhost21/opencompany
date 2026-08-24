@@ -2633,11 +2633,9 @@ impl CompanyRuntime {
                     return Err(OpenCompanyError::NotFound(format!("feedback item {id}")));
                 }
                 _confirm_guard = Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
-                let item = self
-                    .feedback
-                    .get(&id)
-                    .await?
-                    .expect("feedback item exists: existence checked before taking the confirm lock");
+                let item = self.feedback.get(&id).await?.expect(
+                    "feedback item exists: existence checked before taking the confirm lock",
+                );
                 if !preview {
                     if item.issue_status.is_some() {
                         return Ok(FeedbackResponse::recorded(&item));
