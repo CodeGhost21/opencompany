@@ -135,6 +135,7 @@ describe("what an agent's tools amount to", () => {
       requested: ["email.send"],
       companyAllow: ["workspace"],
       deskAllow: [],
+      deskCeilingActive: false,
       effective: [],
     });
     expect(summary.effective).toEqual([]);
