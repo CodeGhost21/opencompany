@@ -448,9 +448,13 @@ impl StepTrace {
                 };
                 let seq = *seq;
                 buf.push_str(delta);
-                if buf.len() < DEEP_THINK_FLUSH_BYTES {
+                self.thinking_pending_bytes = self
+                    .thinking_pending_bytes
+                    .saturating_add(delta.len());
+                if self.thinking_pending_bytes < DEEP_THINK_FLUSH_BYTES {
                     return Vec::new();
                 }
+                self.thinking_pending_bytes = 0;
                 let reasoning = std::mem::take(buf);
                 vec![(
                     seq,
