@@ -178,11 +178,10 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   // This host has no model. Say what that changes before collecting answers,
   // rather than after presenting a plausible but standard roster.
   const modelNotice = page.getByTestId("setup-inference-notice");
-  await expect(modelNotice).toContainText("can't reach a model right now");
-  await expect(modelNotice.getByRole("link", { name: "Set up a model" })).toHaveAttribute(
-    "href",
-    "#/settings/connections",
-  );
+  await expect(modelNotice).toContainText("can't run a model");
+  // A harness-less binary can never put a model on the design path, so the
+  // "Set up a model" CTA is a dead end here and is rightly omitted.
+  await expect(modelNotice.getByRole("link", { name: "Set up a model" })).toHaveCount(0);
 
   // The tour must be holding: a walkthrough of an unstaffed company is the
   // first impression this feature exists to replace.
