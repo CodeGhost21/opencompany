@@ -127,4 +127,54 @@ describe("the operator overview landing page (#1321)", () => {
     expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
     expect(container.querySelector('[href="#/tasks/task-1?run=run-1"]')?.textContent).toContain("Open");
   });
+
+  it("reads failures on their own page, so paused attempts cannot crowd one out of the since-visit answer", async () => {
+    window.localStorage.setItem("oc.overview.last-visit:test-host::acme", "1700000000000");
+    const paused = run({
+      id: "paused-1",
+      status: "paused",
+      phase: "parked",
+      finishedAtMillis: 1_700_000_000_200,
+    });
+    const failed = run({
+      id: "failed-1",
+      finishedAtMillis: 1_700_000_000_100,
+    });
+    await render(
+      clientByUrl((url) =>
+        // The stopped panel's capped mixed page is all-paused — the failure
+        // finished after the visit but is older than the paused pack, so it
+        // would fall off that page. The since-visit panel reads its own
+        // failed-only page, so it still sees the attempt.
+        url.includes("status=failed,paused")
+          ? Promise.resolve([paused])
+          : Promise.resolve([failed]),
+      ),
+      readyFeed,
+    );
+    await settle();
+
+    expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
+    expect(container.querySelector('[href="#/tasks/task-1?run=failed-1"]')).not.toBeNull();
+  });
+
+  it("re-reads the run panels when the shell reports a run status change", async () => {
+    let calls = 0;
+    const host: OpenCompanyClient = {
+      scopeFor: () => "/api/v1/company/acme",
+      get: () => {
+        calls += 1;
+        return Promise.resolve([]);
+      },
+    } as unknown as OpenCompanyClient;
+
+    await render(host, readyFeed, 0);
+    await settle();
+    const afterBoot = calls;
+    expect(afterBoot).toBeGreaterThan(0);
+
+    await render(host, readyFeed, 1);
+    await settle();
+    expect(calls).toBeGreaterThan(afterBoot);
+  });
 });
