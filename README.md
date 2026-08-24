@@ -70,6 +70,7 @@ of moments where a human signs off:
 | **[VC Firm](companies/agentic_venture_capital/)** | Deal flow, diligence, memos, portfolio support | The final "yes" |
 | **[Consulting Firm](companies/agentic_consultation_firm/)** | Research, analysis, modeling, decks, implementation plans | Executive workshops |
 | **[Software Company](companies/agentic_software_company/)** | PM, design, frontend, backend, QA, security, docs, support, DevRel | Product direction |
+| **[Product Team](companies/agentic_product_team/)** | A triaged queue, a groomed backlog, a defended roadmap | Prioritization calls & roadmap sign-off |
 | **[Marketing Agency](companies/agentic_marketing_agency/)** | Creative, copy, SEO, paid, email, landing pages, analytics | Campaign sign-off |
 | **[Design Studio](companies/agentic_design_studio/)** | Branding, UI, motion, illustration, user testing | Creative direction |
 | **[Media Company](companies/agentic_media_company/)** | Finding, verifying, writing, illustrating, distributing stories | Editorial standards |
@@ -83,9 +84,11 @@ of moments where a human signs off:
 | **[Accounting Firm](companies/agentic_accounting_firm/)** | Bookkeeping, tax, payroll, forecasting, audit prep | Signing the filings |
 | **[Law Firm](companies/agentic_law_firm/)** | Research, drafting, litigation support, discovery, compliance | Approving filings |
 | **[Pharma Startup](companies/agentic_pharma_startup/)** | Literature, molecule discovery, simulation, trial planning | The lab work |
+| **[Research Lab](companies/agentic_research_lab/)** | Source-backed research reports with the evidence attached | Setting the question & accepting findings |
+| **[Math Lab](companies/agentic_math_lab/)** | Verified answers to computational problems, with the programs that produced them | Stating the problem & accepting the answer |
 | **[Signals + Opportunity Studio](companies/signals_opportunity_studio/)** | Scouting signals, clustering pains, ranking opportunities into a weekly brief | Which opportunities to fund |
 
-Nineteen companies. One operator. Pick one and run it, or run several at once.
+Twenty-two companies. One operator. Pick one and run it, or run several at once.
 [`companies/README.md`](companies/README.md) has the full catalog.
 
 ## Quickstart

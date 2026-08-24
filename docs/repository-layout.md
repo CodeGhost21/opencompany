@@ -17,8 +17,18 @@ src/server/             Axum HTTP router and handlers
 src/server/users/       Human sign-in: magic link, passwords, sessions, invites
 src/openhuman/          OpenHuman launcher seams
 src/tiny/               TinyAgents/OpenHuman status surface
+src/globals/            The global baseline: agents, workflows, skills, starting tool belt
+src/ledger/             Dynamic ledgers: declared record shapes and the append-only fold
+src/economy/            tiny.place economy: identity, Agent Cards, SIWX auth, x402 payments
+src/ingest/             Turning dropped files and links into memory
+src/metering/           Usage and finances metering projections
+src/harness/            Harness engines agents run their turns on
+src/runner/             Machines executing host work on the operator's hardware
+src/workflows/          Running company workflows on the tinyflows engine
+src/chargebee/          Chargebee billing integration (backend service + agent tools)
+src/paypal/             PayPal wallet and transaction visibility
 src/bin/opencompany.rs  CLI entrypoint
-companies/              19 business definitions (a company.toml + docs each)
+companies/              22 business definitions (a company.toml + docs each)
 frontend/               Company-agnostic operator console (Vite + React)
 docs/spec/              Architecture reference
 docs/modules/           Per-package design docs
@@ -42,6 +52,16 @@ vendor/openhuman/vendor/tinyagents/
 | `server` | The Axum router |
 | `openhuman` | Launcher seams |
 | `tiny` | Vendored TinyAgents status |
+| `globals` | The global baseline every company starts from |
+| `ledger` | Dynamic ledgers and the append-only fold |
+| `economy` | tiny.place identity, Agent Cards, SIWX auth, x402 payments |
+| `ingest` | Dropped files and links into memory |
+| `metering` | Usage and finances metering projections |
+| `harness` | Engines agents run their turns on |
+| `runner` | Machines executing host work on operator hardware |
+| `workflows` | Running company workflows on the tinyflows engine |
+| `chargebee` | Chargebee billing integration |
+| `paypal` | PayPal wallet and transaction visibility |
 
 ## Where to go next
 
