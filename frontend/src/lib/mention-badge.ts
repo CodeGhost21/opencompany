@@ -188,3 +188,56 @@ export function mentionsToClear(
     })
     .map((n) => n.id);
 }
+
+/**
+ * Which host threads need their history re-read because a newly polled
+ * mention's message is absent from the loaded transcript.
+ *
+ * A mention posted by another operator never reaches an open console through
+ * SSE — `OperatorMessage` is deliberately dropped from the stream projection —
+ * and the transcripts are otherwise re-read only when a turn *this tab is
+ * watching* settles, which a turn another operator's message opened is not. So
+ * a mention that lands while the tab is already open has no later delivery
+ * path, and opening its channel cannot satisfy the `loadedMessageIds` gate in
+ * [`mentionsToClear`]: the operator can neither see the summons nor clear it
+ * until reloading. Re-read those threads so the mentioned message lands.
+ *
+ * `seenSubjects` is the set of subject ids already scheduled this session —
+ * the caller adds each returned subject to it, so one mention triggers at most
+ * one re-read rather than one per poll. The fold that rebuilds the transcript
+ * dedupes by message id, so re-reading a thread whose message arrived some
+ * other way is a no-op.
+ */
+export function threadsToReReadForMentions(
+  notifications: readonly NotificationDto[],
+  /**
+   * The message ids currently loaded per rendered channel, keyed by channel id
+   * (the same ids `mentionsToClear`'s `loadedMessageIds` holds).
+   */
+  loadedByChannel: Readonly<Record<string, ReadonlySet<string>>>,
+  /** The console's thread-id → channel-id map, as `AppShell` keeps it. */
+  chatChannelByThread: Readonly<Record<string, string>>,
+  mainChannelId: string | undefined,
+  seenSubjects: ReadonlySet<string>,
+): string[] {
+  const threadIds = new Set<string>();
+  const renderedChannelIds = new Set(Object.values(chatChannelByThread));
+  for (const n of notifications) {
+    if (n.readAt !== undefined || n.kind !== "mention") continue;
+    const subject = hostMessageId(n.subjectId);
+    if (seenSubjects.has(subject)) continue;
+    const channelId = renderedChannelIdForContext(
+      n.context,
+      mainChannelId,
+      renderedChannelIds,
+    );
+    if (channelId === undefined) continue;
+    // The message is already on screen for this channel — nothing to recover.
+    if (loadedByChannel[channelId]?.has(subject)) continue;
+    const threadId = Object.entries(chatChannelByThread).find(
+      ([, c]) => c === channelId,
+    )?.[0];
+    if (threadId !== undefined) threadIds.add(threadId);
+  }
+  return [...threadIds];
+}
