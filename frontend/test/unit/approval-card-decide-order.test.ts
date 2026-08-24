@@ -137,6 +137,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
       b.getAttribute("aria-label"),
     );
+    console.log(JSON.stringify(labelled));
     expect(labelled).toContain(
       `Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0} — approval 1 of 1 — asked by Ops`,
     );
