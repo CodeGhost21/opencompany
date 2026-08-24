@@ -27,13 +27,17 @@
 # namespaces, `search` because it bills per call, and `mcp:*` because MCP grants
 # are named per server.
 #
-# `repo` is the one namespace that is NOT here, and it is not an oversight: a
-# host on filesystem storage (`OPENCOMPANY_STORAGE=fs`, the default and the
-# desktop's) **refuses to boot a company whose allow-list names `repo`** — a
-# repository credential would sit on that filesystem in plaintext, readable by
-# the uid an agent shell runs as. Defaulting it on would turn every fs
-# deployment into a boot failure. A company on MongoDB storage that wants it
-# adds `repo.*` to its own `[tools].allow`.
+# Also not here: `chargebee`, `hosting` and `paypal` — the billing, deploy and
+# wallet namespaces, each opt-in by name because it is a company-specific
+# third-party integration (`hosting` publishes the workspace to the public
+# internet and provisions databases the company pays for).
+#
+# `repo` is not an oversight either: a host on filesystem storage
+# (`OPENCOMPANY_STORAGE=fs`, the default and the desktop's) **refuses to boot a
+# company whose allow-list names `repo`** — a repository credential would sit on
+# that filesystem in plaintext, readable by the uid an agent shell runs as.
+# Defaulting it on would turn every fs deployment into a boot failure. A company
+# on MongoDB storage that wants it adds `repo.*` to its own `[tools].allow`.
 #
 # `workspace.write` is explicit because the host recognizes `workspace.*` as
 # read/sub-grant coverage but only the bare `workspace` or exact
