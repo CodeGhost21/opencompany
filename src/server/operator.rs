@@ -38,8 +38,8 @@ use crate::ports::types::{
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer,
-    channel_attributed_replies, history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer, author_labels,
+    channel_attributed_replies, history_for_desk, project_mentions,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
