@@ -524,4 +524,43 @@ describe("threadsToReReadForMentions", () => {
       ),
     ).toEqual({ threadIds: [], subjects: [] });
   });
+
+  it("re-reads the first desk's own thread, not the main alias", () => {
+    // The first configured desk is not the legacy General thread. `channelMap`
+    // inserts the `main` alias before the desk's self-mapping, so a naive
+    // channel→thread lookup would select `main` and re-read the General
+    // conversation — never the desk's own — leaving the mentioned message
+    // absent and the badge stuck until reload (Codex P2).
+    const firstDeskByThread: Record<string, string> = {
+      main: "engineering",
+      engineering: "engineering",
+      ada: "dm:ada",
+    };
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "engineering", subjectId: "42" })],
+        {},
+        firstDeskByThread,
+        "engineering",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: ["engineering"], subjects: ["h42"] });
+  });
+
+  it("still re-reads the main thread for a legacy general mention on the first desk", () => {
+    const firstDeskByThread: Record<string, string> = {
+      main: "engineering",
+      engineering: "engineering",
+      ada: "dm:ada",
+    };
+    expect(
+      threadsToReReadForMentions(
+        [note({ id: "m", context: "General", subjectId: "5" })],
+        {},
+        firstDeskByThread,
+        "engineering",
+        new Set(),
+      ),
+    ).toEqual({ threadIds: ["main"], subjects: ["h5"] });
+  });
 });
