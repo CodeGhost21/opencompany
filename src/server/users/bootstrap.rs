@@ -164,8 +164,15 @@ mod test {
     use super::*;
     use crate::store::FsOps;
 
-    fn users_store(dir: &tempfile::TempDir) -> Arc<dyn UserStore> {
-        Arc::new(FsOps::new(dir.path().to_path_buf()))
+    fn stores(
+        dir: &tempfile::TempDir,
+    ) -> (
+        Arc<dyn UserStore>,
+        Arc<dyn crate::ports::sessions::SessionStore>,
+        Arc<dyn crate::ports::login_codes::LoginCodeStore>,
+    ) {
+        let ops = Arc::new(FsOps::new(dir.path().to_path_buf()));
+        (ops.clone(), ops.clone(), ops)
     }
 
     const GOOD: &str = "a long enough bootstrap password";
@@ -173,13 +180,13 @@ mod test {
     #[tokio::test]
     async fn issues_a_first_password_to_the_deployment_bootstrap_admin() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let users = users_store(&dir);
+        let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
         let issued = issue_password(
             &users,
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &sessions,
+            &login_codes,
             &company,
             &[],
             Some("Founder@Acme.test"),
@@ -212,13 +219,13 @@ mod test {
     #[tokio::test]
     async fn a_manifest_admin_is_eligible_without_a_bootstrap_admin() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let users = users_store(&dir);
+        let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
         issue_password(
             &users,
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &sessions,
+            &login_codes,
             &company,
             &["ada@acme.test".into()],
             None,
@@ -244,13 +251,13 @@ mod test {
     #[tokio::test]
     async fn refuses_an_address_the_company_does_not_already_admit() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let users = users_store(&dir);
+        let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
         let error = issue_password(
             &users,
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &sessions,
+            &login_codes,
             &company,
             &["ada@acme.test".into()],
             Some("founder@acme.test"),
@@ -281,13 +288,13 @@ mod test {
     #[tokio::test]
     async fn an_existing_account_can_be_reset_without_a_standing_grant() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let users = users_store(&dir);
+        let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
         issue_password(
             &users,
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &sessions,
+            &login_codes,
             &company,
             &[],
             Some("ada@acme.test"),
@@ -301,8 +308,8 @@ mod test {
         // Now nobody is named: no manifest admins, no bootstrap admin.
         let again = issue_password(
             &users,
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &sessions,
+            &login_codes,
             &company,
             &[],
             None,
@@ -332,12 +339,14 @@ mod test {
     #[tokio::test]
     async fn re_issuing_keeps_one_account() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let users = users_store(&dir);
+        let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
         for _ in 0..3 {
             issue_password(
                 &users,
+                &sessions,
+                &login_codes,
                 &company,
                 &[],
                 Some("ada@acme.test"),
@@ -355,13 +364,13 @@ mod test {
     #[tokio::test]
     async fn a_temporary_password_flags_the_account_for_replacement() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let users = users_store(&dir);
+        let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
         let issued = issue_password(
             &users,
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &sessions,
+            &login_codes,
             &company,
             &[],
             Some("ada@acme.test"),
@@ -387,13 +396,13 @@ mod test {
     #[tokio::test]
     async fn a_weak_password_is_refused_before_anything_is_written() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let users = users_store(&dir);
+        let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
         issue_password(
             &users,
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
-            &Arc::new(FsOps::new(dir.path().to_path_buf())),
+            &sessions,
+            &login_codes,
             &company,
             &[],
             Some("ada@acme.test"),
