@@ -72,7 +72,8 @@ pub struct PolicyGql {
     /// The manifest's always-ask list, for the same reason.
     pub manifest_always_approve: Vec<String>,
     /// The manifest's spend cap, for the same reason — what a reset would
-    /// restore (a cap is looser when it is higher or `null`).
+    /// restore (a higher cap is looser; `null` is the strictest setting — no
+    /// spend is auto-approved, so every spend parks).
     pub manifest_auto_approve_under_usd: Option<f64>,
     /// The manifest's approval deadline, for the same reason — what a reset
     /// would restore.

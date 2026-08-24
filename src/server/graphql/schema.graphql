@@ -843,7 +843,14 @@ type Policy {
 	wins over every tier, `full` included.
 	"""
 	alwaysApprove: [String!]!
+	"""
+	Spend strictly under this amount is auto-approved without an approval;
+	`null` means no spend cap is in force.
+	"""
 	autoApproveUnderUsd: Float
+	"""
+	How long an undecided approval remains actionable, in hours.
+	"""
 	approvalTtlHours: Float!
 	"""
 	The manifest's tier, so a client can see what a reset would restore.
@@ -853,7 +860,16 @@ type Policy {
 	The manifest's always-ask list, for the same reason.
 	"""
 	manifestAlwaysApprove: [String!]!
+	"""
+	The manifest's spend cap, for the same reason — what a reset would
+	restore (a higher cap is looser; `null` is the strictest setting — no
+	spend is auto-approved, so every spend parks).
+	"""
 	manifestAutoApproveUnderUsd: Float
+	"""
+	The manifest's approval deadline, for the same reason — what a reset
+	would restore.
+	"""
 	manifestApprovalTtlHours: Float
 	"""
 	Whether an operator override is in force.
