@@ -3043,6 +3043,14 @@ fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
             }
             None => 0u8.hash(&mut hasher),
         }
+        // A routing override changes the harness binding the roster must build,
+        // so it has to move this fingerprint too — a model/harness change on a
+        // teammate who already has a persona override would otherwise be ignored
+        // until the next process restart (issue #1676 review note). Hashed as
+        // `Option`s so the stored `Some("")` "cleared" form stays distinct from
+        // `None` ("never edited").
+        entry.model.hash(&mut hasher);
+        entry.harness.hash(&mut hasher);
     }
     hasher.finish()
 }
