@@ -151,7 +151,7 @@ fn project(server: InstalledServer, state: Option<&ConnStatus>, now: u64) -> Reg
         health_from_status(
             state.status.as_str(),
             state.tool_count,
-            state.auth_hint.as_deref(),
+            state.auth_hint.map(|hint| hint.as_code()),
             now,
         )
     });
