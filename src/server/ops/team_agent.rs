@@ -537,14 +537,14 @@ async fn edit_agent(
     }
 
     let name = trimmed_field(body.name.as_deref(), "name")
-        .map_err(|e| e.into_response().into())?;
+        .map_err(|e| Rejection::from(e.into_response()))?;
     let role = trimmed_field(body.role.as_deref(), "role")
-        .map_err(|e| e.into_response().into())?;
+        .map_err(|e| Rejection::from(e.into_response()))?;
     let tools = body
         .tools
         .map(|globs| trimmed_globs(&globs))
         .transpose()
-        .map_err(|e| e.into_response().into())?;
+        .map_err(|e| Rejection::from(e.into_response()))?;
 
     if is_manifest {
         // Stored as an overlay on the record, exactly like the daily-budget
