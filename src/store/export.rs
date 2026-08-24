@@ -549,6 +549,8 @@ impl BundleContents {
             scrub_redacted_discussion(read_jsonl::<StoredEvent>(&src.join(EVENTS_JSONL)).await?);
         let traces =
             read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(TRACES_JSONL)).await?;
+        let archived_traces =
+            read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(ARCHIVES_JSONL)).await?;
         // Absent on bundles that predate facts-in-the-bundle: empty, not an error.
         let facts = read_jsonl::<FactRecord>(&src.join(FACTS_JSONL)).await?;
 
