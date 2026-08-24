@@ -301,11 +301,8 @@ async fn do_disconnect_from(
 async fn disconnect(
     company: AdminScopedCompany,
     Path(ProviderPath { provider }): Path<ProviderPath>,
-) -> Response {
-    do_disconnect(company.runtime, &provider)
-        .await
-        .map(IntoResponse::into_response)
-        .unwrap_or_else(IntoResponse::into_response)
+) -> Result<Json<serde_json::Value>, ApiError> {
+    do_disconnect(company.runtime, &provider).await
 }
 
 #[cfg(test)]
