@@ -490,6 +490,7 @@ impl StepTrace {
     /// accumulated no text.
     fn close_thinking(&mut self) -> Option<(u32, TurnStep, Option<TurnStepDetail>)> {
         let (seq, buf) = self.thinking_buf.take()?;
+        self.thinking_pending_bytes = 0;
         if buf.is_empty() {
             return None;
         }
