@@ -62,12 +62,20 @@ use crate::store::paths::Bundle;
 #[derive(Clone)]
 pub struct FsOps {
     root: PathBuf,
+    /// Run ids known to live in each company's deep-trace file, so a compaction
+    /// is triggered exactly when a new run pushes the count past the cap — not
+    /// on every append (issue #1679). Seeded from disk on the first deep-trace
+    /// write of a process and rebuilt after each compaction or purge.
+    deep_runs: Arc<tokio::sync::Mutex<HashMap<PathBuf, HashSet<String>>>>,
 }
 
 impl FsOps {
     /// Creates an ops store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            deep_runs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
