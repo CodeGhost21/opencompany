@@ -1744,17 +1744,11 @@ export function AppShell({
     const threadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
     if (!threadId) {
-      // A background/task turn — no chat bubble to fold it into, which is why
-      // this used to `return` and drop the frame entirely. A workflow `agent`
-      // node's turn is exactly this shape, so every frame it emitted vanished
-      // and no surface could show one running.
-      //
-      // A counter rather than the payload, deliberately: the Observatory treats
-      // its fetched snapshot as authority and reacts by re-reading, so two
-      // frames collapsing inside one React batch still mean "re-read" exactly
-      // once. Accumulating payloads here would reintroduce the frame-loss trap
-      // `views/workflows/graph.ts` documents.
-      setBackgroundTurnTick((n) => n + 1);
+      // No chat bubble to fold the frame into. Background turns (workflow
+      // nodes, dispatched cards) stream nothing at all — `run_background` runs
+      // with `LiveStream::Off` — so a chat-less frame here is a host emitting a
+      // shape this console does not render, and the Observatory's live re-read
+      // is instead driven by the workflow node events in `onWorkflowRunEvent`.
       return;
     }
     setLiveStepsByThread((prev) => {
