@@ -538,7 +538,7 @@ export function ApprovalsView({
                   <ApprovalCard
                     key={a.id}
                     approval={a}
-                    now={now}
+                    now={regionNow}
                     askerNames={askerNames}
                     chatChannelByThread={chatChannelByThread}
                     thread={threadLinks.get(a.id)}
