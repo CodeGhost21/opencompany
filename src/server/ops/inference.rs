@@ -392,6 +392,7 @@ async fn effective_status_with(
             cognition: cognition.path.to_string(),
             usage_metering: cognition.metering,
             restart_required,
+            harness_reachable: harness_reachable(runtime),
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -407,6 +408,7 @@ async fn effective_status_with(
             // stranded. Threaded rather than hardcoded so the two arms cannot
             // drift apart.
             restart_required,
+            harness_reachable: harness_reachable(runtime),
         },
     })
 }
