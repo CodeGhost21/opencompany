@@ -388,12 +388,15 @@ and default to empty (offline) — a surface whose seam is absent returns
 made, for the run inspector's "Files associated" section:
 
 ```jsonc
-[
-  { "taskId": "t_a", "artifactId": "art_a1", "title": "Launch spec",
-    "kind": "markdown", "source": "specs/launch.md", "latestVersion": 2,
-    "updatedAtMillis": 1717000000000, "workspaceNodeId": "node_9",
-    "taskTitle": "Draft the launch" }
-]
+{
+  "files": [
+    { "taskId": "t_a", "artifactId": "art_a1", "title": "Launch spec",
+      "kind": "markdown", "source": "specs/launch.md", "latestVersion": 2,
+      "updatedAtMillis": 1717000000000, "workspaceNodeId": "node_9",
+      "taskTitle": "Draft the launch" }
+  ],
+  "truncated": false
+}
 ```
 
 There is no direct "artifacts by run" index — `ArtifactVersion.run_id` is the
@@ -409,8 +412,12 @@ to `#/workspace/<id>`).
 Like `GET …/workflows/runs/{rid}/output` it is a **lazy per-run fetch**, NOT
 folded into `GET …/workflows/runs` (that fold is already expensive, and an
 inspector opens one run at a time). The one contract difference from `output`:
-**a run with no files answers `200 []`, never `404`** — a run that opened no
-cards, or cards that published nothing, is the common case, not an error.
+**a run with no files answers `200 { files: [], truncated: false }`, never
+`404`** — a run that opened no cards, or cards that published nothing, is the
+common case, not an error. `truncated` flips to `true` only when a run's file
+count passes the host's defensive cap (`MAX_RUN_ARTIFACTS`), which the console
+labels "newest files shown" rather than presenting an incomplete list as
+exhaustive.
 
 Provenance is the **opening** run: `origin_run_id` is stamped once, at card
 creation, so a card re-owned by a later run still lists its files under the run
