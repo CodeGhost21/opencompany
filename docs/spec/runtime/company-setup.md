@@ -218,8 +218,7 @@ the logistics coordinator has a mandate rather than a job title.
 | Order dispatch | On new order | Moves the order through fulfilment |
 | Weekly content schedule | Mondays | Drafts the week's posts, holds them for review |
 
-Every one of those needs a connection that does not exist on day one. That is
-the phase boundary, stated concretely.
+Every one of those needs a connection that does not exist on day one.
 
 ## The question we deliberately do not ask
 
