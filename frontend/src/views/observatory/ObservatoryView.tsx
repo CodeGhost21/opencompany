@@ -90,14 +90,15 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
 
   // Navigating between runs (following an Observatory link to another run)
   // changes `runId` while this view stays mounted, and such links deliberately
-  // omit the old `agent` query parameter. Re-read the address so the filter
-  // and the turn/step selection do not keep silently applying to the newly
-  // fetched attempts.
+  // omit the old `agent` query parameter. Re-read the address so the filter,
+  // the turn/step selection and the tab do not keep silently applying to the
+  // newly fetched attempts.
   useEffect(() => {
     const next = readObservatoryHash();
     setAgent(next.agent);
     setTurn(next.turn);
     setFocusStep(next.step);
+    setTab(next.tab);
   }, [runId]);
 
   const reload = useCallback(async () => {
