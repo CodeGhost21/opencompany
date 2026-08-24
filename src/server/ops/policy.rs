@@ -271,7 +271,8 @@ async fn set_policy(
         return Err(refusal(
             "Nothing to set. Send `mode`, `alwaysApprove`, or both — or `DELETE` \
              this endpoint to go back to the manifest's policy.",
-        ));
+        )
+        .into());
     }
 
     // Validate against the same list `company.toml` is validated against, so a
