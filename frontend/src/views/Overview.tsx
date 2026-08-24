@@ -126,13 +126,16 @@ export function Overview({ client, company, companyName }: Props) {
   // outage dismisses — the overlay that held focus unmounts with the "Try
   // again" button, and dropping a keyboard user to <body> would restart their
   // whole tab order (issue #1314). The button is disabled while the retried
-  // read is in flight, so the hand-off is deferred until that load answers.
+  // read is in flight, so the dismissal lands on the graph shell instead and
+  // only hands off to Refresh once the load answers — and even then only if
+  // the user has not moved focus themselves in the meantime.
   const refreshButtonRef = useRef<HTMLButtonElement>(null);
   // Set while the outage overlay is showing, so the dismissal branch of the
   // effect below can tell "the outage just went away" from "the page is
   // loading for the first time" — only the former must move focus.
   const outageWasShowingRef = useRef(false);
-  // Set when the outage dismisses; consumed once the retried load completes.
+  // Set when the outage dismisses with the Refresh control still disabled;
+  // consumed by the hand-off effect below once the retried load answers.
   const restoreFocusToRefreshRef = useRef(false);
   useEffect(() => {
     const shell = graphShellRef.current;
@@ -149,18 +152,33 @@ export function Overview({ client, company, companyName }: Props) {
       shell.removeAttribute("inert");
       if (outageWasShowingRef.current) {
         outageWasShowingRef.current = false;
-        restoreFocusToRefreshRef.current = true;
+        // The overlay that held focus unmounts with the very render that
+        // clears the outage, so focus must land somewhere right now. The
+        // graph shell is stable, visible and — with `inert` lifted — already
+        // interactive; landing there beats <body>, which would make a
+        // keyboard user restart their whole tab order. Refresh is still
+        // disabled mid-read, so the upgrade to it is deferred below.
+        shell.focus();
+        if (refreshButtonRef.current?.disabled) {
+          restoreFocusToRefreshRef.current = true;
+        }
       }
     }
   }, [loadError]);
 
   // Runs after every commit; the ref flags keep it a no-op until an outage is
-  // actually dismissed and the retried load has answered. Only then is the
-  // Refresh control enabled, so the focus hand-off actually lands.
+  // actually dismissed with the retried read still in flight. When that read
+  // answers, Refresh is enabled and gets focus — but only if the user has not
+  // already moved focus somewhere of their own during the read. Overriding a
+  // focus the user set deliberately is worse than leaving the graph shell as
+  // the landing spot.
   useEffect(() => {
     if (!loading && !loadError && restoreFocusToRefreshRef.current) {
       restoreFocusToRefreshRef.current = false;
-      refreshButtonRef.current?.focus();
+      const active = document.activeElement;
+      if (active === graphShellRef.current || active === document.body) {
+        refreshButtonRef.current?.focus();
+      }
     }
   });
 
