@@ -1279,6 +1279,12 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onStartBrief={() =>
+                setComposerPrefill((current) => ({
+                  text: FIRST_TEAM_BRIEF,
+                  revision: (current?.revision ?? 0) + 1,
+                }))
+              }
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
