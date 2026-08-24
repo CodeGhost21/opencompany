@@ -662,7 +662,7 @@ impl ApprovalGate for ManifestApprovalGate {
         //    loads — so `None` here means a path that reached a `Policy` without
         //    validation. It fails safe: require approval.
         let decision = self
-            .mode_decision(self.policy.mode.as_str(), effect)
+            .mode_decision(policy.mode.as_str(), effect)
             .unwrap_or(PolicyDecision::RequireApproval);
         Ok(decision)
     }
