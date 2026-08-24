@@ -37,12 +37,15 @@ describe("Settings navigation (issue #1468)", () => {
 
   it("renders linkable rows and gives narrow-screen navigation its missing context", () => {
     const section = read("views/SettingsSection.tsx");
+    // The settings sub-pages (one view per SETTINGS_PAGES id). Devices and
+    // Connections became pages of their own elsewhere in the redesign, so the
+    // list tracks the ids settings-pages.ts actually declares.
     const settingsPages = [
       "SettingsView.tsx",
       "PeopleView.tsx",
-      "DevicesView.tsx",
-      "ConnectionsView.tsx",
+      "OAuthView.tsx",
       "McpServersView.tsx",
+      "InferenceView.tsx",
       "HostingView.tsx",
       "SearchView.tsx",
       "SkillsView.tsx",
@@ -53,7 +56,12 @@ describe("Settings navigation (issue #1468)", () => {
     expect(section).toContain("title={item.hint}");
     expect(section).toContain("{activePage.hint}");
     for (const page of settingsPages) {
-      expect(page).toContain('className="text-2xl font-semibold tracking-tight"');
+      expect(page).toContain("text-2xl font-semibold tracking-tight");
     }
+    // The General page draws no visible title of its own — the rail already
+    // says "Settings" (issue #1221) — so its heading is screen-reader-only.
+    expect(read("views/SettingsView.tsx")).toContain(
+      'className="text-2xl font-semibold tracking-tight lg:sr-only"',
+    );
   });
 });

@@ -296,6 +296,11 @@ async function mockApi(page: Page) {
         body: "",
       });
     }
+    if (path.endsWith("/memory"))
+      // `GET /memory` answers with `{ items, totalContext, contextTruncated }`
+      // — the Overview's constellation reads the rows from `items`, and a bare
+      // array would leave it `undefined` and crash the graph render.
+      return json({ items: [], totalContext: 0, contextTruncated: false });
     if (path.endsWith("/me"))
       return json({ id: "op", email: "op@example.com", role: "admin" });
     return json([]);

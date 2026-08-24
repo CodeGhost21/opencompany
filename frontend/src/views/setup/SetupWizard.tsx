@@ -129,13 +129,6 @@ const ADVANCED_GROUPS: readonly {
     hint: "The address it serves on and how much room its workspace gets. Defaults are fine for a laptop.",
     fields: ["bind", "public_url", "workspace.max_blob_mb", "workspace.storage_quota_gb"],
   },
-  {
-    id: "tools",
-    label: "Tools",
-    title: "Repository access",
-    hint: "Lets agents read your code and open pull requests. You can add this later.",
-    fields: ["github_token"],
-  },
 ];
 
 /** How each sign-in mode is described, in consequences rather than mode names. */

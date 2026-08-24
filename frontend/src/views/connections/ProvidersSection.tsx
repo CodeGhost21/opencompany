@@ -64,7 +64,7 @@ interface Props {
 }
 
 /**
- * The Connections page's one provider grid (issue #582).
+ * The OAuth page's one provider grid (issue #582).
  *
  * The page used to carry two: this tile grid (then inside `ComposioSection`,
  * fed by `GET …/composio/connections`) and a categorised grid of eleven

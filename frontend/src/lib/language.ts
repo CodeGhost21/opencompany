@@ -205,13 +205,6 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // `pages_read` never reach an approval card.
   pages_write: "Publish a dashboard page",
   pages_delete: "Delete a dashboard page",
-  // Issue #245's pair. Both park per call, so each reaches an operator on the
-  // approval card and again in the Standing permissions list — and both names
-  // read like reads, which is exactly when a label has to say what is actually
-  // happening. "One of the company's repositories" is load-bearing: it tells
-  // the operator the reach is what they bound, not the whole of GitHub.
-  repo_checkout: "Check out one of the company's repositories",
-  repo_pr: "Fetch a pull request from one of the company's repositories",
   memory_store: "Save something to its memory",
   memory_forget: "Discard one of its own saved memories",
   memory_recall: "Look something up in its memory",
@@ -404,7 +397,8 @@ export function toolAction(kind: string): string {
  */
 export function grantHeadline(g: StandingGrant): string {
   const action = toolAction(g.tool);
-  return g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  const target = g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+  return g.verdict === "deny" ? `Don't allow ${target}` : target;
 }
 
 /**

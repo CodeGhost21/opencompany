@@ -2213,122 +2213,6 @@ impl RuntimeBuilder {
         let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
-        // Issue #752: a company whose roster holds `repo` does not come up on a
-        // backend that keeps secrets as plaintext on this container's disk.
-        //
-        // The bind-time refusal in `RepoManager::bind` covers new credentials.
-        // It cannot cover a company that bound one *before* this gate existed —
-        // that credential is already sitting on `/data`, and its agents would
-        // keep checking out under it forever. So the same condition is asked
-        // again here, where the answer is "this company does not start", and an
-        // operator restarting a tenant finds out at the moment they can still
-        // act on it.
-        //
-        // Read over both the effective roster and each raw per-agent request:
-        // an agent naming `tools = ["repo"]` under a company allow-list of
-        // `["*"]` is not granted the capability at runtime, but it is still a
-        // persisted request for a filesystem-backed repository credential and
-        // must be rejected before boot. Checking only the effective grants
-        // would silently erase that safety check while narrowing it.
-        //
-        // NOT feature-gated, for the reason `build_agent` states about the repo
-        // tools themselves: a control compiled only under `openhuman` is a
-        // control most CI lanes never type-check.
-        if self.storage_kind.secrets_are_plaintext_on_disk() {
-            let roster_holds_repo =
-                crate::company::grants_repo_explicit(&self.manifest.tools.allow)
-                    || self
-                        .manifest
-                        .agents
-                        .iter()
-                        .any(|agent| crate::company::grants_repo_explicit(&agent.tools))
-                    || overlay_agents
-                        .iter()
-                        .any(|agent| crate::company::grants_repo_explicit(&agent.tools))
-                    || self
-                        .manifest
-                        .agents
-                        .iter()
-                        .map(|agent| {
-                            agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
-                        })
-                        .chain(overlay_agents.iter().map(|overlay| {
-                            agent_effective_grants(&self.manifest.tools.allow, &overlay.tools)
-                        }))
-                        .any(|grants| crate::company::grants_repo_explicit(&grants));
-            if roster_holds_repo {
-                return Err(crate::error::OpenCompanyError::Config(
-                    crate::store::plaintext_secret_refusal(self.storage_kind),
-                ));
-            }
-        }
-
-        // Issue #245: the company's repository mirror cache, rooted at the same
-        // `companies/<slug>/` prefix the bundle uses so a company's whole
-        // footprint sits in one subtree — and therefore inside the one quota
-        // walk `DataLayout::usage_bytes` already does.
-        //
-        // Built here rather than lazily in the route because the location is a
-        // property of *this* runtime's home, and a route that had to derive it
-        // would be the second place that knows where a company's bytes live.
-        //
-        // The cache is capped by the same `tree_quota_bytes` that bounds the
-        // workspace tree: both answer "how much may one company hold on this
-        // host", and a mirror is company-held binary payload like any other. It
-        // needs no new knob, and a hosted tenant that already sets one gets the
-        // cache covered without touching its config.
-        let repos = {
-            let manager = crate::runtime::RepoManager::new(
-                id.clone(),
-                Bundle::new(home.clone(), &id).repos_dir(),
-                secrets.clone(),
-            )
-            .with_quota(self.workspace_quota.tree_quota_bytes)
-            // Issue #752: the manager refuses a bind when a credential would
-            // land as plaintext on this container's disk, so it has to be told
-            // which backend is actually serving secrets.
-            .with_storage_kind(self.storage_kind);
-            // The forge REST client (pull-request metadata + diff). Without the
-            // feature there is no HTTP client to give it, and the PR route says
-            // so rather than answering with an empty diff. Shadowed rather than
-            // reassigned, the same way `ops::router` folds in its feature-gated
-            // fragment.
-            #[cfg(feature = "github")]
-            let manager =
-                manager.with_host(std::sync::Arc::new(crate::runtime::HttpRepoHost::new()));
-            std::sync::Arc::new(manager)
-        };
-
-        // Issue #245, agent half: the bindings, read once here so the
-        // synchronous `build_agent` can name them in a tool description and
-        // resolve against them. Read only when the company explicitly grants
-        // `repo` — everything else has no repository tools to feed — and a
-        // read error degrades to empty with a warning rather than failing a
-        // boot over a capability the company may not even use.
-        // `HarnessPool::ensure` re-reads this every turn, so a bind, a rotation
-        // or a revoke lands without a restart; this is only the first value.
-        #[cfg(feature = "openhuman")]
-        let repo_bindings = if crate::company::grants_repo_explicit(&self.manifest.tools.allow) {
-            repos.list().await.unwrap_or_else(|err| {
-                tracing::warn!(
-                    company = %id,
-                    error = %err,
-                    "reading the repository bindings failed; agents start with none"
-                );
-                Vec::new()
-            })
-        } else {
-            Vec::new()
-        };
-
-        // Issue #245: a checkout's lifecycle is one turn's, and a host killed
-        // mid-turn ends no turn — so whatever the last process left under
-        // `<harness>/<company>/*/workspace/repos` is deleted before this one
-        // starts. Tenant-scoped (issue #664): it walks this company's subtree
-        // and nothing above it.
-        #[cfg(feature = "openhuman")]
-        crate::harness::repo::sweep_orphaned_checkouts(&home.join("harness"), &id).await;
-
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
             None => {
@@ -2607,6 +2491,10 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                // The company's own MCP store, so the
+                                // registry tools on the belt read the same
+                                // installs REST does.
+                                mcp_home: Some(home.join("mcp")),
                                 workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to
@@ -2821,18 +2709,6 @@ impl RuntimeBuilder {
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
                                 workspace: Some(ops.workspace.clone()),
-                                // Issue #245, agent half: the SAME manager the
-                                // console's bind/revoke routes write through
-                                // (wired onto the runtime below), so an operator
-                                // binding a repository is what the next turn's
-                                // `repo_checkout` resolves against — and the
-                                // one thing in this process holding the token.
-                                repos: Some(repos.clone()),
-                                repo_bindings,
-                                // One ledger per company runtime, shared by every
-                                // agent's tools and claimed per turn by the
-                                // brain's `CheckoutJanitor`.
-                                checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
@@ -3153,7 +3029,6 @@ impl RuntimeBuilder {
                 AuthMode::from_str(&self.manifest.users.mode).unwrap_or_default()
             }),
         );
-        runtime.set_repos(repos);
         // Install-wide MCP defaults (issue #527) — set before anything resolves
         // the effective server set, so the first resolution already sees them.
         runtime.set_default_mcp_servers(self.default_mcp_servers.clone());
@@ -5795,122 +5670,6 @@ needs_reason = true
     fn parse(toml_src: &str) -> CompanyManifest {
         toml::from_str(toml_src).expect("valid manifest")
     }
-
-    // ---- issue #752: `repo` needs a backend that keeps secrets off disk ----
-
-    /// A company that already bound a repository predates the bind-time gate,
-    /// so the *restart* is where it has to be caught. A repo-granted company on
-    /// an fs host does not come up.
-    #[tokio::test]
-    async fn a_repo_granted_company_does_not_boot_on_a_plaintext_secret_backend() {
-        let home = tmp_home("oc-752-boot-");
-        let manifest = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["repo", "shell"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(CompanyId::new("acme"))
-            // The default, spelled out: this is what a local `serve` is.
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect_err("an fs host must refuse to bring up a repo-granted company");
-        let message = err.to_string();
-        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
-        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
-        assert!(message.contains("`repo` grant"), "{message}");
-    }
-
-    /// The wildcard case, which a check against `[tools].allow` alone would let
-    /// through: `*` deliberately does **not** confer `repo`, so the company line
-    /// reads as ungranted while the agent naming `repo` explicitly holds it.
-    #[tokio::test]
-    async fn an_agent_that_names_repo_under_a_wildcard_company_is_caught_too() {
-        let home = tmp_home("oc-752-boot-wildcard-");
-        let manifest = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["*"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            tools = ["repo"]
-            "#,
-        );
-        // The company line itself is not an explicit grant — if it were, this
-        // test would pass for the wrong reason.
-        assert!(!crate::company::grants_repo_explicit(&manifest.tools.allow));
-        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect_err("an agent-level `repo` grant must be caught at boot");
-        assert!(err.to_string().contains("OPENCOMPANY_STORAGE=fs"), "{err}");
-    }
-
-    /// The other side, without which the two above only prove the check is on:
-    /// the same company boots on the backend that keeps secrets out of the
-    /// container, and a company that grants no `repo` boots on fs unaffected.
-    #[tokio::test]
-    async fn the_same_company_boots_where_secrets_leave_the_container() {
-        let home = tmp_home("oc-752-boot-ok-");
-        let granted = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["repo", "shell"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        RuntimeBuilder::new(home.path().to_path_buf(), granted)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Mongodb)
-            .build()
-            .await
-            .expect("mongodb-backed secrets must clear the #752 boot gate");
-
-        let ungranted_home = tmp_home("oc-752-boot-ungranted-");
-        let ungranted = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["shell", "web"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        RuntimeBuilder::new(ungranted_home.path().to_path_buf(), ungranted)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect("a company without `repo` is untouched by this gate");
-    }
-
-    // ---- `[policy]` override across a rebuild (issue #562) ----------------
 
     fn seed_policy(mode: &str, always: &[&str], under: Option<f64>) -> Policy {
         Policy {

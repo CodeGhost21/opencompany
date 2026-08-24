@@ -177,3 +177,69 @@ test("an admin adds and removes a runtime MCP server", async ({ page }) => {
       .catch(() => undefined);
   }
 });
+
+test("mcp.json shows the same servers the rows do, and saves an edit back", async ({ page }) => {
+  // The second half of the MCP page: the declared set as one document. What is
+  // asserted is the property that makes two surfaces safe — they are one
+  // configuration. A document that were an import format could show a server
+  // the rows do not, or accept a save the rows never see, and an operator would
+  // have no way to tell which one was true.
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await openMcpSettings(page);
+  await page.getByTestId("mcp-tab-json").click();
+
+  const editor = page.getByTestId("mcp-json-text");
+  await expect(editor).toBeVisible({ timeout: 15_000 });
+
+  // The manifest server the harness company declares is in the file, with its
+  // provenance echoed — and no credential, which is the rule this surface
+  // cannot be allowed to break.
+  const before = (await editor.inputValue()).trim();
+  const doc = JSON.parse(before) as {
+    mcpServers: Record<string, { url: string; source?: string; headers?: unknown }>;
+  };
+  expect(Object.keys(doc.mcpServers)).toContain("deepwiki");
+  expect(doc.mcpServers.deepwiki.url).toBe("https://mcp.deepwiki.com/mcp");
+  expect(doc.mcpServers.deepwiki.source).toBe("manifest");
+  expect(doc.mcpServers.deepwiki.headers, "a read must never echo a credential").toBeUndefined();
+
+  // An unedited document is not an edit: Save stays disabled, so an operator
+  // who opens the tab and leaves cannot write an override for every declared
+  // server by pressing the only button on screen.
+  await expect(page.getByTestId("mcp-json-save")).toBeDisabled();
+
+  const name = `pw-json-${Date.now()}`;
+  try {
+    // Adding a server here must reach the same store the rows read.
+    doc.mcpServers[name] = { url: `https://mcp.example.test/${name}` };
+    await editor.fill(`${JSON.stringify(doc, null, 2)}\n`);
+    await page.getByTestId("mcp-json-save").click();
+
+    // The host is the authority on what was stored — not the editor's own text.
+    await expect
+      .poll(
+        async () => {
+          const listed = await page.request.get("/api/v1/company/mcp/servers");
+          if (!listed.ok()) return [];
+          const body = (await listed.json()) as { name: string }[];
+          return Array.isArray(body) ? body.map((server) => server.name) : [];
+        },
+        { timeout: 15_000 },
+      )
+      .toContain(name);
+
+    // And the rows show it, because both tabs read one configuration.
+    await page.getByTestId("mcp-tab-connections").click();
+    await expect(page.getByTestId("mcp-server-row").filter({ hasText: name })).toBeVisible({
+      timeout: 15_000,
+    });
+
+    expect(pageErrors, `the page threw: ${pageErrors.join(" | ")}`).toEqual([]);
+  } finally {
+    await page.request
+      .delete(`/api/v1/company/mcp/servers/${encodeURIComponent(name)}`)
+      .catch(() => undefined);
+  }
+});

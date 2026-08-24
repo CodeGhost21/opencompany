@@ -83,11 +83,6 @@ pub mod search;
 // inference credential still gets a real team.
 pub mod setup;
 mod skill_file;
-// The company's Smithery directory credential (issue #1287): the key that
-// decides whether the MCP directory has hosted servers to show. Always compiled
-// — the console must be able to manage it in a build with no `mcp` feature, the
-// same way it manages the Composio token without the harness.
-pub mod smithery;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
@@ -98,7 +93,6 @@ pub mod steer;
 /// up.
 pub mod task_file;
 pub mod task_intent;
-pub mod telegram;
 // The one list of tools a company can grant — built-ins, MCP servers and
 // Composio toolkits in a single vocabulary. Always compiled: it is a projection
 // over the manifest, and the console route that renders it is in the default
@@ -172,8 +166,7 @@ pub use types::{
     PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
     TOOL_PROVIDERS, Tools, grants_chargebee_explicit, grants_composio_explicit,
     grants_files_or_docs, grants_hosting_explicit, grants_media_explicit, grants_paypal_explicit,
-    grants_repo_explicit, grants_repo_write_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, orchestrator_id,
+    grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
     STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
