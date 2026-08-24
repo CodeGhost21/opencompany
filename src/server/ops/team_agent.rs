@@ -719,6 +719,11 @@ async fn edit_agent(
         }
     }
 
+    // Captured before the two are consumed below. `Some` means the request
+    // carried the field at all — including a `null` that clears it, which
+    // changes routing exactly as much as setting one does.
+    let routing_changed = model.is_some() || harness.is_some();
+
     if is_manifest {
         // Stored as an overlay on the record, exactly like the daily-budget
         // override #343 modelled: `company.toml` keeps saying what the company
@@ -819,6 +824,37 @@ async fn edit_agent(
         .save(&record)
         .await
         .map_err(|e| ApiError(e).into_response())?;
+
+    // A harness or model change needs the runtime rebuilt, not just saved.
+    //
+    // Lanes, router bindings and `LocalAcpAgent`'s model map are snapshots
+    // `RuntimeBuilder` takes once, and `HarnessBrain::refresh_record` refreshes
+    // only the record — so without this the save is durable and inert: it
+    // survives, reads back correctly, and changes nothing about where turns go
+    // until the process restarts. The same reasoning `inference.rs` applies to
+    // a provider change, which is likewise chosen at build time.
+    //
+    // Only for these two fields. A name, role, tools or description edit does
+    // not affect routing, and rebuilding a company for one would be a large
+    // cost for no effect.
+    // A let-chain rather than a nested `if`: the tuple form clippy's
+    // `collapsible_if` suggests would evaluate `rebuild_company` before
+    // testing the flag, rebuilding on every name edit — the exact cost this
+    // guard exists to avoid.
+    if routing_changed
+        && let Err(error) = crate::runtime::rebuild_company(&state, company.id()).await
+    {
+        // Not fatal, and deliberately not a failed response: the edit *is*
+        // saved and will apply on the next start. A host that cannot rebuild
+        // in place (no rebuilder wired) is an ordinary configuration, not an
+        // error the operator caused by editing a teammate.
+        tracing::warn!(
+            %error,
+            agent = %agent_id,
+            "saved the harness binding but could not rebuild the company runtime; \
+             it applies on the next restart"
+        );
+    }
 
     // The caller either passed `require_admin` above or sent no `tools`, so
     // re-resolve rather than assume: an admin editing only a name must still
