@@ -1494,12 +1494,12 @@ export function AppShell({
         // reply can only be matched by content.
         //
         // It is no longer the ONLY guard, and issue #483 is why. This line now
-        // carries the host's id (below), so `hydrateChannel`'s id dedupe can
-        // recognise it — which the content check could never do from the other
-        // side, because hydration prepends history rather than appending to the
-        // recent tail this scans. Live-then-hydrate was the one route neither
-        // guard covered, and it doubled every reply that arrived while its
-        // channel was closed.
+        // carries the host's id (below), so `mergeHistoryInOrder`'s id dedupe
+        // can recognise it — which the content check could never do from the
+        // other side, because hydration folds the persisted rows in the
+        // history's own order rather than appending to the recent tail this
+        // scans. Live-then-hydrate was the one route neither guard covered,
+        // and it doubled every reply that arrived while its channel was closed.
         const dup = existing
           .slice(-8)
           .some((m) => m.from === "company" && m.text === event.text);
