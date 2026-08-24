@@ -7138,6 +7138,62 @@ mod tests {
             assert_eq!(body["files"][0]["artifactId"], "art-a1", "{body}");
         }
 
+        /// A run whose file count passes [`MAX_RUN_ARTIFACTS`] reports
+        /// `truncated: true` instead of silently dropping the older rows — so
+        /// the console can label the list "newest 500 shown" rather than
+        /// presenting it as exhaustive. The newest rows survive the cut.
+        #[tokio::test]
+        async fn run_artifacts_exposes_truncation_at_the_cap() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            // One past the cap: 501 files, `at_millis` increasing with the id
+            // so the newest (art-500) is what the cut must keep.
+            for i in 0..=MAX_RUN_ARTIFACTS {
+                crate::ports::ArtifactStore::upsert(
+                    runtime.artifacts().as_ref(),
+                    &id,
+                    &published(
+                        &format!("art-{i:03}"),
+                        "t-a",
+                        &format!("File {i}"),
+                        &format!("files/{i}.md"),
+                        i as u64,
+                    ),
+                )
+                .await
+                .expect("seed artifact");
+            }
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let files = body["files"].as_array().expect("files array");
+            assert_eq!(files.len(), MAX_RUN_ARTIFACTS, "{body}");
+            assert_eq!(body["truncated"], true, "{body}");
+            assert_eq!(
+                files[0]["artifactId"], "art-500",
+                "the newest file survives the cut: {body}"
+            );
+            assert!(
+                files.iter().all(|f| f["artifactId"] != "art-000"),
+                "the oldest file is what the cap drops: {body}"
+            );
+        }
+
         /// A run that died outright reads back with its reason. This is the
         /// outcome that previously left nothing behind but a host-stdout warning.
         #[tokio::test]
