@@ -244,6 +244,66 @@ test("opening a channel does not clear its mentions before history has loaded", 
     .toBe(true);
 });
 
+test("a mention inside a thread reply stays unread until its thread is opened", async ({
+  page,
+}) => {
+  // The mention lives in a reply, and replies are folded out of the main
+  // timeline (`buildTimeline`) — they render only inside the thread panel that
+  // opens on their parent. Opening the channel alone therefore shows nothing
+  // of the summons, so the badge must not clear; it clears the moment the
+  // thread panel makes the reply visible. The notification names the reply by
+  // its host sequence (`subjectId: "21"`), and the loaded transcript's reply
+  // map keys by the console id the same sequence prefixes (`h21`).
+  await mockApi(page, [
+    {
+      id: "eng-thread-1",
+      kind: "mention",
+      subjectKind: "message",
+      subjectId: "21",
+      title: "Ada mentioned you in engineering",
+      createdAt: 2,
+      context: "engineering",
+    },
+  ], {
+    history: {
+      engineering: [
+        {
+          id: "20",
+          channel: "engineering",
+          author: "ceo",
+          text: "the launch plan",
+          atMillis: 1,
+          mine: false,
+        },
+        {
+          id: "21",
+          channel: "engineering",
+          author: "ceo",
+          text: "@Rae can you sanity-check?",
+          atMillis: 2,
+          mine: false,
+          parentId: "20",
+        },
+      ],
+    },
+  });
+  await openChannel(page, "general");
+  await expect(mentionBadge(page, "Engineering")).toHaveText("@1");
+
+  // The channel is open and its history is on screen, but the reply itself is
+  // still hidden inside the collapsed thread — the badge has to stay.
+  await openChannel(page, "engineering");
+  await expect(mentionBadge(page, "Engineering")).toHaveText("@1");
+  expect(marked.some((m) => m.ids?.includes("eng-thread-1"))).toBe(false);
+
+  // Opening the thread renders the reply, and only then is the summons
+  // answered.
+  await page.getByRole("button", { name: /1 reply/i }).click();
+  await expect
+    .poll(() => marked.some((m) => m.ids?.includes("eng-thread-1")))
+    .toBe(true);
+});
+
 test("a collapsed section aggregates its hidden mentions, same as unread", async ({ page }) => {
   await mockApi(page, seedFeed());
   await openChannel(page, "general");
