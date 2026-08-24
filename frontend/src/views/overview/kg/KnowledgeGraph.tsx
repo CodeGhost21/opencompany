@@ -826,7 +826,7 @@ export function KnowledgeGraph({
     }
     sim.alpha(0.16).restart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repel, linkDist, centerForce, focusId, coreExpanded]);
+  }, [repel, linkDist, centerForce, focusId, coreExpanded, graph]);
 
   // ── cinematic camera ────────────────────────────────────────────────────────
   // The viewBox glides toward (and then tracks) whatever is selected — reading
@@ -2007,6 +2007,13 @@ export function KnowledgeGraph({
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
     <>
+      {/* The visual lane runs with `reducedMotion: "reduce"`, and this graph
+          reads that media query itself: the camera snaps instead of gliding,
+          the orbit and pulses freeze, and once the d3 sim cools to sleep
+          (`alphaDecay(0.015)` ≈ 8s) nothing repaints — so `visual.spec.ts`
+          compares the settled graph instead of masking it. Without the media
+          query the graph never holds still, which is exactly why the lane
+          sets it. */}
       <div className="kg-grid pointer-events-none absolute inset-0" aria-hidden />
       <svg
         ref={svgRef}

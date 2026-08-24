@@ -44,6 +44,28 @@ The console's Brain header needs it: agents write memory **only** through the
 `GET /memory/stats` therefore reports `lastUpdatedAtMillis` as the max across
 both ports, alongside the facts-only `factsUpdatedAtMillis`.
 
+The stats response exposes the Brain's full-store display partition: `facts`,
+`teammateMemory`, `taskOutcomes`, and `documentMemory` are disjoint, and
+`totalItems` is their sum. Operator-fact context mirrors remain
+agent-recallable but are not counted as teammate memory, because the
+corresponding fact is already the operator-visible row. Dropped-document and
+link chunks (`document/…`) get their own bucket for the same reason: they are
+operator-supplied material, and counting them as teammate memory would read
+as something an agent learned.
+
+`GET /memory` returns its rows as `items` alongside the truncation metadata
+for that same read: `totalContext` — the non-mirror context chunk population
+before the 500-row list cap — and `contextTruncated`, whether the rows dropped
+any to it. Facts are never capped and are not counted in `totalContext`.
+Keeping the two beside the rows is what makes the console's "showing the
+newest N of M" notice consistent: N (the rows rendered) and M (the uncapped
+count) come from one server-side read, so a write between requests can never
+make them disagree. A `?query=` request is the exception: its rows are search
+matches, not "the newest N", so the metadata is reported as not applicable
+(`totalContext: 0`, `contextTruncated: false`) rather than implying a search
+result was dropped by the cap. The stats counts above are never capped; the
+list may show only the newest 500 non-mirror context rows.
+
 Read that stamp as a max across chunks, not as one row per body: one address
 carries one row per *label* claiming it (issue #1300), a new label on an
 existing body stamps per-label on fs/sqlite and keeps the address's first

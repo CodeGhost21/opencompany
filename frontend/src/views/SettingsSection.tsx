@@ -3,11 +3,11 @@ import { lazy, Suspense } from "react";
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
-import { ConnectionsView } from "@/views/ConnectionsView";
-import { DevicesView } from "@/views/DevicesView";
+import { InferenceView } from "@/views/InferenceView";
 import { HostingView } from "@/views/HostingView";
 import { SearchView } from "@/views/SearchView";
 import { McpServersView } from "@/views/McpServersView";
+import { OAuthView } from "@/views/OAuthView";
 import { PeopleView } from "@/views/PeopleView";
 import { SkillsView } from "@/views/SkillsView";
 import { SettingsView } from "@/views/SettingsView";
@@ -124,9 +124,9 @@ export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
           <SettingsView client={client} company={company} feed={feed} onFlag={onFlag} />
         )}
         {page === "people" && <PeopleView client={client} company={company} />}
-        {page === "devices" && <DevicesView client={client} company={company} />}
-        {page === "connections" && <ConnectionsView client={client} company={company} />}
+        {page === "oauth" && <OAuthView client={client} company={company} />}
         {page === "mcp" && <McpServersView client={client} company={company} />}
+        {page === "inference" && <InferenceView client={client} company={company} />}
         {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
             (docs/spec/runtime/finance-console.md): a credential form belongs
             beside the data it unlocks, and "Billing" read as *what OpenCompany

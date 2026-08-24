@@ -114,6 +114,11 @@ async function mockApi(page: Page) {
           },
         ],
       });
+    if (path.endsWith("/memory"))
+      // `GET /memory` answers with `{ items, totalContext, contextTruncated }`
+      // — the Overview's constellation reads the rows from `items`, and a bare
+      // array would leave it `undefined` and crash the graph render.
+      return json({ items: [], totalContext: 0, contextTruncated: false });
     if (path.endsWith("/team")) return json(ROSTER);
     const agent = path.match(/\/team\/([^/]+)$/);
     if (agent) {

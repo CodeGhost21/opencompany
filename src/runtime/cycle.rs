@@ -60,17 +60,6 @@ use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 /// park cards that silently do nothing when approved.
 pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
 
-/// The effect kind a `repo_publish` approval performs (issue #735) — the
-/// host-side push to the real remote.
-///
-/// `pub(crate)` and defined here, in the always-compiled runtime, rather than in
-/// the `openhuman`-gated `harness::repo` that builds it: `perform_effect` below
-/// matches on it in the default build, where `crate::harness` does not exist. The
-/// tool references it through `crate::runtime::cycle::REPO_PUBLISH_EFFECT`, the
-/// same shape `workflows::delivery` uses for [`EMAIL_SEND_KIND`], so the producer
-/// and this consumer key off one literal.
-pub(crate) const REPO_PUBLISH_EFFECT: &str = "repo.publish";
-
 /// The `error` the terminality backstop stamps on an attempt row whose cycle
 /// ended without settling it (issue #242) — a brain that ignored the dispatch,
 /// not a brain that failed at it.
@@ -911,7 +900,7 @@ approval.]"
         // request changes nothing at all: the approval stays parked, no verdict
         // is journaled, and the operator can simply approve it "once" instead.
         if let GrantScope::Tool { .. } = scope {
-            self.check_broadly_grantable(id)?;
+            self.check_broadly_scoped(id, verdict)?;
         }
         let outcome = self
             .rt
@@ -946,9 +935,22 @@ approval.]"
         // deny nothing does, so its held checkout becomes sweepable.
         self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
-        if let ResolveOutcome::Approved(effect) = outcome {
-            self.settle_approved_effect(id, effect, by.clone(), scope)
-                .await?;
+        match outcome {
+            ResolveOutcome::Approved(effect) => {
+                self.settle_approved_effect(id, effect, by.clone(), scope)
+                    .await?;
+            }
+            // Issue #1458: a standing denial is minted from the effect the
+            // resolve carried, not `journal.approval_effect` — the journal keeps
+            // a payload-scrubbed copy (issue #351), and `standing_scope_of` read
+            // against a scrubbed payload answers `None`, which `admits_scope`
+            // treats as a wildcard. A refusal prompted by one web origin would
+            // then block every origin for that teammate.
+            ResolveOutcome::Denied(effect) if matches!(scope, GrantScope::Tool { .. }) => {
+                self.mint_standing_deny(id, effect, by.clone(), scope)
+                    .await?;
+            }
+            _ => {}
         }
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
@@ -1015,7 +1017,7 @@ approval.]"
     /// An unknown or already-resolved id falls through to the ordinary
     /// already-resolved path rather than erroring here — a double-click on the
     /// scoped button must stay the no-op it is on the plain one.
-    fn check_broadly_grantable(&self, id: &ApprovalId) -> Result<()> {
+    fn check_broadly_scoped(&self, id: &ApprovalId, verdict: Verdict) -> Result<()> {
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
@@ -1030,14 +1032,54 @@ approval.]"
                 effect.kind
             )));
         }
-        if !effect.may_be_granted_standing() {
+        if verdict == Verdict::Approve && !effect.may_be_granted_standing() {
             return Err(OpenCompanyError::InvalidRequest(format!(
                 "'{}' cannot be granted for a period — it can reach further than a standing \
                  permission can describe, so it stays a per-call decision; approve it once instead",
                 effect.kind
             )));
         }
+        // Issue #1458: a standing DENY is only enforced on the agent turn path,
+        // where openhuman treats a `Deny` verdict as fail-closed. The workflow
+        // gate deliberately does not honour `Deny` (`src/workflows/gate.rs`), so
+        // minting one for a workflow would advertise a refusal no run ever
+        // enforces — the operator clicks "don't ask again" and the next
+        // scheduled run sails through the gate. A workflow refusal stays a
+        // per-call decision until the gate learns to enforce the verdict.
+        if verdict == Verdict::Deny
+            && matches!(
+                crate::runtime::grants::subject_of(&effect),
+                Some(GrantSubject::Workflow(_))
+            )
+        {
+            // Name the real call a gate is stopping, not the `workflow.approve`
+            // wrapper — the same inner call the card showed the operator.
+            let call = crate::runtime::workflow_resume::gate_inner_call(&effect)
+                .map(|(tool, _)| tool)
+                .unwrap_or(&effect.kind);
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "'{call}' is a workflow call, and the workflow path does not enforce a \
+                 standing refusal yet; deny it once instead",
+            )));
+        }
         Ok(())
+    }
+
+    async fn mint_standing_deny(
+        &self,
+        id: &ApprovalId,
+        effect: Effect,
+        by: Actor,
+        scope: GrantScope,
+    ) -> Result<()> {
+        let GrantScope::Tool { expires_at_millis } = scope else {
+            unreachable!()
+        };
+        let Some(subject) = crate::runtime::grants::subject_of(&effect) else {
+            unreachable!()
+        };
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Deny)
+            .await
     }
 
     async fn settle_approved_effect(
@@ -1110,6 +1152,19 @@ approval.]"
         by: Actor,
         expires_at_millis: u64,
     ) -> Result<()> {
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Approve)
+            .await
+    }
+
+    async fn mint_standing_policy(
+        &self,
+        id: &ApprovalId,
+        subject: GrantSubject,
+        effect: Effect,
+        by: Actor,
+        expires_at_millis: u64,
+        verdict: Verdict,
+    ) -> Result<()> {
         let conversation = self
             .rt
             .journal
@@ -1131,9 +1186,9 @@ approval.]"
         // Computed here rather than inline in the literal below, which would
         // borrow `tool` after the field above has moved it.
         let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
-        let (agent, workflow) = match subject {
-            GrantSubject::Agent(agent) => (agent, None),
-            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow)),
+        let (agent, workflow) = match &subject {
+            GrantSubject::Agent(agent) => (agent.clone(), None),
+            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow.clone())),
         };
         let grant = StandingGrant {
             id: GrantId::generate(),
@@ -1142,7 +1197,8 @@ approval.]"
             // The tool, and nothing about the arguments. A standing grant has no
             // `args` field to copy them into — that is the type's whole point.
             tool,
-            granted_by: by,
+            verdict,
+            granted_by: by.clone(),
             approval_id: id.clone(),
             at_millis: now_millis(),
             expires_at_millis,
@@ -1161,6 +1217,50 @@ approval.]"
             // permission that never matches its own call.
             scope,
         };
+        // Issue #1458: newest standing decision wins. `ApprovalPolicy` checks
+        // a standing denial above a standing grant, so an approval minted while
+        // a denial of the same scope was still live would sit listed but never
+        // admit a call — the operator's later "yes" silently inert until the
+        // older refusal expired or was revoked. Revoke the shadowed
+        // opposite-polarity policy before arming the new one, journaled as a
+        // revocation by the same resolving actor, so replay reconstructs the
+        // same single-policy state. Scoped to what would actually shadow (either
+        // scope overlapping the other), so a denial of one host leaves a grant
+        // for another alone while a wildcard policy supersedes scoped
+        // opposite-polarity ones in both directions.
+        //
+        // The reconcile is not itself atomic: the snapshot below, the journal
+        // appends, and the insert are separate steps, and the journal appends
+        // are awaited. Two concurrent resolutions of the same scope with
+        // opposite verdicts — an approve and a deny landing within a few
+        // milliseconds from separate console surfaces — could both snapshot an
+        // empty opposite set before either inserts, leaving the deny shadowing
+        // the approve whatever the operator's true order. Holding the grant
+        // set's reconcile lock for the whole sequence makes the second mint see
+        // the first's policy and supersede it, which is the same single-policy
+        // state the sequential path already reconstructs on replay.
+        let _reconcile = self.rt.grants.standing_reconcile().await;
+        for old in self.rt.grants.opposite_polarity(
+            &subject,
+            &grant.tool,
+            grant.scope.as_deref(),
+            verdict,
+            now_millis(),
+        ) {
+            self.rt
+                .journal
+                .record_standing_revoked(&old.id, by.clone(), now_millis())
+                .await?;
+            self.rt.grants.revoke_standing(&old.id);
+            tracing::debug!(
+                grant_id = %old.id,
+                tool = %old.tool,
+                agent = %old.agent,
+                "[approval] minting a {:?} supersedes the opposite-polarity \
+                 standing policy for the same scope",
+                verdict
+            );
+        }
         self.rt.journal.record_standing_granted(&grant).await?;
         tracing::debug!(
             approval_id = %id,
@@ -1640,203 +1740,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
     if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND {
         crate::runtime::workflow_resume::on_gate_approved(rt, effect).await?;
     }
-    // Issue #735: an approved `repo_publish`. `execute` already staged the agent's
-    // commits onto the mirror's `oc/<company>/<task>` ref (the reversible half);
-    // this is the irreversible half — the host-side push to the real remote, done
-    // only now that the operator has approved. At-most-once comes free from the
-    // `approval:<id>` key the caller holds; a denied or expired approval never
-    // reaches here, which is exactly what leaves the remote untouched.
-    if effect.kind == REPO_PUBLISH_EFFECT {
-        let repo = effect
-            .payload
-            .get("repo")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let branch = effect
-            .payload
-            .get("branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        // The exact commit the approval was bound to at stage time. Pushing this
-        // SHA — not whatever the mirror's branch ref points at now — is what stops
-        // a second publish on the same task from riding in on this approval.
-        let head = effect
-            .payload
-            .get("head")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        // The card this publish belongs to, so a host-side failure can be reported
-        // on it.
-        let task = effect
-            .payload
-            .get("task")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let agent = effect
-            .payload
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let message = effect
-            .payload
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let Some(repos) = rt.repos() else {
-            return Err(crate::error::OpenCompanyError::Unimplemented(
-                "a repository publish was approved but this host has no repository manager \
-                 configured to perform it",
-            ));
-        };
-        // The push is the irreversible half, and it fails the effect — but never
-        // silently (issue #815). A failed push leaves the effect recorded as
-        // executed (the at-most-once guard), so re-approving is a no-op; the
-        // operator has to KNOW it failed and re-run the task, or the publish
-        // vanishes with the change staged in the mirror and nothing on the remote.
-        if let Err(err) = repos.push_published(repo, branch, head).await {
-            // The diagnosis — which can name the remote URL and host paths — stays
-            // in the log; the durable, company-readable note carries a classified
-            // sentence instead (issue #815, the rule #614/#688 set).
-            tracing::warn!(branch, "[repo] could not publish the branch: {err}");
-            note_publish_failure_on_card(
-                rt,
-                task,
-                format!(
-                    "Could not publish `{branch}` to the remote. Nothing reached the remote, and \
-                     this approval will not retry on its own \u{2014} re-run the task to publish \
-                     again."
-                ),
-            )
-            .await;
-            return Err(err);
-        }
-
-        // Issue #736: open a pull request for the pushed branch, best-effort. The
-        // push has landed, so a PR failure must NOT fail the effect — the branch
-        // is on the remote regardless. It is reported instead: the operator is
-        // told, on the task itself, that the branch is up but the PR did not open.
-        let title = repo_publish_pr_title(message);
-        let body = repo_publish_pr_body(agent, task, effect.run_id.as_deref(), message);
-        match repos.open_pull_request(repo, branch, &title, &body).await {
-            Ok(pr) => tracing::info!(
-                number = pr.number,
-                url = %pr.html_url,
-                branch,
-                "[repo] opened a pull request for the published branch"
-            ),
-            Err(err) => {
-                // Same division as the push failure: the raw error to the log,
-                // a classified sentence to the durable note (issue #815).
-                tracing::warn!(
-                    branch,
-                    "[repo] pushed the branch but could not open a pull request: {err}"
-                );
-                note_publish_failure_on_card(
-                    rt,
-                    task,
-                    format!(
-                        "Published `{branch}` to the remote, but the pull request could not be \
-                         opened. The branch is on the remote \u{2014} open a PR from it by hand, or \
-                         approve another publish to retry."
-                    ),
-                )
-                .await;
-            }
-        }
-    }
     Ok(())
-}
-
-/// Whether `task` names a real card in `cards` (issue #815).
-///
-/// The guard that keeps a DM's `dm-*` work key — which `repo_publish` stamps as
-/// the effect's `task`, and which no card owns — from filing a publish-failure
-/// note under a phantom card. The empty id, an unknown id, and a work key all
-/// resolve to nothing.
-fn task_names_a_card(cards: &[TaskRecord], task: &str) -> bool {
-    !task.is_empty() && cards.iter().any(|card| card.id == task)
-}
-
-/// Records a host-side `repo_publish` failure where the operator will see it,
-/// but **only when the work unit is a real card** (issue #815).
-///
-/// A DM's `repo_publish` stamps its `dm-*` work key as the effect's `task`, and
-/// no card owns that id — a [`TaskDiscussionPosted`](CompanyEvent::TaskDiscussionPosted)
-/// under it would file the note against a phantom card. When the id does not
-/// resolve to a card the board post is skipped: the failure is already in the
-/// operator log (the `tracing::warn` at the call site), which is where a `git`
-/// error that can name host paths and the remote URL belongs, rather than in a
-/// durable, company-readable record (the rule #614/#688 set). `text` is a fixed,
-/// classified sentence carrying none of the raw error.
-async fn note_publish_failure_on_card(rt: &CompanyRuntime, task: &str, text: String) {
-    if task.is_empty() {
-        return;
-    }
-    // Resolve to a live card; a `dm-*` work key or an unknown id resolves to
-    // nothing, and the note stays in the log rather than misfiling. A store error
-    // is treated the same way — better a logged-only note than one on a card that
-    // may not exist.
-    let is_card = match rt.tasks().list(&rt.id).await {
-        Ok(cards) => task_names_a_card(&cards, task),
-        Err(err) => {
-            tracing::warn!("[repo] could not resolve the task for a publish-failure note: {err}");
-            false
-        }
-    };
-    if !is_card {
-        return;
-    }
-    if let Err(err) = rt
-        .events
-        .append(
-            &rt.id,
-            CompanyEvent::TaskDiscussionPosted {
-                task_id: task.to_string(),
-                text,
-                by: None,
-            },
-        )
-        .await
-    {
-        tracing::warn!("[repo] could not record the publish failure on the task: {err}");
-    }
-}
-
-/// The title of the pull request a `repo_publish` opens (issue #736): the first
-/// line of the agent's message, bounded, or a plain fallback when it said
-/// nothing.
-fn repo_publish_pr_title(message: &str) -> String {
-    let first = message.trim().lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        "Published by an OpenCompany agent".to_string()
-    } else {
-        first.chars().take(72).collect()
-    }
-}
-
-/// The body of that pull request (issue #736): the agent's message, then task,
-/// run, and agent linkage so an operator landing on the PR can get back to the
-/// card, attempt, and seat that produced it.
-fn repo_publish_pr_body(agent: &str, task: &str, run_id: Option<&str>, message: &str) -> String {
-    let mut body = String::new();
-    let message = message.trim();
-    if !message.is_empty() {
-        body.push_str(message);
-        body.push_str("\n\n");
-    }
-    body.push_str("---\n");
-    body.push_str("Opened host-side by an OpenCompany agent");
-    if !agent.is_empty() {
-        body.push_str(&format!(" (`{agent}`)"));
-    }
-    if !task.is_empty() {
-        body.push_str(&format!(" for task `{task}`"));
-    }
-    if let Some(run_id) = run_id.filter(|run_id| !run_id.is_empty()) {
-        body.push_str(&format!(" in run `{run_id}`"));
-    }
-    body.push('.');
-    body
 }
 
 /// Sends an `email.send` effect via the company's own outbound-mail handle
@@ -3045,59 +2949,6 @@ mod test {
         );
     }
 
-    fn card_record(id: &str) -> TaskRecord {
-        TaskRecord {
-            id: id.to_string(),
-            title: "t".to_string(),
-            note: None,
-            column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
-            priority: "medium".to_string(),
-            assignee: "ceo".to_string(),
-            updated_at_millis: 1,
-            origin_chat_id: None,
-            parent_task_id: None,
-            output: None,
-            plan: None,
-            planning_attempts: Vec::new(),
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
-            workflow_proposal: None,
-            origin_run_id: None,
-            origin_workflow_id: None,
-        }
-    }
-
-    /// Issue #247: a publish PR carries both the task and the concrete run that
-    /// produced its approved effect, letting an operator trace it back to the
-    /// exact attempt rather than only the card.
-    #[test]
-    fn a_publish_pr_body_links_its_task_and_run() {
-        let body = repo_publish_pr_body(
-            "developer",
-            "task-247",
-            Some("run-247"),
-            "Add run linkage to publish pull requests.",
-        );
-
-        assert!(body.contains("task `task-247`"), "{body}");
-        assert!(body.contains("run `run-247`"), "{body}");
-    }
-
-    /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
-    /// work key, which no card owns (issue #815).
-    #[test]
-    fn a_publish_note_only_lands_on_a_real_card_not_a_dm_work_key() {
-        let cards = vec![card_record("019ff728-abcd"), card_record("another")];
-        // A real card id resolves.
-        assert!(task_names_a_card(&cards, "019ff728-abcd"));
-        // A DM work key — what `repo_publish` stamps for a DM — owns no card, so
-        // the failure note stays in the log rather than filing under a phantom
-        // card.
-        assert!(!task_names_a_card(&cards, "dm-coder-main"));
-        // An unknown id, the empty id, and an empty board all resolve to nothing.
-        assert!(!task_names_a_card(&cards, "ghost"));
-        assert!(!task_names_a_card(&cards, ""));
-        assert!(!task_names_a_card(&[], "019ff728-abcd"));
-    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -7570,6 +7421,43 @@ mod test {
         (rt, id)
     }
 
+    /// Like [`park_one_blocked_tool_call`], but parks the same effect **twice**
+    /// — two cycles, two identical cards on one runtime.
+    ///
+    /// The ordering matters and is why this exists: the deny/grant reconcile
+    /// tests need both cards parked before either is resolved, because once a
+    /// standing deny is live the identical call is denied inline and never
+    /// parks again.
+    async fn park_two_blocked_tool_calls(
+        home: std::path::PathBuf,
+        effect: Effect,
+    ) -> (Arc<CompanyRuntime>, Vec<ApprovalId>) {
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(Arc::new(ParkingBrain { effect }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+        (rt, ids)
+    }
+
     /// The headline: approving with the broader scope arms a standing grant, and
     /// mints **no** single-use grant beside it.
     ///
@@ -7673,6 +7561,175 @@ mod test {
         );
     }
 
+    /// Issue #1458, from the deny side: a standing denial minted against a
+    /// scoped tool remembers **which slice** the operator refused.
+    ///
+    /// The mint used to re-read the journal's payload-scrubbed copy of the
+    /// effect (issue #351), whose `Null` payload made `standing_scope_of`
+    /// answer `None` — and a stored `None` is a wildcard in `admits_scope`, so
+    /// refusing one web origin blocked every origin for that teammate until
+    /// expiry. The resolve now carries the parked effect whole, so the deny
+    /// records the same scope the card showed.
+    #[tokio::test]
+    async fn a_standing_deny_on_a_scoped_tool_keeps_the_scope_it_was_shown_for() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+
+        let listed = rt.standing_grants();
+        assert_eq!(listed.len(), 1, "one standing denial is minted");
+        assert_eq!(listed[0].verdict, Verdict::Deny);
+        assert_eq!(
+            listed[0].scope.as_deref(),
+            Some("https://docs.rs"),
+            "the deny records the origin the operator refused, not a wildcard"
+        );
+    }
+
+    /// Issue #1458: when two identical cards park and the operator resolves the
+    /// first as a standing **denial** and the second as a standing **approval**,
+    /// the newer decision wins. `ApprovalPolicy` checks a deny above a standing
+    /// grant, so without reconciliation the approval would list as a live
+    /// permission and never admit a call until the refusal expired — the
+    /// operator's later "yes" silently inert.
+    #[tokio::test]
+    async fn a_new_standing_approval_revokes_an_older_standing_denial_for_the_same_scope() {
+        let home_dir = tmp_home();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+        assert_eq!(
+            rt.standing_grants()[0].verdict,
+            Verdict::Deny,
+            "the first resolution arms a standing denial"
+        );
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[1], Verdict::Approve, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+
+        let listed = rt.standing_grants();
+        assert_eq!(listed.len(), 1, "the deny is revoked, not left shadowing");
+        assert_eq!(listed[0].verdict, Verdict::Approve);
+        assert_eq!(
+            listed[0].scope.as_deref(),
+            Some("https://docs.rs"),
+            "the surviving policy keeps the scope both were minted for"
+        );
+    }
+
+    /// The mirror direction: a standing **denial** minted after a standing
+    /// **approval** of the same scope revokes the grant. Enforcement would
+    /// already have the deny win, but a listed-but-dead grant is a wrong
+    /// contract for the operator who approved it.
+    #[tokio::test]
+    async fn a_new_standing_denial_revokes_an_older_standing_approval_for_the_same_scope() {
+        let home_dir = tmp_home();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+        assert_eq!(
+            rt.standing_grants()[0].verdict,
+            Verdict::Approve,
+            "the first resolution arms a standing grant"
+        );
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+
+        let listed = rt.standing_grants();
+        assert_eq!(listed.len(), 1, "the grant is revoked by the newer refusal");
+        assert_eq!(listed[0].verdict, Verdict::Deny);
+    }
+
+    /// Issue #1458 under concurrency: two opposite-polarity resolutions of the
+    /// **same** scope settled while both are in flight — the approve and the
+    /// deny each half-finished before either mints — must still leave a single
+    /// policy, not the deny permanently shadowing the approve.
+    ///
+    /// Before the reconcile lock this could interleave: the journal appends
+    /// between the [`opposite_polarity`] snapshot and the `grant_standing`
+    /// insert are awaited, so a concurrent settle gets polled in that window,
+    /// snapshots the same empty opposite set, and then both insert. Because
+    /// `ApprovalPolicy` matches a standing denial above a standing grant, the
+    /// approve then sits listed but never admits a call whatever the operator's
+    /// true order. The lock serialises the two mints, so the second observes
+    /// the first's policy and supersedes it — the same single-policy state the
+    /// sequential tests above assert.
+    #[tokio::test]
+    async fn concurrent_opposite_polarity_resolutions_leave_one_policy() {
+        let home_dir = tmp_home();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (a, b) = tokio::join!(
+            rt.resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope()),
+            rt.resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope()),
+        );
+        let (_, follow_up_a) = a.unwrap();
+        let (_, follow_up_b) = b.unwrap();
+        let _ = tokio::join!(
+            crate::company::runtime::join_follow_up(follow_up_a),
+            crate::company::runtime::join_follow_up(follow_up_b),
+        );
+
+        let listed = rt.standing_grants();
+        assert_eq!(
+            listed.len(),
+            1,
+            "the concurrent resolutions must not leave both polarities live"
+        );
+    }
+
     /// A scope the runtime must not honour changes **nothing**: the approval is
     /// still parked and no verdict was journaled.
     ///
@@ -7728,6 +7785,122 @@ mod test {
                 .unwrap();
             assert!(rt.pending_approvals().is_empty());
         }
+    }
+
+    /// Issue #1458: a standing **denial** for a workflow is refused at the
+    /// edge — the workflow gate does not enforce a `Deny` verdict
+    /// (`src/workflows/gate.rs`), so a time-bounded refusal would be a control
+    /// that never took effect. The card stays parked so the operator can still
+    /// deny it once.
+    #[tokio::test]
+    async fn a_standing_deny_on_a_workflow_gate_is_refused_and_mints_nothing() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sports_digest",
+                    "node_id": "fetch_bbc",
+                    "tool": "web_fetch",
+                    "args": { "url": "https://docs.rs/x" },
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let err = match rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+        {
+            Ok(_) => panic!("a workflow standing denial must be refused at the edge"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg.contains("'web_fetch' is a workflow call")
+                        && msg.contains("does not enforce a standing refusal")
+            ),
+            "{err:?}"
+        );
+
+        assert_eq!(
+            rt.pending_approvals().len(),
+            1,
+            "the card is still there to be denied once"
+        );
+        assert_eq!(rt.grants.standing_count(), 0, "no refusal is minted");
+        assert_eq!(rt.grants.live_count(), 0);
+
+        // And the operator can still deny it once — the refused request did not
+        // consume the card.
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+        assert!(rt.pending_approvals().is_empty());
+    }
+
+    /// Issue #1458, the console half: a workflow-gate card must not offer a
+    /// standing **denial**.
+    ///
+    /// `check_broadly_scoped` refuses a workflow standing denial with a 400 —
+    /// the gate does not enforce a `Deny` verdict — so a card that advertised
+    /// the control would let the operator click "don't ask again" and get an
+    /// error that leaves the approval parked. The grant half is still offered:
+    /// a workflow *can* hold a standing permission. Only the deny control is
+    /// withheld.
+    #[tokio::test]
+    async fn a_workflow_gate_card_is_not_advertised_as_broadly_deniable() {
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sports_digest",
+                    "node_id": "fetch_bbc",
+                    "tool": "web_fetch",
+                    "args": { "url": "https://docs.rs/x" },
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        assert!(
+            !rt.pending_approvals()[0].broadly_deniable,
+            "a workflow card must not advertise a standing refusal nothing enforces"
+        );
+        assert!(
+            rt.pending_approvals()[0].broadly_grantable,
+            "a workflow card can still hold a standing permission"
+        );
+
+        // The same tool, parked from an agent turn, offers the deny control.
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+        assert!(rt.pending_approvals()[0].broadly_deniable);
     }
 
     /// The default scope is byte-identical to pre-#374 behaviour.

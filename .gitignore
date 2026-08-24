@@ -48,3 +48,6 @@ worktrees/*
 instance-id
 .lock
 /target
+
+# Playwright MCP scratch output when a client ignores `--output-dir`.
+.playwright-mcp/

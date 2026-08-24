@@ -78,9 +78,19 @@ use crate::server::error::ApiError;
 use crate::server::ops::composio_toolkits::{self, CatalogSource, OpenModeToolkits};
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
-/// The reminder attached to every mutating response.
+/// The reminder attached to a set / rotate response.
 const SWITCH_NOTE: &str =
     "Agents pick up the new Composio token on their next turn — no restart needed.";
+
+/// The reminder attached to a clear response.
+///
+/// A clear does not hand agents a new token — it withdraws the BYO override, so
+/// what they present next is whatever tier remains (a company key, the instance
+/// identity, or none). Reusing [`SWITCH_NOTE`] here would tell the operator that
+/// a new token exists when the effective credential has fallen back to nothing
+/// (issue #1471).
+const CLEAR_NOTE: &str =
+    "Composio token cleared. Agents use whatever credential remains on their next turn.";
 
 /// The toolkits the console should offer for a company, whether that answer
 /// came from open mode, and where the list came from.
@@ -519,7 +529,11 @@ async fn set_token(
     journal(&company, change, None).await?;
     Ok(Json(MutationResponse {
         status: effective_status(runtime).await?,
-        note: SWITCH_NOTE.to_string(),
+        note: if body.token.trim().is_empty() {
+            CLEAR_NOTE.to_string()
+        } else {
+            SWITCH_NOTE.to_string()
+        },
     }))
 }
 
@@ -1515,6 +1529,50 @@ mod tests {
         )
         .await;
         assert_eq!(resp["status"]["credentialSource"], "none");
+    }
+
+    /// The note on a write names the operation (issue #1471): a set tells the
+    /// operator a new token is live, a clear must not claim one exists — the
+    /// effective credential after a clear is whatever tier remains, which may
+    /// be nothing at all.
+    #[tokio::test]
+    async fn the_clear_note_does_not_claim_a_new_token() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        let (_, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": TOKEN })),
+        )
+        .await;
+        let set_note = resp["note"].as_str().expect("a note").to_string();
+        assert!(
+            set_note.contains("new Composio token"),
+            "a set announces the new token: {set_note}"
+        );
+
+        let (_, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "" })),
+        )
+        .await;
+        let clear_note = resp["note"].as_str().expect("a note").to_string();
+        assert_ne!(
+            clear_note, set_note,
+            "set and clear are told apart: {clear_note}"
+        );
+        assert!(
+            !clear_note.contains("new Composio token"),
+            "a clear must not invent a token that no longer exists: {clear_note}"
+        );
+        assert!(
+            clear_note.contains("cleared"),
+            "the clear names what it did: {clear_note}"
+        );
     }
 
     /// The hosted shape, driven through the env seam (no process mutation): a

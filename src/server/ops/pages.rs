@@ -368,8 +368,9 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
 /// The fixed HTML shell that mounts a page's compiled module (not agent
 /// content). Extracted from the route so the shell's load-bearing invariants
 /// — the React namespace import, the slug-relative bootstrap path, the
-/// shell-minted capability, the import map — are unit-testable instead of
-/// living only in a route that needs a full workspace to exercise.
+/// shell-minted capability, the unconditional SDK load, the import map — are
+/// unit-testable instead of living only in a route that needs a full workspace
+/// to exercise.
 ///
 /// `cap` is the short-lived capability minted by the authenticated shell route
 /// ([`mint_module_cap`]); it rides the bootstrap module's URL so the module
@@ -397,6 +398,9 @@ fn page_shell_html(slug: &str, cap: &str) -> String {
 </head>
 <body>
 <div id="root"></div>
+<script type="module">
+  import "@opencompany/site";
+</script>
 <script type="module" src="./{slug}/bootstrap.mjs?oc_cap={cap}"></script>
 </body>
 </html>
@@ -719,5 +723,20 @@ mod tests {
             "true"
         );
         assert_eq!(headers.get(header::VARY).unwrap(), "Origin");
+    }
+
+    #[test]
+    fn shell_loads_the_page_sdk_even_for_a_page_that_does_not_import_it() {
+        let html = page_shell_html("revenue", "cap");
+        // The toast click relay (`toast-click-through.ts`) forwards a click on
+        // a toast over this frame to the page SDK's own listener
+        // (`pages-sdk/client.ts`), so the SDK must be present in every frame —
+        // including a static page whose own bundle never imports it. Without
+        // the shell import, a relayed click into such a page would reach no
+        // listener and the control beneath the toast would stay blocked.
+        assert!(
+            html.contains("import \"@opencompany/site\";"),
+            "the shell must load the page SDK itself: {html}"
+        );
     }
 }

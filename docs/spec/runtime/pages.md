@@ -116,7 +116,7 @@ is an internal dashboard page, not a public site):
 | Route | Serves |
 | --- | --- |
 | `GET {scope}/pages` | Every page's manifest as JSON — `[{ "slug", "title", "description", "icon", "navVisible" }]` — for the console nav. |
-| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports `./{slug}/bootstrap.mjs?oc_cap=…` — a path relative to the shell's own URL at `…/pages/{slug}` — and mounts the page with `ReactDOM.createRoot`. |
+| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that loads the SDK unconditionally — `@opencompany/site` is present even for a page that does not import it itself, so the gesture-relay listener below is always there — and a second `<script type="module">` that imports `./{slug}/bootstrap.mjs?oc_cap=…` (a path relative to the shell's own URL at `…/pages/{slug}`) and mounts the page with `ReactDOM.createRoot`. |
 | `GET {scope}/pages/{slug}/bootstrap.mjs` | The fixed mounting module, served with the shell-minted capability threaded into its own import of the bundle. |
 | `GET {scope}/pages/{slug}/bundle.mjs` | The page's `page.compiled.mjs`, streamed with `Content-Type: application/javascript` and `Content-Disposition: inline`. |
 
@@ -210,6 +210,30 @@ not limit what an authorized request can *do* once it crosses the bridge. The
 iframe embedding, the bridge, and the nav view that lists pages are frontend
 concerns and are not described further here.
 
+**The gesture relay.** The one thing that travels the bridge the other way —
+parent to page — is a forwarded gesture. A toast in the console can cover a
+control inside the Pages view (issue #1303); a DOM event cannot cross the
+sandboxed-frame boundary, so when the toast is clicked the console posts the
+gesture's coordinates to the frame's document instead: `oc:relay-click` or
+`oc:relay-pointerdown`, with `x`/`y` shifted into frame-relative viewport
+coordinates, and the pointer's `pointerId`/`pointerType`/`button`/`buttons`
+fields on the pointerdown variant. Pointer capture cannot reach into another
+document, so a press is relayed whole: the console keeps posting the rest of
+the sequence — `oc:relay-pointermove`, `oc:relay-pointerup`,
+`oc:relay-pointercancel` — to the same frame until the press ends, and the
+SDK routes the continuations to the element that took the press so a drag or
+press-state control completes instead of getting stuck. The page SDK accepts
+a relay only from `window.parent` — a frame the page embeds itself surfaces
+as its own window, not the parent, so the source check is the whole trust
+boundary — and turns it back into a real click or `pointer` sequence on
+whatever `elementFromPoint(x, y)` finds in the frame's own document. The
+re-dispatched events are programmatic and therefore untrusted: like the
+console's own synthetic clicks, they carry no transient user activation, so
+a control that requires activation (a file input, `showPicker()`,
+`window.open()`) stays unreachable through an overlay — a browser will not
+transfer activation across the sandbox boundary (that is the clickjacking
+defense) — and the relay targets the ordinary click- and pointer-driven
+controls a toast-over-page gesture is actually for.
 
 **Normative: pages require a same-origin console.** The page shell is loaded by
 an iframe `src` navigation, which can only attach the credentials a browser
@@ -225,8 +249,9 @@ module can load.
 frame loads through the bridge described above MUST be assumed able to perform
 every query and mutation the operator's session authorizes, unless the console
 imposes an operation allow-list at the point the bridge forwards a request.
-Verifying `event.source` against `iframe.contentWindow` authenticates the
-caller's window identity but does NOT restrict the scope of operations an
+Possession of the transferred `MessageChannel` port — with the per-document
+capability layered on top — authenticates the caller as the exact document the
+console loaded, but does NOT restrict the scope of operations an
 authorized message can request. The operational consequence feature
 (`pages_write`, `pages_delete`) gates *persisting* a page — approval is
 single-use and covers only that one storage operation; every later GraphQL

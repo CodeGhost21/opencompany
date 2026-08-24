@@ -175,6 +175,7 @@ function grant(over: Partial<StandingGrant> & Pick<StandingGrant, "tool">): Stan
   return {
     id: "g1",
     agent: "ceo",
+    verdict: "approve",
     granted_by: { kind: "user", id: "u1" },
     at_millis: 1_000,
     expires_at_millis: 2_000,
@@ -211,5 +212,16 @@ describe("what a standing permission covers", () => {
 
   it("says only the action when the grant narrows to nothing", () => {
     expect(grantHeadline(grant({ tool: "file_write" }))).toBe("Write a file in its workspace");
+  });
+
+  it("prefaces a standing refusal with 'Don't allow'", () => {
+    // Issue #1458: the grants list now carries denials too, and the headline
+    // has to say the permission is a refusal, not an allowance.
+    expect(
+      grantHeadline(grant({ tool: "web_fetch", verdict: "deny", scope: "https://docs.rs" })),
+    ).toBe("Don't allow Fetch a web page — https://docs.rs only");
+    expect(grantHeadline(grant({ tool: "file_write", verdict: "deny" }))).toBe(
+      "Don't allow Write a file in its workspace",
+    );
   });
 });
