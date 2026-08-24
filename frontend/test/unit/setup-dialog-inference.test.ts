@@ -414,6 +414,17 @@ describe("the finished build-out points at what would actually help", () => {
     expect(find("setup-add-model")).toBeNull();
   });
 
+  it("tells a member to ask an admin instead of offering the wiring CTA", async () => {
+    await show(clientWith({ source: "fallback", reason: "no_model", role: "member" }));
+    await runFlow();
+    // The Connections card is read-only for a member, so the link that sends
+    // them there can only 403 — the admin-directed copy takes its place.
+    expect(find("setup-add-model"), "handed a dead-end wiring CTA").toBeNull();
+    expect(find("setup-add-model-member")?.textContent).toContain(
+      "Ask an admin to add a model",
+    );
+  });
+
   it("says nothing about fallbacks when the model designed the team", async () => {
     await show(clientWith({ source: "model", reason: null }));
     await runFlow();
