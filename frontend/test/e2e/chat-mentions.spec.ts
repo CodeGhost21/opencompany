@@ -110,7 +110,7 @@ test("typing @ opens the picker and filters as you type", async ({ page }) => {
 
   await composer(page).pressSequentially("eng");
   // The teammate wins the exact query even though a desk also starts with it.
-  await expect(options(page).first()).toContainText("engineer");
+  await expect(options(page).first()).toContainText("Ada");
 });
 
 /**
