@@ -249,6 +249,61 @@ describe("a host that cannot be reached at all", () => {
     );
   });
 
+  it("does not steal focus from a user who moved it during a slow retry", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+    expect(retryButton()).toBeDefined();
+
+    // Heal the host, but keep the company's one saved flow's graph read
+    // pending until the test releases it — so there is a real window between
+    // the outage overlay dismissing and the retried load answering.
+    let releaseFlowRead: (() => void) | undefined;
+    const flowReadGate = new Promise<void>((resolve) => {
+      releaseFlowRead = resolve;
+    });
+    unreachable.get.mockImplementation((path: string): Promise<unknown> => {
+      const suffix = Object.keys(HEALTHY_GET).find((k) => path.endsWith(k));
+      if (suffix === "/workflows") {
+        return Promise.resolve([
+          { id: "flow-1", name: "Flow", description: "", editable: false, enabled: true },
+        ]);
+      }
+      if (path.endsWith("/workflows/flow-1")) {
+        return flowReadGate.then(() => ({}));
+      }
+      return Promise.resolve(suffix ? HEALTHY_GET[suffix] : []);
+    });
+
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    // The overlay is gone and focus landed on the graph shell — not <body> —
+    // while the flow's graph read is still in flight.
+    expect(container.querySelector('[data-testid="overview-outage"]')).toBeNull();
+    expect(document.activeElement).toBe(container.querySelector('[data-graph-shell]'));
+
+    // The user moves focus somewhere of their own before the retry answers.
+    const sentinel = document.createElement("button");
+    sentinel.textContent = "sentinel";
+    document.body.appendChild(sentinel);
+    sentinel.focus();
+    expect(document.activeElement).toBe(sentinel);
+
+    // The retried load completes; the deferred hand-off must not yank focus
+    // back to Refresh over the user's own choice.
+    await act(async () => {
+      releaseFlowRead?.();
+    });
+    await act(async () => {});
+
+    expect(document.activeElement).toBe(sentinel);
+    sentinel.remove();
+  });
+
   it("keeps the previous snapshot's time rather than re-stamping it", async () => {
     const mocks = fakeClient({
       desks: [desk({ id: "research", name: "Research Desk", members: ["maya"] })],
