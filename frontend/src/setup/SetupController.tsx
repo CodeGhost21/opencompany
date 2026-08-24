@@ -201,19 +201,25 @@ export function SetupController({
   // an effect keyed on the route. The roster is re-read on arrival rather than
   // trusted from state captured before the navigation: another tab or colleague
   // may have staffed the company in the meantime, and a return must never open
-  // setup over a team that already exists. The debt is dropped either way so it
-  // cannot resurface on some later unrelated navigation.
+  // setup over a team that already exists. The debt is cleared only when the
+  // return is actually handled — a roster read that fails transiently keeps it,
+  // so a later navigation or reload can retry the resume.
   useEffect(() => {
     const arrive = () => {
       if (onModelSettings()) return;
       const wasResuming = setupResuming(scope);
       const wasRedesigning = setupRedesign(scope);
       if (!wasResuming && !wasRedesigning) return;
-      if (wasResuming) clearSetupResuming(scope);
-      if (wasRedesigning) clearSetupRedesign(scope);
       void client
         .listTeam(company)
         .then((roster) => {
+          // The return is handled only with the roster read in hand. Consuming
+          // the debt before it could not tell a transient failure from a handled
+          // return: the dialog would stay shut (correctly — the roster is
+          // unknown) but the resume would be gone, reachable again only through
+          // the Company-page prompt.
+          if (wasResuming) clearSetupResuming(scope);
+          if (wasRedesigning) clearSetupRedesign(scope);
           const empty = teamIsUnstaffed(roster);
           setUnstaffed(empty);
           if (wasRedesigning) {
@@ -228,7 +234,8 @@ export function SetupController({
         })
         .catch(() => {
           // Cannot confirm what the roster looks like; opening setup over an
-          // unknown team risks a duplicate, so stay closed.
+          // unknown team risks a duplicate, so stay closed. The debt is kept,
+          // so a later navigation or reload can retry the resume.
         });
     };
     window.addEventListener("hashchange", arrive);
