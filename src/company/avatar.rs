@@ -596,4 +596,148 @@ mod test {
             assert!(!is_supported_image(no), "{no}");
         }
     }
+
+    // ——— decoded-size validation ——————————————————————————————
+
+    /// A PNG whose header announces the given size — the signature and IHDR
+    /// that carry width and height, plus the IHDR fields that follow them.
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut v = PNG_SIGNATURE.to_vec();
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v
+    }
+
+    /// A GIF whose logical screen announces the given size.
+    fn gif(w: u16, h: u16) -> Vec<u8> {
+        let mut v = GIF_SIGNATURE_89.to_vec();
+        v.extend_from_slice(&w.to_le_bytes());
+        v.extend_from_slice(&h.to_le_bytes());
+        v
+    }
+
+    /// A minimal JPEG whose SOF0 announces the given size, preceded by an APP0
+    /// segment so the size is found by walking the marker list, not assumed at
+    /// an offset.
+    fn jpeg(w: u16, h: u16) -> Vec<u8> {
+        let mut v = b"\xff\xd8".to_vec();
+        // APP0 (JFIF), length 16, then a 14-byte payload.
+        v.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x10]);
+        v.extend_from_slice(b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00");
+        // SOF0, length 16: precision(1) + h(2) + w(2) + 3 components × 3.
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x10, 0x08]);
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&[0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        v
+    }
+
+    /// A WebP whose VP8X canvas chunk announces the given size.
+    fn webp_vp8x(w: u32, h: u32) -> Vec<u8> {
+        let (wm1, hm1) = (w - 1, h - 1);
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&22u32.to_le_bytes());
+        v.extend_from_slice(b"WEBPVP8X");
+        v.extend_from_slice(&10u32.to_le_bytes());
+        v.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x00, //
+            (wm1 & 0xFF) as u8,
+            ((wm1 >> 8) & 0xFF) as u8,
+            ((wm1 >> 16) & 0xFF) as u8,
+            (hm1 & 0xFF) as u8,
+            ((hm1 >> 8) & 0xFF) as u8,
+            ((hm1 >> 16) & 0xFF) as u8,
+        ]);
+        v
+    }
+
+    /// A WebP whose VP8 (lossy) chunk announces the given size.
+    fn webp_vp8(w: u16, h: u16) -> Vec<u8> {
+        let mut v = b"RIFF".to_vec();
+        // 12 (container) + 8 (chunk header) + 9 (frame) = 29.
+        v.extend_from_slice(&29u32.to_le_bytes());
+        v.extend_from_slice(b"WEBPVP8 ");
+        v.extend_from_slice(&9u32.to_le_bytes());
+        // Frame tag + start code (RFC 6386), then 14-bit width and height.
+        v.extend_from_slice(&[0x9D, 0x01, 0x2A, 0x9D, 0x01, 0x2A]);
+        v.push((w & 0xFF) as u8);
+        v.push((((w >> 8) & 0x3F) | ((h & 0x03) << 6)) as u8);
+        v.push(((h >> 2) & 0xFF) as u8);
+        v
+    }
+
+    #[test]
+    fn reads_the_size_each_format_announces() {
+        assert_eq!(image_dimensions(&png(1, 1)).unwrap(), (1, 1));
+        assert_eq!(image_dimensions(&png(192, 192)).unwrap(), (192, 192));
+        assert_eq!(image_dimensions(&png(65535, 1)).unwrap(), (65535, 1));
+        assert_eq!(image_dimensions(&gif(640, 480)).unwrap(), (640, 480));
+        assert_eq!(image_dimensions(&jpeg(320, 240)).unwrap(), (320, 240));
+        // A real mascot shape: a 192×192 VP8X canvas with an animated-style
+        // VP8 frame following it (the canvas is what a decoder allocates).
+        let mut extended = webp_vp8x(192, 192);
+        extended.extend_from_slice(b"ANIM");
+        extended.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(image_dimensions(&extended).unwrap(), (192, 192));
+        assert_eq!(image_dimensions(&webp_vp8(192, 192)).unwrap(), (192, 192));
+    }
+
+    #[test]
+    fn size_check_accepts_a_reasonable_image() {
+        for ok in [png(192, 192), gif(4096, 4096), jpeg(4032, 3024), webp_vp8x(4096, 4096)] {
+            check_image_dimensions(&ok).expect("a normal image must pass");
+        }
+    }
+
+    /// The decompression bomb the caps exist for: a header claiming a huge
+    /// frame in a payload small enough to pass the 4 MiB ceiling.
+    #[test]
+    fn size_check_refuses_a_decompression_bomb() {
+        for bomb in [
+            png(65535, 65535),
+            png(MAX_AVATAR_DIMENSION + 1, 1),
+            gif(65535, 65535),
+            jpeg(65535, 65535),
+            webp_vp8x(65535, 65535),
+            webp_vp8(65535, 65535),
+        ] {
+            let err = check_image_dimensions(&bomb).unwrap_err().to_string();
+            assert!(
+                err.contains("pixels") && err.contains("avatar has to fit"),
+                "a bomb must be refused by name: {err}"
+            );
+        }
+    }
+
+    /// Both caps work together: an extreme aspect ratio whose edges each fit
+    /// within the dimension cap is still refused by total area.
+    #[test]
+    fn size_check_refuses_an_extreme_aspect_ratio() {
+        let wide = png(MAX_AVATAR_DIMENSION * 2, MAX_AVATAR_DIMENSION / 2);
+        assert!(
+            check_image_dimensions(&wide).is_err(),
+            "edges within the dimension cap must still respect the area cap"
+        );
+    }
+
+    /// A payload too short to announce a size is not an image: a truncated
+    /// avatar would not decode anywhere either.
+    #[test]
+    fn size_check_refuses_a_truncated_payload() {
+        for truncated in [
+            &PNG_SIGNATURE[..],
+            &b"GIF89a"[..],
+            &b"\xff\xd8\xff\xe0\x00\x10"[..],
+            &b"RIFF\x16\x00\x00\x00WEBPVP8X"[..],
+        ] {
+            assert!(
+                check_image_dimensions(truncated).is_err(),
+                "{:?}",
+                &truncated[..truncated.len().min(16)]
+            );
+        }
+    }
 }
