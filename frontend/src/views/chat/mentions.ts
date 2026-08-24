@@ -496,17 +496,38 @@ export function mentionablesFor(
  * People are never returned. Every signed-in person can see every desk, so
  * "outside this channel" does not apply to them — only to teammates, whose desk
  * membership is real.
+ *
+ * A desk mention is judged by its blast radius: each of the desk's members is
+ * compared against the channel, so picking a desk whose members are all outside
+ * warns exactly as naming each of them directly would. `mentionables` supplies
+ * that membership (the picker rows carry `memberIds` on desk rows); without it
+ * a desk mention is left alone rather than guessed about.
  */
 export function mentionsOutsideChannel(
   mentions: Mention[],
   channelMemberIds: string[] | undefined,
+  mentionables?: readonly Mentionable[],
 ): string[] {
   // Unknown membership is not empty membership: a DM and a fallback desk both
   // report none, and warning about every mention there would be noise.
   if (!channelMemberIds) return [];
   const members = new Set(channelMemberIds);
+  const deskMembers = new Map(
+    (mentionables ?? [])
+      .filter((e) => e.target.kind === "desk")
+      .map((e) => [e.target.id, e.memberIds ?? []]),
+  );
   return mentions
-    .filter((m) => m.target.kind === "agent" && !members.has(m.target.id))
-    .map((m) => (m.target.kind === "agent" ? m.target.id : ""))
+    .flatMap((m) => {
+      if (m.target.kind === "agent") {
+        return members.has(m.target.id) ? [] : [m.target.id];
+      }
+      if (m.target.kind === "desk") {
+        return (deskMembers.get(m.target.id) ?? []).filter(
+          (id) => !members.has(id),
+        );
+      }
+      return [];
+    })
     .filter((id, i, all) => id && all.indexOf(id) === i);
 }
