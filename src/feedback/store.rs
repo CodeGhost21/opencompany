@@ -49,6 +49,17 @@ pub(crate) fn confirm_lock(id: &str) -> Arc<TokioMutex<()>> {
     CONFIRM_LOCKS.get(id)
 }
 
+/// Whether the confirm-lock registry holds an entry for `id`. Test-only: used
+/// to assert that a nonexistent confirm id never mints an un-evictable entry.
+#[cfg(test)]
+pub(crate) fn confirm_lock_holds(id: &str) -> bool {
+    CONFIRM_LOCKS
+        .inner
+        .lock()
+        .expect("confirm-lock map poisoned")
+        .contains_key(id)
+}
+
 /// A per-company append-only store of [`FeedbackItem`]s.
 ///
 /// Holds no lock of its own. Writes serialise on the process-wide, **path-keyed**
