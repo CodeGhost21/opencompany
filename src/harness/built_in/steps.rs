@@ -289,6 +289,8 @@ pub(crate) struct StepTrace {
     /// ordinal. The store replaces on `(run_id, step_seq)`, so re-emitting
     /// finalizes in place rather than duplicating.
     thinking_buf: Option<(u32, String)>,
+    /// Number of reasoning bytes added since the last interim flush.
+    thinking_pending_bytes: usize,
 }
 
 impl StepTrace {
