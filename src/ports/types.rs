@@ -2554,7 +2554,7 @@ pub struct OutboundMessage {
     /// handler. Stored replies carry structured mentions in `AgentReply`; this
     /// field keeps the synchronous POST response identical to history and SSE.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mentions: Vec<crate::server::chat_history::MentionView>,
+    pub mentions: Vec<Mention>,
 }
 
 /// One visible step in an agent turn's processing timeline, surfaced in the
