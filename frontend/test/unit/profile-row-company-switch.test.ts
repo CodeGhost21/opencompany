@@ -44,6 +44,7 @@ function meFor(company: string): Me {
 
 function host() {
   const reads: string[] = [];
+  const patches: { path: string; body: unknown }[] = [];
   const beta = deferred<Me>();
   const client = {
     scopeFor: (company: string | null) =>
@@ -59,8 +60,13 @@ function host() {
       if (company === "ghost") throw new Error("no sign-in");
       return meFor(company);
     },
+    patch: async (path: string, body: unknown) => {
+      patches.push({ path, body });
+      const company = path.match(/companies\/([^/]+)\//)?.[1] ?? "";
+      return meFor(company);
+    },
   } as unknown as OpenCompanyClient;
-  return { client, reads, releaseBeta: (who: Me) => beta.settle(who) };
+  return { client, reads, patches, releaseBeta: (who: Me) => beta.settle(who) };
 }
 
 let container: HTMLDivElement;
