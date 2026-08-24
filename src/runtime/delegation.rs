@@ -2747,8 +2747,7 @@ impl<'a> DelegationRunner<'a> {
         let Some(agent) = self.record.effective_agent(responder) else {
             return false;
         };
-        let reachable =
-            delegation_tools::teammate_targets(&self.record, responder, &agent.delegates_to);
+        let reachable = delegation_tools::teammate_targets(self.record, responder, &agent.delegates_to);
         self.also_mentioned
             .iter()
             .any(|target| reachable.contains(target))
