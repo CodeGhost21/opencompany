@@ -446,10 +446,10 @@ fn webp_animation_cost(bytes: &[u8]) -> Option<u64> {
                 return None;
             }
             saw_frame = true;
-            let frame_w = 1
-                + ((data[6] as u32) | ((data[7] as u32) << 8) | ((data[8] as u32) << 16));
-            let frame_h = 1
-                + ((data[9] as u32) | ((data[10] as u32) << 8) | ((data[11] as u32) << 16));
+            let frame_w =
+                1 + ((data[6] as u32) | ((data[7] as u32) << 8) | ((data[8] as u32) << 16));
+            let frame_h =
+                1 + ((data[9] as u32) | ((data[10] as u32) << 8) | ((data[11] as u32) << 16));
             cost = cost.saturating_add((frame_w as u64) * (frame_h as u64));
         }
         i += 8 + size + (size & 1);
@@ -533,16 +533,16 @@ pub fn check_image_dimensions(bytes: &[u8]) -> Result<()> {
     // walkers above read; a still has nothing to count and is bounded by the
     // single-frame check already done. Each walker answers `None` for a format
     // it is not, or for a file of its format that never reaches a frame.
-    let animated_cost = if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89)
-    {
-        gif_animation_cost(bytes)
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        webp_animation_cost(bytes)
-    } else if bytes.starts_with(PNG_SIGNATURE) {
-        apng_animation_cost(bytes)
-    } else {
-        None
-    };
+    let animated_cost =
+        if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89) {
+            gif_animation_cost(bytes)
+        } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+            webp_animation_cost(bytes)
+        } else if bytes.starts_with(PNG_SIGNATURE) {
+            apng_animation_cost(bytes)
+        } else {
+            None
+        };
     if let Some(cost) = animated_cost
         && cost > MAX_AVATAR_ANIMATED_PIXELS
     {
@@ -1458,7 +1458,10 @@ mod test {
     }
 
     impl crate::ports::WorkspaceStore for ScriptedStore {
-        async fn tree(&self, _company: &crate::ports::types::CompanyId) -> Result<Vec<WorkspaceNode>> {
+        async fn tree(
+            &self,
+            _company: &crate::ports::types::CompanyId,
+        ) -> Result<Vec<WorkspaceNode>> {
             unreachable!("resolve does not list the tree")
         }
         async fn read(
@@ -1530,10 +1533,12 @@ mod test {
             _company: &crate::ports::types::CompanyId,
             id: &str,
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
-            Ok(self
-                .nodes
-                .get(id)
-                .map(|(node, bytes)| (node.clone(), crate::ports::workspace::one_chunk(bytes.clone()))))
+            Ok(self.nodes.get(id).map(|(node, bytes)| {
+                (
+                    node.clone(),
+                    crate::ports::workspace::one_chunk(bytes.clone()),
+                )
+            }))
         }
         async fn rename_move(
             &self,
