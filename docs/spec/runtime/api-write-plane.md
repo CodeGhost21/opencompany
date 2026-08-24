@@ -329,10 +329,7 @@ nothing in the console read or wrote it, so an operator drowning in approval
 cards could change it only by redeploying an edited `company.toml` — or, on a
 hosted tenant with a read-only manifest snapshot, not at all.
 
-`GET` returns the tier and always-ask list **in force**, what the manifest would
-restore, whether an override is set and by whom, and the selectable tiers with
-the host's own description of each (`POLICY_MODES` narrowed to tiers the console
-has text for, so it never offers one the host would downgrade). `PUT` takes `mode`
+`GET` returns the tier, spend cap, approval deadline, and always-ask list **in force**, what the manifest would restore, whether an override is set and by whom, and the selectable tiers with the host's own description of each (`POLICY_MODES` narrowed to tiers the console has text for, so it never offers one the host would downgrade). `PUT` takes `mode`
 and `alwaysApprove`, both optional and independent — `{"mode": "auto"}`
 leaves the list alone, `{"alwaysApprove": []}` clears it (a real state, not a
 reset), `{"mode": null}` stops overriding the tier, and `{}` is a **`422`**
