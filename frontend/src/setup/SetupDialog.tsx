@@ -100,6 +100,7 @@ export function SetupDialog({
   client,
   company,
   redesign,
+  fallbackIds,
   onSkip,
   onLeave,
   onDone,
@@ -114,6 +115,15 @@ export function SetupDialog({
    * replace it rather than stack a second one on it.
    */
   redesign?: boolean;
+  /**
+   * The host ids of the fallback team the first pass created, captured when the
+   * operator left to wire a model.
+   *
+   * The only rows a redesign may replace. Teammates other operators added while
+   * model settings were open are not in this list, and survive the replacement.
+   * Empty when the first pass created nothing (no fallback team to replace).
+   */
+  fallbackIds?: string[];
   /** "I'll do this later" — records the skip and closes. */
   onSkip: () => void;
   /**
@@ -131,10 +141,10 @@ export function SetupDialog({
   onDone: () => void;
   /**
    * The completion screen's "Add a model in Settings" action: close and send
-   * the operator to wire a model, recording that the fallback team is to be
-   * redesigned on their return.
+   * the operator to wire a model, recording that the fallback team — the ids of
+   * the rows this run just created — is to be redesigned on their return.
    */
-  onRedesign: () => void;
+  onRedesign: (fallbackIds: string[]) => void;
 }) {
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
   const [phase, setPhase] = useState<Phase>({ kind: "asking", step: 0 });
