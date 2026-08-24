@@ -1425,16 +1425,16 @@ mod test {
     fn webp_animation_cost_counts_every_anmf_frame() {
         assert_eq!(
             webp_animation_cost(&webp_animated((100, 100), &[(100, 100), (50, 50)])),
-            Some(12_500)
+            Ok(Some(12_500))
         );
         // Frames may be sub-rectangles of the canvas; each one is still paid for.
         assert_eq!(
             webp_animation_cost(&webp_animated((4096, 4096), &[(128, 128)])),
-            Some(16_384)
+            Ok(Some(16_384))
         );
         // Not a WebP, and a WebP with no ANMF chunks: nothing to count.
-        assert_eq!(webp_animation_cost(PNG_SIGNATURE), None);
-        assert_eq!(webp_animation_cost(&webp_vp8x(16, 16)), None);
+        assert_eq!(webp_animation_cost(PNG_SIGNATURE), Ok(None));
+        assert_eq!(webp_animation_cost(&webp_vp8x(16, 16)), Ok(None));
     }
 
     /// The APNG walker pays for the default image (the canvas, frame 0 of the
@@ -1443,10 +1443,10 @@ mod test {
     fn apng_animation_cost_counts_the_canvas_and_every_fctl_frame() {
         assert_eq!(
             apng_animation_cost(&apng_animated((100, 100), &[(100, 100), (50, 50)])),
-            Some(22_500)
+            Ok(Some(22_500))
         );
         // A still PNG carries no acTL, so there is nothing animated to count.
-        assert_eq!(apng_animation_cost(&png(16, 16)), None);
+        assert_eq!(apng_animation_cost(&png(16, 16)), Ok(None));
     }
 
     /// An animated WebP can hide a flood of full-canvas frames under the byte
