@@ -1288,9 +1288,43 @@ mod route_tests {
         }
     }
 
+    /// A scripted [`crate::store::MemoryScopes`] whose archive tier answers a
+    /// fixed trace list — the provider-only surface the fs default refuses.
+    struct ScriptedScopes {
+        archived: Vec<CompressedTrace>,
+    }
+
+    #[async_trait]
+    impl crate::store::MemoryScopes for ScriptedScopes {
+        fn agent_context(&self, _agent_id: &str) -> Arc<dyn ContextStore> {
+            panic!("the archives route never touches agent context")
+        }
+
+        fn desk_context(&self, _desk_id: &str) -> Arc<dyn ContextStore> {
+            panic!("the archives route never touches desk context")
+        }
+
+        async fn archived_traces(
+            &self,
+            _company: &CompanyId,
+        ) -> crate::Result<Vec<CompressedTrace>> {
+            Ok(self.archived.clone())
+        }
+    }
+
     /// An [`AppState`] whose company runtime reads context from `context`,
     /// with everything else on fresh fs stores under `home`.
     async fn state_over(home: &std::path::Path, context: Arc<ScriptedContext>) -> AppState {
+        state_over_with_scopes(home, context, None).await
+    }
+
+    /// [`state_over`] with an injected [`crate::store::MemoryScopes`], so a
+    /// test can exercise the provider-only archive surface.
+    async fn state_over_with_scopes(
+        home: &std::path::Path,
+        context: Arc<ScriptedContext>,
+        scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
+    ) -> AppState {
         use crate::ports::CompanyStore;
         let manifest: CompanyManifest =
             toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
@@ -1318,12 +1352,13 @@ mod route_tests {
             })
             .await
             .unwrap();
-        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest)
             .with_id(id.clone())
-            .with_context(context)
-            .build()
-            .await
-            .unwrap();
+            .with_context(context);
+        if let Some(scopes) = scopes {
+            builder = builder.with_memory_scopes(scopes);
+        }
+        let runtime = builder.build().await.unwrap();
         let state = AppState::new(AppConfig::default());
         state.registry().insert(id, Arc::new(runtime));
         crate::server::test_support::seed_fixed_admin(&state, "acme").await;
