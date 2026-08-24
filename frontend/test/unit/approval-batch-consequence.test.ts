@@ -47,6 +47,7 @@ async function render(
   approvals: ApprovalSummary[],
   decided: Record<string, Verdict> = {},
   failed: Record<string, string> = {},
+  compact = false,
 ) {
   await act(async () => {
     root.render(
