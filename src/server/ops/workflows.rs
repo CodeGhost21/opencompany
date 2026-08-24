@@ -181,6 +181,20 @@ pub fn router() -> Router<AppState> {
         // fold is already expensive, and an inspector only ever opens one run at
         // a time (the make.com pattern).
         .merge(scoped("/workflows/runs/{rid}/output", get(get_run_output)))
+        // Issue #1684: read the files ONE past run produced, for the run
+        // inspector's "Files associated" section. Same static-before-dynamic
+        // family as the output route above and, like it, four segments deep so
+        // it cannot collide with the two/three-segment dynamic routes — but
+        // registered here to keep the ordering uniform. Deliberately a lazy
+        // per-run fetch, NOT folded into `list_runs`: that fold is already
+        // expensive, and an inspector only ever opens one run at a time. The
+        // join it runs — `run_id → cards where origin_run_id == run_id → each
+        // card's artifacts` — is the authoritative provenance path (see
+        // `run_artifacts`).
+        .merge(scoped(
+            "/workflows/runs/{rid}/artifacts",
+            get(run_artifacts),
+        ))
         // Issue #259: read, replace, remove — all on the same id. `PUT` is a
         // full replace rather than a `PATCH` merge because a workflow *is* its
         // graph: a partial node/edge merge has no well-defined meaning (which
@@ -1735,6 +1749,138 @@ async fn get_run_output(
             "no output captured for workflow run {rid}"
         )))),
     }
+}
+
+/// The row cap on [`run_artifacts`]: a defensive ceiling on how many files one
+/// run's response carries, in the spirit of [`MAX_RUN_LIMIT`] on the history
+/// read. A run that opened an unusually large number of cards — or a card with
+/// a long publish history — cannot turn one lazy expand into an unbounded
+/// payload; the newest rows survive the truncation, matching the newest-first
+/// sort the handler applies just before it.
+const MAX_RUN_ARTIFACTS: usize = 500;
+
+/// One file a workflow run produced, projected for the run inspector's "Files
+/// associated" section (issue #1684).
+///
+/// **Metadata only** — never the artifact body, the same discipline
+/// [`WorkflowRunNode`] keeps. The console deep-links each row into the
+/// producing card's Artifacts tab (`artifactHref` → `taskId` + `artifactId` +
+/// `latestVersion`) and, when the file was mirrored into the workspace tree,
+/// offers a second link to that node. Both are addresses; neither needs bytes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunArtifactRow {
+    /// The card that produced the file — scopes both `artifactHref` and the
+    /// Artifacts tab the link opens.
+    task_id: String,
+    /// The artifact's stable id → the tab's `openArtifactId`.
+    artifact_id: String,
+    /// The artifact's display title.
+    title: String,
+    /// What the file holds; drives the console's icon/renderer choice.
+    kind: crate::ports::ArtifactKind,
+    /// The workspace-relative path the agent published (e.g. `specs/launch.md`).
+    /// `None` for a legacy record captured before issue #244 — the console
+    /// labels it, it does not drop it, so the history stays honest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// The newest revision number → the tab's `openVersion` pin. `0` only for a
+    /// hand-written or truncated record with no versions, which the accessors
+    /// tolerate rather than panic on.
+    latest_version: u32,
+    /// Epoch-millis of the newest revision — the sort key and the display time.
+    updated_at_millis: u64,
+    /// The workspace node the newest revision was mirrored into, when one was
+    /// (issue #552) → an optional `#/workspace/<id>` link. `None` when nothing
+    /// mirrored it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_node_id: Option<String>,
+    /// The producing card's title, for grouping rows by card in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_title: Option<String>,
+}
+
+/// `GET …/workflows/runs/{rid}/artifacts` (both scope forms) — the files one
+/// past run produced, for the run inspector's "Files associated" section
+/// (issue #1684).
+///
+/// # The join, and why it reads two ports in memory
+///
+/// There is no direct "artifacts by run" index: [`ArtifactVersion::run_id`] is
+/// the task **attempt** id, not the workflow run id. The authoritative link is
+/// the card's [`origin_run_id`](crate::ports::TaskRecord::origin_run_id) — the
+/// run that OPENED the card — so the read is `run_id → cards where
+/// origin_run_id == run_id → each card's artifacts`. Both halves reuse the
+/// broad list primitives ([`TaskStore::list`] once, then
+/// [`ArtifactStore::list`] narrowed to each matched card) and filter in memory
+/// rather than adding an origin-run query to the three storage backends — the
+/// same choice `list_runs` makes for the same reason, and correct here because
+/// this is a lazy per-run read, not a per-history-GET cost.
+///
+/// # `200 []`, never `404`
+///
+/// The one contract difference from [`get_run_output`]: a run that opened no
+/// cards, or whose cards published no files, is the common case, not an error —
+/// it answers `200 []`, mirroring [`ArtifactStore::list`] returning `[]` for a
+/// card with no artifacts. An unknown run id is indistinguishable from a run
+/// that produced nothing, and means the same thing to the operator: no files.
+///
+/// # Provenance is the OPENING run
+///
+/// `origin_run_id` is stamped once, when the card is created; a later run that
+/// re-owns the card does not overwrite it, so a card's files list under the run
+/// that opened it, not a re-owner. A `sub_workflow` child stamps its parent
+/// run, so sub-workflow cards roll up to the parent. This is the intended,
+/// defensible reading of "the files this run produced".
+async fn run_artifacts(
+    company: ScopedCompany,
+    Path(RunPath { rid }): Path<RunPath>,
+) -> Result<Json<Vec<RunArtifactRow>>, ApiError> {
+    // One broad read of the board; the run's cards are the ones this run
+    // opened. `TaskStore::list` also carries each card's title, so grouping the
+    // files by card below needs no second read.
+    let cards = company
+        .runtime
+        .tasks()
+        .list(company.id())
+        .await
+        .map_err(ApiError)?;
+
+    let mut rows: Vec<RunArtifactRow> = Vec::new();
+    for card in cards {
+        if card.origin_run_id.as_deref() != Some(rid.as_str()) {
+            continue;
+        }
+        let artifacts = company
+            .runtime
+            .artifacts()
+            .list(company.id(), Some(&card.id))
+            .await
+            .map_err(ApiError)?;
+        for record in artifacts {
+            // The two latest-derived fields, read before the record's own
+            // fields move into the row below (the accessor borrows `record`).
+            let latest_version = record.latest().map(|v| v.version).unwrap_or(0);
+            let workspace_node_id = record.latest().and_then(|v| v.workspace_node_id.clone());
+            rows.push(RunArtifactRow {
+                task_id: record.task_id,
+                artifact_id: record.id,
+                title: record.title,
+                kind: record.kind,
+                source: record.source,
+                latest_version,
+                updated_at_millis: record.updated_at_millis,
+                workspace_node_id,
+                task_title: Some(card.title.clone()),
+            });
+        }
+    }
+
+    // Newest first, then cap defensively — the newest rows are the ones an
+    // operator opening a run reaches for, so they are the ones the cap keeps.
+    rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at_millis));
+    rows.truncate(MAX_RUN_ARTIFACTS);
+    Ok(Json(rows))
 }
 
 // ---------------------------------------------------------------------------
@@ -6588,6 +6734,384 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        }
+
+        // ------------------------------------------------------------------
+        // `GET …/workflows/runs/{rid}/artifacts` — the files one run produced,
+        // joined through `origin_run_id` (issue #1684).
+        // ------------------------------------------------------------------
+
+        /// Builds a board card, optionally stamped with the run that opened it
+        /// (`origin_run_id`) — the field [`run_artifacts`] joins on (issue
+        /// #1684). Everything else is the neutral shape the board's own tests
+        /// use.
+        fn run_card(
+            id: &str,
+            title: &str,
+            origin_run_id: Option<&str>,
+        ) -> crate::ports::TaskRecord {
+            crate::ports::TaskRecord {
+                id: id.into(),
+                title: title.into(),
+                note: None,
+                column: "in_review".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                planning_attempts: Vec::new(),
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+                origin_run_id: origin_run_id.map(str::to_string),
+                origin_workflow_id: None,
+            }
+        }
+
+        /// A published artifact on `task_id`: one agent version, a `source`
+        /// path, stamped `updated_at_millis` so the newest-first sort is
+        /// testable.
+        fn published(
+            id: &str,
+            task_id: &str,
+            title: &str,
+            source: &str,
+            at_millis: u64,
+        ) -> crate::ports::ArtifactRecord {
+            let mut rec = crate::ports::ArtifactRecord::new(
+                id,
+                task_id,
+                title,
+                crate::ports::ArtifactKind::Markdown,
+                "the agent's draft",
+                "ceo",
+                at_millis,
+            )
+            .with_source(source);
+            rec.updated_at_millis = at_millis;
+            rec
+        }
+
+        /// The join: a run's files are the artifacts of every card it opened,
+        /// and only those. Two cards stamped with the run (one carrying two
+        /// files, one carrying one) contribute three rows; a card of a
+        /// *different* run and a chat card with no `origin_run_id` contribute
+        /// none. Newest-`updatedAtMillis` first.
+        #[tokio::test]
+        async fn run_artifacts_joins_cards_by_origin_run_id() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            for card in [
+                run_card("t-a", "Launch spec", Some("run-1")),
+                run_card("t-b", "Press kit", Some("run-1")),
+                run_card("t-c", "Someone else", Some("run-2")),
+                run_card("t-chat", "A chat card", None),
+            ] {
+                runtime.tasks().upsert(&id, &card).await.expect("seed card");
+            }
+            for art in [
+                published("art-a1", "t-a", "Spec v1", "specs/launch.md", 30),
+                published("art-a2", "t-a", "Spec appendix", "specs/appendix.md", 10),
+                published("art-b1", "t-b", "Press release", "press/release.md", 20),
+                // Belongs to run-2's card — must NOT appear under run-1.
+                published("art-c1", "t-c", "Other run's file", "other.md", 99),
+                // Belongs to a chat card with no origin run — must NOT appear.
+                published("art-chat", "t-chat", "Chat reply", "chat.md", 99),
+            ] {
+                crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, &art)
+                    .await
+                    .expect("seed artifact");
+            }
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array response");
+            assert_eq!(rows.len(), 3, "only run-1's cards' files: {body}");
+
+            // Newest-first: art-a1 (30), art-b1 (20), art-a2 (10).
+            assert_eq!(rows[0]["artifactId"], "art-a1", "{body}");
+            assert_eq!(rows[0]["taskId"], "t-a");
+            assert_eq!(rows[0]["taskTitle"], "Launch spec");
+            assert_eq!(rows[0]["title"], "Spec v1");
+            assert_eq!(rows[0]["kind"], "markdown");
+            assert_eq!(rows[0]["source"], "specs/launch.md");
+            assert_eq!(rows[0]["latestVersion"], 1);
+            assert_eq!(rows[1]["artifactId"], "art-b1", "{body}");
+            assert_eq!(rows[2]["artifactId"], "art-a2", "{body}");
+
+            let ids: Vec<&str> = rows
+                .iter()
+                .map(|r| r["artifactId"].as_str().unwrap())
+                .collect();
+            assert!(
+                !ids.contains(&"art-c1") && !ids.contains(&"art-chat"),
+                "another run's and a chat card's files must not appear: {body}"
+            );
+        }
+
+        /// The contract difference from `output`'s 404: a run that opened no
+        /// cards (or whose cards published nothing) answers `200 []`, not a
+        /// 404. A fileless run is normal, not an error.
+        #[tokio::test]
+        async fn run_artifacts_empty_run_returns_200_empty() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-nothing/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a run with no files is 200, never 404"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body.as_array().expect("array").len(), 0, "{body}");
+        }
+
+        /// `latestVersion` pins the newest revision, so the deep-link opens the
+        /// version an operator edit produced, not v1. A v1(agent)+v2(operator)
+        /// artifact reports `latestVersion == 2`.
+        #[tokio::test]
+        async fn run_artifacts_latest_version_is_pinned() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            let mut art = published("art-a1", "t-a", "Spec", "specs/launch.md", 5);
+            art.push_version(
+                "the operator's rewrite",
+                crate::ports::artifacts::ArtifactAuthor::Operator,
+                "ceo",
+                6,
+                Some("operator edit before approval".to_string()),
+            );
+            crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, &art)
+                .await
+                .expect("seed artifact");
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body[0]["latestVersion"], 2, "{body}");
+            assert_eq!(body[0]["updatedAtMillis"], 6, "{body}");
+        }
+
+        /// `workspaceNodeId` rides through from the newest revision when the
+        /// file was mirrored into the tree (issue #552), so the console can
+        /// offer the `#/workspace/<id>` link — and is absent otherwise.
+        #[tokio::test]
+        async fn run_artifacts_carries_workspace_node_when_mirrored() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            let mut mirrored = published("art-a1", "t-a", "Spec", "specs/launch.md", 30);
+            mirrored.stamp_workspace_node("node-9");
+            let bare = published("art-a2", "t-a", "Note", "specs/note.md", 10);
+            for art in [&mirrored, &bare] {
+                crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, art)
+                    .await
+                    .expect("seed artifact");
+            }
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body[0]["artifactId"], "art-a1", "{body}");
+            assert_eq!(body[0]["workspaceNodeId"], "node-9", "{body}");
+            assert!(
+                body[1]["workspaceNodeId"].is_null(),
+                "an unmirrored file omits the workspace link: {body}"
+            );
+        }
+
+        /// A card opened by run A and re-owned by run B keeps `origin_run_id ==
+        /// A` (the field is stamped once, at creation), so its files list under
+        /// A — the OPENING run — and not under B. Documents the deliberate
+        /// provenance choice.
+        #[tokio::test]
+        async fn run_artifacts_reowned_card_lists_under_opening_run() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            // Card was opened by run-A; a later run-B re-owned it but the field
+            // still records the opener.
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-A")))
+                .await
+                .expect("seed card");
+            crate::ports::ArtifactStore::upsert(
+                runtime.artifacts().as_ref(),
+                &id,
+                &published("art-a1", "t-a", "Spec", "specs/launch.md", 30),
+            )
+            .await
+            .expect("seed artifact");
+
+            // Under the opener: present.
+            let under_a = json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/runs/run-A/artifacts",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(under_a.as_array().unwrap().len(), 1, "{under_a}");
+            assert_eq!(under_a[0]["artifactId"], "art-a1");
+
+            // Under the re-owner: nothing — provenance is the opening run.
+            let under_b = json_body(
+                router(state)
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/runs/run-B/artifacts",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                under_b.as_array().unwrap().len(),
+                0,
+                "a re-owner does not inherit the file: {under_b}"
+            );
+        }
+
+        /// A legacy record with `source == None` (a pre-#244 auto-captured chat
+        /// reply) is still returned — with `source` absent — so the console can
+        /// label it rather than the history silently dropping it.
+        #[tokio::test]
+        async fn run_artifacts_includes_legacy_source_none_labeled() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            // No `.with_source(..)` — a legacy record.
+            let legacy = crate::ports::ArtifactRecord::new(
+                "art-legacy",
+                "t-a",
+                "Auto-captured reply",
+                crate::ports::ArtifactKind::Text,
+                "an old chat reply",
+                "assistant",
+                12,
+            );
+            crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, &legacy)
+                .await
+                .expect("seed artifact");
+
+            let body = json_body(
+                router(state)
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/runs/run-1/artifacts",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(body[0]["artifactId"], "art-legacy");
+            assert!(
+                body[0]["source"].is_null(),
+                "a legacy record's absent source stays absent on the wire: {body}"
+            );
+        }
+
+        /// The route resolves to `run_artifacts`, not the dynamic
+        /// `/workflows/{wid}` graph read — the static-before-dynamic slot holds
+        /// (mirrors `run_history_is_not_shadowed_by_the_graph_read`).
+        #[tokio::test]
+        async fn run_artifacts_route_is_not_shadowed() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            crate::ports::ArtifactStore::upsert(
+                runtime.artifacts().as_ref(),
+                &id,
+                &published("art-a1", "t-a", "Spec", "specs/launch.md", 30),
+            )
+            .await
+            .expect("seed artifact");
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            // A graph read would 404 an unknown `wid`; this returns the files
+            // array, proving the four-segment static route won.
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body[0]["artifactId"], "art-a1", "{body}");
         }
 
         /// A run that died outright reads back with its reason. This is the
