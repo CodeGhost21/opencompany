@@ -1032,11 +1032,14 @@ export function AppShell({
    */
   const mountedRef = useRef(true);
   // The latest full browser scope, so async completions cannot cross either a
-  // company switch or an in-place connection reconfiguration.
-  const scopeRef = useRef({ connection: scope.connection, company });
+  // company switch or an in-place connection reconfiguration. `client` is part
+  // of the scope: `reseat` edits a host address by swapping the client while
+  // preserving the connection id, so connection+company alone do not move on
+  // reconfiguration — only the client instance does.
+  const scopeRef = useRef({ connection: scope.connection, company, client });
   useEffect(() => {
-    scopeRef.current = { connection: scope.connection, company };
-  }, [scope.connection, company]);
+    scopeRef.current = { connection: scope.connection, company, client };
+  }, [scope.connection, company, client]);
   useEffect(() => {
     // Re-armed on mount, which is not redundant with the initial `true`:
     // `main.tsx` renders under `StrictMode`, so in development React mounts,
