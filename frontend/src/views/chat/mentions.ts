@@ -667,6 +667,7 @@ export function mentionablesFor(
     .map((p) => ({
       target: { kind: "user", id: p.id },
       label: p.label,
+      avatar: p.avatar,
       aliases: [...new Set([p.label.toLowerCase(), p.slug])],
       hint:
         (labelCounts.get(p.label) ?? 0) > 1
