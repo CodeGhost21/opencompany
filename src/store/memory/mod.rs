@@ -120,6 +120,18 @@ pub use driver::{
 type ContextStoreCache =
     Arc<OnceLock<std::sync::Mutex<HashMap<String, Arc<ProviderContextStore>>>>>;
 
+/// Upper bound on distinct scope labels the per-scope context cache holds.
+///
+/// The labels are agent/desk ids — internal identifiers, so a legitimate
+/// company has a handful — but nothing else stops an unbounded number of them
+/// from accumulating for the life of the process: every distinct id ever used
+/// inserts an entry that is never removed. The cache exists to make repeated
+/// access to the *same* scope cheap, not to remember every scope forever, so
+/// the bound is a plain capacity cap with arbitrary eviction. Eviction is safe
+/// because entries are `Arc`-backed: an in-flight holder keeps its store, and
+/// the next access to an evicted scope rebuilds it.
+const SCOPED_CONTEXT_CACHE_CAPACITY: usize = 4096;
+
 /// A bound memory engine, and the only way to get a memory port out of one.
 ///
 /// Process-scoped, like the `MemoryOverlay` it is opened into: one engine serves
