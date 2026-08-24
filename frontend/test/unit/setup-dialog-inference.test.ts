@@ -261,6 +261,21 @@ describe("the finished build-out points at what would actually help", () => {
     expect(find("setup-add-model")).toBeNull();
   });
 
+  it("withholds the credential CTA on a host that cannot run a model", async () => {
+    await show(
+      clientWith({
+        source: "fallback",
+        reason: "no_model",
+        status: async () => ({ ...ECHO, harnessReachable: false }),
+      }),
+    );
+    await runFlow();
+    // A credential cannot move a harness-less binary onto the design path, so
+    // the CTA that promises it would send the operator round a redesign loop
+    // that cannot end.
+    expect(find("setup-add-model")).toBeNull();
+  });
+
   it("says nothing about fallbacks when the model designed the team", async () => {
     await show(clientWith({ source: "model", reason: null }));
     await runFlow();
