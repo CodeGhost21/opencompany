@@ -246,8 +246,12 @@ describe("read() can verify the approval tier", () => {
   const policyDto = {
     mode: "supervised",
     alwaysApprove: [],
+    autoApproveUnderUsd: null,
+    approvalTtlHours: 24,
     manifestMode: "full",
     manifestAlwaysApprove: [],
+    manifestAutoApproveUnderUsd: null,
+    manifestApprovalTtlHours: null,
     overridden: true,
     setBy: "alice@acme",
     setAtMillis: 1_700_000_000_000,
