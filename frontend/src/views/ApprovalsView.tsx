@@ -392,7 +392,7 @@ export function ApprovalsView({
               even when a backlog is several screens long. */}
           <StandingPermissions
             grants={grants}
-            now={now}
+            now={permissionNow}
             askerNames={askerNames}
             granterNames={granterNames}
             onRevoke={async (id) => {
