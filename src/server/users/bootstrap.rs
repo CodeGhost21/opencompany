@@ -203,7 +203,23 @@ mod test {
         (ops.clone(), ops.clone(), ops)
     }
 
-    const GOOD: &str = "a long enough bootstrap password";
+    fn context<'a>(
+        users: &'a Arc<dyn UserStore>,
+        sessions: &'a Arc<dyn crate::ports::sessions::SessionStore>,
+        login_codes: &'a Arc<dyn crate::ports::login_codes::LoginCodeStore>,
+        company: &'a CompanyId,
+        manifest_admins: &'a [String],
+        bootstrap_admin: Option<&'a str>,
+    ) -> PasswordIssueContext<'a> {
+        PasswordIssueContext {
+            users,
+            sessions,
+            login_codes,
+            company,
+            manifest_admins,
+            bootstrap_admin,
+        }
+    }
 
     #[tokio::test]
     async fn issues_a_first_password_to_the_deployment_bootstrap_admin() {
