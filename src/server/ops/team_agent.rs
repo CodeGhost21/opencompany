@@ -877,29 +877,16 @@ async fn edit_agent(
     // The chosen face, written to the same override row for either kind of
     // teammate. `null` — and a blank string, which is the same intent typed by a
     // client that cleared an input — resets to the hashed default rather than
-    // storing an unrenderable empty reference. Anything else is validated
-    // *before* it is stored: the value ends up in an `src=` on every surface
-    // that draws a face, so the refusal has to happen here, once, and not at
-    // eleven render sites.
-    if let Some(avatar) = body.avatar {
-        match avatar
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            Some(value) => {
-                let stored = crate::company::avatar::resolve(
-                    company.runtime.workspace().as_ref(),
-                    company.id(),
-                    &value,
-                )
-                .await
-                .map_err(|e| ApiError(e).into_response())?;
-                record.upsert_agent_override(AgentOverride {
-                    agent_id: agent_id.clone(),
-                    avatar: Some(stored),
-                    ..Default::default()
-                });
-            }
+    // storing an unrenderable empty reference. The bytes were resolved before
+    // the write lock above (see the note at the top of this handler), so this
+    // only writes the outcome under the lock.
+    if let Some(avatar) = resolved_avatar {
+        match avatar {
+            Some(stored) => record.upsert_agent_override(AgentOverride {
+                agent_id: agent_id.clone(),
+                avatar: Some(stored),
+                ..Default::default()
+            }),
             None => record.clear_agent_avatar(&agent_id),
         }
     }
