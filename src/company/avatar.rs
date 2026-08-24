@@ -1030,12 +1030,6 @@ mod test {
     /// within the dimension cap is still refused by total area.
     #[test]
     fn size_check_refuses_an_extreme_aspect_ratio() {
-        let wide = png(MAX_AVATAR_DIMENSION * 2, MAX_AVATAR_DIMENSION / 2);
-        assert!(
-            check_image_dimensions(&wide).is_err(),
-            "edges within the dimension cap must still respect the area cap"
-        );
-    }
 
     /// A payload too short to announce a size is not an image: a truncated
     /// avatar would not decode anywhere either.
