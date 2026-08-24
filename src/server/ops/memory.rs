@@ -1585,6 +1585,71 @@ mod route_tests {
             "the per-chunk peek loop is gone"
         );
     }
+
+    /// The route is registered for every company, but only a provider-backed
+    /// engine has an archive tier. The store/embedded default must answer a
+    /// 404 that names the condition — never a 500 that reads as a server
+    /// fault — and an empty list would falsely imply there are no archived
+    /// traces.
+    #[tokio::test]
+    async fn the_archives_route_refuses_a_store_backend_with_404() {
+        let home = tempfile::tempdir().unwrap();
+        let state = state_over(home.path(), ScriptedContext::with_labels(&[])).await;
+
+        let (status, body) = get_json(&state, "/api/v1/company/memory/archives").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "not_found");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("does not provide archived traces"),
+            "the refusal must name the condition: {body}"
+        );
+    }
+
+    /// The archive surface speaks the same camelCase [`TraceEntry`] contract
+    /// as `/memory/traces` — `cycleId`/`atMillis`, never the storage type's
+    /// snake_case — and returns newest-first like the retained window.
+    #[tokio::test]
+    async fn the_archives_route_serializes_camelcase_newest_first() {
+        let home = tempfile::tempdir().unwrap();
+        let scopes: Arc<dyn crate::store::MemoryScopes> = Arc::new(ScriptedScopes {
+            archived: vec![
+                CompressedTrace {
+                    cycle_id: "c-old".into(),
+                    summary: "older".into(),
+                    at_millis: 100,
+                },
+                CompressedTrace {
+                    cycle_id: "c-new".into(),
+                    summary: "newer".into(),
+                    at_millis: 300,
+                },
+            ],
+        });
+        let state = state_over_with_scopes(
+            home.path(),
+            ScriptedContext::with_labels(&[]),
+            Some(scopes),
+        )
+        .await;
+
+        let (status, body) = get_json(&state, "/api/v1/company/memory/archives").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let rows = body.as_array().expect("a JSON array of traces");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["cycleId"], "c-new", "newest first");
+        assert_eq!(rows[0]["atMillis"], 300);
+        assert_eq!(rows[0]["summary"], "newer");
+        assert_eq!(rows[1]["cycleId"], "c-old");
+        assert!(
+            rows[0].get("cycle_id").is_none() && rows[0].get("at_millis").is_none(),
+            "the storage type's snake_case must not leak onto the wire"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "openhuman"))]
