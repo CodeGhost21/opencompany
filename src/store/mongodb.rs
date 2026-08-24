@@ -5433,10 +5433,18 @@ mod test {
         }
         // The two oldest runs fell past the cap and are gone whole…
         assert!(
-            s.list_step_details(&company, "r000").await.unwrap().is_empty(),
+            s.list_step_details(&company, "r000")
+                .await
+                .unwrap()
+                .is_empty(),
             "r000 ranked oldest and must be pruned"
         );
-        assert!(s.list_step_details(&company, "r001").await.unwrap().is_empty());
+        assert!(
+            s.list_step_details(&company, "r001")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // …and every surviving run kept both rows.
         for i in 2..cap + 2 {
             let run = format!("r{i:03}");

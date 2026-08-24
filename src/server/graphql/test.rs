@@ -2400,8 +2400,7 @@ async fn a_member_gets_the_trace_but_not_the_deep_half() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let value: serde_json::Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
 
     let runs = value["data"]["company"]["agentRuns"]
         .as_array()
