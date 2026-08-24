@@ -171,6 +171,25 @@ describe("leaving to wire a model", () => {
     );
   });
 
+  it("re-reads the roster on a hash-change return instead of trusting the old answer", async () => {
+    // A colleague staffs the company while the operator is wiring a model. The
+    // hash-change return goes through the same `arrive` listener as any other,
+    // which must re-read the roster — the empty answer captured before the
+    // navigation is a snapshot, not a fact, and opening setup over a team that
+    // now exists would stack a second one.
+    const roster: TeamMemberDto[] = [...BASELINE];
+    const client = clientWith(roster);
+    await mount(client);
+    await leaveForModelSettings();
+
+    roster.push({ id: "ada", role: "Operations", inboxEnabled: false } as TeamMemberDto);
+
+    await goTo("#/overview");
+
+    expect(dialog(), "a setup dialog over a team that exists").toBeNull();
+    expect(setupResuming(SCOPE), "debt should be dropped").toBe(false);
+  });
+
   it('drops the debt when the operator then says "I\'ll do this later"', async () => {
     await mount(clientWith(BASELINE));
     await leaveForModelSettings();
