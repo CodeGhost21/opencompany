@@ -638,4 +638,68 @@ mode = "full"
             .expect("list");
         assert!(admin_rows.is_empty(), "{admin_rows:?}");
     }
+
+    /// A runtime being replaced refuses the prompt *before* it is journaled
+    /// (codex P2): a message appended and then rejected would stay in the
+    /// transcript with nothing that will ever answer it — the ordering the
+    /// REST chat path holds via `accept_chat_turn`.
+    #[tokio::test]
+    async fn a_quiesced_runtime_refuses_prompt_before_journaling() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-quiesce-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).expect("company");
+        let admin = seed_user(&state, &company, "u-admin", "Admin Person").await;
+        let auth = GqlAuth::User(UserPrincipal {
+            company: company.clone(),
+            user_id: admin,
+            email: "admin@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
+        });
+
+        state.acp_sessions().insert(
+            "conn-1",
+            crate::server::acp::AcpSession {
+                id: "s-1".to_string(),
+                company: company.clone(),
+                chat: "engineering".to_string(),
+                agent_id: None,
+            },
+        );
+
+        runtime.quiesce().await;
+
+        let result = prompt(
+            &state,
+            &auth,
+            &json!({
+                "sessionId": "s-1",
+                "prompt": [
+                    { "type": "text", "text": "please review the invoice" },
+                ],
+                "_meta": { "opencompany/connectionId": "conn-1" },
+            }),
+        )
+        .await;
+        assert!(result.is_err(), "a quiesced runtime must refuse the prompt");
+
+        // And nothing was journaled: the refusal happened before the append.
+        let events = runtime
+            .events()
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        assert!(
+            events
+                .iter()
+                .all(|stored| !matches!(&stored.event, CompanyEvent::OperatorMessage { .. })),
+            "a refused prompt must not leave a message in the journal: {events:?}"
+        );
+    }
 }
