@@ -2615,6 +2615,24 @@ pub enum TurnStepFailure {
     Failed,
 }
 
+impl TurnStepFailure {
+    /// The `snake_case` word this failure serializes as.
+    #[must_use]
+    pub fn wire_word(self) -> &'static str {
+        match self {
+            Self::Declined => "declined",
+            Self::BlockedByPolicy => "blocked_by_policy",
+            Self::Unauthorized => "unauthorized",
+            Self::MissingPermission => "missing_permission",
+            Self::MissingApp => "missing_app",
+            Self::NotFound => "not_found",
+            Self::Timeout => "timeout",
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Company records
 // ---------------------------------------------------------------------------
