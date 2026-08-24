@@ -806,8 +806,8 @@ mod test {
             PolicyDecision::Allow
         );
     }
-
-
+    #[tokio::test]
+    async fn readonly_gates_everything() {
         let gate = ManifestApprovalGate::new(policy("readonly", None));
         assert_eq!(
             decide(&gate, &effect("misc.read", EffectGroup::Other)).await,
