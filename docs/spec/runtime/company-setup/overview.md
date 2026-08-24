@@ -319,7 +319,7 @@ a seed file cannot name a column, and the seeder writes through the plain task
 store rather than the edge-firing path that turns `in_progress` into a run. A
 freshly provisioned company can boot with a full board and spend nothing.
 Seeding is first-boot only, so a card an operator deletes stays deleted. See
-[globals.md](globals.md) for the rules and the `disable = ["task:<id>"]` opt-out.
+[globals.md](../globals.md) for the rules and the `disable = ["task:<id>"]` opt-out.
 
 ## What the host enforces, rather than asks for
 
