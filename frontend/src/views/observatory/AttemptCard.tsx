@@ -108,7 +108,11 @@ export function AttemptCard({ run, nowMs, turn, focusStep }: Props) {
           ) : (
             <ul className="flex flex-col">
               {run.steps.map((step) => (
-                <StepRow key={step.seq} step={step} />
+                <StepRow
+                  key={step.seq}
+                  step={step}
+                  focus={focused && focusStep === step.seq}
+                />
               ))}
             </ul>
           )}
