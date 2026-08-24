@@ -114,7 +114,7 @@ Each rule has its own predicate beside the manifest types
 (`grants_media_explicit` and siblings in `src/company/types.rs`). Nothing may
 re-derive these answers from the generic glob matcher: it reports `*` as
 covering everything, which is right for the ordinary families and wrong for
-these four.
+every opt-in namespace above.
 
 ## The catalog
 
