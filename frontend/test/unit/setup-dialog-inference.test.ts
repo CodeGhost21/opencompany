@@ -327,4 +327,61 @@ describe("a replacing build-out clears the team it replaces", () => {
     await runFlow();
     expect(client.removed).toEqual([]);
   });
+
+  it("a 'Try again' retry removes only the rows the first pass created", async () => {
+    const removed: string[] = [];
+    const roster = [
+      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      { id: "h2", name: "Hand", role: "Designer", global: false } as TeamMemberDto,
+    ];
+    const client = {
+      ...clientWith({ source: "fallback", reason: "model_unreachable" }),
+      // The first pass's creates are answered with the ids they were assigned,
+      // so the retry's replacement is bounded to exactly those rows.
+      addTeamMember: async () => ({ id: "f1" }),
+      listTeam: async () => roster,
+      removeTeamMember: async (agentId: string) => {
+        removed.push(agentId);
+      },
+      removed,
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    await show(client);
+    await runFlow(); // first pass creates the fallback team
+    await click(find("setup-try-redesign")!);
+    await runFlow(); // retry: replaces that team
+    // The hand-added teammate h2 is not on the first pass's boundary and must
+    // survive; without the fallback to createdIds the retry would delete it.
+    expect(removed).toEqual(["f1"]);
+  });
+
+  it("keeps the existing team when a replacing build-out creates nothing", async () => {
+    const removed: string[] = [];
+    const roster = [
+      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+    ];
+    const client = {
+      ...clientWith({ source: "fallback", reason: "model_unreachable" }),
+      addTeamMember: async () => {
+        throw new Error("nope");
+      },
+      listTeam: async () => roster,
+      removeTeamMember: async (agentId: string) => {
+        removed.push(agentId);
+      },
+      removed,
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    await show(client, { redesign: true, fallbackIds: ["f1"] });
+    await answer("setup-field-industry", "E-commerce — homeware");
+    await answer("setup-field-teamHint", "");
+    await answer("setup-field-automate", "");
+    for (let i = 0; i < 40 && !find("setup-failed"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+    }
+    // Every add was refused, so no replacement ever existed — the fallback team
+    // is kept and the flow fails rather than claiming a completed redesign.
+    expect(find("setup-failed")).toBeTruthy();
+    expect(removed).toEqual([]);
+  });
 });
