@@ -528,6 +528,35 @@ mod test {
         assert_eq!(github.comments().len(), 0, "no duplicate comment");
     }
 
+    // A confirm of a nonexistent item id is a 404 and must not mint an entry
+    // in the process-wide confirm-lock registry: the id is caller-supplied and
+    // the registry is never evicted, so a bad id must fail before the lock is
+    // taken rather than growing the server heap forever.
+    #[tokio::test]
+    async fn confirm_of_nonexistent_item_does_not_mint_confirm_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+        let app = router(state);
+
+        // An id no stored item could ever carry: minted, never persisted.
+        let bogus = "no-such-item-confirm-nonexistent".to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": bogus,
+        })
+        .to_string();
+
+        let (status, _) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            !crate::feedback::store::confirm_lock_holds(&bogus),
+            "a nonexistent item id must not mint a confirm-lock entry"
+        );
+    }
+
     // A provisioned instance forwards to the hub instead of filing, and what
     // crosses the boundary is the scrubbed body — not the operator's raw words.
     #[tokio::test]
