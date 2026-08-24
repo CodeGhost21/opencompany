@@ -110,6 +110,20 @@ function partialLabel(settled: number, total: number): string {
 }
 
 /**
+ * The tint for a batch, only when every pending item has the same known
+ * consequence. An unclassified item makes the aggregate meaning ambiguous, so
+ * the icon remains neutral even if the other items share one consequence.
+ */
+function uniformConsequence(approvals: ApprovalSummary[]) {
+  const consequences = batchConsequences(approvals);
+  return consequences.length === 1 && approvals.every(
+    (approval) => approvalConsequence(approval.group)?.label === consequences[0].label,
+  )
+    ? consequences[0]
+    : null;
+}
+
+/**
  * What the card says when a decision did not land (#842 review).
  *
  * The failure consolidation makes worse, said out loud. Deciding three cards
