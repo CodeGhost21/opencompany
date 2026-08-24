@@ -2776,10 +2776,24 @@ impl HarnessBrain {
                     // delegation seam rather than through a new uncontrolled
                     // one. `@everyone` expands here, against the addressed
                     // desk's membership.
+                    //
+                    // The addressed desk is the raw chat key unless it is one of
+                    // the General-desk spellings `is_general_chat` folds — the
+                    // console's default thread sends `chat: "main"`, and
+                    // `resolve_desk_id` does not recognise that console-only
+                    // alias, so a broadcast from the main thread would otherwise
+                    // expand against no desk at all.
+                    let addressed_desk = match chat.as_deref() {
+                        Some(chat)
+                            if !crate::server::chat_history::is_general_chat(Some(chat)) =>
+                        {
+                            chat
+                        }
+                        _ => crate::server::ops::language::DEFAULT_DESK,
+                    };
                     let also_mentioned = crate::runtime::mentions::mentioned_agents(
                         &self.record(),
-                        chat.as_deref()
-                            .unwrap_or(crate::server::ops::language::DEFAULT_DESK),
+                        addressed_desk,
                         mentions,
                         Some(&responder),
                     );
