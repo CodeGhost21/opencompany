@@ -1263,33 +1263,62 @@ impl RuntimeBuilder {
             .map(|h| h.events.clone())
             .or(self.events)
             .unwrap_or_else(|| Arc::new(FsEventLog::new(home.clone())));
-        let memory: Arc<dyn MemoryStore> = handover
-            .as_ref()
-            .map(|h| h.memory.clone())
-            .or(self.memory)
-            .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())));
-        let context: Arc<dyn ContextStore> = handover
-            .as_ref()
-            .map(|h| h.context.clone())
-            .or(self.context)
-            .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())));
+        let memory: Arc<dyn MemoryStore> = if self.memory_overlay_applied {
+            self.memory
+                .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())))
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.memory.clone())
+                .or(self.memory)
+                .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())))
+        };
+        let context: Arc<dyn ContextStore> = if self.memory_overlay_applied {
+            self.context
+                .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())))
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.context.clone())
+                .or(self.context)
+                .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())))
+        };
         // Resolved to a real port here so nothing downstream carries the
         // Option: absent (base backends, legacy engine overlay) means the
         // plain context store — the write still lands, it is merely stamped
         // Internal, which is today's exact behavior on those backends.
-        let inbound_context: Arc<dyn ContextStore> = handover
-            .as_ref()
-            .map(|h| h.inbound_context.clone())
-            .or(self.inbound_context)
-            .unwrap_or_else(|| context.clone());
-        let scratch_context = handover
-            .as_ref()
-            .and_then(|h| h.scratch_context.clone())
-            .or(self.scratch_context);
-        let memory_scopes = handover
-            .as_ref()
-            .and_then(|h| h.memory_scopes.clone())
-            .or(self.memory_scopes);
+        let inbound_context: Arc<dyn ContextStore> = if self.memory_overlay_applied {
+            self.inbound_context.unwrap_or_else(|| context.clone())
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.inbound_context.clone())
+                .or(self.inbound_context)
+                .unwrap_or_else(|| context.clone())
+        };
+        // A live engine swap replaces every memory-family port, not just the
+        // two the port contract names: the provider decorator's scratch and
+        // scope partitions must follow the selected engine, or the successor
+        // keeps reading agent/desk contexts and the archive from the engine the
+        // swap was replacing. When the selection was re-applied, the builder's
+        // own (new) handles win and the handover's are dropped; `store` clears
+        // them to `None` (the base backend has no decorator).
+        let scratch_context = if self.memory_overlay_applied {
+            self.scratch_context
+        } else {
+            handover
+                .as_ref()
+                .and_then(|h| h.scratch_context.clone())
+                .or(self.scratch_context)
+        };
+        let memory_scopes = if self.memory_overlay_applied {
+            self.memory_scopes
+        } else {
+            handover
+                .as_ref()
+                .and_then(|h| h.memory_scopes.clone())
+                .or(self.memory_scopes)
+        };
         // Effective grants narrow the company allow-list by per-agent tools.
         let grants = effective_grants(&self.manifest);
         let openhuman = self.openhuman;
