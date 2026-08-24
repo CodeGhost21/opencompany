@@ -755,6 +755,19 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the deep-trace store (default: fs-backed).
+    ///
+    /// The default is what every production host runs; a test swaps it for a
+    /// counting or in-memory store to observe whether the unredacted half was
+    /// actually read.
+    pub fn with_deep_trace(
+        mut self,
+        store: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
+    ) -> Self {
+        self.deep_trace = Some(store);
+        self
+    }
+
     /// Swaps the task board store (default: fs-backed).
     /// Injects the ledger store.
     #[must_use]
