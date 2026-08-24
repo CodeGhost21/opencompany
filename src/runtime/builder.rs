@@ -1436,7 +1436,23 @@ impl RuntimeBuilder {
             // A rebuild inherits the ops it was handed, announcer and all — the
             // wrap below happens once, at first construction. Re-wrapping an
             // inherited board would announce every write twice.
-            Some(h) => h.ops.clone(),
+            Some(h) => {
+                let mut ops = h.ops.clone();
+                // A live engine swap replaces every memory-family port, facts
+                // included. The ops struct is inherited wholesale, so without
+                // this override `ops.facts` stays the outgoing engine's — a
+                // fact created after the swap would be written to the engine
+                // the swap was replacing while recall reads the new context
+                // store, leaving the company split across two engines. The
+                // builder's own facts handle (set by `with_memory_overlay`
+                // when the engine serves facts) is authoritative here, falling
+                // back to the base backend exactly as the first-construction
+                // branch below does for an engine that serves no facts.
+                if self.memory_overlay_applied {
+                    ops.facts = self.facts.clone().unwrap_or_else(|| fs_ops.clone());
+                }
+                ops
+            }
             None => OpsStores {
                 // Issue #464: the board announces its own writes. Wrapped here,
                 // at the single place the store is chosen, so *every* writer —
