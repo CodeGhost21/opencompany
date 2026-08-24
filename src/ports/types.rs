@@ -3171,6 +3171,43 @@ impl PolicyOverride {
     }
 }
 
+/// Resolves a manifest `[policy]` against an operator override — the merge
+/// [`CompanyRecord::effective_policy`] applies, factored out so the runtime
+/// builder can build the approval gate from the same resolution without
+/// constructing a whole record.
+///
+/// `None` override means the manifest's policy is in force byte for byte.
+/// The merge is per field and `None` means "not overridden", so an operator
+/// who moved the tier has not thereby silently reset the always-ask list to
+/// the manifest's. An explicitly emptied list (`Some(vec![])`) survives as
+/// empty; only an absent field falls through. An unknown stored mode also
+/// falls through to the manifest: it can arise under version skew, and
+/// allowing the policy parser to downgrade it to `supervised` would loosen
+/// a `readonly` manifest.
+pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverride>) -> Policy {
+    let Some(override_) = override_ else {
+        return manifest.clone();
+    };
+    Policy {
+        mode: override_
+            .mode
+            .as_deref()
+            .filter(|mode| POLICY_MODES.contains(mode))
+            .map(str::to_owned)
+            .unwrap_or_else(|| manifest.mode.clone()),
+        always_approve: override_
+            .always_approve
+            .clone()
+            .unwrap_or_else(|| manifest.always_approve.clone()),
+        auto_approve_under_usd: override_
+            .auto_approve_under_usd
+            .unwrap_or(manifest.auto_approve_under_usd),
+        approval_ttl_hours: override_
+            .approval_ttl_hours
+            .unwrap_or(manifest.approval_ttl_hours),
+    }
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
