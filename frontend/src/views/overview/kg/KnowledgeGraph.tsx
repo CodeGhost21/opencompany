@@ -48,7 +48,7 @@ const RIM_DELTA_DEG = (WHEEL_GEOM.delta * 180) / Math.PI;
 // connection count (see nodeRadius / TIER_OPACITY).
 const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; r: number }> = {
   self: { color: 'var(--text)', Icon: Sparkles, label: 'Notes', r: 18 },
-  team: { color: 'var(--brain-1)', Icon: Users, label: 'Pillars', r: 15 },
+  team: { color: 'var(--brain-1)', Icon: Users, label: 'Desks', r: 15 },
   workflow: { color: 'var(--brain-2)', Icon: WorkflowIcon, label: 'Workflows', r: 8.5 },
   step: { color: 'var(--brain-2)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },
@@ -85,10 +85,9 @@ const EDGE_COLOR: Record<string, string> = {
   reports: 'var(--accent)',
 };
 
-// On-screen label size per tier, in px. Quoted at rest and held there at every
-// camera depth by `fixedLabel`, which is why the declutter can measure in px.
-const labelFontPx = (kind: KGNodeKind): number =>
-  kind === 'self' || kind === 'team' ? 10 : kind === 'task' ? 8.5 : 9;
+// Labels hold at the design system's 10px floor at every camera depth through
+// `fixedLabel`, which is why the declutter can measure their boxes in px.
+const LABEL_FONT_PX = 10;
 
 // 'about how long ago' for the harness card's last-run line
 const agoLabel = (iso: string): string => {
@@ -192,7 +191,7 @@ const CAM_EASE_HOME = 0.3;
 // font counter-scales through it. `px` is the desired size at rest;
 // `groupScale` compensates for an extra ancestor scale (the constellation).
 const fixedLabel = (px: number, groupScale = 1): React.CSSProperties => ({
-  fontSize: `calc(${(px / groupScale).toFixed(3)}px * var(--kg-cam-k, 1))`,
+  fontSize: `calc(${(Math.max(px, LABEL_FONT_PX) / groupScale).toFixed(3)}px * var(--kg-cam-k, 1))`,
 });
 
 type SimNode = KGNode & { x: number; y: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null };
@@ -210,7 +209,7 @@ type SimLink = { source: SimNode | string; target: SimNode | string; kind: strin
  */
 export function KnowledgeGraph({
   graph, agents = [], departments = [], people = [], tasks = [], memory, runsByAgent = {}, toolLabels = {},
-  statusSlot,
+  statusSlot, emptyState = false,
   repelDefault = 150, linkDistDefault = 60, centerDefault = 0.32,
 }: {
   graph: KGData; agents?: Agent[]; departments?: Department[]; people?: Person[]; tasks?: SopTask[];
@@ -228,6 +227,8 @@ export function KnowledgeGraph({
    * operator opened.
    */
   statusSlot?: React.ReactNode;
+  /** A settled company with no desks gets an explanation and desk-management link. */
+  emptyState?: boolean;
   /** latest run per agent id, for the harness card */
   runsByAgent?: Record<string, AgentRun>;
   /** Tool slug → display name, so a card can name a tool as its source does. */
@@ -1924,7 +1925,7 @@ export function KnowledgeGraph({
       x: n.x,
       y: n.y,
       dy: v.r + 11 + (labelDy.get(n.id) ?? 0),
-      fontPx: labelFontPx(n.kind),
+      fontPx: LABEL_FONT_PX,
       priority: priority + Math.min(degree, 50) / 100,
     });
   }
@@ -2354,7 +2355,7 @@ export function KnowledgeGraph({
                               fontFamily="var(--font-mono)"
                               fontWeight={500}
                               fill="var(--text-2)"
-                              style={fixedLabel(9, coreScale)}
+                              style={fixedLabel(LABEL_FONT_PX, coreScale)}
                             >
                               {m.label.length > 22 ? `${m.label.slice(0, 20).trimEnd()}…` : m.label}
                             </text>
@@ -2396,7 +2397,7 @@ export function KnowledgeGraph({
                               fontFamily="var(--font-mono)"
                               fontWeight={500}
                               fill="var(--text-2)"
-                              style={fixedLabel(9.5, coreScale)}
+                              style={fixedLabel(LABEL_FONT_PX, coreScale)}
                             >
                               {m.label.length > 24 ? `${m.label.slice(0, 22).trimEnd()}…` : m.label}
                             </text>
@@ -2464,7 +2465,7 @@ export function KnowledgeGraph({
                   fontFamily="var(--font-mono)"
                   fontWeight={n.kind === 'self' || n.kind === 'team' || hoverId === n.id ? 600 : 400}
                   fill={hoverId === n.id ? 'var(--text)' : n.kind === 'team' ? color : 'var(--text-2)'}
-                  style={fixedLabel(labelFontPx(n.kind))}
+                  style={fixedLabel(LABEL_FONT_PX)}
                 >
                   {n.label}
                 </text>
@@ -2576,6 +2577,7 @@ export function KnowledgeGraph({
         searchSlot={vaultSearchInput}
         legendSlot={compactLegend}
         statusSlot={statusSlot}
+        emptyState={emptyState}
         onNavDept={navDept}
         onBack={clearDetail}
       >

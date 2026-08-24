@@ -35,6 +35,7 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
+import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
   addMemberFailure,
   reportAddMember,
@@ -61,8 +62,6 @@ import {
   channelTitle,
   deskFromDto,
   dmChannelId,
-  directMessageChannels,
-  directMessageForId,
   findChannel,
   firstChannel,
   historyReady,
@@ -152,18 +151,6 @@ interface Props {
    */
   onSendFailed?: (threadId: string) => void;
   /**
-   * The chat POST resolved — either shape — for a company the operator has
-   * since left (issue #1000).
-   *
-   * The reply is durably journaled in the OLD company's history, so nothing
-   * about it belongs in the active scope. The shell must release the send
-   * bracket `onSendStart` armed (lift the echo suppression and drop the held
-   * frames — history re-reads them back on return) without folding the turn
-   * into the current company's `openTurns` or transcript routing, which is
-   * what `onSendDetached` would do.
-   */
-  onSendStale?: (threadId: string) => void;
-  /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
    */
@@ -222,8 +209,8 @@ interface Props {
  *
  * One screen replaces what used to be three: the Conversation page's thread
  * list, the Team page's roster, and the desks those two shared without ever
- * being connected. Here the desks are channels, active teammate conversations
- * are DMs, and the roster sits in a pane you can open beside the transcript.
+ * being connected. Here the desks are channels, every teammate has a DM, and
+ * the roster sits in a pane you can open beside the transcript.
  *
  * Every channel posts to the same company chat endpoint — a channel scopes a
  * transcript and fixes the company side's identity, it is not a separate
@@ -247,7 +234,6 @@ export function ChatView({
   onSendEnd,
   onSendDetached,
   onSendFailed,
-  onSendStale,
   openTurns,
   liveStepsByThread,
   unread,
@@ -283,6 +269,19 @@ export function ChatView({
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
+  const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
+  // Section disclosure is shared by the desktop and sub-`lg` rail instances
+  // (codex P2 review): each instance would otherwise keep its own fold state,
+  // so dropping below `lg` reopened every section the operator had folded.
+  const [railOpenSections, setRailOpenSections] = useState<Record<string, boolean>>({});
+  const toggleRailSection = (id: string) =>
+    setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
+  // The header's density toggle stays mounted across a collapse/expand, but the
+  // compact rail's expand button does not — expanding unmounts it while a
+  // keyboard user is still focused on it, dropping them at the document. The
+  // ref lets the expand action hand focus to the header toggle instead (the
+  // fix for the rail's issue #1340 focus review).
+  const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
@@ -290,6 +289,26 @@ export function ChatView({
   const [people, setPeople] = useState<Person[]>([]);
   // The member whose budget dialog is open, if any.
   const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
+
+  // A host switch keeps this mounted briefly, so replace rather than carry the
+  // previous connection's layout preference into the next company.
+  useEffect(() => {
+    setChannelsCollapsed(readChannelRailCollapsed(scope));
+  }, [scope]);
+
+  function toggleChannels() {
+    setChannelsCollapsed((collapsed) => {
+      const next = !collapsed;
+      writeChannelRailCollapsed(scope, next);
+      // Expanding from the compact rail unmounts the button that carried focus;
+      // hand it to the header toggle, which is mounted on both density states.
+      // `next` is the rail's new collapsed state, so expanding is `!next` —
+      // collapsing from the header's own toggle leaves that button mounted,
+      // and the focus it already holds is the right place to stay.
+      if (!next) channelsToggleRef.current?.focus();
+      return next;
+    });
+  }
 
   const boot = useCallback(async () => {
     try {
@@ -458,13 +477,6 @@ export function ChatView({
    * one attempt per bare-hash entry, so it can never fight a navigation.
    */
   const restoredFor = useRef<string | null | undefined>(undefined);
-  // The latest company, so an async completion started for one company can
-  // tell whether it still belongs to the active scope before writing a
-  // transcript (`send` and `react` both await a host round trip).
-  const companyRef = useRef(company);
-  useEffect(() => {
-    companyRef.current = company;
-  }, [company]);
   useEffect(() => {
     if (sub) {
       // A channel is named, so the next bare `#/chat` is a fresh re-entry.
@@ -484,8 +496,8 @@ export function ChatView({
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
   const sections = useMemo(
-    () => (desks ? buildChannels(members, desks, transcripts) : []),
-    [members, desks, transcripts],
+    () => (desks ? buildChannels(members, desks) : []),
+    [members, desks],
   );
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
@@ -501,13 +513,10 @@ export function ChatView({
    * nothing is ever addressed or stored under the old id, so this shim can be
    * deleted without leaving anything stranded.
    */
-  const resolvedSub = sub ? resolveDmChannelId(sub, members) : null;
+  const resolvedSub =
+    sub && !findChannel(sections, sub) ? resolveDmChannelId(sub, members) : null;
   const channel = desks
-    ? (
-        findChannel(sections, resolvedSub ?? sub)
-        ?? directMessageForId(members, resolvedSub ?? sub)
-        ?? firstChannel(sections)
-      )
+    ? (findChannel(sections, resolvedSub ?? sub) ?? firstChannel(sections))
     : null;
   /**
    * The hash named a channel this company doesn't have, and the first-channel
@@ -747,22 +756,6 @@ export function ChatView({
         // below reads the response's shape and never this argument.
         true,
       );
-      // A company switch while the POST was in flight invalidates the
-      // result: the reply belongs to the old company and must not
-      // repopulate the new company's (just-cleared) transcript. Skip the
-      // transcript writes and fold nothing into the active scope —
-      // `onSendStale` releases the shell's send bracket (echo suppression
-      // and held frames) without arming a working row or rendering through
-      // the current company's routing, while the reply stays durably
-      // journaled in the old company's history and rehydrates when the
-      // operator returns (issue #983/#1000). `outcome` stays non-resolved
-      // so the `finally` bracket is a no-op: no reply is on screen in the
-      // current company, so neither `onSendEnd` nor `onSendFailed` may run.
-      if (companyRef.current !== company) {
-        outcome = "detached";
-        if (chatId) onSendStale?.(chatId);
-        return;
-      }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
       // journaled at accept time, so its durable id is a fact within
@@ -797,13 +790,6 @@ export function ChatView({
       append(target, ...replies);
       onReply?.();
     } catch (err) {
-      // A rejected request can be just as stale as a fulfilled one. Do not
-      // append the old company's error or notify the new company's shell.
-      if (companyRef.current !== company) {
-        outcome = "detached";
-        if (chatId) onSendStale?.(chatId);
-        return;
-      }
       outcome = "failed";
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
@@ -857,12 +843,7 @@ export function ChatView({
     try {
       await client.reactToMessage(seq, emoji, on, company);
     } catch (error) {
-      // Roll the chip back only if the scope is unchanged: after a company
-      // switch the optimistic chip belongs to the old company's transcript,
-      // and rolling it back there would write into the new company's.
-      if (companyRef.current === company) {
-        setTranscripts((t) => ({ ...t, [active.id]: apply(t[active.id] ?? []) }));
-      }
+      setTranscripts((t) => ({ ...t, [active.id]: apply(t[active.id] ?? []) }));
       toast.error(
         error instanceof ApiError && error.status === 404
           ? "This host doesn't keep reactions yet."
@@ -1071,9 +1052,20 @@ export function ChatView({
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
-        directMessages={directMessageChannels(members)}
-        onStartDirectMessage={selectChannel}
-        className={cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")}
+        openSections={railOpenSections}
+        onToggleSection={toggleRailSection}
+        className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
+      />
+      <ChannelRail
+        sections={sections}
+        activeId={channel.id}
+        unread={unread ?? {}}
+        onSelect={selectChannel}
+        openSections={railOpenSections}
+        onToggleSection={toggleRailSection}
+        collapsed={channelsCollapsed}
+        onExpand={toggleChannels}
+        className="hidden lg:flex"
       />
 
       <div
@@ -1088,6 +1080,9 @@ export function ChatView({
           membersOpen={membersOpen}
           onToggleMembers={() => setMembersOpen((o) => !o)}
           onOpenRail={() => setMobilePane("rail")}
+          channelsCollapsed={channelsCollapsed}
+          onToggleChannels={toggleChannels}
+          channelsToggleRef={channelsToggleRef}
         />
 
         <div className="flex min-h-0 flex-1">

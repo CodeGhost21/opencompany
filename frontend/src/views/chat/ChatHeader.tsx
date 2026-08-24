@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-react";
+import { useState, type Ref } from "react";
+import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, PanelRight, Users } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -13,8 +13,17 @@ interface Props {
   memberCount: number;
   membersOpen: boolean;
   onToggleMembers: () => void;
-  /** Only rendered below `md`, where the rail shares the pane. */
+  /** Only rendered below `lg`, where the full rail shares the pane. */
   onOpenRail?: () => void;
+  channelsCollapsed: boolean;
+  onToggleChannels: () => void;
+  /**
+   * Where the shell restores focus after this header's own toggle unmounts the
+   * compact rail's expand button (issue #1340). The header toggle is mounted on
+   * both density states, so it is the one control the shell can count on to
+   * carry focus across the switch.
+   */
+  channelsToggleRef?: Ref<HTMLButtonElement>;
 }
 
 /**
@@ -36,6 +45,9 @@ export function ChatHeader({
   membersOpen,
   onToggleMembers,
   onOpenRail,
+  channelsCollapsed,
+  onToggleChannels,
+  channelsToggleRef,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const title = channelTitle(channel);
@@ -64,6 +76,18 @@ export function ChatHeader({
           <PanelLeft className="size-4" />
         </Button>
       )}
+
+      <Button
+        ref={channelsToggleRef}
+        variant="ghost"
+        size="icon"
+        className="hidden size-8 lg:inline-flex"
+        onClick={onToggleChannels}
+        aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}
+        title={channelsCollapsed ? "Expand channels" : "Collapse channels"}
+      >
+        {channelsCollapsed ? <PanelRight className="size-4" /> : <PanelLeft className="size-4" />}
+      </Button>
 
       <div className="group/title flex min-w-0 flex-1 items-center gap-1.5">
         <KindIcon channel={channel} />

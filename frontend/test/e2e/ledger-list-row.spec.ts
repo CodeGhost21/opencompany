@@ -61,10 +61,11 @@ test("a list row leads with its title and shows one readable status", async ({
     expect(recorded.ok()).toBeTruthy();
 
     await page.goto(`/#/ledgers/${slug}`);
-    // Declared ledgers default to the list view (`defaultLedgerMode`, added
-    // with the #1627 mode work): the toggle then reads "Board", so there is
-    // no "List" button to click into the view this test is about. The row
-    // under test is the list's own, so assert it directly.
+    // Declared ledgers open in their readable list form (`defaultLedgerMode`,
+    // issue #1351), so the row below is the list row already — the "List"
+    // toggle only exists when the board is the active view, and it is not for
+    // a declared list. No toggle click needed to get there.
+
     const row = page.getByTestId(`ledger-entry-${id}`);
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row.getByTestId("ledger-entry-title")).toHaveText(title);

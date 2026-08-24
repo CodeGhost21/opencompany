@@ -7,8 +7,8 @@ import type { ToolWiki } from './agent-wiki';
 import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
 
 /**
- * The chrome around the graph in its fullscreen (only) mode: the pillar
- * selector and side paddles for stepping through departments, the vault
+ * The chrome around the graph in its fullscreen (only) mode: the desk
+ * selector and side paddles for stepping through desks, the vault
  * search/legend slots, and a detail panel that overlays rather than resizes
  * the canvas — so opening or closing a card never reflows the graph. Owns
  * ←/→ and Escape; typing in the vault search suppresses them so the query
@@ -17,7 +17,7 @@ import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
   toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
-  onNavDept, onBack, children,
+  emptyState = false, onNavDept, onBack, children,
 }: {
   deptList: DeptLite[];
   currentTeamId: string | null;
@@ -36,6 +36,8 @@ export function KnowledgeGraphFullscreen({
   legendSlot?: React.ReactNode;
   /** the snapshot line and its Refresh control, rendered top-right */
   statusSlot?: React.ReactNode;
+  /** the loaded company has no desks, so the graph cannot show its pillars */
+  emptyState?: boolean;
   onNavDept: (teamId: string) => void;
   onBack: () => void;
   children: React.ReactNode;
@@ -105,16 +107,16 @@ export function KnowledgeGraphFullscreen({
           department in its spot in the circle, the active one bloomed into its
           tree with its colour glow, the rest dimmed in the background. */}
       <div className="relative min-w-0 flex-1 overflow-hidden bg-os-surface">
-        {children}
+        {!emptyState && children}
 
         {/* vault search — top-left while the Notes core is open */}
         {searchSlot && <div className="absolute left-5 top-5 z-10">{searchSlot}</div>}
 
-        {/* pillar selector — compact, TOP-LEFT: convenient, not in the
+        {/* desk selector — compact, TOP-LEFT: convenient, not in the
             graph's way. One named chip per desk (issue #1309).
 
             It used to be three 10px dots at 50% opacity under the words "Pick
-            a pillar", and the names existed only in each dot's `title` — so
+            a desk", and the names existed only in each dot's `title` — so
             the control that exists to choose a desk refused to say which desk
             was which, while the graph named all three in their own colours a
             few inches away. You had to click a blind dot to learn what it was.
@@ -122,15 +124,15 @@ export function KnowledgeGraphFullscreen({
             The chips wrap rather than scroll or truncate the row: a company
             with ten desks gets three short lines in the corner, which is a
             legible answer, where a clipped row is not. The colour is the same
-            one the desk's node and label carry, so the chip and the pillar are
+            one the desk's node and label carry, so the chip and the desk are
             visibly the same thing. */}
-        {!coreOpen && (
+        {!coreOpen && !emptyState && (
           <div className="absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
             <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
-              {/* Names the group rather than instructing. "Pick a pillar" was
+              {/* Names the group rather than instructing. "Pick a desk" was
                   an imperative with no visible object, and at zero desks it
                   asked for something the page made impossible. */}
-              {deptList.length > 0 ? 'Pillars' : 'No desks yet'}
+              {deptList.length > 0 ? 'Desks' : 'No desks yet'}
             </span>
             {deptList.length > 0 && (
               <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
@@ -140,7 +142,7 @@ export function KnowledgeGraphFullscreen({
                     <button
                       key={d.teamId}
                       onClick={() => onNavDept(d.teamId)}
-                      title={`${d.name} — bring this pillar forward`}
+                      title={`${d.name} — bring this desk forward`}
                       aria-current={active ? 'true' : undefined}
                       className={`flex items-center gap-1.5 rounded-sm-t px-1.5 py-0.5 text-2xs leading-tight transition-colors duration-200 ease-standard hover:bg-os-surface hover:text-os-text ${
                         active ? 'font-bold' : 'text-os-muted'
@@ -169,7 +171,7 @@ export function KnowledgeGraphFullscreen({
         {/* the snapshot line — top-right, clear of the detail rail (issue
             #1307). `z-40` so it stays above the rail even when the offset
             above puts it beside rather than behind it, and `top-5`/`right-5`
-            so it sits on the same 20px inset as the pillar selector and the
+            so it sits on the same 20px inset as the desk selector and the
             legend rather than the 12px one it used to carry alone. */}
         {statusSlot && (
           <div
@@ -181,10 +183,8 @@ export function KnowledgeGraphFullscreen({
           </div>
         )}
 
-        {/* compact legend — bottom-left, always on. It must be bounded by the
-            canvas, rather than its contents: at phone widths the old fixed row
-            extended past the right edge with no way to reach its last kinds. */}
-        {legendSlot && (
+        {/* A graph with no desks has no kind to explain. */}
+        {!emptyState && legendSlot && (
           <div
             data-testid="kg-legend"
             className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] sm:bottom-5 sm:left-5 sm:max-w-[calc(100%-2.5rem)]"
@@ -193,25 +193,51 @@ export function KnowledgeGraphFullscreen({
           </div>
         )}
 
+        {/* A newly provisioned company has only its core node. The graph is
+            useful once desks give it pillars, so say that plainly and lead to
+            the one place that can create one instead of leaving inert graph
+            controls around an empty canvas (issue #1313). */}
+        {emptyState && (
+          <div className="absolute inset-0 z-20 grid place-items-center p-5">
+            <section
+              aria-labelledby="overview-empty-title"
+              className="max-w-md rounded-sm-t border border-os-border-strong bg-os-bg/90 px-6 py-5 text-center shadow-lg backdrop-blur"
+            >
+              <p className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">Company overview</p>
+              <h2 id="overview-empty-title" className="mt-2 text-lg font-semibold text-os-text">No desks yet</h2>
+              <p className="mt-2 text-sm leading-6 text-os-muted">
+                This graph shows how your company&apos;s desks, teammates, work, and workflows connect.
+                Create a desk to add its first pillar.
+              </p>
+              <a
+                href="#/company/desks"
+                className="mt-4 inline-flex rounded-sm-t border border-os-border-strong bg-os-surface px-3 py-1.5 text-sm font-medium text-os-text transition-colors hover:bg-os-bg"
+              >
+                Create a desk
+              </a>
+            </section>
+          </div>
+        )}
+
         {/* side paddles: slim, hugging the canvas edges at mid-height — you
             turn the wheel from where you're already looking, never the top.
             The right paddle steps aside when the detail panel is open — see
             `clearOfRail`, which is what finally made that sentence true
             (issue #1307). */}
-        {!coreOpen && (
+        {!coreOpen && !emptyState && (
           <>
             <button
               onClick={() => step(-1)}
-              aria-label="Previous department"
-              title="Previous pillar (←)"
+              aria-label="Previous desk"
+              title="Previous desk (←)"
               className={`absolute left-2 z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text max-[899px]:left-3 max-[899px]:h-20 max-[899px]:w-10 max-[639px]:left-2 max-[639px]:h-14 max-[639px]:w-8 ${paddleTop}`}
             >
               <ChevronLeft className="h-7 w-7 max-[899px]:h-6 max-[899px]:w-6 max-[639px]:h-5 max-[639px]:w-5" />
             </button>
             <button
               onClick={() => step(1)}
-              aria-label="Next department"
-              title="Next pillar (→)"
+              aria-label="Next desk"
+              title="Next desk (→)"
               className={`absolute z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text max-[899px]:h-20 max-[899px]:w-10 max-[639px]:h-14 max-[639px]:w-8 ${clearOfRail} ${paddleTop}`}
             >
               <ChevronRight className="h-7 w-7 max-[899px]:h-6 max-[899px]:w-6 max-[639px]:h-5 max-[639px]:w-5" />
@@ -224,10 +250,10 @@ export function KnowledgeGraphFullscreen({
           resizes the graph area (that reflow was the back-and-forth glitch) */}
       {hasDetail && (
         <aside className="absolute right-0 top-0 z-30 flex h-full w-[300px] flex-col border-l border-os-border-strong bg-os-bg/95 shadow-lg backdrop-blur max-[820px]:inset-x-0 max-[820px]:bottom-0 max-[820px]:top-auto max-[820px]:max-h-[62vh] max-[820px]:w-full max-[820px]:rounded-t-lg-t max-[820px]:border-l-0 max-[820px]:border-t">
-          {/* the trail: node → pillar (this) → home. Same affordance inline. */}
+          {/* the trail: node → desk (this) → home. Same affordance inline. */}
           <button
             onClick={onBack}
-            aria-label={`Back to the ${currentDept?.name ?? 'graph'} pillar`}
+            aria-label={`Back to the ${currentDept?.name ?? 'graph'} desk`}
             className="flex shrink-0 items-center gap-1.5 border-b border-os-border px-3 py-2 text-left font-mono text-3xs uppercase tracking-[0.14em] text-os-dim transition-colors hover:text-os-text"
           >
             <ArrowLeft className="h-3 w-3 shrink-0" />
