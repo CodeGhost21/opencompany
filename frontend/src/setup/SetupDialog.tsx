@@ -476,6 +476,13 @@ export function SetupDialog({
           if (kept.length) {
             createdIds.current = [...boundaryIds, ...kept];
             redesignRoster.current = null;
+            // The captured debt — which predates this run and cannot name the
+            // kept row — is let go above so it does not shadow the expanded
+            // boundary. Persist the expansion too: a reload before the retry
+            // must still find the kept row, or the eventual replacement would
+            // sweep the original boundary and leave it stacked beside the new
+            // team.
+            onReplacementComplete?.([...boundaryIds, ...kept]);
           } else {
             createdIds.current = boundaryIds;
           }
