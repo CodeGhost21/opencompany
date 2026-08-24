@@ -252,7 +252,7 @@ row because a client
 cannot otherwise tell a company somebody staffed from one nobody has: the
 baseline is on every roster, so `length === 0` is a question with one answer.
 The console's first-run gate turns on it
-([company-setup.md](company-setup/overview.md)); before the field existed that gate could
+([company-setup/overview.md](company-setup/overview.md)); before the field existed that gate could
 never open.
 
 `PATCH …/team/{agentId}` edits a teammate's `name`, `role`, `description` and
