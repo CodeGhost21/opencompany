@@ -1113,7 +1113,9 @@ async fn an_admin_cannot_set_an_over_long_display_name() {
                 .uri(format!("/api/v1/companies/acme/users/{bob_id}"))
                 .header("content-type", "application/json")
                 .header("cookie", &admin)
-                .body(Body::from(serde_json::json!({ "display_name": long }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "display_name": long }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -2246,12 +2248,17 @@ async fn a_profile_name_may_not_exceed_the_bound() {
     let cookie = login_via_link(&state, &sender, "ada@example.com").await;
 
     let long = "A".repeat(crate::server::users::MAX_DISPLAY_NAME_CHARS + 1);
-    let (status, refused) = patch_me(&state, &cookie, serde_json::json!({"displayName": long})).await;
+    let (status, refused) =
+        patch_me(&state, &cookie, serde_json::json!({"displayName": long})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
 
     // Nothing was persisted, and a subsequent normal save still works.
-    let (status, _) =
-        patch_me(&state, &cookie, serde_json::json!({"displayName": "Ada L."})).await;
+    let (status, _) = patch_me(
+        &state,
+        &cookie,
+        serde_json::json!({"displayName": "Ada L."}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 }
 
