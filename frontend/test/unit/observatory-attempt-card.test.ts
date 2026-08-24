@@ -169,4 +169,34 @@ describe("attempt cards behind a deep link", () => {
 
     expect(container.textContent).toContain("read_gamma");
   });
+
+  it("re-reads the deep half when an open attempt's step trace grows", async () => {
+    // An open card on a live attempt keeps receiving steps between polls. The
+    // parent's deep read is keyed on `onOpen`, so a card that stays open must
+    // announce the growth or the new steps would keep empty deep panes until
+    // the reader closes and reopens it (the one-time snapshot bug).
+    const onOpen = vi.fn();
+    const live = run({
+      id: "att-a",
+      phase: "active",
+      status: "running",
+      steps: [step({ seq: 1, label: "first" })],
+    });
+    await mount([live], { turn: "att-a", onOpen });
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onOpen).toHaveBeenCalledWith("att-a");
+
+    // A poll appends a step to the same run; the card stays open.
+    const grown = run({
+      id: "att-a",
+      phase: "active",
+      status: "running",
+      steps: [step({ seq: 1, label: "first" }), step({ seq: 2, label: "second" })],
+    });
+    await mount([grown], { turn: "att-a", onOpen });
+
+    expect(onOpen).toHaveBeenCalledTimes(2);
+    expect(onOpen).toHaveBeenLastCalledWith("att-a");
+  });
 });
