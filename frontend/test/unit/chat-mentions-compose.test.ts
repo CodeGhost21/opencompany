@@ -823,6 +823,52 @@ describe("resolvableMentions", () => {
     expect(resolvableMentions("@engineerish", directory)).toEqual([]);
     expect(resolvableMentions("@engineer, thanks", directory)).toHaveLength(1);
   });
+
+  it("resolves the desk-only `@#desk` spelling", () => {
+    const desks: Mentionable[] = [
+      {
+        target: { kind: "desk", id: "engineering" },
+        label: "engineering",
+        aliases: ["engineering", "eng"],
+      },
+    ];
+    const out = resolvableMentions("@#engineering", desks);
+    expect(out).toHaveLength(1);
+    expect(out[0].target).toEqual({ kind: "desk", id: "engineering" });
+    expect(out[0].text).toBe("@#engineering");
+  });
+
+  it("treats `@#name` as desk-only, never matching a person or agent", () => {
+    const rows: Mentionable[] = [
+      {
+        target: { kind: "agent", id: "eng" },
+        label: "#engineering",
+        aliases: ["engineering"],
+      },
+      {
+        target: { kind: "desk", id: "engineering" },
+        label: "engineering",
+        aliases: ["engineering"],
+      },
+    ];
+    const out = resolvableMentions("@#engineering", rows);
+    expect(out).toHaveLength(1);
+    expect(out[0].target).toEqual({ kind: "desk", id: "engineering" });
+  });
+
+  it("resolves the picker's label even when no alias repeats it", () => {
+    const rows: Mentionable[] = [
+      {
+        target: { kind: "everyone" },
+        label: "All hands",
+        aliases: ["everyone", "channel", "here"],
+      },
+    ];
+    const out = resolvableMentions("@All hands", rows);
+    expect(out).toHaveLength(1);
+    expect(out[0].target).toEqual({ kind: "everyone" });
+    expect(out[0].text).toBe("@All hands");
+  });
 });
 
 describe("utf8ByteLength", () => {
