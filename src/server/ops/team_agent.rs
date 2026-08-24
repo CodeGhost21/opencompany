@@ -3050,6 +3050,31 @@ agent = "claude"
         );
     }
 
+    /// The same identity-before-validation rule, applied to the slowest path
+    /// the body can take: an unknown id with a malformed `blob:` avatar is a
+    /// `404`, not a `400`. The roster check has to run before the referent is
+    /// resolved — which can otherwise cost up to 4 MiB of workspace I/O for an
+    /// id nobody could have edited anyway.
+    #[tokio::test]
+    async fn an_unknown_teammate_is_a_404_even_when_the_avatar_is_malformed() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+        let (status, _) = send_as(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/nobody",
+            // Would be a `400` on its own — `blob:` node ids allow neither
+            // spaces nor `!` — but the id answers `404` before the body is
+            // ever judged.
+            Some(json!({"avatar": "blob:not a node id!"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     /// The conditional check must not take an existing capability away: a
     /// member editing a name or a role keeps working exactly as before, which
     /// is the same rule `POST …/team` applies to its budget cap.
