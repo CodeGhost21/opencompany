@@ -243,6 +243,11 @@ const NAV: NavItem[] = [
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
 
+// The console is hash-routed, so a normal `href="#main-content"` would also
+// be treated as a route change. Keep the conventional fragment for link
+// semantics, then focus this stable landmark without changing the route.
+const MAIN_CONTENT_ID = "main-content";
+
 // Which views are routable is decided in `@/lib/console-routes`, not here.
 // `NAV` above is presentation: a row means a surface is offered in the sidebar,
 // and its absence means only that the surface is not offered. `VIEWS` is every
