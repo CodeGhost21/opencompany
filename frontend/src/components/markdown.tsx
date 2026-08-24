@@ -31,25 +31,37 @@ export interface MentionSpan {
  * render with their own record, and a third, unresolved `@engineer` elsewhere
  * in the text renders plain.
  */
-function chipMentions(nodes: ReactNode, mentions: MentionSpan[]): ReactNode {
+function chipMentions(nodes: ReactNode, mentions: MentionSpan[], source: string): ReactNode {
   if (mentions.length === 0) return nodes;
   const pattern = mentionRegex(mentions);
-  // Per-literal queues, drawn down as the text's occurrences are walked, so
-  // each span gets the next mention of its own text rather than the last one
-  // for every hit.
-  const byText = new Map<string, MentionSpan[]>();
+  // Offsets are UTF-8 bytes in the host DTO, while source is indexed in UTF-16.
+  // Convert each offset to the source index and record its occurrence ordinal;
+  // this prevents an unresolved earlier `@name` from consuming a later chip.
+  const occurrences = new Map<string, Map<number, MentionSpan>>();
   for (const m of mentions) {
-    const queue = byText.get(m.text) ?? [];
-    queue.push(m);
-    byText.set(m.text, queue);
+    let bytes = 0;
+    let index = 0;
+    while (index < source.length && bytes < m.offset) {
+      const point = source.codePointAt(index)!;
+      const ch = String.fromCodePoint(point);
+      bytes += new TextEncoder().encode(ch).length;
+      index += ch.length;
+    }
+    const ordinal = source.slice(0, index).split(m.text).length - 1;
+    const byOrdinal = occurrences.get(m.text) ?? new Map<number, MentionSpan>();
+    byOrdinal.set(ordinal, m);
+    occurrences.set(m.text, byOrdinal);
   }
+  const seen = new Map<string, number>();
 
   const split = (node: ReactNode, key: string): ReactNode => {
     if (typeof node === "string") {
       const parts = node.split(pattern);
       if (parts.length === 1) return node;
       return parts.map((part, i) => {
-        const hit = part === "" ? undefined : byText.get(part)?.shift();
+        const ordinal = seen.get(part) ?? 0;
+        if (part !== "") seen.set(part, ordinal + 1);
+        const hit = part === "" ? undefined : occurrences.get(part)?.get(ordinal);
         if (!hit) return part;
         return (
           <span
@@ -151,10 +163,10 @@ export function Markdown({
           // through a remark plugin, so the mention list stays a plain prop and
           // no AST transform has to be kept in step with it.
           p: ({ children: content, ...rest }) => (
-            <p {...rest}>{chipMentions(content, spans)}</p>
+            <p {...rest}>{chipMentions(content, spans, children)}</p>
           ),
           li: ({ children: content, ...rest }) => (
-            <li {...rest}>{chipMentions(content, spans)}</li>
+            <li {...rest}>{chipMentions(content, spans, children)}</li>
           ),
         }}
       >
