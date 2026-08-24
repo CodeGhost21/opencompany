@@ -1543,10 +1543,15 @@ members = ["engineer", "ceo"]
     // -----------------------------------------------------------------------
 
     #[test]
-    fn a_label_falls_back_from_display_name_to_local_part() {
+    fn a_label_falls_back_from_display_name_to_a_derived_name() {
         assert_eq!(user_label(&user("u", "jane@x.test", Some("Jane"))), "Jane");
-        assert_eq!(user_label(&user("u", "jane@x.test", None)), "jane");
-        assert_eq!(user_label(&user("u", "jane@x.test", Some("  "))), "jane");
+        // No chosen name: the same derived name `display_label` uses for the
+        // profile pane, not the raw local part — the same person must read the
+        // same way on a mention chip and in the people list.
+        assert_eq!(user_label(&user("u", "jane.doe@x.test", None)), "Jane Doe");
+        // A blanked display name is the same intent as `null`.
+        assert_eq!(user_label(&user("u", "jane.doe@x.test", Some("  "))), "Jane Doe");
+        // An identity with no name in it to derive stays the honest fallback.
         assert_eq!(user_label(&user("u", "@x.test", None)), "someone");
     }
 
