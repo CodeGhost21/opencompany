@@ -193,7 +193,15 @@ export async function fetchRecentRuns(
   return data.company?.agentRuns ?? [];
 }
 
-/** One attempt by id, or `null` when the company does not have it. */
+/**
+ * One attempt by id — **with its unredacted half**, or `null` when the company
+ * does not have it.
+ *
+ * This is the on-demand deep read: the list queries select no deep bodies, so
+ * the console fetches this only when a reader opens an attempt's card. The deep
+ * fields resolve to `null` per step for a host that keeps no deep trace, and
+ * for a reader who may not see one.
+ */
 export async function fetchRun(
   client: OpenCompanyClient,
   company: string,
