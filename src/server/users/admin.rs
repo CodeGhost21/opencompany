@@ -554,8 +554,9 @@ async fn update_user(
         user.status = status;
     }
     if let Some(name) = body.display_name {
+        let name = name.trim().to_string();
         super::validate_display_name(&name)?;
-        user.display_name = Some(name);
+        user.display_name = (!name.is_empty()).then_some(name);
     }
     user.updated_at_millis = now_millis();
     runtime.users().upsert_user(runtime.id(), &user).await?;
