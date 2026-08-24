@@ -210,8 +210,19 @@ export function retainAvatar(client: OpenCompanyClient, company: string | null, 
 export function releaseAvatar(client: OpenCompanyClient, company: string | null, nodeId: string): void {
   const key = avatarCacheKey(client, company, nodeId);
   const count = blobUrlRefs.get(key) ?? 0;
-  if (count <= 1) blobUrlRefs.delete(key);
-  else blobUrlRefs.set(key, count - 1);
+  if (count <= 1) {
+    blobUrlRefs.delete(key);
+    // A component-owned URL (minted when the cache was full of pinned
+    // entries) has no cache owner to evict it — this is the release that
+    // must revoke it, or the face would pin its blob for the life of the tab.
+    const url = componentUrls.get(key);
+    if (url) {
+      URL.revokeObjectURL(url);
+      componentUrls.delete(key);
+    }
+  } else {
+    blobUrlRefs.set(key, count - 1);
+  }
 }
 
 /**
