@@ -423,4 +423,81 @@ describe("leaving the completion screen to wire a model", () => {
     expect(removed, "the fallback team should be replaced").toEqual(["ada", "cara"]);
     expect(removed, "a teammate staffed while settings were open must survive").not.toContain("bob");
   });
+
+  it("keeps the redesign debt across a reload after the return reopens it", async () => {
+    // The redesign reopens the moment the operator returns, but the replacement
+    // build-out has not run yet — the fallback team is still what the gate
+    // calls staffed. A reload or crash in that window must not lose the debt:
+    // without it the ordinary gate offers nothing and the owed redesign is
+    // unreachable.
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      listTeam: async () => [...BASELINE],
+      get: async () => ({ cognition: "echo" }),
+      post: async () => ({
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        template: "ecommerce",
+        source: "fallback",
+        reason: "no_model",
+      }),
+      addTeamMember: async () => ({}),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+    await runFlow();
+
+    await act(async () => {
+      (addModelLink() as HTMLElement).click();
+    });
+    expect(setupRedesign(SCOPE)).toBe(true);
+
+    await goTo("#/overview");
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
+    // The debt outlived the reopen.
+    expect(setupRedesign(SCOPE), "the return paid the redesign debt").toBe(true);
+
+    // A fresh mount stands in for the reload mid-redesign. The kept debt is the
+    // only thing that can reopen replacing mode: `deepLinked` suppresses the
+    // ordinary gate, and the fallback roster reads as staffed.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await mount(client, true);
+
+    expect(dialog(), "the owed redesign did not come back after a reload").toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
+    expect(setupRedesign(SCOPE)).toBe(true);
+  });
+
+  it("drops the redesign debt when the operator says 'I'll do this later' mid-redesign", async () => {
+    // Skip is an explicit decline, not a hold: the debt must not re-offer a
+    // redesign the operator just turned down.
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      listTeam: async () => [...BASELINE],
+      get: async () => ({ cognition: "echo" }),
+      post: async () => ({
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        template: "ecommerce",
+        source: "fallback",
+        reason: "no_model",
+      }),
+      addTeamMember: async () => ({}),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+    await runFlow();
+
+    await act(async () => {
+      (addModelLink() as HTMLElement).click();
+    });
+    expect(setupRedesign(SCOPE)).toBe(true);
+
+    await goTo("#/overview");
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
+
+    await act(async () => {
+      (find("setup-skip") as HTMLElement).click();
+    });
+
+    expect(dialog()).toBeNull();
+    expect(setupRedesign(SCOPE), "skip should cancel the owed redesign").toBe(false);
+  });
 });
