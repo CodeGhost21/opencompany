@@ -231,12 +231,25 @@ export function PolicySettings({ client, company }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
+    // A new scoped read must not carry the previous company's values. If this
+    // read fails, the card should show the error state, not the old company's
+    // policy (deadline, cap, list) as if it were this one's — the drafts below
+    // are the exact state an operator would otherwise save against the new
+    // company. They are overwritten from `next` on success.
+    setStatus(null);
+    setDraftAlways("");
+    setDraftSpend("");
+    setNoSpendCap(false);
+    setDraftDeadline("");
     try {
       const next = await getPolicy(client, company);
       setStatus(next);
       setDraftAlways(next.alwaysApprove.join(", "));
       setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
       setNoSpendCap(next.autoApproveUnderUsd === null);
+      // A host that predates the deadline field omits it; `undefined` must
+      // fall back to the historical 24-hour default rather than render as
+      // "undefined hours".
       setDraftDeadline((next.approvalTtlHours ?? 24).toString());
       setDirty(false);
     } catch (error) {
