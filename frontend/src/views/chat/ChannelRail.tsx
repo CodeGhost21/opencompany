@@ -182,6 +182,7 @@ function Section({
   section,
   activeId,
   unread,
+  mentions,
   onSelect,
   open,
   onToggle,
