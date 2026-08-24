@@ -90,13 +90,17 @@ company grant itself — but it is not the intuitive one.
 ## The wildcard does not mean everything
 
 `*` covers `files`, `docs`, `shell`, `code`, `web` and `subagent`. It
-deliberately does **not** confer four namespaces, each of which must be named:
+deliberately does **not** confer the explicit opt-in namespaces, each of which
+must be named:
 
 | Namespace | Why it must be named |
 | --- | --- |
 | `media` | Spends real money per generated image or video. |
 | `composio` | Reaches the tenant's connected third-party accounts and moves real side effects — sends email, opens PRs. |
 | `search` | The queries leave the building, and a call is billed — to the managed platform, or to the company's own provider account. See [search.md](search.md). |
+| `chargebee` | Billing API, wired only against the company's own Chargebee credentials. |
+| `paypal` | Wallet reads — a business's private figure, not a `*` wildcard's business. |
+| `hosting` | Publishes the workspace to the public internet and provisions databases the company pays for. |
 | `repo` | Materializes a third party's source inside a sandbox where the agent may also hold `shell`. |
 
 `repo.write` is tighter still: only the exact string confers it. A bare `repo`
