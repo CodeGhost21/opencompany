@@ -67,9 +67,7 @@ export function mentionsToClear(
         n.context !== undefined &&
         ((n.context === channelId &&
           (channelId !== mainChannelId || visibleThreadIds.has(channelId))) ||
-          (channelId === mainChannelId &&
-            n.context === MAIN_THREAD_ID &&
-            visibleThreadIds.has(MAIN_THREAD_ID))),
+          (channelId === mainChannelId && n.context === MAIN_THREAD_ID)),
     )
     .map((n) => n.id);
 }
