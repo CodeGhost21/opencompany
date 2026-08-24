@@ -2307,6 +2307,54 @@ prompt = "Lead decisively."
         assert!(cleared["harness"].is_null(), "{cleared}");
     }
 
+    /// A coding CLI this build drives is bindable without any `[[harness]]`
+    /// naming it — but only where this host can actually run one (issue
+    /// #1245's detected-harness follow-up).
+    ///
+    /// `harness_by_id` resolves an `ACP_AGENTS` id on any build through the
+    /// implicit-local fallback, so without this gate a hosted admin could bind
+    /// a teammate to a CLI the server has nothing to launch — accepted by
+    /// `PATCH`, then dead on the next rebuild. The picker (`GET
+    /// {scope}/harnesses`) already refuses to offer detected CLIs without an
+    /// `AcpAgentFactory`; the write path must agree.
+    #[tokio::test]
+    async fn an_undeclared_coding_cli_is_bindable_only_where_this_host_can_run_one() {
+        struct StubFactory;
+        impl crate::ports::acp::AcpAgentFactory for StubFactory {
+            fn build(
+                &self,
+                _agent: &str,
+                _model: Option<&str>,
+                _agent_models: &std::collections::HashMap<String, String>,
+                _workspace_root: &std::path::Path,
+            ) -> crate::Result<std::sync::Arc<dyn crate::ports::acp::AcpAgent>> {
+                unreachable!("this route never builds an agent")
+            }
+        }
+
+        // Hosted shape (no factory): an undeclared coding CLI is refused, just
+        // as the picker that does not offer it.
+        let hosted_home = home();
+        let hosted = state_with_manifest(hosted_home.path(), ACP_ROSTER).await;
+        let jamie = add_overlay(&hosted, "Jamie", "Growth").await;
+        let (status, refusal) = patch_agent(&hosted, &jamie, json!({"harness": "claude"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        // Desktop shape (factory wired): the same id is bindable.
+        let desktop_home = home();
+        let desktop = state_with_manifest(desktop_home.path(), ACP_ROSTER)
+            .await
+            .with_acp_agents(std::sync::Arc::new(StubFactory));
+        let jamie = add_overlay(&desktop, "Jamie", "Growth").await;
+        let (status, set) = patch_agent(&desktop, &jamie, json!({"harness": "claude"})).await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["harness"], "claude");
+
+        // A factory must not widen the vocabulary beyond the coding CLIs.
+        let (status, refusal) = patch_agent(&desktop, &jamie, json!({"harness": "not-a-cli"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    }
+
     /// Issue #1245's harness-picker follow-up: switching a teammate onto an
     /// ACP harness and setting its model happen in the same `PATCH` in the
     /// console's own edit flow, so the cross-field check has to validate
