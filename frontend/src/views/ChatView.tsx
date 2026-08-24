@@ -595,9 +595,19 @@ export function ChatView({
    * unknown. Derived rather than stored, so it clears itself the moment the
    * hash changes — there is no stale banner to dismiss. A legacy DM link that
    * the shim above resolved is not unknown; it found its channel.
+   *
+   * An inactive DM is not unknown either: the rail only carries DMs with a
+   * transcript (issue #1335), so `findChannel` answers `null` for a DM the
+   * picker just opened, but `directMessageForId` still resolves it against the
+   * whole roster. Check that resolver explicitly rather than leaning on
+   * `resolvedSub`, whose legacy-id shim is meant to be deletable.
    */
   const unknownChannel =
-    desks && decodedSub && !resolvedSub && !findChannel(sections, decodedSub)
+    desks &&
+    decodedSub &&
+    !resolvedSub &&
+    !findChannel(sections, decodedSub) &&
+    !directMessageForId(members, decodedSub)
       ? decodedSub
       : null;
 
