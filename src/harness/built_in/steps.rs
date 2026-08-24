@@ -2566,6 +2566,50 @@ mod tests {
             );
         }
 
+        /// The EOF path: a turn that ends mid-thought has no `TextDelta` or tool
+        /// call to close the run, so the tail below the interim flush threshold
+        /// survives only because the collector calls [`StepTrace::finish`] when
+        /// the stream drains.
+        #[test]
+        fn an_aborted_thought_is_flushed_when_the_trace_finishes() {
+            let mut trace = StepTrace::deep();
+            let mut emitted = Vec::new();
+            emitted.extend(trace.push(&thinking("first ")));
+            emitted.extend(trace.push(&thinking("second"))); // under DEEP_THINK_FLUSH_BYTES
+            // No text, no tool call — the turn just ends.
+            emitted.extend(trace.finish());
+
+            let reasoning: String = emitted
+                .iter()
+                .filter_map(|(_, _, d)| d.as_ref())
+                .filter_map(|d| d.reasoning.clone())
+                .collect();
+            assert_eq!(
+                reasoning, "first second",
+                "the tail of an aborted thought was dropped: {reasoning:?}"
+            );
+        }
+
+        /// A flush on a trace with nothing open is a no-op — in particular it
+        /// must not claim an ordinal or mint a step.
+        #[test]
+        fn finish_with_nothing_open_yields_nothing() {
+            let mut trace = StepTrace::deep();
+            assert!(
+                trace.finish().is_empty(),
+                "an idle trace must not emit on finish"
+            );
+            assert_eq!(trace.emitted(), 0);
+            // A thought already closed by text has nothing left to flush.
+            let mut closed = StepTrace::deep();
+            closed.push(&thinking("done"));
+            closed.push(&text("answer"));
+            assert!(
+                closed.finish().is_empty(),
+                "a closed thinking run must not re-emit on finish"
+            );
+        }
+
         #[test]
         fn a_completed_call_carries_raw_arguments_and_output() {
             let emitted = run(
