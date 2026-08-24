@@ -528,6 +528,41 @@ impl StepTrace {
         ))
     }
 
+    /// Flushes a thinking run that has no event left to close it.
+    ///
+    /// [`close_thinking`](Self::close_thinking) is driven by the stream —
+    /// visible text or a tool call. A turn that *ends* mid-thought — a reply,
+    /// an abort, an error — has neither, so the tail accumulated below
+    /// [`DEEP_THINK_FLUSH_BYTES`] would sit in `thinking_buf` forever and the
+    /// stored deep trace would record only the first delta plus any full
+    /// threshold chunks. The collector calls this when the stream drains, so
+    /// precisely the failed/interrupted turns worth diagnosing keep their
+    /// closing reasoning. No-op when nothing is open or the run said nothing.
+    pub(crate) fn finish(&mut self) -> Vec<(u32, TurnStep, Option<TurnStepDetail>)> {
+        let closing = self.close_thinking();
+        self.thinking_open = false;
+        closing.into_iter().collect()
+    }
+        let (seq, buf) = self.thinking_buf.take()?;
+        self.thinking_pending_bytes = 0;
+        if buf.is_empty() {
+            return None;
+        }
+        Some((
+            seq,
+            TurnStep {
+                kind: TurnStepKind::Thinking,
+                status: TurnStepStatus::Ok,
+                label: "Thinking".to_string(),
+                ..TurnStep::default()
+            },
+            Some(crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                reasoning: Some(buf),
+                ..TurnStepDetail::default()
+            })),
+        ))
+    }
+
     /// How many ordinals have been handed out. Test-only: the sink tracks what
     /// actually landed in the store, which is not the same number when a write
     /// fails or the cap bites.
