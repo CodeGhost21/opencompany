@@ -688,15 +688,32 @@ async fn edit_agent(
             .clone()
             .unwrap_or_else(|| declared_harness(&record, &agent_id))
             .unwrap_or_else(|| record.manifest.default_harness_id());
-        let kind = record
-            .manifest
-            .harness_by_id(&resulting_harness_id)
-            .map(|h| h.kind);
-        if kind.as_deref() != Some("acp") {
+        let bound = record.manifest.harness_by_id(&resulting_harness_id);
+        if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
             return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
                 "`{model_value}` names a model, but this teammate's harness has no ACP \
                  transport to forward it to. Bind it to an ACP harness first, or clear \
                  the model."
+            )))
+            .into_response());
+        }
+        // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
+        // still cannot carry a model, because the runner wire protocol has no
+        // field for one. `CompanyManifest::validate` already refuses this
+        // combination, so accepting it here let the API store a binding a
+        // manifest is not allowed to declare — and one that could never take
+        // effect. The wording is the validator's, so both refusals read the
+        // same.
+        if bound
+            .as_ref()
+            .and_then(|h| h.acp.as_ref())
+            .map(|acp| acp.transport.as_str())
+            == Some("runner")
+        {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                 `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                 yet — the runner wire protocol doesn't carry them."
             )))
             .into_response());
         }
@@ -2353,6 +2370,101 @@ agent = "claude"
         let (_, after) = get_agent(&state, "ceo").await;
         assert!(after["harness"].is_null(), "{after}");
         assert!(after["model"].is_null(), "{after}");
+    }
+
+    /// Resetting instructions must not take the harness and model with it.
+    ///
+    /// `clear_agent_override` drops an override row once nothing is left in
+    /// it, and its retention predicate named only the fields that existed when
+    /// it was written — so for a teammate whose row held instructions plus a
+    /// harness, clearing the first deleted the row and silently reverted the
+    /// second to the blueprint.
+    #[tokio::test]
+    async fn clearing_instructions_leaves_the_harness_binding_alone() {
+        let home_dir = home();
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "main"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML).await;
+
+        let (status, _) = patch_agent(
+            &state,
+            "ceo",
+            json!({"harness": "laptop", "instructions": "Be brief."}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, after) = get_agent(&state, "ceo").await;
+        assert_eq!(
+            after["harness"], "laptop",
+            "clearing one override field must not discard the others: {after}"
+        );
+    }
+
+    /// A `runner` harness is `kind = "acp"` and still cannot carry a model —
+    /// its wire protocol has no field for one. `CompanyManifest::validate`
+    /// already refuses the combination, so accepting it here let the API store
+    /// a binding a manifest may not declare and that could never take effect.
+    #[tokio::test]
+    async fn a_model_is_refused_on_a_runner_bound_harness() {
+        let home_dir = home();
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "main"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "shared"
+kind = "acp"
+
+[harness.acp]
+transport = "runner"
+runner = "build-box"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML).await;
+
+        let (status, refused) = patch_agent(
+            &state,
+            "ceo",
+            json!({"harness": "shared", "model": "claude-opus-4-5"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused.to_string().contains("runner"),
+            "the refusal names the reason: {refused}"
+        );
     }
 
     /// **Review of #745.** An unknown id answers the same way whether or not

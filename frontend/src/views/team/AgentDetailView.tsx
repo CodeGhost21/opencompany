@@ -500,6 +500,11 @@ export function AgentDetailView({
     setSavingHarness(true);
     try {
       const updated = await client.updateAgent(agentId, edits, company);
+      // The same guard the ordinary save, reset, budget and inbox writes use,
+      // and missing here: this view stays mounted across teammates, so a slow
+      // harness save for A landing after a click through to B would fold A's
+      // response into B's card and show the wrong binding until a reload.
+      if (displayedAgentIdRef.current !== agentId) return;
       setAgent(updated);
       setEditingHarness(false);
       toast.success("Harness updated.");

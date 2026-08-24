@@ -150,12 +150,18 @@ pub struct Lanes {
 
 /// Which agents are bound to `harness_id`, given the company's default.
 fn agents_on(record: &CompanyRecord, harness_id: &str, default_harness: &str) -> HashSet<String> {
+    // `effective_agents`, not `manifest.agents`: an admin's harness or model
+    // edit to a blueprint teammate is stored as an overlay, so the raw
+    // manifest row still says what the company launched with. Reading it here
+    // meant a saved binding survived the write, survived a restart, and was
+    // then ignored by the runtime that actually routes turns — the setting
+    // persisted everywhere except where it mattered. It also drops retired
+    // teammates, which have no business in a lane.
     let mut ids: HashSet<String> = record
-        .manifest
-        .agents
-        .iter()
+        .effective_agents()
+        .into_iter()
         .filter(|a| a.harness.as_deref().unwrap_or(default_harness) == harness_id)
-        .map(|a| a.id.clone())
+        .map(|a| a.id)
         .collect();
     // A console-created (overlay) teammate carries its own optional binding
     // (issue #1245's harness-picker follow-up), resolved against the default
@@ -190,12 +196,14 @@ fn agent_models_on(
     harness_id: &str,
     default_harness: &str,
 ) -> std::collections::HashMap<String, String> {
+    // Effective, not raw — see `agents_on`. A model an admin picked in the
+    // console lives in the overlay, and this map is what actually carries it
+    // to the spawned harness.
     let mut models: std::collections::HashMap<String, String> = record
-        .manifest
-        .agents
-        .iter()
+        .effective_agents()
+        .into_iter()
         .filter(|a| a.harness.as_deref().unwrap_or(default_harness) == harness_id)
-        .filter_map(|a| a.model.clone().map(|model| (a.id.clone(), model)))
+        .filter_map(|a| a.model.clone().map(|model| (a.id, model)))
         .collect();
     // Mirrors `agents_on`'s own overlay fold: an overlay teammate's own
     // binding decides which harness's map it enters, not an assumed default.
@@ -224,11 +232,11 @@ fn referenced_implicit_locals(
     declared: &[Harness],
     default_harness: &str,
 ) -> Vec<String> {
-    let manifest_bindings = record
-        .manifest
-        .agents
-        .iter()
-        .filter_map(|a| a.harness.as_deref());
+    // Effective, not raw — see `agents_on`. This decides which implicit-local
+    // lanes get synthesized at all, so missing an overlay binding here leaves
+    // the teammate bound to a lane nothing built.
+    let effective = record.effective_agents();
+    let manifest_bindings = effective.iter().filter_map(|a| a.harness.as_deref());
     let overlay_bindings = record
         .overlay_agents
         .iter()

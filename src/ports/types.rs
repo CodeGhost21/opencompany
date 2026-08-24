@@ -4202,12 +4202,19 @@ impl CompanyRecord {
         {
             entry.instructions = None;
         }
+        // Every field the override can carry, not just the ones it carried
+        // when this was written. A predicate that names a subset deletes rows
+        // that are still holding the fields it forgot — here, resetting a
+        // teammate's instructions would take their harness and model with it,
+        // silently reverting both to the blueprint.
         self.overlay_agent_edits.retain(|entry| {
             entry.name.is_some()
                 || entry.role.is_some()
                 || entry.description.is_some()
                 || entry.tools.is_some()
                 || entry.instructions.is_some()
+                || entry.model.is_some()
+                || entry.harness.is_some()
         });
     }
 
