@@ -1189,10 +1189,10 @@ async fn edit_me(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<EditMe>,
-) -> Result<Json<MeResult>, Response> {
+) -> Result<Json<MeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
     // A temporary password is for replacing itself, not for spending on the
     // account's public name or face. An admin who reset a password knows the
