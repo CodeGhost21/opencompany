@@ -41,6 +41,11 @@ export function ProfileRow({
 
   useEffect(() => {
     let live = true;
+    // `me` is keyed by the scope it was fetched for. When the company changes,
+    // the row must not keep the previous company's identity on screen while the
+    // new fetch is in flight — and, worse, a save in that window would write
+    // the old name into the new company — so drop the stale record first.
+    setMe(null);
     void fetchMe(client, company)
       .then((who) => {
         if (live) setMe(who);
