@@ -641,15 +641,18 @@ pub fn check_image_dimensions(bytes: &[u8]) -> Result<()> {
     }
     // The three formats browsers can animate each carry a per-frame table the
     // walkers above read; a still has nothing to count and is bounded by the
-    // single-frame check already done. Each walker answers `None` for a format
-    // it is not, or for a file of its format that never reaches a frame.
+    // single-frame check already done. Each walker answers `Ok(None)` for a
+    // format it is not, or for a file of its format that never reaches a frame,
+    // and `Err` for a truncated animation — a file whose frames a viewer would
+    // decode but whose walk could not be completed, which must not be read as a
+    // still and sneaked past the per-cycle cap.
     let animated_cost =
         if bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89) {
-            gif_animation_cost(bytes)
+            gif_animation_cost(bytes)?
         } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-            webp_animation_cost(bytes)
+            webp_animation_cost(bytes)?
         } else if bytes.starts_with(PNG_SIGNATURE) {
-            apng_animation_cost(bytes)
+            apng_animation_cost(bytes)?
         } else {
             None
         };
