@@ -414,7 +414,7 @@ export function Overview({ client, company, companyName }: Props) {
           not focusable, not exposed to a screen reader (issue #1314). The
           attribute lives on this wrapper because it must cover the graph and
           the status slot but not the overlay itself. */}
-      <div ref={graphShellRef} data-graph-shell className="h-full w-full">
+      <div ref={graphShellRef} data-graph-shell tabIndex={-1} className="h-full w-full">
         <Suspense
           fallback={
             // The graph's chunk is still in flight, so there is no shell to slot
