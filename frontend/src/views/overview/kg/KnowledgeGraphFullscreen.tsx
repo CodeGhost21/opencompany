@@ -82,6 +82,11 @@ export function KnowledgeGraphFullscreen({
   };
 
   useEffect(() => {
+    // While the outage overlay covers the shell, the graph must not answer
+    // the keyboard at all: `inert` on the covered subtree cannot suppress a
+    // `window` listener, so the handler is simply not registered (issue
+    // #1314).
+    if (covered) return;
     const onKey = (e: KeyboardEvent) => {
       // typing in the vault search (or any input) must not drive navigation
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -96,7 +101,7 @@ export function KnowledgeGraphFullscreen({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasDetail, coreOpen, idx, deptList]);
+  }, [hasDetail, coreOpen, idx, deptList, covered]);
 
   if (!mounted) return null;
 
