@@ -3971,6 +3971,32 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert!(!message.contains("You have no way to hand this off"));
     }
 
+    /// A responder that can reach ONE of two named teammates is told which one
+    /// is out of reach — not asked to "hand work to them" as though everyone
+    /// named were in play, nor told it has no way to hand off at all.
+    #[tokio::test]
+    async fn also_mentioned_wording_names_the_out_of_reach_teammate() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .also_mentioned(vec!["researcher".to_string(), "designer".to_string()])
+            .handle_operator_message("engineer", "look into this", Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 1);
+        let (agent, message) = &calls[0];
+        assert_eq!(agent, "engineer");
+        assert!(
+            message.contains("You can hand work to researcher, but not to designer"),
+            "the mixed case must name who is out of reach: {message}"
+        );
+        assert!(!message.contains("Hand work to them only if it genuinely needs them"));
+        assert!(!message.contains("You have no way to hand this off"));
+    }
+
     #[tokio::test]
     async fn an_operator_turn_approval_actually_lands_the_card() {
         let fx = Fixture::new();
