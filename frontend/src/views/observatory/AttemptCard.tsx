@@ -44,8 +44,9 @@ interface Props {
    * link's turn, an auto-opened failure) — so the parent can fetch the
    * unredacted half only for attempts a reader actually opened. Fires once per
    * open, again on each reopen, and again whenever an already-open attempt's
-   * step trace grows, so a live attempt's new steps are not left with empty
-   * deep panes until the reader closes and reopens the card.
+   * step trace changes between polls (a new step, or an existing one whose
+   * status flips and result lands), so a live attempt's fresh deep panes are
+   * not left empty until the card is closed and reopened.
    */
   onOpen?: (runId: string) => void;
 }
