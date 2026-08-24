@@ -1030,6 +1030,47 @@ mod test {
     /// within the dimension cap is still refused by total area.
     #[test]
     fn size_check_refuses_an_extreme_aspect_ratio() {
+        let wide = png(MAX_AVATAR_DIMENSION * 2, MAX_AVATAR_DIMENSION / 2);
+        assert!(
+            check_image_dimensions(&wide).is_err(),
+            "edges within the dimension cap must still respect the area cap"
+        );
+    }
+
+    /// The frame walker sums every Image Descriptor's area, not just the
+    /// logical screen's.
+    #[test]
+    fn gif_animation_cost_counts_every_frame() {
+        assert_eq!(
+            gif_animation_cost(&gif_animated((100, 100), &[(100, 100), (50, 50)])),
+            Some(12_500)
+        );
+        // Frames may be sub-rectangles of the screen; each one is still paid for.
+        assert_eq!(
+            gif_animation_cost(&gif_animated((4096, 4096), &[(128, 128)])),
+            Some(16_384)
+        );
+        // Not a GIF, and a GIF with no Image Descriptor: nothing to count.
+        assert_eq!(gif_animation_cost(PNG_SIGNATURE), None);
+        assert_eq!(gif_animation_cost(&gif_animated((16, 16), &[])), None);
+    }
+
+    /// A GIF can hide a flood of full-canvas frames under the byte ceiling: the
+    /// logical screen fits the dimension caps and a single `4096²` frame would
+    /// too, but ten of them repaint ten times the decoded pixels every cycle.
+    #[test]
+    fn size_check_refuses_a_gif_that_animates_beyond_the_cost_cap() {
+        let busy = gif_animated((4096, 4096), &[(4096, 4096); 10]);
+        let err = check_image_dimensions(&busy).unwrap_err().to_string();
+        assert!(
+            err.contains("animates") && err.contains("per cycle"),
+            "an animation far over the decoded-pixel cap must be refused by name: {err}"
+        );
+
+        // The same form, kept human: a small face with plenty of frames.
+        let calm = gif_animated((128, 128), &[(128, 128); 60]);
+        check_image_dimensions(&calm).expect("60 frames at 128×128 must pass");
+    }
 
     /// A payload too short to announce a size is not an image: a truncated
     /// avatar would not decode anywhere either.
