@@ -1118,7 +1118,7 @@ async fn run_issue_password(
         .filter(|value| !value.trim().is_empty());
 
     let issued = bootstrap::issue_password(
-        &handles.users,
+        &users,
         &id,
         &manifest_admins,
         bootstrap_admin.as_deref(),
