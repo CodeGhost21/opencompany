@@ -668,7 +668,13 @@ impl ApprovalGate for ManifestApprovalGate {
         let mode = policy.mode.clone();
         drop(policy);
 
-        // 3. mode dispatch.
+        // 3. mode dispatch. A word with no arm is not a tier — the manifest
+        //    validator rejects anything outside `POLICY_MODES` before a company
+        //    loads — so `None` here means a path that reached a `Policy` without
+        //    validation. It fails safe: require approval.
+        let decision = self
+            .mode_decision(mode.as_str(), effect)
+            .unwrap_or(PolicyDecision::RequireApproval);
         Ok(decision)
     }
 
