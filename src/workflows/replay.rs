@@ -364,7 +364,7 @@ pub(crate) fn child_calls_to_repeat(
         let Some(gate) = segments.pop() else {
             continue;
         };
-        let mut graph = parent;
+        let mut graph = parent.clone();
         let mut record: Option<ChildGateRecord> = None;
         let mut prefix = String::new();
 
