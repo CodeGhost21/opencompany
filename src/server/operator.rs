@@ -9636,14 +9636,14 @@ mode = "full"
         // A desk addressed by its display name files under the desk's id —
         // `"Engineering"` names the desk whose id is `engineering`.
         assert_eq!(
-            mention_context(runtime, &id, &[], "Engineering").await,
+            mention_context(&runtime, &id, &[], "Engineering").await,
             "engineering",
             "a desk named by its display name has to store the desk id, not the raw key"
         );
         // A teammate addressed by a case-variant of their id files under the
         // canonical agent id, re-keyed into the console's DM channel space.
         assert_eq!(
-            mention_context(runtime, &id, &[], "BACKEND_ENGINEER").await,
+            mention_context(&runtime, &id, &[], "BACKEND_ENGINEER").await,
             "dm:backend_engineer",
             "a teammate named by a noncanonical key has to store dm:<agent-id>"
         );
