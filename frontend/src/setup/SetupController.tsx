@@ -108,6 +108,12 @@ export function SetupController({
    */
   const [unstaffed, setUnstaffed] = useState(false);
   /**
+   * Whether the dialog should open in **redesign** mode — the first pass shipped
+   * a fallback team, the operator went to wire a model, and the next build-out
+   * must replace that team rather than stack a second one on it.
+   */
+  const [redesigning, setRedesigning] = useState(false);
+  /**
    * Whether the gate has already been evaluated once in this mount.
    *
    * Setup opens **unprompted only on the first evaluation**, never again on a
