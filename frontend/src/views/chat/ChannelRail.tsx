@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock, PanelRight } from "lucide-react";
+import { ChevronRight, CircleDot, Hash, Lock, PanelRight, SquarePen } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
+import { NewMessageDialog } from "./NewMessageDialog";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
 
 /**
