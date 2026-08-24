@@ -35,8 +35,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
+import { ExternalHarnesses } from "@/components/external-harnesses";
 import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
