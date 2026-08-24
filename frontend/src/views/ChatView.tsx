@@ -247,6 +247,7 @@ export function ChatView({
   onSendEnd,
   onSendDetached,
   onSendFailed,
+  onSendStale,
   openTurns,
   liveStepsByThread,
   unread,
