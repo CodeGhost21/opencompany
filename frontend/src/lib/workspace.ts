@@ -35,6 +35,10 @@ export function childrenOf(nodes: FsNode[], parentId: string | null): FsNode[] {
       const bDerived =
         b.kind === "folder" && b.name.toLowerCase() === DERIVED_DIR;
       if (aDerived !== bDerived) return aDerived ? 1 : -1;
+      if (a.updatedAt != null && b.updatedAt != null) {
+        const updatedAt = b.updatedAt - a.updatedAt;
+        if (updatedAt !== 0) return updatedAt;
+      }
       return a.name.localeCompare(b.name);
     });
 }

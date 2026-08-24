@@ -89,7 +89,7 @@ async function mockApi(page: Page) {
         source: "overlay",
         editable: ["name", "role", "description"],
         isOrchestrator: false,
-        tools: { requested: [], companyAllow: [], effective: [] },
+        tools: { requested: [], companyAllow: [], deskAllow: [], deskCeilingActive: false, effective: [] },
         inboxEnabled: false,
       });
     }

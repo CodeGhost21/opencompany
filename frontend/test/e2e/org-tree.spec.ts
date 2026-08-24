@@ -270,7 +270,7 @@ async function mockApi(page: Page) {
         source: "manifest",
         editable: [],
         isOrchestrator: false,
-        tools: { requested: [], companyAllow: [], effective: [] },
+        tools: { requested: [], companyAllow: [], deskAllow: [], deskCeilingActive: false, effective: [] },
         desks: [],
         inboxEnabled: false,
       });

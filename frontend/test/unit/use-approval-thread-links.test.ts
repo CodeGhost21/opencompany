@@ -35,11 +35,13 @@ let lastLinks: Map<string, ApprovalThreadLink> | null;
 function Probe({
   client,
   approvals,
+  holding = false,
 }: {
   client: OpenCompanyClient;
   approvals: ApprovalSummary[];
+  holding?: boolean;
 }) {
-  lastLinks = useApprovalThreadLinks(client, "acme", approvals);
+  lastLinks = useApprovalThreadLinks(client, "acme", approvals, holding);
   return null;
 }
 
@@ -125,5 +127,56 @@ describe("useApprovalThreadLinks", () => {
     await render(client, [approval("a1", "main")]);
 
     expect(lastLinks?.has("a1")).toBe(false);
+  });
+
+  it("defers a link that resolves during the queue hold until release (#1593)", async () => {
+    // The operator starts interacting before the desks/roster reads finish. A
+    // topology that lands mid-hold must not swap an "Asked in" link into the
+    // card under the pointer — it wraps differently from "Origin unavailable"
+    // and would shift the decide buttons despite the frozen row snapshot. The
+    // link applies when the hold releases instead.
+    let resolveDesks!: (desks: unknown[]) => void;
+    const client = {
+      listDesks: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveDesks = resolve;
+          }),
+      ),
+      listTeam: vi.fn(async () => []),
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(
+        createElement(Probe, {
+          client,
+          approvals: [approval("a1", "engineering")],
+          holding: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    // The desks read resolves while the hold is still active.
+    await act(async () => {
+      resolveDesks([{ id: "engineering", name: "Engineering", members: [] }]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(lastLinks?.has("a1")).toBe(false);
+
+    // Releasing the hold applies the deferred topology.
+    await act(async () => {
+      root.render(
+        createElement(Probe, {
+          client,
+          approvals: [approval("a1", "engineering")],
+          holding: false,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(lastLinks?.get("a1")).toEqual({ channelId: "engineering", label: "#engineering" });
   });
 });

@@ -2758,7 +2758,7 @@ admins = [{list}]
     }
 
     /// **The default-configuration case (after #230).** A company with no
-    /// `[tools]` section at all now defaults to `["*", "media", "composio"]`,
+    /// `[tools]` section at all now defaults to the globals `default_allow`,
     /// and `*` satisfies the `email` grant — so on the majority of tenants the
     /// grant gate is open and the established-thread gate is the one actually
     /// holding the line. Pin that it does: a default-configured company still

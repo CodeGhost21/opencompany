@@ -353,7 +353,20 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 # and *run* by nothing. Moving it into the default set makes both `cargo test`
 # lanes execute them, which is why this needs no new CI lane. It costs one pure
 # dependency (`jsonwebtoken`), already in `Cargo.lock`.
-default = ["oauth", "platform-jwt", "documents"]
+#
+# `tinymemory` ships in the standard build because the memory-engine catalog is
+# a console surface in every build, and without this feature four of its eight
+# tiles ("Supermemory", "Mem0", "Cognee", "No memory") render disabled with
+# "this build was compiled without the `tinymemory` feature" — an instruction
+# to go and find a differently compiled binary, which for the desktop app and
+# for anyone running the shipped container is not an instruction they can
+# follow. It is the cheap half of the memory seam: the driver registry, the
+# contract API and the HTTP remote, all pure Rust already in `Cargo.lock`. The
+# in-pod engines stay opt-in (`tinycortex`, `tinymemory-embedded`) because
+# those do cost a bundled SQLite build, and the desktop — which offers no
+# in-pod memory surface — keeps them off; it enables `tinymemory` itself in
+# `src-tauri/Cargo.toml`, so the hosted catalog tiles are live there too.
+default = ["oauth", "platform-jwt", "documents", "tinymemory"]
 # Text extraction for files dropped on the Brain page (PDF, Word, Excel,
 # PowerPoint). Without it those formats still upload and are still refused
 # honestly — the route reports "no text could be extracted" rather than

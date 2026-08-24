@@ -131,7 +131,7 @@ async function mockApi(page: Page) {
         // Edit a live control rather than a disabled explanation.
         editable: ["name", "role", "description"],
         isOrchestrator: false,
-        tools: { requested: [], companyAllow: ["web_search"], effective: ["web_search"] },
+        tools: { requested: [], companyAllow: ["web_search"], deskAllow: [], deskCeilingActive: false, effective: ["web_search"] },
         desks: [{ id: "research", name: "Research", lead: true }],
         inboxEnabled: false,
       });

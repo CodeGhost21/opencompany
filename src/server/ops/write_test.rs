@@ -3578,14 +3578,14 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
 
 /// Issue #568: each listed server carries the agents whose *effective* grants
 /// reach it — over the full runtime roster, manifest agents plus overlay
-/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
-/// (and every overlay teammate, which has no tools row) inherits the wildcard and
-/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
-/// that server.
+/// teammates. With a company `allow = ["*", "mcp:*"]`, an agent that declares
+/// no `tools` (and every overlay teammate, which has no tools row) inherits the
+/// wildcard and explicit MCP grant and reaches every server; an agent that
+/// narrows itself to `mcp:notion` reaches only that server.
 #[tokio::test]
 async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
          [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
@@ -3707,7 +3707,7 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
 #[tokio::test]
 async fn mcp_reachability_is_empty_for_a_disabled_server() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
     )
