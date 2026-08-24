@@ -49,16 +49,25 @@ export function useLedgerViewMode(
     setMode(readLedgerViewMode(undefined, fallback));
   }, [fallback]);
 
-  const set = useCallback((next: LedgerViewMode) => {
-    const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
-    const params = new URLSearchParams(query);
-    if (next === "list") params.set(LEDGER_VIEW_PARAM, "list");
-    else params.delete(LEDGER_VIEW_PARAM);
-    const suffix = params.toString().replace(/=(?=&|$)/g, "");
-    const nextHash = `#${path}${suffix ? `?${suffix}` : ""}`;
-    if (window.location.hash !== nextHash) window.location.hash = nextHash;
-    setMode(next);
-  }, []);
+  const set = useCallback(
+    (next: LedgerViewMode) => {
+      const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+      const params = new URLSearchParams(query);
+      // The fallback is the mode the ledger opens in when the address names no
+      // view, so switching to it deletes the parameter. Any other mode is an
+      // explicit override and must be serialized — in particular `view=board`
+      // on a declared ledger whose default is rows, which would otherwise
+      // round-trip back to the fallback on the next `hashchange` and make the
+      // board unreachable after one toggle (issue #1397).
+      if (next === fallback) params.delete(LEDGER_VIEW_PARAM);
+      else params.set(LEDGER_VIEW_PARAM, next);
+      const suffix = params.toString().replace(/=(?=&|$)/g, "");
+      const nextHash = `#${path}${suffix ? `?${suffix}` : ""}`;
+      if (window.location.hash !== nextHash) window.location.hash = nextHash;
+      setMode(next);
+    },
+    [fallback],
+  );
 
   return [mode, set];
 }
