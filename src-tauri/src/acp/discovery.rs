@@ -385,7 +385,23 @@ pub fn survey() -> Vec<HarnessStatus> {
 ///   copy of something it has. That case is not hypothetical — it is how every
 ///   machine that used this feature before the installer existed is set up.
 pub fn resolve_adapter(harness: &Harness) -> Option<PathBuf> {
-    super::tools::installed_adapter(harness).or_else(|| SystemProbe.locate(harness.command))
+    resolve_adapter_in(&super::tools::tools_dir(), &SystemProbe, harness)
+}
+
+/// [`resolve_adapter`] with both sources injected.
+///
+/// Split out purely so the preference order is testable. It is the whole
+/// correctness of this function — spawning the wrong one of two present
+/// adapters is invisible until a turn behaves oddly — and it cannot be
+/// exercised through [`resolve_adapter`] without writing into the operator's
+/// real tools directory.
+pub fn resolve_adapter_in(
+    tools_root: &Path,
+    probe: &dyn Probe,
+    harness: &Harness,
+) -> Option<PathBuf> {
+    super::tools::installed_adapter_in(tools_root, harness)
+        .or_else(|| probe.locate(harness.command))
 }
 
 /// Why a spawn found nothing to start — the *only* place `PATH` is consulted.
@@ -650,6 +666,52 @@ mod test {
             .find(|h| h.id == id)
             .expect("a known harness");
         diagnose_absent(probe, harness)
+    }
+
+    /// The preference order the Install button depends on.
+    ///
+    /// This was the defect Codex caught on #1681: the probe resolved
+    /// app-owned-first while `LocalAcpAgent` spawned the bare catalogue name,
+    /// so an installed adapter was reported `Ready` and then never run. On a
+    /// machine whose only adapter is the installed one, that is the difference
+    /// between the feature working and every turn failing "not on PATH".
+    #[test]
+    fn an_app_owned_adapter_wins_over_one_on_path() {
+        let root = tempfile::tempdir().unwrap();
+        let harness = HARNESSES.iter().find(|h| h.id == "claude").unwrap();
+        let bin = root.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(harness.command), "#!/usr/bin/env node\n").unwrap();
+
+        let on_path = Fake::new().with_installed(harness.command);
+        assert_eq!(
+            resolve_adapter_in(root.path(), &on_path, harness),
+            Some(bin.join(harness.command)),
+            "the version this app installed and pinned must win"
+        );
+    }
+
+    /// ...and an operator's own install is still used when this app has none,
+    /// so the installer is additive rather than a new requirement. Every
+    /// machine that used this feature before the installer existed is set up
+    /// exactly this way.
+    #[test]
+    fn a_path_adapter_is_used_when_this_app_installed_none() {
+        let empty = tempfile::tempdir().unwrap();
+        let harness = HARNESSES.iter().find(|h| h.id == "claude").unwrap();
+        let on_path = Fake::new().with_installed(harness.command);
+
+        assert_eq!(
+            resolve_adapter_in(empty.path(), &on_path, harness),
+            Some(PathBuf::from(format!("/usr/local/bin/{}", harness.command)))
+        );
+        // Neither source has one: the caller falls back to the bare name and
+        // the spawn reports `NotOnPath`, which is what produces the install
+        // advice rather than a spawn error.
+        assert_eq!(
+            resolve_adapter_in(empty.path(), &Fake::new(), harness),
+            None
+        );
     }
 
     /// The survey decides nothing, and that is the point of the inversion.
