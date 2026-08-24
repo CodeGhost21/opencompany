@@ -273,17 +273,15 @@ export function resolveAvatarSrc(
         // mounted tile — a screen drawing more custom faces than the cap —
         // nothing can be evicted, and the bound wins: the URL is handed to
         // the caller but is not cache-owned, so the cache does not grow. It
-        // is revoked by `releaseAvatar` when the last tile unmounts. With no
-        // mounted tile waiting and nothing evictable, the face is simply
-        // revoked on the spot — nobody would ever read it.
+        // is revoked by `releaseAvatar` when the last tile unmounts; the key
+        // stays in `blobUrls` so concurrent mounts of the same face share
+        // this URL rather than racing another fetch. With no mounted tile
+        // waiting and nothing evictable, the face is simply revoked on the
+        // spot — nobody would ever read it.
         if (blobUrlValues.size < MAX_BLOB_URLS || evictOldestBlobUrl()) {
           blobUrlValues.set(key, url);
         } else if ((blobUrlRefs.get(key) ?? 0) > 0) {
           componentUrls.set(key, url);
-          // The fetch this promise answers is spent and its URL dies with the
-          // tile: drop the entry so a later mount fetches again instead of
-          // reusing a URL that will be revoked.
-          blobUrls.delete(key);
         } else {
           URL.revokeObjectURL(url);
           blobUrls.delete(key);
