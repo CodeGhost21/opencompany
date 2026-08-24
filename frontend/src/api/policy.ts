@@ -67,6 +67,15 @@ export interface PolicyStatus {
    * is worth stating rather than leaving them to discover.
    */
   takesEffect: string;
+  /**
+   * Every tool name this build's approval gate can match — the complete
+   * registry, not the workflow-authorable subset served by
+   * `/workflows/tool-slugs`. The "is this a real tool?" note under the field
+   * compares against this when the host serves it, so a wired agent tool
+   * (`hosting_launch_site`, `publish_artifact`) is never called a mistake just
+   * because it cannot be a workflow node. Absent on a host predating the field.
+   */
+  knownTools?: string[];
 }
 
 /**
