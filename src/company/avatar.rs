@@ -483,13 +483,11 @@ fn apng_animation_cost(bytes: &[u8]) -> Option<u64> {
         let len = u32::from_be_bytes(bytes.get(i..i + 4)?.try_into().ok()?) as usize;
         let chunk_type = bytes.get(i + 4..i + 8)?;
         let data = bytes.get(i + 8..i + 8 + len)?;
-        eprintln!("apng walk: len={} i={i} chunklen={len} type={:?} data.len={}", bytes.len(), String::from_utf8_lossy(chunk_type), data.len());
         if chunk_type == b"acTL" {
             animated = true;
             cost = cost.saturating_add(w * h);
         } else if chunk_type == b"fcTL" {
             // Sequence(4), then big-endian width and height at 4..12.
-            eprintln!("apng fcTL: data.len={} data[4..8]={:?} data[8..12]={:?}", data.len(), data.get(4..8), data.get(8..12));
             if data.len() < 12 {
                 return None;
             }
