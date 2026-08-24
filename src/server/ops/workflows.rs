@@ -1852,7 +1852,7 @@ struct RunArtifactsResponse {
 async fn run_artifacts(
     company: ScopedCompany,
     Path(RunPath { rid }): Path<RunPath>,
-) -> Result<Json<Vec<RunArtifactRow>>, ApiError> {
+) -> Result<Json<RunArtifactsResponse>, ApiError> {
     // One broad read of the board; the run's cards are the ones this run
     // opened. `TaskStore::list` also carries each card's title, so grouping the
     // files by card below needs no second read.
