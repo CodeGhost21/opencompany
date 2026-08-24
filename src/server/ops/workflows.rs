@@ -2833,6 +2833,10 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                 status,
                 elapsed_ms,
                 diagnostics,
+                // Folded but not yet surfaced on the row: the run-history shape
+                // is a stable console contract, so the join rides the SSE frame and
+                // `GET {scope}/runs?workflow_run=` until a reader needs it here.
+                agent_run_id: _,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -6667,6 +6671,7 @@ mod tests {
                         status,
                         elapsed_ms: 42,
                         diagnostics: Vec::new(),
+                        agent_run_id: None,
                     },
                 )
                 .await

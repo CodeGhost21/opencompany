@@ -304,7 +304,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 35] = [
+        let plans: [(&str, IndexModel); 36] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -379,6 +379,12 @@ impl MongoStore {
             // A card has many attempts, and many attempts share a status.
             ("runs", nonunique(doc! {"company_id": 1, "task_id": 1})),
             ("runs", nonunique(doc! {"company_id": 1, "status": 1})),
+            // The workflow-run join: a node's attempt has no card and no
+            // conversation, so this is the only handle on it.
+            (
+                "runs",
+                nonunique(doc! {"company_id": 1, "workflow_run_id": 1}),
+            ),
             (
                 "run_steps",
                 unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
@@ -413,7 +419,7 @@ impl MongoStore {
         // is.
         const INDEX_CONCURRENCY: usize = 10;
 
-        let extra: [(&str, IndexModel); 9] = [
+        let extra: [(&str, IndexModel); 11] = [
             ("owners", unique(doc! {"company_id": 1})),
             // Issue #241: the cross-replica arbiter. This unique compound index
             // is what turns two replicas racing one schedule minute into one
@@ -430,6 +436,18 @@ impl MongoStore {
             ("run_outputs", unique(doc! {"company_id": 1, "run_id": 1})),
             (
                 "run_outputs",
+                nonunique(doc! {"company_id": 1, "at_ms": -1}),
+            ),
+            // The unredacted step detail. `(company_id, run_id, step_seq)` is
+            // unique because that pair IS the key — a reasoning run flushes
+            // twice under the same ordinal and must converge rather than
+            // duplicate. The recency index backs the newest-N-runs prune.
+            (
+                "run_step_details",
+                unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
+            ),
+            (
+                "run_step_details",
                 nonunique(doc! {"company_id": 1, "at_ms": -1}),
             ),
             // Issue #726: the runtime journal. `(company_id, seq)` is unique
@@ -2246,6 +2264,105 @@ impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// DeepTraceStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::deep_trace::DeepTraceStore for MongoStore {
+    async fn append_step_detail(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::deep_trace::RunStepDetailRecord,
+    ) -> Result<()> {
+        use crate::ports::deep_trace::MAX_DEEP_RUNS_PER_COMPANY;
+        let coll = self.collection("run_step_details");
+        // Upsert: last-write-wins per `(company, run_id, step_seq)`, so a
+        // reasoning run that flushes partway and again at close converges.
+        coll.update_one(
+            doc! {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "step_seq": record.step_seq as i64,
+            },
+            doc! {"$set": {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "step_seq": record.step_seq as i64,
+                "at_ms": record.at_millis as i64,
+                "detail_json": serde_json::to_string(&record.detail)?,
+            }},
+        )
+        .with_options(UpdateOptions::builder().upsert(true).build())
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap by RUN, not by row: ranking rows would leave a
+        // surviving run holding a torn half of its own trace. A run's recency is
+        // the newest `at_ms` any of its rows carries, so a long run is ranked by
+        // when it last wrote. Two statements, like the run-output prune beside
+        // it — Mongo has no "delete all but the newest N" operator.
+        let mut cursor = coll
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"at_ms": -1, "run_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut seen: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            let id = get_str(&doc, "run_id")?;
+            if !seen.contains(&id) {
+                seen.push(id);
+            }
+        }
+        if seen.len() > MAX_DEEP_RUNS_PER_COMPANY {
+            let stale: Vec<&String> = seen.iter().skip(MAX_DEEP_RUNS_PER_COMPANY).collect();
+            coll.delete_many(doc! {
+                "company_id": company.as_ref(),
+                "run_id": {"$in": stale},
+            })
+            .await
+            .map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    async fn list_step_details(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Vec<crate::ports::deep_trace::RunStepDetailRecord>> {
+        let mut cursor = self
+            .collection("run_step_details")
+            .find(doc! {"company_id": company.as_ref(), "run_id": run_id})
+            .sort(doc! {"step_seq": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(crate::ports::deep_trace::RunStepDetailRecord {
+                run_id: run_id.to_string(),
+                step_seq: get_i64(&doc, "step_seq")? as u32,
+                at_millis: get_i64(&doc, "at_ms")? as u64,
+                detail: serde_json::from_str(&get_str(&doc, "detail_json")?)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn purge_deep_trace(&self, company: &CompanyId, run_id: Option<&str>) -> Result<u64> {
+        let filter = match run_id {
+            Some(id) => doc! {"company_id": company.as_ref(), "run_id": id},
+            None => doc! {"company_id": company.as_ref()},
+        };
+        let result = self
+            .collection("run_step_details")
+            .delete_many(filter)
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -2279,6 +2396,8 @@ impl crate::ports::runs::RunStore for MongoStore {
             task_id: spec.task_id,
             agent_id: spec.agent_id,
             chat_id: spec.chat_id,
+            workflow_run_id: spec.workflow_run_id,
+            node_id: spec.node_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2308,6 +2427,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
                 "task_id": run.task_id.as_deref(),
+                "workflow_run_id": run.workflow_run_id.as_deref(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
                 "created_ms": run.created_at_millis as i64,
@@ -2344,6 +2464,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
                     "task_id": run.task_id.as_deref(),
+                    "workflow_run_id": run.workflow_run_id.as_deref(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
                     "created_ms": run.created_at_millis as i64,
@@ -2364,6 +2485,9 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut query = doc! {"company_id": company.as_ref()};
         if let Some(task_id) = &filter.task_id {
             query.insert("task_id", task_id.as_str());
+        }
+        if let Some(workflow_run_id) = &filter.workflow_run_id {
+            query.insert("workflow_run_id", workflow_run_id.as_str());
         }
         if !filter.statuses.is_empty() {
             let statuses: Vec<&str> = filter.statuses.iter().map(|s| s.as_str()).collect();
@@ -4969,6 +5093,20 @@ mod test {
             Some(7),
             "first-write-wins still holds for the fields that were present"
         );
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_deep_trace_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_deep_trace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_run_store_workflow_join() {
+        let Some(s) = store().await else { return };
+        conformance::assert_run_store_workflow_join(s.clone()).await;
         drop_db(&s).await;
     }
 

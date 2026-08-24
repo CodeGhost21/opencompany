@@ -15,6 +15,7 @@ use super::connections::{ConnectionStateGql, DomainStatusGql, SmtpStatusGql};
 use super::finances::FinancesGql;
 use super::inbox::InboxGql;
 use super::memory_facts::{MemoryFactGql, MemoryKindGql};
+use super::observability;
 use super::pagination::Page;
 use super::policy;
 use super::skills::SkillGql;
@@ -120,6 +121,32 @@ impl CompanyGql {
         #[graphql(default = 0)] offset: i32,
     ) -> async_graphql::Result<Page<TaskGql>> {
         tasks::resolve(&self.runtime, column, first, offset).await
+    }
+
+    /// Attempts at work — a card dispatch, a chat turn, or a workflow node —
+    /// newest first, each with its step trace.
+    ///
+    /// `workflowRunId` is the join that had no answer before agent nodes minted
+    /// rows: a node's turn has neither a card nor a conversation, so nothing
+    /// could ask what a workflow run's agents did.
+    async fn agent_runs(
+        &self,
+        task_id: Option<ID>,
+        workflow_run_id: Option<ID>,
+        #[graphql(default = 50)] limit: i32,
+    ) -> async_graphql::Result<Vec<observability::AgentRunGql>> {
+        observability::resolve_runs(
+            &self.runtime,
+            task_id.map(|id| id.0),
+            workflow_run_id.map(|id| id.0),
+            limit,
+        )
+        .await
+    }
+
+    /// One attempt by id, with its step trace; null when absent.
+    async fn agent_run(&self, id: ID) -> async_graphql::Result<Option<observability::AgentRunGql>> {
+        observability::resolve_run(&self.runtime, id.0).await
     }
 
     /// The company's installed skills.

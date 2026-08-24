@@ -318,6 +318,13 @@ struct RunDetail {
 struct RunsQuery {
     /// Only attempts at this card. Absent = every card.
     task: Option<String>,
+    /// Only attempts spawned by this workflow run's `agent` nodes. Absent =
+    /// every attempt, workflow-spawned or not.
+    ///
+    /// The join a run inspector needs: a workflow node's turn has neither a card
+    /// nor a conversation, so before this there was no selector that could
+    /// reach it.
+    workflow_run: Option<String>,
     /// A comma-separated status list (`?status=failed,cancelled`). Absent =
     /// any status. An unknown word is a 400 rather than a silent empty page:
     /// a typo'd filter that returns `[]` looks exactly like "nothing matched".
@@ -350,6 +357,7 @@ impl RunsQuery {
         }
         Ok(RunFilter {
             task_id: self.task,
+            workflow_run_id: self.workflow_run,
             statuses,
             limit: Some(match self.limit {
                 Some(0) | None => DEFAULT_RUN_LIMIT,
@@ -949,6 +957,7 @@ mod tests {
     fn the_limit_clamps_and_zero_means_default() {
         let filter = |limit: Option<usize>| {
             RunsQuery {
+                workflow_run: None,
                 task: None,
                 status: None,
                 limit,

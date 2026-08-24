@@ -2238,3 +2238,137 @@ async fn a_prose_note_projects_no_binary_metadata() {
     assert!(note["size"].is_null(), "{note}");
     assert!(note["sha256"].is_null(), "{note}");
 }
+
+// ---------------------------------------------------------------------------
+// Run observability: what a company's agents actually did
+// ---------------------------------------------------------------------------
+
+/// Seeds one workflow-node attempt with a two-step trace and a deep half.
+async fn given_a_workflow_node_attempt(state: &AppState) {
+    use crate::ports::deep_trace::{RunStepDetailRecord, TurnStepDetail};
+    use crate::ports::runs::{NewRun, RunStepRecord};
+    use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
+
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("runtime");
+    let runs = runtime.runs();
+
+    let row = runs
+        .create_run(
+            &id,
+            NewRun::for_workflow_node("att-1", "wr-1", "solve", "programmer"),
+        )
+        .await
+        .unwrap();
+    runs.begin_run_untriggered(&id, &row.id).await.unwrap();
+
+    for (seq, kind, label) in [
+        (0u32, TurnStepKind::Thinking, "Thinking"),
+        (1, TurnStepKind::ToolCall, "Shell"),
+    ] {
+        runs.append_run_step(
+            &id,
+            &RunStepRecord {
+                run_id: "att-1".to_string(),
+                step_seq: seq,
+                at_millis: 100 + seq as u64,
+                step: TurnStep {
+                    kind,
+                    status: TurnStepStatus::Ok,
+                    label: label.to_string(),
+                    result: (seq == 1).then(|| "1 line".to_string()),
+                    ..TurnStep::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    runtime
+        .deep_trace()
+        .append_step_detail(
+            &id,
+            &RunStepDetailRecord {
+                run_id: "att-1".to_string(),
+                step_seq: 0,
+                at_millis: 100,
+                detail: TurnStepDetail {
+                    reasoning: Some("Collatz — memoise the chain".to_string()),
+                    ..TurnStepDetail::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The join, in one request: workflow run → attempts → steps → deep detail.
+///
+/// This is the query that had no answer before an `agent` node minted a row —
+/// its turn has neither a card nor a conversation, so nothing could name it.
+#[tokio::test]
+async fn agent_runs_walks_a_workflow_run_to_its_reasoning() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"wr-1\") { id agentId nodeId workflowRunId status stepCount steps { seq kind label result deep { reasoning } } } } }"}"#,
+    )
+    .await;
+
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "one node ran under wr-1: {value}");
+    let run = &runs[0];
+    assert_eq!(run["id"], "att-1");
+    assert_eq!(run["agentId"], "programmer");
+    assert_eq!(run["nodeId"], "solve");
+    assert_eq!(run["workflowRunId"], "wr-1");
+
+    // Live, so the settled count is deliberately null — a client must count the
+    // steps rather than trust a total the settle has not written yet.
+    assert!(
+        run["stepCount"].is_null(),
+        "a running attempt has no settled count"
+    );
+
+    let steps = run["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["kind"], "thinking");
+    assert_eq!(steps[1]["label"], "Shell");
+    assert_eq!(steps[1]["result"], "1 line");
+
+    // The deep half: reasoning the scrubbed step deliberately does not carry.
+    assert_eq!(steps[0]["deep"]["reasoning"], "Collatz — memoise the chain");
+    assert!(
+        steps[1]["deep"].is_null(),
+        "a step with no detail recorded has no deep half"
+    );
+}
+
+/// An unrelated workflow run selects nothing rather than everything — the
+/// failure mode of a filter that is silently dropped.
+#[tokio::test]
+async fn agent_runs_filters_by_workflow_run() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"other\") { id } } }"}"#,
+    )
+    .await;
+    assert_eq!(
+        value["data"]["company"]["agentRuns"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "{value}"
+    );
+}

@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { observatoryHref } from "@/views/observatory/hash";
 import { Button } from "@/components/ui/button";
 import type {
   DeliveryReport,
@@ -411,6 +412,20 @@ function RunHistoryRow({
           <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal">
             scheduled
           </Badge>
+        )}
+        {/* The bridge to the Observatory: this panel says what each NODE did,
+            and that view says what each node's AGENT did — the steps, the tool
+            calls, the reasoning. Rendered only when the row carries a run id,
+            since a row journaled before #371 has none to address. */}
+        {run.runId && (
+          <a
+            href={observatoryHref(run.runId)}
+            className="text-2xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            data-testid="workflow-run-inspect"
+            onClick={(event) => event.stopPropagation()}
+          >
+            Inspect
+          </a>
         )}
         <span
           className="text-2xs text-muted-foreground"

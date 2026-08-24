@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   // AppWindow,  // re-add with the Pages nav entry below
   Brain,
   FolderClosed,
@@ -106,6 +107,13 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 const WorkflowsView = lazy(() =>
   import("@/views/WorkflowsView").then((m) => ({ default: m.WorkflowsView })),
 );
+// Lazy for the reason the canvas is: it pulls recharts, and an operator who
+// never opens the Observatory should not pay for it.
+const ObservatoryView = lazy(() =>
+  import("@/views/observatory/ObservatoryView").then((m) => ({
+    default: m.ObservatoryView,
+  })),
+);
 // Pulls in the markdown renderer — load on demand.
 const WorkspaceView = lazy(() =>
   import("@/views/WorkspaceView").then((m) => ({ default: m.WorkspaceView })),
@@ -172,6 +180,9 @@ const NAV: NavItem[] = [
   // `server::ops::finance`. See docs/spec/runtime/finance-console.md.
   { view: "finances", label: "Finance", icon: Wallet },
   { view: "workflows", label: "Workflows", icon: Workflow },
+  // What the agents actually did, run by run — the read-only companion to
+  // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
+  { view: "observatory", label: "Observatory", icon: Activity },
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
   // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
   // "something an agent built" surfaces, as opposed to the fixed views above.
@@ -490,6 +501,8 @@ export function AppShell({
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
+  /** Bumped by a live turn frame that belongs to no chat — see `onTurnEvent`. */
+  const [backgroundTurnTick, setBackgroundTurnTick] = useState(0);
   // Issue #384: bumped on every `workflow_created` / `workflow_updated` /
   // `workflow_deleted`, and since issue #276 on `workflow_enabled_changed` too,
   // so the Workflows view re-reads its picker while the tab stays open — a graph
@@ -1507,7 +1520,20 @@ export function AppShell({
     // when a frame carries no chatId (older host / background turn).
     const threadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
-    if (!threadId) return; // a background/task turn — not part of a chat.
+    if (!threadId) {
+      // A background/task turn — no chat bubble to fold it into, which is why
+      // this used to `return` and drop the frame entirely. A workflow `agent`
+      // node's turn is exactly this shape, so every frame it emitted vanished
+      // and no surface could show one running.
+      //
+      // A counter rather than the payload, deliberately: the Observatory treats
+      // its fetched snapshot as authority and reacts by re-reading, so two
+      // frames collapsing inside one React batch still mean "re-read" exactly
+      // once. Accumulating payloads here would reintroduce the frame-loss trap
+      // `views/workflows/graph.ts` documents.
+      setBackgroundTurnTick((n) => n + 1);
+      return;
+    }
     setLiveStepsByThread((prev) => {
       const rows = prev[threadId] ? [...prev[threadId]] : [];
       if (event.type === "tool_call") {
@@ -2106,7 +2132,29 @@ export function AppShell({
               onDecideStart={(approvalId) => ownApprovalDecisionsRef.current.add(approvalId)}
             />
           )}
-          {view === "workflows" && (
+          {view === "observatory" && (
+          <Suspense
+            fallback={
+              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
+                Loading observatory…
+              </div>
+            }
+          >
+            <ObservatoryView
+              client={client}
+              company={company}
+              // `#/observatory/<workflowRunId>` — the run to inspect, or null
+              // for the index. Unvalidated here for the reason every other
+              // sub-page is: only the view knows which run ids exist.
+              runId={sub}
+              // One tick for both signals a re-read should follow: a workflow
+              // run moved, or a background turn emitted a frame that belongs to
+              // no chat (which is every workflow node's turn).
+              eventTick={workflowRunTick + backgroundTurnTick}
+            />
+          </Suspense>
+        )}
+        {view === "workflows" && (
             <Suspense
               fallback={
                 <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">

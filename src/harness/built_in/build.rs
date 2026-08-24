@@ -1942,6 +1942,8 @@ mod tests {
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         }
     }
 

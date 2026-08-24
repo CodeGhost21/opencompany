@@ -1087,6 +1087,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // stays the three structural scalars it already was — the console
             // surfaces diagnostics from the run-detail drawer, not this stream.
             diagnostics: _,
+            agent_run_id,
         } => {
             let mut o = envelope("workflow_node_finished");
             o["workflowId"] = json!(workflow_id);
@@ -1094,6 +1095,15 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["nodeId"] = json!(node_id);
             o["status"] = json!(status);
             o["elapsedMs"] = json!(elapsed_ms);
+            // A fourth structural id, on the same terms as the three above: it
+            // is reachable by this same operator through `GET {scope}/runs`, and
+            // it is what lets a console watching the canvas open the node's step
+            // trace directly rather than searching for which attempt was its.
+            // Omitted entirely when the node opened none, so a frame for a
+            // non-agent node is byte-identical to what it was.
+            if let Some(agent_run_id) = agent_run_id {
+                o["agentRunId"] = json!(agent_run_id);
+            }
             o
         }
         // Issue #983: a turn was accepted, so a console watching the
@@ -3992,6 +4002,8 @@ mode = "full"
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -8105,6 +8117,7 @@ mode = "full"
             status: crate::ports::types::WorkflowNodeStatus::Error,
             elapsed_ms: 1234,
             diagnostics: Vec::new(),
+            agent_run_id: None,
         }))
         .expect("workflow_node_finished reaches the console");
         assert_eq!(node["type"], "workflow_node_finished");

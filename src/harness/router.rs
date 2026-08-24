@@ -213,9 +213,10 @@ impl RunTurn for HarnessRouter {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
+        run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.engine_for(agent_id)?
-            .run_background(company, agent_id, message)
+            .run_background(company, agent_id, message, run_sink)
             .await
     }
 
@@ -467,7 +468,7 @@ mod tests {
         );
         assert_eq!(
             router
-                .run_background(&company(), "researcher", "hi")
+                .run_background(&company(), "researcher", "hi", None)
                 .await
                 .unwrap()
                 .reply,

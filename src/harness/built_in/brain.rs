@@ -3408,6 +3408,8 @@ description = "Runs Acme."
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record)
     }
@@ -3595,6 +3597,8 @@ description = "Builds it."
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -3721,6 +3725,8 @@ members = ["engineer"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -5630,6 +5636,8 @@ members = ["engineer"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -6628,6 +6636,8 @@ members = ["eng1", "eng2"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -6781,6 +6791,8 @@ members = ["eng1", "eng2"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -6877,6 +6889,8 @@ members = ["eng1", "eng2"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -7214,6 +7228,8 @@ members = ["eng1", "eng2"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -7719,6 +7735,8 @@ members = ["eng1", "eng2"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -8048,6 +8066,8 @@ members = ["eng1", "eng2"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
@@ -8454,6 +8474,8 @@ members = ["eng1", "eng2"]
             repos: None,
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_desk()),

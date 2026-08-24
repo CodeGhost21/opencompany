@@ -308,6 +308,7 @@ mod test {
             status: WorkflowNodeStatus::Ok,
             elapsed_ms: 1,
             diagnostics: Vec::new(),
+            agent_run_id: None,
         }
     }
 

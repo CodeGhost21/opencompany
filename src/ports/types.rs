@@ -1395,6 +1395,21 @@ pub enum CompanyEvent {
         /// byte-for-byte as it did before.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         diagnostics: Vec<String>,
+        /// The attempt this node's agent ran as, when it opened one.
+        ///
+        /// A **structural id and nothing more**, which is why it is allowed on
+        /// an event whose whole stance is "ids, never payloads": it is no more
+        /// revealing than the `node_id` beside it, and it is what lets a console
+        /// go from a node on the canvas to that node's step trace without a
+        /// second round trip to find which attempt belonged to it.
+        ///
+        /// Absent for a non-agent node, for a host that records no attempts, and
+        /// on every line written before this field existed. Same `default` +
+        /// `skip_serializing_if` shape as `diagnostics` above, for the same
+        /// reason: the journal is replayed at boot, so a field without a default
+        /// would turn every pre-existing line into silent history loss.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_run_id: Option<String>,
     },
     /// One `output` node's report actually left the process (issue #529) — the
     /// durable record of a dispatch that the run's own
@@ -6762,6 +6777,7 @@ mod test {
                 status,
                 elapsed_ms: 1234,
                 diagnostics: Vec::new(),
+                agent_run_id: None,
             };
             assert_eq!(round_trip(&event), event);
         }
@@ -6848,6 +6864,7 @@ mod test {
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 7,
             diagnostics: Vec::new(),
+            agent_run_id: None,
         })
         .expect("serialize");
         assert_eq!(

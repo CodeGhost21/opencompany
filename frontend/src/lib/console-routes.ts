@@ -51,6 +51,7 @@ export type View =
   | "memory"
   | "approvals"
   | "workflows"
+  | "observatory"
   | "pages"
   | "finances"
   | "settings"
@@ -106,6 +107,18 @@ const ROUTABLE: Record<View, true> = {
   memory: true,
   approvals: true,
   workflows: true,
+  /**
+   * The run observatory: what a company's agents actually did, run by run.
+   *
+   * A view of its own rather than a fourth lens inside `workflows`, which is an
+   * *authoring and operating* surface — create, edit, arm, run, cancel, decide
+   * approvals. This one is read-only, cross-run and agent-centric, and the DAG
+   * is one lens on it rather than the subject.
+   *
+   * Addresses past the second segment are query keys, because `useHashView`
+   * carries only head/sub: `#/observatory/<runId>?agent=&turn=&step=`.
+   */
+  observatory: true,
   /**
    * No nav row (issues #1171, #1172) — and this entry is the half of that
    * removal which went missing until issue #1311. Pages is the agent-authored

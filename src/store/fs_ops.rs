@@ -27,6 +27,7 @@ use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ledger::{LedgerEvent, LedgerSpec};
 use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
+use crate::ports::deep_trace::{DeepTraceStore, MAX_DEEP_RUNS_PER_COMPANY, RunStepDetailRecord};
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::ledgers::LedgerStore;
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
@@ -776,6 +777,105 @@ fn prune_run_outputs(all: &mut Vec<WorkflowRunOutputRecord>) {
 }
 
 // ---------------------------------------------------------------------------
+// DeepTraceStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl DeepTraceStore for FsOps {
+    async fn append_step_detail(
+        &self,
+        company: &CompanyId,
+        record: &RunStepDetailRecord,
+    ) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.deep_trace_jsonl();
+        // The per-path lock makes read-dedup-prune-write atomic against a
+        // concurrent step write — process-local, the documented fs-backend
+        // assumption everywhere in this file.
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut all = read_jsonl::<RunStepDetailRecord>(&path).await?;
+        // Last-write-wins per (run_id, step_seq). A reasoning run flushes once
+        // partway through and again at close, both under the same ordinal, so
+        // without this a long thought would stack rather than converge.
+        all.retain(|r| !(r.run_id == record.run_id && r.step_seq == record.step_seq));
+        all.push(record.clone());
+        prune_deep_trace(&mut all);
+        rewrite_jsonl(&path, &all).await
+    }
+
+    async fn list_step_details(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Vec<RunStepDetailRecord>> {
+        let all =
+            read_jsonl::<RunStepDetailRecord>(&self.bundle(company).deep_trace_jsonl()).await?;
+        let mut mine: Vec<RunStepDetailRecord> = Vec::new();
+        for record in all {
+            if record.run_id != run_id {
+                continue;
+            }
+            // Last-write-wins on read too: two lines can share an ordinal after
+            // a crash between append and rewrite, and the later one is the truth.
+            match mine.iter_mut().find(|r| r.step_seq == record.step_seq) {
+                Some(existing) => *existing = record,
+                None => mine.push(record),
+            }
+        }
+        mine.sort_by_key(|r| r.step_seq);
+        Ok(mine)
+    }
+
+    async fn purge_deep_trace(&self, company: &CompanyId, run_id: Option<&str>) -> Result<u64> {
+        let path = self.bundle(company).deep_trace_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut all = read_jsonl::<RunStepDetailRecord>(&path).await?;
+        let before = all.len();
+        match run_id {
+            Some(id) => all.retain(|r| r.run_id != id),
+            None => all.clear(),
+        }
+        let removed = before - all.len();
+        if removed > 0 {
+            rewrite_jsonl(&path, &all).await?;
+        }
+        Ok(removed as u64)
+    }
+}
+
+/// Trims `all` to the newest [`MAX_DEEP_RUNS_PER_COMPANY`] runs, dropping every
+/// record belonging to an older one.
+///
+/// Prunes by **run**, not by record: dropping the oldest N rows would leave a
+/// run holding a torn half of its own trace, which reads as "the agent stopped
+/// thinking here" rather than "this run's bodies were pruned". Recency is the
+/// newest `at_millis` any of a run's records carries, so a long run is ranked by
+/// when it last wrote rather than when it started.
+fn prune_deep_trace(all: &mut Vec<RunStepDetailRecord>) {
+    let mut newest: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for record in all.iter() {
+        let entry = newest.entry(record.run_id.as_str()).or_insert(0);
+        *entry = (*entry).max(record.at_millis);
+    }
+    if newest.len() <= MAX_DEEP_RUNS_PER_COMPANY {
+        return;
+    }
+    let mut ranked: Vec<(&str, u64)> = newest.into_iter().collect();
+    // Newest first, with the run id as a tiebreaker so a prune is deterministic
+    // when two runs share a millisecond.
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let keep: std::collections::HashSet<String> = ranked
+        .into_iter()
+        .take(MAX_DEEP_RUNS_PER_COMPANY)
+        .map(|(id, _)| id.to_string())
+        .collect();
+    all.retain(|r| keep.contains(&r.run_id));
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -818,6 +918,8 @@ impl RunStore for FsOps {
             task_id: spec.task_id,
             agent_id: spec.agent_id,
             chat_id: spec.chat_id,
+            workflow_run_id: spec.workflow_run_id,
+            node_id: spec.node_id,
             attempt,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2339,6 +2441,79 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_run_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_deep_trace_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_deep_trace_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_run_store_workflow_join() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_run_store_workflow_join(Arc::new(FsOps::new(&root))).await;
+    }
+
+    /// The prune drops whole runs, never a torn half of one.
+    ///
+    /// Backend-specific because it reaches past the cap, which would make the
+    /// shared conformance suite write thousands of rows on every backend to
+    /// assert a property one implementation owns.
+    #[tokio::test]
+    async fn deep_trace_prune_keeps_whole_runs() {
+        use crate::ports::deep_trace::{
+            DeepTraceStore, MAX_DEEP_RUNS_PER_COMPANY, RunStepDetailRecord, TurnStepDetail,
+        };
+
+        let root_dir = tmp_root();
+        let ops = FsOps::new(root_dir.path());
+        let company = CompanyId::new("alpha");
+
+        // One run past the cap, two steps each, oldest first.
+        let runs = MAX_DEEP_RUNS_PER_COMPANY + 1;
+        for run in 0..runs {
+            for seq in 0..2u32 {
+                ops.append_step_detail(
+                    &company,
+                    &RunStepDetailRecord {
+                        run_id: format!("run-{run:04}"),
+                        step_seq: seq,
+                        at_millis: (run as u64 + 1) * 1000,
+                        detail: TurnStepDetail {
+                            reasoning: Some(format!("run {run} step {seq}")),
+                            ..TurnStepDetail::default()
+                        },
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        }
+
+        // The oldest run went entirely...
+        assert!(
+            ops.list_step_details(&company, "run-0000")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the oldest run's bodies were pruned"
+        );
+        // ...and every survivor kept BOTH of its steps. A prune that dropped the
+        // oldest N *rows* would leave a run holding half its own trace, which
+        // reads as the agent stopping mid-thought.
+        for run in 1..runs {
+            assert_eq!(
+                ops.list_step_details(&company, &format!("run-{run:04}"))
+                    .await
+                    .unwrap()
+                    .len(),
+                2,
+                "run {run} kept a torn half of its trace"
+            );
+        }
     }
 
     /// A run row written before `task_id` could be absent still loads

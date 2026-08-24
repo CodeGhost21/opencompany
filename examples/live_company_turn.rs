@@ -158,6 +158,8 @@ async fn main() -> anyhow::Result<()> {
         repos: None,
         repo_bindings: Vec::new(),
         checkouts: Default::default(),
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let pool = HarnessPool::new();

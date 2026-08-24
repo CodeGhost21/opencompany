@@ -74,6 +74,15 @@ pub struct RunTraceSink {
     usage: StdMutex<TokenUsage>,
     /// How many step rows were actually written.
     persisted: StdMutex<u32>,
+    /// Where the unredacted companion of each step goes, when this host keeps
+    /// one.
+    ///
+    /// **Presence of the `Arc` IS the enablement.** There is deliberately no
+    /// boolean beside it: a host that does not retain deep traces constructs no
+    /// store, so there is nothing to write to and nothing to get wrong. A future
+    /// refactor replacing this with a flag would turn "cannot leak" into
+    /// "must remember not to".
+    deep: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
 }
 
 impl RunTraceSink {
@@ -86,7 +95,24 @@ impl RunTraceSink {
             trace: StdMutex::new(StepTrace::default()),
             usage: StdMutex::new(TokenUsage::default()),
             persisted: StdMutex::new(0),
+            deep: None,
         }
+    }
+
+    /// Also retain the unredacted companion of every step.
+    ///
+    /// Switches the trace itself into deep mode, so the two projections come
+    /// from one state machine and their ordinals cannot drift.
+    #[must_use]
+    pub fn with_deep(
+        mut self,
+        deep: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
+    ) -> Self {
+        if deep.is_some() {
+            self.trace = StdMutex::new(StepTrace::deep());
+        }
+        self.deep = deep;
+        self
     }
 
     /// The attempt this sink is tracing.
@@ -100,39 +126,66 @@ impl RunTraceSink {
     /// ordinal finalized, because `append_run_step` replaces on a matching
     /// `step_seq`. An event that maps to no step is a no-op.
     pub async fn record(&self, event: &AgentProgress) {
-        let Some((step_seq, step)) = self
+        let emitted = self
             .trace
             .lock()
             .expect("run trace")
-            // The lock is released before the await below — a store write must
+            // The lock is released before the awaits below — a store write must
             // never be held across the mutex the collector re-enters per event.
-            .push(event)
-        else {
-            return;
-        };
-        if step_seq >= MAX_RUN_STEPS {
-            return;
-        }
-        let record = RunStepRecord {
-            run_id: self.run_id.clone(),
-            step_seq,
-            at_millis: now_millis(),
-            step,
-        };
-        match self.runs.append_run_step(&self.company, &record).await {
-            Ok(()) => {
-                let mut persisted = self.persisted.lock().expect("run trace count");
-                // A finalized start rewrites its own row rather than adding one,
-                // so the count is the high-water ordinal, not the write count.
-                *persisted = (*persisted).max(step_seq + 1);
+            .push(event);
+        for (step_seq, step, detail) in emitted {
+            if step_seq >= MAX_RUN_STEPS {
+                continue;
             }
-            Err(err) => tracing::warn!(
-                company = %self.company,
-                run = %self.run_id,
+            let at_millis = now_millis();
+            let record = RunStepRecord {
+                run_id: self.run_id.clone(),
                 step_seq,
-                error = %err,
-                "[runs] could not persist a step of an attempt's trace; the turn continues"
-            ),
+                at_millis,
+                step,
+            };
+            match self.runs.append_run_step(&self.company, &record).await {
+                Ok(()) => {
+                    let mut persisted = self.persisted.lock().expect("run trace count");
+                    // A finalized start rewrites its own row rather than adding
+                    // one, so the count is the high-water ordinal, not the write
+                    // count.
+                    *persisted = (*persisted).max(step_seq + 1);
+                }
+                Err(err) => tracing::warn!(
+                    company = %self.company,
+                    run = %self.run_id,
+                    step_seq,
+                    error = %err,
+                    "[runs] could not persist a step of an attempt's trace; the turn continues"
+                ),
+            }
+
+            // The unredacted half, written after the skeleton so a reader can
+            // never meet a detail whose step does not exist. Best-effort like
+            // the step above: a full disk must degrade the record, never fail
+            // the turn.
+            let (Some(deep), Some(detail)) = (self.deep.as_ref(), detail) else {
+                continue;
+            };
+            if detail.is_empty() {
+                continue;
+            }
+            let record = crate::ports::deep_trace::RunStepDetailRecord {
+                run_id: self.run_id.clone(),
+                step_seq,
+                at_millis,
+                detail,
+            };
+            if let Err(err) = deep.append_step_detail(&self.company, &record).await {
+                tracing::warn!(
+                    company = %self.company,
+                    run = %self.run_id,
+                    step_seq,
+                    error = %err,
+                    "[runs] could not persist a step's deep detail; the turn continues"
+                );
+            }
         }
     }
 
@@ -309,6 +362,8 @@ mod tests {
                     error: None,
                     usage: TokenUsage::default(),
                     step_count: 0,
+                    workflow_run_id: None,
+                    node_id: None,
                 })
             }
             async fn get_run(
