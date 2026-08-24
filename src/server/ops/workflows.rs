@@ -7047,7 +7047,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                under_b.as_array().unwrap().len(),
+                under_b["files"].as_array().unwrap().len(),
                 0,
                 "a re-owner does not inherit the file: {under_b}"
             );
