@@ -1560,7 +1560,18 @@ impl HarnessAgentRunner {
         // here (they surface only on operator/desk chat replies).
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves.
-        self.settle_attempt(run_sink.as_ref(), crate::ports::RunStatus::Succeeded, None)
+        // A capped turn is a real, partial checkpoint rather than a completed
+        // answer. Keep the engine's typed `LimitStop` outcome below, but do not
+        // let the durable attempt claim that this node finished successfully.
+        let (status, error) = if outcome.hit_iteration_cap {
+            (
+                crate::ports::RunStatus::Failed,
+                Some("agent stopped at the max_tool_iterations cap before finishing".to_string()),
+            )
+        } else {
+            (crate::ports::RunStatus::Succeeded, None)
+        };
+        self.settle_attempt(run_sink.as_ref(), status, error)
             .await;
         let value = json!({ "text": outcome.reply, "agent_ref": agent_ref });
         Ok((value, outcome))
