@@ -2818,13 +2818,20 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
                 }
                 None => 0u8.hash(&mut hasher),
             }
-            // The spend cap and approval deadline join the fingerprint for the
-            // same reason the tier and list do: `ApprovalPolicy` is built once
-            // per roster, so a cap-only or deadline-only edit must still rebuild.
-            // `auto_approve_under_usd` is `Option<Option<f64>>` — hash the outer
-            // present marker, then the inner value with its own present marker,
-            // so `None` (no override), `Some(None)` (no cap: every spend parks)
-            // and `Some(Some(n))` are three distinct states.
+            // The spend cap joins the fingerprint for the same reason the tier
+            // and list do: `ApprovalPolicy` is built once per roster, so a
+            // cap-only edit must still rebuild. `auto_approve_under_usd` is
+            // `Option<Option<f64>>` — hash the outer present marker, then the
+            // inner value with its own present marker, so `None` (no override),
+            // `Some(None)` (no cap: every spend parks) and `Some(Some(n))` are
+            // three distinct states.
+            //
+            // `approval_ttl_hours` is deliberately NOT here: the deadline lives
+            // in the live gate's `AtomicU64`, applied by `apply_effective_policy`
+            // at `PUT`/`DELETE` time and at build, and the roster's
+            // `ApprovalPolicy` snapshot carries no TTL — so a deadline-only edit
+            // cannot be applied by rebuilding, and rebuilding would only discard
+            // live agent sessions for nothing.
             match &entry.auto_approve_under_usd {
                 Some(cap) => {
                     1u8.hash(&mut hasher);
@@ -2835,13 +2842,6 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
                         }
                         None => 0u8.hash(&mut hasher),
                     }
-                }
-                None => 0u8.hash(&mut hasher),
-            }
-            match &entry.approval_ttl_hours {
-                Some(hours) => {
-                    1u8.hash(&mut hasher);
-                    hours.hash(&mut hasher);
                 }
                 None => 0u8.hash(&mut hasher),
             }
