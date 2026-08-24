@@ -2361,6 +2361,7 @@ export function AppShell({
         client={client}
         company={company}
         force={setupForced}
+        routeOpen={view === "setup"}
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
