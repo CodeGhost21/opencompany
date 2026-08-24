@@ -2637,8 +2637,12 @@ mod test {
             },
         };
 
-        ops.append_step_detail(&company, &record("first", 10)).await.unwrap();
-        ops.append_step_detail(&company, &record("second", 20)).await.unwrap();
+        ops.append_step_detail(&company, &record("first", 10))
+            .await
+            .unwrap();
+        ops.append_step_detail(&company, &record("second", 20))
+            .await
+            .unwrap();
 
         // The read folds last-write-wins per ordinal...
         let got = ops.list_step_details(&company, "run-a").await.unwrap();
