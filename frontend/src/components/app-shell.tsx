@@ -2065,6 +2065,10 @@ export function AppShell({
               onOpenAgent={(agentId) =>
                 agentId ? navigate("team", agentId) : navigate("company")
               }
+              // The graph at `#/company/graph` names its core node after the
+              // company the way the rest of the console does (issue #1219),
+              // not after the slug.
+              companyName={feed.status.name}
               // Setup just staffed the company, so the roster read is stale.
               refreshKey={teamBuilt}
               // Skipping setup must not be a dead end: an unstaffed company keeps
