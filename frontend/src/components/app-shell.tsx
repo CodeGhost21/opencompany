@@ -50,7 +50,11 @@ import {
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
-import { arrivedViaSetupHandoff, clearSetupHandoff } from "@/setup/state";
+import {
+  arrivedViaSetupHandoff,
+  clearSetupHandoff,
+  setupHandoffHasScope,
+} from "@/setup/state";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
