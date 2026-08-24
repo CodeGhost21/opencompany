@@ -1611,9 +1611,10 @@ mod route_tests {
 
     /// The archive surface speaks the same camelCase [`TraceEntry`] contract
     /// as `/memory/traces` — `cycleId`/`atMillis`, never the storage type's
-    /// snake_case — and returns newest-first like the retained window.
+    /// snake_case — and orders newest-last, the same total order as the
+    /// retained window.
     #[tokio::test]
-    async fn the_archives_route_serializes_camelcase_newest_first() {
+    async fn the_archives_route_serializes_camelcase_newest_last() {
         let home = tempfile::tempdir().unwrap();
         let scopes: Arc<dyn crate::store::MemoryScopes> = Arc::new(ScriptedScopes {
             archived: vec![
@@ -1641,10 +1642,10 @@ mod route_tests {
         assert_eq!(status, StatusCode::OK);
         let rows = body.as_array().expect("a JSON array of traces");
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["cycleId"], "c-new", "newest first");
-        assert_eq!(rows[0]["atMillis"], 300);
-        assert_eq!(rows[0]["summary"], "newer");
-        assert_eq!(rows[1]["cycleId"], "c-old");
+        assert_eq!(rows[0]["cycleId"], "c-old");
+        assert_eq!(rows[1]["cycleId"], "c-new", "newest last, like /memory/traces");
+        assert_eq!(rows[1]["atMillis"], 300);
+        assert_eq!(rows[1]["summary"], "newer");
         assert!(
             rows[0].get("cycle_id").is_none() && rows[0].get("at_millis").is_none(),
             "the storage type's snake_case must not leak onto the wire"
