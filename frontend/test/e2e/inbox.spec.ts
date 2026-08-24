@@ -75,6 +75,9 @@ test("Inbox is reachable, explains that it is parked, and reads the host's per-a
   // optimistic toggle state survives, and the assertion below would prove
   // nothing about the host.
   await page.reload();
+  // Clearing storage also clears the tour's "seen" marker, so the first-run
+  // overlay is back. Dismiss it again rather than let it sit over the page.
+  await dismissTour(page);
   await expect(page.getByTestId("agent-inbox-toggle")).toBeChecked({ timeout: 30_000 });
 
   // The Inbox page lists that inbox and shows only real mail. With no ingested
