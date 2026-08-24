@@ -3178,6 +3178,24 @@ impl PolicyOverride {
     }
 }
 
+/// Serializes an operator spend-cap override as a number or explicit `null`.
+fn serialize_policy_cap<S>(value: &Option<Option<f64>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    value.serialize(serializer)
+}
+
+/// Deserializes a present spend-cap key, retaining `null` as an explicit
+/// no-cap override. An omitted key is handled by `#[serde(default)]` and never
+/// calls this function.
+fn deserialize_policy_cap<'de, D>(deserializer: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<f64>::deserialize(deserializer).map(Some)
+}
+
 /// Resolves a manifest `[policy]` against an operator override — the merge
 /// [`CompanyRecord::effective_policy`] applies, factored out so the runtime
 /// builder can build the approval gate from the same resolution without
