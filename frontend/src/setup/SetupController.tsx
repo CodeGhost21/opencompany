@@ -28,6 +28,36 @@ function onModelSettings(): boolean {
 }
 
 /**
+ * Settle the persisted redesign debt against the roster read on return.
+ *
+ * A redesign names the team the first pass created. That team may have been
+ * deleted or replaced by another operator while model settings were open — the
+ * return re-reads the roster precisely because the answer captured at leave
+ * time is a snapshot, not a fact. Reopening redesign against a boundary that no
+ * longer exists would build a full roster and sweep nothing (the recorded rows
+ * are gone), stacking a second team over the concurrent work.
+ *
+ * Returns the recorded ids that still exist, re-keying the debt to them when
+ * some vanished, or `null` when none survive and the debt is cancelled. A debt
+ * that recorded no ids is uncheckable and kept as it is — the empty list means
+ * there was no fallback team to replace, so nothing here can prove it gone.
+ */
+function reconcileRedesign(scope: LocalScope, roster: TeamMemberDto[]): string[] | null {
+  const recorded = setupRedesignIds(scope);
+  if (!recorded.length) return recorded;
+  const present = new Set(roster.map((member) => member.id));
+  const survivors = recorded.filter((id) => present.has(id));
+  if (!survivors.length) {
+    clearSetupRedesign(scope);
+    return null;
+  }
+  if (survivors.length !== recorded.length) {
+    markSetupRedesign(scope, survivors);
+  }
+  return survivors;
+}
+
+/**
  * Decides whether first-run setup opens, and gets out of the way once it has
  * (docs/spec/runtime/company-setup.md).
  *
