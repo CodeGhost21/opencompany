@@ -725,10 +725,7 @@ async fn evict_bounds_the_archive_when_the_loop_fails_partway() {
     // leaving c5 and c4 in the archive, which the failure-path prune must
     // bring back down to the newest one (c5).
     let mem = BoundMemory::bind(
-        Arc::new(MemoryTraitProvider::new(
-            FlakyStore::arc(6),
-            "flaky-engine",
-        )),
+        Arc::new(MemoryTraitProvider::new(FlakyStore::arc(6), "flaky-engine")),
         DriverClass::Embedded,
     )
     .unwrap();
