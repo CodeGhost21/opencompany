@@ -58,6 +58,7 @@ async function render(
         deciding: new Map(),
         decided,
         failed,
+        compact,
         onDecide: (_a: ApprovalSummary, _v: Verdict, _s: GrantScope) => {},
       }),
     );
