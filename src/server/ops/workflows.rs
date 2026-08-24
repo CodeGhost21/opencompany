@@ -1496,9 +1496,9 @@ async fn run_workflow(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("workflow execution"),
-                RunnerGap::InferenceRequired => super::inference_required("workflow execution"),
-                RunnerGap::NotWired => super::not_wired("workflow execution"),
+                RunnerGap::RestartPending => super::restart_required("workflow execution").into(),
+                RunnerGap::InferenceRequired => super::inference_required("workflow execution").into(),
+                RunnerGap::NotWired => super::not_wired("workflow execution").into(),
             },
         );
     };
