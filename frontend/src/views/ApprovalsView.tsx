@@ -435,7 +435,7 @@ export function ApprovalsView({
         <div {...queueHold}>
           <StandingPermissions
             grants={grants}
-            now={now}
+            now={regionNow}
             askerNames={askerNames}
             granterNames={granterNames}
             onRevoke={async (id) => {
