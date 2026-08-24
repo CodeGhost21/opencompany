@@ -52,6 +52,17 @@ interface SetupState {
    * stack a second one.
    */
   redesign?: boolean;
+  /**
+   * The host ids of the fallback team the first pass created, captured when the
+   * operator left to wire a model.
+   *
+   * The redesign's replacement may only remove **these** rows. Re-deriving the
+   * list from the roster on return would sweep up teammates other operators
+   * added while model settings were open — those rows belong to someone else's
+   * work and must survive the replacement. Ids survive a reload of the settings
+   * page, which is the whole point of storing them here rather than in a ref.
+   */
+  fallbackIds?: string[];
   at?: number;
 }
 
