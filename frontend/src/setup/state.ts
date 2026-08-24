@@ -165,10 +165,18 @@ export function setupRedesignIds(scope: LocalScope): string[] {
   return read(scope).fallbackIds ?? [];
 }
 
-/** Forget the redesign debt, once it has been paid by reopening the dialog. */
+/**
+ * Forget the redesign debt — both the owed flag and the rows it names.
+ *
+ * Called when the redesign is resolved (its build-out completed, which also
+ * clears the whole state) or explicitly declined ("I'll do this later"), never
+ * when the return merely reopens the dialog: a reload between the reopen and
+ * the build-out must still find the debt, or the fallback team would leave the
+ * ordinary gate reporting staffed and the owed redesign would be unreachable.
+ */
 export function clearSetupRedesign(scope: LocalScope): void {
   try {
-    const { redesign: _dropped, ...rest } = read(scope);
+    const { redesign: _dropped, fallbackIds: _ids, ...rest } = read(scope);
     localStorage.setItem(KEY(scope), JSON.stringify(rest));
   } catch {
     /* nothing to clear */
