@@ -105,8 +105,7 @@ describe("mentionsToClear", () => {
       "a",
     ]);
   });
-
-
+  it("returns nothing for a channel with no mentions", () => {
     expect(mentionsToClear(feed, "random")).toEqual([]);
   });
 
