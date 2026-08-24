@@ -285,7 +285,10 @@ impl ManifestApprovalGate {
             .approval_ttl_hours
             .map(|hours| hours.saturating_mul(60 * 60 * 1000))
             .unwrap_or(DEFAULT_TTL_MILLIS);
-        self.policy = policy;
+        self.policy
+            .write()
+            .expect("policy lock poisoned")
+            .clone_from(&policy);
         self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
     }
 
