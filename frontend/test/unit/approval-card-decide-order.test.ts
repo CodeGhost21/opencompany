@@ -450,4 +450,3 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       ),
     ).not.toBeNull();
   });
-});
