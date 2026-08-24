@@ -2957,6 +2957,11 @@ impl RuntimeBuilder {
         // the seed wins, and for `[tools]` / `[policy]` that is a security property
         // — a record-wins merge would let a runtime grant outlive the operator
         // revoking it in version control.
+        //
+        // The effective policy (seed + carried override) is computed now, before
+        // `overlay_policy` is moved into the record, so it can be applied to the
+        // live gate after the save succeeds — see below.
+        let effective_policy = effective_policy(&self.manifest.policy, overlay_policy.as_ref());
         store
             .save(&CompanyRecord {
                 overlay_retired_agents,
