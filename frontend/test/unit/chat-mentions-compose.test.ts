@@ -527,8 +527,8 @@ describe("mentionablesFor", () => {
   it("includes everyone when selfId is not provided", () => {
     const rows = mentionablesFor(directory, []);
     const labels = rows.map((r) => r.label);
-    expect(labels).toContain("engineer");
-    expect(labels).toContain("ceo");
+    expect(labels).toContain("Ada");
+    expect(labels).toContain("Rae");
     expect(labels).toContain("Jane Doe");
     expect(labels).toContain("everyone");
   });
