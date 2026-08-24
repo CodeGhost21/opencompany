@@ -48,8 +48,12 @@ const { PolicySettings } = await import("@/components/policy-settings");
 const STATUS: PolicyStatus = {
   mode: "auto",
   alwaysApprove: [],
+  autoApproveUnderUsd: null,
+  approvalTtlHours: 24,
   manifestMode: "auto",
   manifestAlwaysApprove: [],
+  manifestAutoApproveUnderUsd: null,
+  manifestApprovalTtlHours: null,
   overridden: false,
   takesEffect: "on the next turn",
   tiers: [
