@@ -15,17 +15,14 @@ boundary; parked effects surface in the operator's approvals inbox.
 
 The gate is built from the seed manifest's `[policy]` alone, then reconciled
 with the operator's console override once the persisted record is read.
-[`CompanyRecord::effective_policy`](crate::ports::types::CompanyRecord::effective_policy)
-resolves the merge (per field, `None` meaning "not overridden"), and the runtime
-applies it to the live gate with
-[`ManifestApprovalGate::apply_effective_policy`](crate::policy::gate::ManifestApprovalGate::apply_effective_policy)
-at boot/rebuild and at the start of every cycle (issue #1455). The swap keeps the
-parked queue and the emergency switch; only the evaluation snapshot and the
-derived deadline move.
+`CompanyRecord::effective_policy` resolves the merge (per field, `None` meaning
+"not overridden"), and the runtime applies it to the live gate with
+`ManifestApprovalGate::apply_effective_policy` at boot/rebuild and at the start
+of every cycle (issue #1455). The swap keeps the parked queue and the emergency
+switch; only the evaluation snapshot and the derived deadline move.
 
 The two halves move on different timings. The deadline (`[policy].approval_ttl_hours`)
-is **immediate**: a policy `PUT`/`DELETE` calls
-[`apply_effective_ttl`](crate::policy::gate::ManifestApprovalGate::apply_effective_ttl)
+is **immediate**: a policy `PUT`/`DELETE` calls `ManifestApprovalGate::apply_effective_ttl`
 right after the write persists, because a parked card's deadline is re-evaluated
 against the current TTL each time it is displayed, swept or resolved — waiting
 for the next cycle would let approvals parked under a longer TTL outlive the
