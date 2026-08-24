@@ -111,12 +111,12 @@ pub(crate) async fn require_admin(
     state: &AppState,
     runtime: &CompanyRuntime,
     peer: Option<std::net::SocketAddr>,
-) -> Result<UserPrincipal, Response> {
+) -> Result<UserPrincipal, crate::server::Rejection> {
     let principal = current_user(headers, state, runtime.id(), peer)
         .await
         .ok_or_else(unauthorized)?;
     if !principal.may_administer() {
-        return Err(forbidden());
+        return Err(forbidden().into());
     }
     Ok(principal)
 }
@@ -161,14 +161,10 @@ async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<Vec<UserSummary>>, Response> {
+) -> Result<Json<Vec<UserSummary>>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     require_admin(&headers, &state, &runtime, peer).await?;
-    let users = runtime
-        .users()
-        .list_users(runtime.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let users = runtime.users().list_users(runtime.id()).await?;
     Ok(Json(users.into_iter().map(UserSummary::from).collect()))
 }
 
@@ -178,26 +174,16 @@ async fn list_invites(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<Vec<InviteRecord>>, Response> {
+) -> Result<Json<Vec<InviteRecord>>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     require_admin(&headers, &state, &runtime, peer).await?;
     let now = now_millis();
-    let mut invites = runtime
-        .users()
-        .list_invites(runtime.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let mut invites = runtime.users().list_invites(runtime.id()).await?;
     // Manifest admins are eligible without an invite record. Showing only the
     // stored ones would render a list that contradicts who can actually log in.
     let stored: Vec<String> = invites.iter().map(|i| i.email.clone()).collect();
-    let users = runtime
-        .users()
-        .list_users(runtime.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
-    let synthetic = manifest_admin_invites(state.config(), &runtime, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let users = runtime.users().list_users(runtime.id()).await?;
+    let synthetic = manifest_admin_invites(state.config(), &runtime, now).await?;
     for invite in synthetic {
         let already_a_user = users.iter().any(|u| u.email == invite.email);
         if !stored.contains(&invite.email) && !already_a_user {
@@ -366,7 +352,10 @@ async fn send_invite_mail(
         Err(err) => {
             // The error, never the message: a body echoed into a log or into
             // telemetry carries the recipient's address off this host.
-            tracing::warn!(company = %runtime.id(), "invite mail failed: {err}");
+            // `error!`, not `warn!`: the default `EnvFilter` (no `RUST_LOG`)
+            // shows errors only, and this is the only line that records why an
+            // invite could not be delivered.
+            tracing::error!(company = %runtime.id(), "invite mail failed: {err}");
             InviteDelivery::Failed
         }
     }
@@ -400,32 +389,30 @@ async fn invite(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<InviteBody>,
-) -> Result<Json<InviteResult>, Response> {
+) -> Result<Json<InviteResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // Refused before authenticating the caller is checked, because the answer
     // does not depend on who is asking: a company with no sign-in has no second
     // person to admit, and an invite would grant an account nobody could ever
     // reach. See `AuthMode::None`.
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let admin = require_admin(&headers, &state, &runtime, peer).await?;
-    let identity = body
-        .identity(runtime.auth_mode())
-        .map_err(|e| ApiError(e).into_response())?;
+    let identity = body.identity(runtime.auth_mode())?;
     let now = now_millis();
     if runtime
         .users()
         .find_user_by_email(runtime.id(), &identity)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .is_some()
     {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
             "{} is already a member",
             LoginIdentity::parse(&identity).label()
         )))
-        .into_response());
+        .into_response()
+        .into());
     }
     let mut record = InviteRecord {
         id: generate_id(),
@@ -438,11 +425,7 @@ async fn invite(
         notified_at_millis: None,
     };
     // The store enforces one invite per address; a clash surfaces as 409.
-    runtime
-        .users()
-        .upsert_invite(runtime.id(), &record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    runtime.users().upsert_invite(runtime.id(), &record).await?;
 
     // Strictly after the grant lands. Mailing first would tell someone they
     // were invited by a request that then 409'd on a duplicate or failed in the
@@ -490,10 +473,10 @@ async fn revoke_invite(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, Response> {
+) -> Result<Json<serde_json::Value>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let invite_id = params.get("invite_id").cloned().unwrap_or_default();
@@ -506,7 +489,8 @@ async fn revoke_invite(
              [users].admins there instead"
                 .to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
     if invite_id.starts_with("platform:") {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
@@ -514,13 +498,13 @@ async fn revoke_invite(
              unset it there instead"
                 .to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
     let removed = runtime
         .users()
         .delete_invite(runtime.id(), &invite_id)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
@@ -542,10 +526,10 @@ async fn update_user(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<UpdateUser>,
-) -> Result<Json<UserSummary>, Response> {
+) -> Result<Json<UserSummary>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
@@ -566,11 +550,7 @@ async fn update_user(
         user.display_name = Some(name);
     }
     user.updated_at_millis = now_millis();
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    runtime.users().upsert_user(runtime.id(), &user).await?;
 
     // Suspension must bite now, not at cookie expiry. resolve_principal also
     // re-checks status per request; this closes the window and frees the rows.
@@ -606,30 +586,25 @@ async fn reset_password(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<ResetPassword>,
-) -> Result<Json<UserSummary>, Response> {
+) -> Result<Json<UserSummary>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // A password is an alternative to a mailbox round trip, so it exists only
     // where the mailbox does. Issuing one in wallet mode would create a
     // credential no route accepts; in `none` mode there is nobody to issue it
     // to.
     if let Some(refusal) = crate::server::users::routes::wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let mut user = load_user(&runtime, &user_id).await?;
 
-    password::validate(&body.password, &user.email).map_err(|e| ApiError(e).into_response())?;
-    let hash = password::hash(&token::OsTokens, &body.password)
-        .map_err(|e| ApiError(e).into_response())?;
+    password::validate(&body.password, &user.email)?;
+    let hash = password::hash(&token::OsTokens, &body.password)?;
     user.password_hash = Some(hash);
     user.must_change_password = true;
     user.updated_at_millis = now_millis();
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    runtime.users().upsert_user(runtime.id(), &user).await?;
 
     // Every session goes: a reset is what you do when you believe the account
     // is compromised, so leaving live sessions running would defeat it.
@@ -651,13 +626,13 @@ async fn revoke_sessions(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, Response> {
+) -> Result<Json<serde_json::Value>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // Nothing to revoke: a `none`-mode principal is resolved from configuration
     // on every request, so there is no session whose deletion would sign anyone
     // out. Succeeding would report a lever that does not exist.
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
@@ -665,22 +640,24 @@ async fn revoke_sessions(
     let revoked = runtime
         .sessions()
         .delete_for_user(runtime.id(), &user.id)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
-async fn load_user(runtime: &CompanyRuntime, user_id: &str) -> Result<UserRecord, Response> {
+async fn load_user(
+    runtime: &CompanyRuntime,
+    user_id: &str,
+) -> Result<UserRecord, crate::server::Rejection> {
     runtime
         .users()
         .get_user(runtime.id(), user_id)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::InvalidRequest(format!(
                 "no user {user_id}"
             )))
             .into_response()
+            .into()
         })
 }
 
@@ -688,15 +665,11 @@ async fn load_user(runtime: &CompanyRuntime, user_id: &str) -> Result<UserRecord
 async fn ensure_not_last_admin(
     runtime: &CompanyRuntime,
     target: &UserRecord,
-) -> Result<(), Response> {
+) -> Result<(), crate::server::Rejection> {
     if target.role != UserRole::Admin || target.status != UserStatus::Active {
         return Ok(());
     }
-    let users = runtime
-        .users()
-        .list_users(runtime.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let users = runtime.users().list_users(runtime.id()).await?;
     let others = users
         .iter()
         .filter(|u| {
@@ -707,7 +680,8 @@ async fn ensure_not_last_admin(
         return Err(ApiError(OpenCompanyError::Conflict(
             "this is the company's last admin; promote someone else first".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
     Ok(())
 }

@@ -28,6 +28,7 @@
 //! renewal *is* the stop signal. A console that closes mid-word therefore
 //! clears itself with no teardown to get wrong.
 
+use crate::server::error::Rejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -110,9 +111,9 @@ struct TypingBody {
 async fn list_presence(
     State(state): State<AppState>,
     company: ScopedCompany,
-) -> Result<Json<PresenceListDto>, Response> {
+) -> Result<Json<PresenceListDto>, Rejection> {
     let Some(_) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     Ok(Json(PresenceListDto {
         people: state.presence().list(company.id(), now_millis()),
@@ -123,9 +124,9 @@ async fn announce(
     State(state): State<AppState>,
     company: ScopedCompany,
     Json(body): Json<AnnounceBody>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     // An "offline" announcement is a disconnect, not a lease to store. `list`
     // only ever reads live leases, so an `Offline` entry inserted here would
@@ -168,9 +169,9 @@ async fn disconnect(
     State(state): State<AppState>,
     company: ScopedCompany,
     Query(query): Query<DisconnectQuery>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     let console = query.console_id.as_deref().unwrap_or(DEFAULT_CONSOLE);
     // Only announce a change the person's aggregate status actually made — a
@@ -200,16 +201,17 @@ async fn disconnect(
 async fn typing(
     company: ScopedCompany,
     Json(body): Json<TypingBody>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     if body.chat_id.trim().is_empty() {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": "chatId must not be empty", "code": "invalid_request" })),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
     crate::turn_stream::publish(
         company.id(),

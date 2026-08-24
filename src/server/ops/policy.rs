@@ -203,6 +203,18 @@ pub(crate) struct PolicyDto {
     /// When a change bites. Stated because "stop the flood now" is what an
     /// operator comes here to do, and this is not quite that.
     pub(crate) takes_effect: &'static str,
+    /// Every tool name this build's approval gate can match, for the console's
+    /// "is this a real tool?" note (issue #1423).
+    ///
+    /// The complete registry, not the granted-and-wired subset
+    /// (`/workflows/tool-slugs`): the gate matches a tool call by name, so an
+    /// entry naming a wired agent tool (`hosting_launch_site`,
+    /// `publish_artifact`) is a legitimate fence and must not be called a
+    /// mistake just because it cannot be a workflow node. Sourced from
+    /// `consequence::declared_tools`, which
+    /// `every_registered_tool_is_declared` proves covers every tool a live
+    /// agent can call.
+    pub(crate) known_tools: Vec<String>,
 }
 
 impl PolicyDto {
@@ -219,6 +231,15 @@ impl PolicyDto {
             set_at_millis: record.overlay_policy.as_ref().map(|o| o.at_millis),
             tiers: selectable_tiers(),
             takes_effect: TAKES_EFFECT,
+            known_tools: {
+                let mut tools: Vec<String> = crate::policy::consequence::declared_tools()
+                    .map(str::to_owned)
+                    .collect();
+                // Deterministic over the wire; the console compares membership,
+                // not order, but a stable list is easier to read and to test.
+                tools.sort();
+                tools
+            },
         }
     }
 }
@@ -251,7 +272,7 @@ struct SetPolicy {
 
 /// `GET {scope}/policy` — the tier in force, what the manifest would restore,
 /// and the selectable tiers with their consequences.
-async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, Response> {
+async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let record = load_record(&company).await?;
     Ok(Json(PolicyDto::build(&record)))
 }
@@ -264,14 +285,15 @@ async fn set_policy(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPolicy>,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
 
     if body.mode.is_none() && body.always_approve.is_none() {
         return Err(refusal(
             "Nothing to set. Send `mode`, `alwaysApprove`, or both — or `DELETE` \
              this endpoint to go back to the manifest's policy.",
-        ));
+        )
+        .into());
     }
 
     // Validate against the same list `company.toml` is validated against, so a
@@ -285,7 +307,8 @@ async fn set_policy(
         return Err(refusal(&format!(
             "`mode` must be one of {} — you sent `{mode}`.",
             POLICY_MODES.join(", ")
-        )));
+        ))
+        .into());
     }
 
     let write_lock = company_write_lock(company.id());
@@ -338,7 +361,7 @@ async fn clear_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -354,25 +377,29 @@ fn refusal(message: &str) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, message.to_string()).into_response()
 }
 
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 
-async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), Response> {
+async fn save(
+    company: &ScopedCompany,
+    record: &CompanyRecord,
+) -> Result<(), crate::server::Rejection> {
     company
         .runtime
         .store()
         .save(record)
         .await
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 #[cfg(test)]
@@ -471,6 +498,30 @@ mod tests {
         assert_eq!(body["overridden"], false);
         assert!(body["setBy"].is_null());
         assert!(!body["tiers"].as_array().unwrap().is_empty());
+    }
+
+    /// `GET` also answers the console's "is this a real tool?" note: the
+    /// complete gateable registry, not the workflow-authorable subset. A wired
+    /// agent tool that cannot be a workflow node (`publish_artifact`,
+    /// `hosting_launch_site`) is still a fence the gate matches, so it must be
+    /// present — otherwise the console would call a working entry a mistake.
+    #[tokio::test]
+    async fn get_serves_the_complete_gateable_tool_registry() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let known_tools: &Vec<Value> = body["knownTools"]
+            .as_array()
+            .expect("knownTools is an array");
+        assert!(
+            known_tools.iter().any(|tool| tool == "publish_artifact"),
+            "a wired agent tool the workflow catalog does not carry must be known"
+        );
+        assert!(
+            known_tools.iter().any(|tool| tool == "shell"),
+            "the registry still carries the workflow tools"
+        );
     }
 
     /// A tier `PUT` moves the tier and leaves the always-ask list on the

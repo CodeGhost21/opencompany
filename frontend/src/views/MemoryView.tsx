@@ -1,7 +1,6 @@
-// Parked by issue #302, re-listed in `app-shell.tsx`'s `NAV` with the
-// memory-engine work: an operator choosing between engines needs somewhere to
-// see which one is bound, what it negotiated, and whether the boot probe
-// reached it — that is the engine panel below the header.
+// Brain lives under Settings (issue #1416): the memory browser and its engine
+// controls belong together, while the sidebar keeps its scarce permanent rows
+// for surfaces an operator works from every day.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";

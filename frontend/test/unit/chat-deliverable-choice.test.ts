@@ -173,13 +173,15 @@ describe("composer intent selection (issue #984)", () => {
     }
 
     await send("ordinary message");
-    expect(sent).toHaveBeenLastCalledWith("ordinary message", undefined);
+    // Third argument is the resolved mentions, absent on a message that names
+    // nobody. Spelled out rather than omitted so the arity stays asserted.
+    expect(sent).toHaveBeenLastCalledWith("ordinary message", undefined, undefined);
 
     await act(async () => {
       (container.querySelector('[data-testid="composer-deliverable-workflow"]') as HTMLButtonElement).click();
     });
     await send("make it reusable");
-    expect(sent).toHaveBeenLastCalledWith("make it reusable", "workflow");
+    expect(sent).toHaveBeenLastCalledWith("make it reusable", "workflow", undefined);
 
     for (const intent of ["chat", "once", "workflow"]) {
       expect(

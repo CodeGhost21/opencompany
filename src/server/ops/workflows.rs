@@ -1477,7 +1477,7 @@ async fn run_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     body: Option<Json<RunWorkflowBody>>,
-) -> Result<RunWorkflowOk, Response> {
+) -> Result<RunWorkflowOk, crate::server::Rejection> {
     // No runner wired. THREE very different causes look identical from here —
     // `workflow_runner() == None` — and each points the operator at a different
     // next step (issues #266, #514):
@@ -1496,35 +1496,30 @@ async fn run_workflow(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("workflow execution"),
-                RunnerGap::InferenceRequired => super::inference_required("workflow execution"),
-                RunnerGap::NotWired => super::not_wired("workflow execution"),
+                RunnerGap::RestartPending => super::restart_required("workflow execution").into(),
+                RunnerGap::InferenceRequired => {
+                    super::inference_required("workflow execution").into()
+                }
+                RunnerGap::NotWired => super::not_wired("workflow execution").into(),
             },
         );
     };
 
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
     if !safe_wid(&wid) {
-        return Err(
-            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
-        );
+        return Err(OpenCompanyError::NotFound(format!("workflow {wid}")).into());
     }
 
     // Load the saved graph from the seed ∪ overlay union, so a graph created on
     // a hosted tenant (no source directory) runs the same as a committed one.
-    let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company).await?;
     let file = load_workflow_with_globals(
         company.runtime.source_dir(),
         &overlays,
         &globals_disable,
         &wid,
-    )
-    .map_err(|e| ApiError(e).into_response())?
-    .ok_or_else(|| {
-        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
-    })?;
+    )?
+    .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let detach = body.detach;
@@ -1549,8 +1544,7 @@ async fn run_workflow(
         file,
         body.input,
         dry_run,
-    )
-    .map_err(|e| ApiError(e).into_response())?;
+    )?;
 
     if detach {
         // Returned before the engine has walked a node. From here the client
@@ -1623,7 +1617,7 @@ async fn run_workflow(
                 approvals: run.approvals,
             })))
         }
-        Ok(Err(err)) => Err(ApiError(err).into_response()),
+        Ok(Err(err)) => Err(ApiError(err).into_response().into()),
         Err(join) => {
             tracing::error!(
                 company = %company.id(),
@@ -1639,7 +1633,8 @@ async fn run_workflow(
             Err(ApiError(OpenCompanyError::BackgroundTask(
                 "the workflow run task did not complete".to_string(),
             ))
-            .into_response())
+            .into_response()
+            .into())
         }
     }
 }
@@ -1897,13 +1892,14 @@ enum DraftFromDescriptionResponse {
 async fn draft_from_description(
     company: ScopedCompany,
     Json(body): Json<DraftFromDescriptionBody>,
-) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+) -> Result<Json<DraftFromDescriptionResponse>, crate::server::Rejection> {
     let description = body.description.trim();
     if description.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "describe the workflow you want in a sentence or two.".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
     // Char-safe cap on the request body before it reaches the metered path.
     let description: String = description
@@ -1918,9 +1914,11 @@ async fn draft_from_description(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
-                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
-                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot").into(),
+                RunnerGap::InferenceRequired => {
+                    super::inference_required("the workflow copilot").into()
+                }
+                RunnerGap::NotWired => super::not_wired("the workflow copilot").into(),
             },
         );
     }
@@ -1947,7 +1945,7 @@ async fn draft_from_description(
         }
         // A read the drafter could not proceed without (the company record) — a
         // genuine 500, not a model answer.
-        Err(err) => Err(ApiError(err).into_response()),
+        Err(err) => Err(ApiError(err).into_response().into()),
     }
 }
 
@@ -1959,15 +1957,16 @@ async fn draft_from_description(
 async fn draft_from_description(
     company: ScopedCompany,
     Json(body): Json<DraftFromDescriptionBody>,
-) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+) -> Result<Json<DraftFromDescriptionResponse>, crate::server::Rejection> {
     let _ = &company;
     if body.description.trim().is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "describe the workflow you want in a sentence or two.".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
-    Err(super::not_wired("the workflow copilot"))
+    Err(super::not_wired("the workflow copilot").into())
 }
 
 // ---------------------------------------------------------------------------
@@ -2118,13 +2117,11 @@ async fn fix_from_run(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Json(body): Json<FixFromRunBody>,
-) -> Result<Json<FixFromRunResponse>, Response> {
+) -> Result<Json<FixFromRunResponse>, crate::server::Rejection> {
     // `wid` becomes a filename on the read below — reject anything that could
     // escape `workflows/`.
     if !safe_wid(&wid) {
-        return Err(
-            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
-        );
+        return Err(OpenCompanyError::NotFound(format!("workflow {wid}")).into());
     }
 
     // No builder wired: classify WHY exactly as the draft + run routes do (issues
@@ -2133,18 +2130,18 @@ async fn fix_from_run(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
-                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
-                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot").into(),
+                RunnerGap::InferenceRequired => {
+                    super::inference_required("the workflow copilot").into()
+                }
+                RunnerGap::NotWired => super::not_wired("the workflow copilot").into(),
             },
         );
     }
 
     // Load the saved graph for `wid` (seed ∪ overlay) and convert it to the spec
     // the copilot corrects and pins its identity to.
-    let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company).await?;
     // A source-defined workflow (seed-backed, or seed-shadowed) can never take
     // the correction: `PUT …/workflows/{wid}` refuses it with the same 409 this
     // mirrors (`locate_editable_overlay`). Catching it here — before the copilot
@@ -2156,18 +2153,16 @@ async fn fix_from_run(
             "workflow `{wid}` is defined by a file in the company source tree, so a copilot fix \
              can't be saved for it. Edit `workflows/{wid}.toml` in the company repository instead."
         )))
-        .into_response());
+        .into_response()
+        .into());
     }
     let file = load_workflow_with_globals(
         company.runtime.source_dir(),
         &overlays,
         &globals_disable,
         &wid,
-    )
-    .map_err(|e| ApiError(e).into_response())?
-    .ok_or_else(|| {
-        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
-    })?;
+    )?
+    .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
     // field on `WorkflowNodeSpec` (the builder never authors them — see its
     // own doc comment), so a node that had any of the three set loses it
@@ -2188,9 +2183,7 @@ async fn fix_from_run(
 
     // The failure to correct from: prefer what the run journaled, fall back to the
     // caller's hint. Neither → there is nothing to fix from.
-    let journaled = journaled_run_failure(&company, &body.run_id)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let journaled = journaled_run_failure(&company, &body.run_id).await?;
     let hint = body
         .error_hint
         .as_deref()
@@ -2202,7 +2195,8 @@ async fn fix_from_run(
             "this run recorded no error to fix from — reopen the run, or pass its error as a hint."
                 .to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     };
     // The journal names a node id; the human-readable name comes from the saved
     // graph the id belongs to.
@@ -2250,7 +2244,7 @@ async fn fix_from_run(
             }))
         }
         // A read the drafter could not proceed without — a genuine 500.
-        Err(err) => Err(ApiError(err).into_response()),
+        Err(err) => Err(ApiError(err).into_response().into()),
     }
 }
 
@@ -2262,9 +2256,9 @@ async fn fix_from_run(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Json(body): Json<FixFromRunBody>,
-) -> Result<Json<FixFromRunResponse>, Response> {
+) -> Result<Json<FixFromRunResponse>, crate::server::Rejection> {
     let _ = (&company, &wid, &body.run_id, &body.error_hint);
-    Err(super::not_wired("the workflow copilot"))
+    Err(super::not_wired("the workflow copilot").into())
 }
 
 /// The `GET …/workflows/tool-slugs` answer (issues #783, #874): the tools the
@@ -2325,19 +2319,14 @@ struct UnwiredWorkflowTool {
 #[cfg(feature = "openhuman")]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
-) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+) -> Result<Json<WorkflowToolSlugsResponse>, crate::server::Rejection> {
     let record = company
         .runtime
         .store()
         .load(company.runtime.id())
         .await
         .map_err(|err| ApiError(err).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(
-                company.runtime.id().to_string(),
-            ))
-            .into_response()
-        })?;
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.runtime.id().to_string()))?;
     // `None` — no harness deps on this runtime — means the wiring is unknowable,
     // not that nothing is wired. Both helpers below read it that way: `slugs`
     // falls back to the grant-only set and `unwired` stays empty, which is the
@@ -2400,7 +2389,7 @@ async fn workflow_tool_slugs(
 #[cfg(not(feature = "openhuman"))]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
-) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+) -> Result<Json<WorkflowToolSlugsResponse>, crate::server::Rejection> {
     let _ = &company;
     Ok(Json(WorkflowToolSlugsResponse {
         slugs: Vec::new(),
@@ -2833,6 +2822,10 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                 status,
                 elapsed_ms,
                 diagnostics,
+                // Folded but not yet surfaced on the row: the run-history shape
+                // is a stable console contract, so the join rides the SSE frame and
+                // `GET {scope}/runs?workflow_run=` until a reader needs it here.
+                agent_run_id: _,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -6667,6 +6660,7 @@ mod tests {
                         status,
                         elapsed_ms: 42,
                         diagnostics: Vec::new(),
+                        agent_run_id: None,
                     },
                 )
                 .await

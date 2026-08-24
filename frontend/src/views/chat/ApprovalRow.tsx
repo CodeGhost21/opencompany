@@ -49,7 +49,9 @@ import {
   ApprovalPayload,
   ApprovalScopeControl,
   DeclineScopeControl,
+  approvalConsequence,
   approvalIcon,
+  batchConsequences,
   type ApprovalThreadLink,
 } from "@/components/approval-card";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -108,6 +110,20 @@ function partialLabel(settled: number, total: number): string {
 }
 
 /**
+ * The tint for a batch, only when every pending item has the same known
+ * consequence. An unclassified item makes the aggregate meaning ambiguous, so
+ * the icon remains neutral even if the other items share one consequence.
+ */
+function uniformConsequence(approvals: ApprovalSummary[]) {
+  const consequences = batchConsequences(approvals);
+  return consequences.length === 1 && approvals.every(
+    (approval) => approvalConsequence(approval.group)?.label === consequences[0].label,
+  )
+    ? consequences[0]
+    : null;
+}
+
+/**
  * What the card says when a decision did not land (#842 review).
  *
  * The failure consolidation makes worse, said out loud. Deciding three cards
@@ -152,6 +168,7 @@ export function ApprovalRow({
   approvals,
   now,
   askerNames,
+  chatChannelByThread,
   thread,
   compact = false,
   deciding,
@@ -163,6 +180,7 @@ export function ApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The channel this inline row is already rendered inside. */
   thread?: ApprovalThreadLink | null;
   /** Render as a quiet interruption inside a chat transcript (#1330). */
@@ -337,6 +355,7 @@ export function ApprovalRow({
           {approvals.length > 1 ? (
             <BatchHeadline
               approvals={approvals}
+              pending={pending}
               askerNames={askerNames}
               actions={actions}
             />
@@ -392,6 +411,7 @@ export function ApprovalRow({
             approval={lead}
             now={now}
             askerNames={askerNames}
+            chatChannelByThread={chatChannelByThread}
             thread={thread}
             status={
               busy
@@ -444,6 +464,8 @@ function CompactApprovalRow({
   // A mixed batch has no one glyph that is true of it, so it wears the neutral
   // one rather than the first item's, just as `BatchHeadline` does.
   const Icon = sameKind ? approvalIcon(lead.kind) : ShieldCheck;
+  const consequences = batchConsequences(approvals);
+  const uniform = uniformConsequence(approvals);
 
   return (
     <div className="px-4 py-1.5">
@@ -454,11 +476,27 @@ function CompactApprovalRow({
         data-approval-inline="compact"
         className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-muted/50"
       >
-        <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <div
+          className={cn(
+            "flex size-7 shrink-0 items-center justify-center rounded-md",
+            uniform?.iconClass ?? "bg-muted text-muted-foreground",
+          )}
+        >
           <Icon className="size-3.5" aria-hidden />
         </div>
         <div className="min-w-0 flex-1">
-          <CompactLabel approvals={approvals} />
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <CompactLabel approvals={approvals} />
+            {consequences.map((c) => (
+              <span
+                key={c.label}
+                data-approval-consequence={c.label}
+                className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+              >
+                {c.label}
+              </span>
+            ))}
+          </div>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <ApprovalMeta
               approval={lead}
@@ -619,10 +657,13 @@ function SettledApprovalReceipt({
  */
 function BatchHeadline({
   approvals,
+  pending,
   askerNames,
   actions,
 }: {
   approvals: ApprovalSummary[];
+  /** The subset one Approve would actually act on. */
+  pending: ApprovalSummary[];
   askerNames: Map<string, string>;
   actions?: React.ReactNode;
 }) {
@@ -635,14 +676,54 @@ function BatchHeadline({
   const asker = lead.agent ? (askerNames.get(lead.agent) ?? lead.agent) : null;
   const title = sameKind ? approvalAction(lead) : `${approvals.length} actions need your sign-off`;
 
+  // Consolidating the asking must not consolidate away the warning (#1426).
+  // Batching is the common case for exactly the calls that carry one — a
+  // research turn parks several fetches, an outreach turn several sends — so a
+  // batch that showed no consequence would hide it precisely where it is most
+  // often earned, while the Approvals page went on showing it for the same
+  // parks.
+  //
+  // The tint follows the same rule as the glyph above: a batch that agrees
+  // with itself wears its one consequence, and a mixed batch stays neutral
+  // rather than letting the first item's colour speak for a card that also
+  // spends money. Either way every distinct label is listed, so nothing is
+  // lost to the mixed case — and `BatchItem` repeats each line's own label, so
+  // a mixed batch still says *which* call is the one that spends.
+  //
+  // Derived from `pending`, not from every item the card was raised with, for
+  // the same reason `decideAll` iterates `pending`: the badge describes what
+  // the next Approve authorises. An item settled on the Approvals page while
+  // this card sat open is no longer part of that, so a batch whose only spend
+  // has already been approved elsewhere must stop claiming the remaining
+  // internal call spends money — that warning would be attached to a decision
+  // nobody is about to make.
+  const consequences = batchConsequences(pending);
+  const uniform = uniformConsequence(pending);
+
   return (
     <div className="flex flex-wrap items-start gap-4">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+      <div
+        className={cn(
+          "flex size-10 shrink-0 items-center justify-center rounded-lg",
+          uniform?.iconClass ?? "bg-muted text-foreground",
+        )}
+      >
         <Icon className="size-5" />
       </div>
       {/* Same container-capped 12rem floor as `ApprovalHeadline`. */}
       <div className="min-w-[min(12rem,100%)] flex-1">
-        <p className="font-medium">{title}</p>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p className="font-medium">{title}</p>
+          {consequences.map((c) => (
+            <span
+              key={c.label}
+              data-approval-consequence={c.label}
+              className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+            >
+              {c.label}
+            </span>
+          ))}
+        </div>
         <p className="text-xs text-muted-foreground">
           {asker ? `${asker} needs` : "This turn needs"} {approvals.length} sign-offs before it
           can carry on
@@ -684,6 +765,11 @@ function BatchItem({
   failure: string | null;
 }) {
   const label = itemLabel(a);
+  // Repeated per line, not only in the headline: a mixed batch's headline says
+  // the card both spends money and leaves the company, and this is what says
+  // which of the three calls does which. A settled line drops it — the warning
+  // is there to inform a decision that has already been made.
+  const consequence = approvalConsequence(a.group);
 
   // A failed decision outranks the pending look, and says which item and why.
   // Silence here is the failure mode worth designing against: the operator
@@ -704,11 +790,36 @@ function BatchItem({
       <li
         data-approval-item={a.id}
         data-approval-failed="true"
-        className="flex items-center gap-2 text-sm text-status-blocked-text"
+        className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-status-blocked-text"
       >
         <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
         <span className="min-w-0 flex-1 truncate font-mono text-xs">{label}</span>
-        <span className="shrink-0 text-xs">Not recorded — {failure}</span>
+        {/*
+         * Carried into this branch too. A failed item is still pending and the
+         * card's buttons are still live, so the retry is a decision the
+         * operator has yet to make — and in a mixed batch the headline says the
+         * card both sends and spends without saying which row is which. Two
+         * argument-classified calls sharing a kind (`composio_execute`) are
+         * indistinguishable by their label alone, so dropping it here is
+         * exactly where the attribution is needed most.
+         */}
+        {consequence && (
+          <span
+            data-approval-consequence={consequence.label}
+            className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+          >
+            {consequence.label}
+          </span>
+        )}
+        {/*
+         * The row wraps so the badge and this line can flow beneath the label on
+         * a narrow chat pane instead of both holding fixed widths and pushing
+         * the label to nothing. The badge keeps `shrink-0` — a pill must not
+         * squash — but a non-wrapping row left it and this text side by side,
+         * and two non-shrinking pieces beside a truncating label overflow the
+         * card rather than wrap.
+         */}
+        <span className="min-w-0 text-xs">Not recorded — {failure}</span>
       </li>
     );
   }
@@ -720,7 +831,10 @@ function BatchItem({
     // reaches any of the others.
     <li
       data-approval-item={a.id}
-      className="flex items-center gap-2 text-sm text-muted-foreground"
+      // Wrapping like the failed row above: the consequence badge is
+      // non-shrinking, and a non-wrapping row would let it crowd the label to
+      // nothing on a narrow chat pane instead of flowing to the next line.
+      className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground"
     >
       {verdict === "approve" ? (
         <Check className="size-3.5 shrink-0" />
@@ -739,6 +853,14 @@ function BatchItem({
       >
         {label}
       </span>
+      {!verdict && consequence && (
+        <span
+          data-approval-consequence={consequence.label}
+          className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+        >
+          {consequence.label}
+        </span>
+      )}
       {deciding ? (
         <Loader2 className="size-3.5 shrink-0 animate-spin" />
       ) : (

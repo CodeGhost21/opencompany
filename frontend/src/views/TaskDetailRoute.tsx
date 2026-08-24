@@ -29,6 +29,8 @@ import {
   type TaskFocus,
   type TaskTab,
 } from "@/lib/task-output";
+import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
+import { withHostParam } from "@/hooks/use-host-route";
 import { TaskDetailView } from "@/views/TaskDetailView";
 
 export function TaskDetailRoute({
@@ -84,7 +86,10 @@ export function TaskDetailRoute({
       parked={parked}
       onBack={onLeave}
       onNavigate={(id) => {
-        window.location.hash = `#/tasks/${encodeURIComponent(id)}`;
+        const view = readLedgerViewMode();
+        window.location.hash = withHostParam(`tasks/${encodeURIComponent(id)}`, {
+          [LEDGER_VIEW_PARAM]: view === "list" ? "list" : null,
+        });
       }}
       onOpenThread={onOpenThread}
       // Both of these used to hand a card back to the board rendered beside

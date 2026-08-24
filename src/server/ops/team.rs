@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::dns::DomainStatus;
+use crate::company::setup::AgentFocus;
 use crate::error::OpenCompanyError;
 use crate::ports::inbox::InboxMeta;
 use crate::ports::now_millis;
@@ -195,6 +196,20 @@ struct AddMember {
     /// only restrict the new teammate below what the company already allows.
     #[serde(default)]
     tools: Vec<String>,
+    /// The job shape that decides this teammate's tool belt, sent by the
+    /// first-run setup build-out (issue #1674). When present it derives the
+    /// grant list through
+    /// [`tools_for_focus`](crate::company::setup::tools_for_focus) — the same
+    /// host-side belt table the roster proposal uses — instead of `tools`, so a
+    /// setup-created teammate gets the belt its shape was approved with on the
+    /// review screen rather than inheriting the whole company default. An
+    /// unreadable value fails closed to the Writing belt, exactly as the
+    /// proposal's [`focus_from_wire`](crate::company::setup) does; the derived
+    /// list is still intersected with the company `[tools].allow` like any
+    /// other `tools` line, so this can only ever narrow. Takes no permission:
+    /// the setup flow that sends it is the same member-level add as before.
+    #[serde(default)]
+    focus: Option<String>,
     /// Optional persona instructions for the new teammate (issue #1530), so a
     /// teammate can be born with an overridden persona rather than needing a
     /// second PATCH. A plain `Option` — at creation there is no blueprint to
@@ -428,7 +443,7 @@ async fn add_member(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     // Setting a cap is admin-only, so an add that carries one is too — but an
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
@@ -436,7 +451,7 @@ async fn add_member(
     let author = match body.budget_usd_daily {
         Some(cap) => {
             if let Some(refusal) = validate_cap(cap) {
-                return Err(refusal);
+                return Err(refusal.into());
             }
             Some(require_admin(&headers, &state, &company.runtime, peer).await?)
         }
@@ -450,12 +465,22 @@ async fn add_member(
 
     // Issue #661 / L5: trim + drop blank globs, mirroring the orchestrator
     // `add_agent` parse. Empty stays empty → the standard company-wide grant.
-    let tools: Vec<String> = body
-        .tools
-        .into_iter()
-        .map(|glob| glob.trim().to_string())
-        .filter(|glob| !glob.is_empty())
-        .collect();
+    //
+    // Issue #1674: a `focus` from the setup build-out derives the grant list
+    // host-side instead — the belt table lives in `src/company/setup.rs`, and
+    // the console has no business choosing a permission boundary. An unreadable
+    // focus fails closed to the Writing belt (`tools_for_focus`), never wider.
+    let tools: Vec<String> = match body.focus.as_deref().map(str::trim) {
+        Some(focus) if !focus.is_empty() => {
+            crate::company::setup::tools_for_focus(AgentFocus::from_wire(focus))
+        }
+        _ => body
+            .tools
+            .into_iter()
+            .map(|glob| glob.trim().to_string())
+            .filter(|glob| !glob.is_empty())
+            .collect(),
+    };
     let mut record = load_record(&company).await?;
     let agent = OverlayAgent {
         // A readable id derived from the name, unique against the roster this
@@ -471,6 +496,8 @@ async fn add_member(
         // Issue #661 / L5: the teammate's own grant, intersected with the
         // company allow-list by the shared reads/roster build. Empty = standard.
         tools,
+        model: None,
+        harness: None,
     };
     record.overlay_agents.push(agent.clone());
     let attribution = author.map(|admin| BudgetOverride {
@@ -506,12 +533,7 @@ async fn add_member(
             ..Default::default()
         });
     }
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
@@ -627,13 +649,13 @@ async fn set_budget(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<SetBudget>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
     // `Some(_)` is guaranteed by `SetBudget`'s missing-key rejection; the inner
     // option is the cap-or-uncap the operator asked for.
     let cap = body.budget_usd_daily.flatten();
     if let Some(refusal) = cap.and_then(validate_cap) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let write_lock = company_write_lock(company.id());
@@ -641,7 +663,7 @@ async fn set_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let entry = BudgetOverride {
@@ -656,12 +678,7 @@ async fn set_budget(
     // One override per teammate: replace in place rather than accumulating, so
     // `effective_budget`'s first-match read can never see a stale row.
     record.upsert_budget_override(entry);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -680,7 +697,7 @@ async fn clear_budget(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -688,16 +705,11 @@ async fn clear_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -731,15 +743,16 @@ fn validate_cap(cap: f64) -> Option<Response> {
 }
 
 /// Loads the addressed company's record, or 404s.
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 
@@ -766,7 +779,7 @@ async fn updated_row(
     company: &ScopedCompany,
     record: &CompanyRecord,
     agent_id: &str,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let spend_today = daily_spend_samples(company, Some(record))
         .await
         .map_err(|e| e.into_response())?;
@@ -779,8 +792,7 @@ async fn updated_row(
         .runtime
         .inbox()
         .inboxes(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .into_iter()
         .any(|meta| meta.key == agent_id && meta.enabled);
 
@@ -1392,6 +1404,86 @@ mod tests {
             "{detail}"
         );
         assert_eq!(detail["instructionsOverridden"], true, "{detail}");
+    }
+
+    /// Issue #1674: a setup-created teammate carries its job shape (`focus`) so
+    /// it is created with the belt that shape was approved with on the review
+    /// screen, rather than inheriting the whole company default. `research` is
+    /// the read-only shape: its effective grants hold no `workspace.write`, and
+    /// a focus-less add still gets the standard company-wide grant.
+    #[tokio::test]
+    async fn a_teammate_created_with_a_focus_is_scoped_to_that_focus_belt() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[tools]\n\
+             allow = [\"workspace.read\", \"workspace.write\", \"docs.*\", \
+             \"files.*\", \"web.*\", \"search\", \"mcp:*\"]\n",
+        )
+        .await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        // A Research teammate: reads the workspace and browses, but has no
+        // business writing the company's own guidance tree.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({
+                "name": "Jamie",
+                "role": "Researcher",
+                "focus": "research",
+            })),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let jamie = created["id"].as_str().unwrap().to_string();
+        let row = team_row(&state, &jamie).await;
+        let grants = |field: &str| {
+            row["tools"][field]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        let effective = grants("effective");
+        assert!(
+            effective.contains(&"workspace.read"),
+            "research reads the workspace: {effective:?}"
+        );
+        assert!(
+            !effective.contains(&"workspace.write"),
+            "research must not write the workspace it reports on: {effective:?}"
+        );
+        let requested = grants("requested");
+        assert!(
+            !requested.contains(&"workspace.write"),
+            "the stored belt is the research belt, not the company grant: {requested:?}"
+        );
+
+        // A focus-less add keeps the standard company-wide grant — the field
+        // takes no permission away from the generic add path.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Sam", "role": "Generalist"})),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let sam = created["id"].as_str().unwrap().to_string();
+        let row = team_row(&state, &sam).await;
+        let effective = row["tools"]["effective"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            effective.contains(&"workspace.write"),
+            "a focus-less add still inherits the company grant: {effective:?}"
+        );
     }
 
     /// An **overlay** teammate can be capped after the fact too — the case the

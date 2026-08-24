@@ -88,9 +88,10 @@ impl RunTurn for HarnessRunTurn {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
+        run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.pool
-            .run_background(company, agent_id, message, &self.deps)
+            .run_background(company, agent_id, message, &self.deps, run_sink)
             .await
     }
 

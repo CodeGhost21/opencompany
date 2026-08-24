@@ -3,11 +3,13 @@ import { X } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
+import type { MessageIntent } from "@/api/tasks";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
+import { type Mention, type Mentionable } from "./mentions";
 
 interface Props {
   channel: Channel;
@@ -21,7 +23,19 @@ interface Props {
   parent: ChatMessage;
   replies: ChatMessage[];
   sending: boolean;
-  onSend: (text: string) => void;
+  /**
+   * Everything an `@` can name here (issue #1645). Drawn from the parent
+   * ChatView's directory so the thread composer shares the same roster.
+   * Absent when the host predates the route, or when the directory has not
+   * loaded — the composer degrades to plain-text typing.
+   */
+  mentionables?: Mentionable[];
+  /**
+   * The ids of the teammates on the channel this thread belongs to, for the
+   * composer's outside-channel warning. Absent when membership is unknown.
+   */
+  channelMemberIds?: string[];
+  onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
   onClose: () => void;
   /**
    * Who is typing *in this thread* — scoped by the parent's own id, never the
@@ -48,6 +62,8 @@ export function ThreadPanel({
   parent,
   replies,
   sending,
+  mentionables,
+  channelMemberIds,
   onSend,
   onClose,
   typingNames = [],
@@ -83,6 +99,8 @@ export function ThreadPanel({
         compact
         placeholder="Reply…"
         disabled={sending}
+        mentionables={mentionables}
+        channelMemberIds={channelMemberIds}
         onSend={onSend}
         onTyping={onTyping}
       />
@@ -123,7 +141,7 @@ function Line({
             {formatTime(message.at)}
           </span>
         </div>
-        <Markdown className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+        <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
       </div>
     </div>
   );

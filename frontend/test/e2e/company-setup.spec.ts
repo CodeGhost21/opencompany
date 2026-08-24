@@ -202,6 +202,11 @@ test("first-run setup builds a real team from three answers", async ({ page, req
 
   await page.getByTestId("setup-finish").click();
   await expect(dialog).toBeHidden();
+  await expect(page).toHaveURL(/#\/company$/);
+
+  // Setup's payoff is the roster, and its own build-out is the introduction;
+  // the first-run welcome must not immediately cover either one.
+  await expect(page.getByRole("button", { name: "Take the tour" })).toBeHidden();
 
   // 5. The host really holds them — not the console's fabricated starter team,
   //    and not the global baseline every company already had.
@@ -211,8 +216,7 @@ test("first-run setup builds a real team from three answers", async ({ page, req
     "the teammates setup created, over and above the baseline every company gets",
   ).toBeGreaterThanOrEqual(4);
 
-  // 6. And the Team page shows that roster, refreshed without a reload.
-  await page.goto("/#/company");
+  // 6. The arrival page shows that roster, refreshed without a reload.
   for (const member of designed.slice(0, 3)) {
     await expect(page.getByText(member.role, { exact: false }).first()).toBeVisible();
   }

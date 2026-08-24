@@ -30,7 +30,6 @@ use oh::mcp::registry::types::{ConnStatus, InstalledServer, McpTool};
 use oh::security::{SecurityPolicy, ToolOperation};
 use oh::tools::traits::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
-use crate::company::Agent as ManifestAgent;
 use crate::company::mcp::{AuthMaterial, McpServerDecl, stdio_install_refusal};
 use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
@@ -38,7 +37,7 @@ use crate::harness::mcp_probe::{
 };
 use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
-use crate::runtime::tools::{grant_matches, grants_cover_server};
+use crate::runtime::tools::grants_cover_server;
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
 ///
@@ -93,22 +92,18 @@ pub fn registry_for_agent(
     }
 }
 
-/// Whether `agent`'s tool grants reach the MCP server named `name`, using the
-/// same glob semantics as every other tool grant (`mcp:*` = all, `mcp:notion` =
-/// exact).
-fn agent_grants_server(agent: &ManifestAgent, name: &str) -> bool {
-    let want = format!("mcp:{name}");
-    agent.tools.iter().any(|grant| grant_matches(grant, &want))
-}
-
 /// The credential substrings from the (enabled, grant-matched) servers this
 /// agent reaches — the known-secret set fed to
 /// [`scrub`](crate::harness::mcp_probe::scrub) so no configured credential can
-/// survive into an agent-visible error. Never serialized anywhere.
-pub fn granted_secrets(decls: &[McpServerDecl], agent: &ManifestAgent) -> Vec<String> {
+/// survive into an agent-visible error. `grants` must be the same effective
+/// grants passed to [`registry_for_agent`], rather than the raw manifest
+/// request, because an empty request inherits the company belt and therefore
+/// reaches every server that belt grants.
+/// Never serialized anywhere.
+pub fn granted_secrets(decls: &[McpServerDecl], grants: &[String]) -> Vec<String> {
     decls
         .iter()
-        .filter(|decl| decl.enabled && agent_grants_server(agent, &decl.name))
+        .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .flat_map(|decl| decl.auth.secret_values())
         .collect()
 }
@@ -735,7 +730,15 @@ impl McpRuntime {
             .dynamic()
             .store()
             .get_server(server_id)
-            .map_err(|_| OpenCompanyError::McpServerNotFound(server_id.to_string()))
+            // Only a genuinely absent install is "not found". A store that
+            // fails to read must not be reported as a missing server — the
+            // caller would be told to reinstall something that is there.
+            .map_err(|error| match error {
+                tinymcp::Error::UnknownServer { .. } => {
+                    OpenCompanyError::McpServerNotFound(server_id.to_string())
+                }
+                other => store_error(other),
+            })
     }
 
     /// Connects an installed server and returns its advertised tools.
@@ -860,28 +863,6 @@ mod tests {
 
     fn grants(g: &[&str]) -> Vec<String> {
         g.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn agent(grants: &[&str]) -> ManifestAgent {
-        ManifestAgent {
-            global: false,
-            id: "ceo".into(),
-            role: "Chief".into(),
-            name: None,
-            description: None,
-            tier: None,
-            harness: None,
-            tools: grants.iter().map(|g| g.to_string()).collect(),
-            delegates_to: vec![],
-            context: None,
-            budget_usd_daily: None,
-            prompt: None,
-            prompt_files: Vec::new(),
-            prompt_files_resolved: Vec::new(),
-            classes: Vec::new(),
-            ledgers: None,
-            can_declare_ledgers: true,
-        }
     }
 
     #[test]
@@ -1075,6 +1056,21 @@ mod tests {
         assert!(result.output().contains("remote ran ok"));
     }
 
+    /// An empty raw request inherits the company belt at the builder seam. The
+    /// scrubber must receive those effective grants too, or an MCP credential
+    /// echoed by a server can reach the agent-visible failure even though the
+    /// registry correctly wires that server.
+    #[test]
+    fn granted_secrets_follows_effective_grants() {
+        let mut server = decl("fixture", "http://127.0.0.1:1/mcp");
+        server.auth = AuthMaterial::Bearer("inherited-canary".into());
+        let inherited = granted_secrets(std::slice::from_ref(&server), &grants(&["*", "mcp:*"]));
+        assert_eq!(inherited, vec!["inherited-canary"]);
+
+        let omitted = granted_secrets(std::slice::from_ref(&server), &grants(&["*"]));
+        assert!(omitted.is_empty());
+    }
+
     /// SECURITY CANARY: a server that **reflects the submitted credential** in a
     /// non-401 error body must not leak it anywhere the `OcMcpCallTool` decorator
     /// surfaces — not the agent-visible result, and not the drained failure. This
@@ -1139,8 +1135,7 @@ mod tests {
         let endpoint = format!("http://{addr}/mcp");
         let mut d = decl("fixture", &endpoint);
         d.auth = AuthMaterial::Bearer(CANARY.into());
-        let agent = agent(&["mcp:*"]);
-        let secrets = granted_secrets(std::slice::from_ref(&d), &agent);
+        let secrets = granted_secrets(std::slice::from_ref(&d), &grants(&["mcp:*"]));
         let registry = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
 
         let queue = McpFailureQueue::default();
@@ -1482,5 +1477,46 @@ rl.on('line', (line) => {
                 .expect("uninstall")
         );
         assert!(runtime.list().expect("list").is_empty());
+    }
+
+    /// `get` on an install that was never persisted reports `McpServerNotFound`
+    /// — the "genuinely absent" half of the store-error split.
+    #[test]
+    fn get_on_an_absent_server_reports_not_found() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = McpRuntime::new(temp.path().join("workspace"));
+        let error = runtime
+            .get("no-such-server")
+            .expect_err("an absent install must not resolve");
+        assert!(
+            matches!(error, OpenCompanyError::McpServerNotFound(ref id) if id == "no-such-server"),
+            "absent install must be McpServerNotFound, got: {error:?}"
+        );
+    }
+
+    /// `get` on a store that fails to read must NOT be reported as a missing
+    /// server — the caller would be told to reinstall something that is there.
+    /// Truncating the SQLite file beneath the runtime's open connection forces
+    /// the next `get_server` read to fail, and the error must surface as a
+    /// `Store` error rather than the blanket `McpServerNotFound` the pre-split
+    /// code produced for every failure.
+    #[test]
+    fn get_on_a_store_that_fails_to_read_reports_store_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let runtime = McpRuntime::new(workspace.clone());
+        // Open the host so the store and its schema exist on disk.
+        runtime.list().expect("open the mcp store");
+        // Corrupt the file beneath the open connection: the query can no longer
+        // be satisfied, so `get_server` must fail with a store error.
+        let db = workspace.join("mcp_clients").join("mcp_clients.db");
+        std::fs::write(&db, b"this is not a sqlite database").expect("corrupt the store file");
+        let error = runtime
+            .get("some-server")
+            .expect_err("a store that cannot read must not resolve");
+        assert!(
+            matches!(error, OpenCompanyError::Store(_)),
+            "a failing store read must surface as Store, got: {error:?}"
+        );
     }
 }

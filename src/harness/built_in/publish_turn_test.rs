@@ -354,6 +354,8 @@ fn brain_with(
         workspace: None,
         search: None,
         tenant_search: None,
+        workflow_runs: None,
+        deep_trace: None,
     };
     let record = CompanyRecord {
         overlay_retired_agents: Vec::new(),

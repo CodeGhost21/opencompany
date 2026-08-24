@@ -61,6 +61,16 @@ pub(crate) async fn state_with_manifest(
     home: &std::path::Path,
     manifest: CompanyManifest,
 ) -> AppState {
+    state_with_builder(home, manifest, |builder| builder).await
+}
+
+/// [`state_with_manifest`] with a runtime-builder override, for a test that
+/// swaps a store the runtime owns — e.g. a counting deep-trace store.
+async fn state_with_builder(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    override_runtime: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
+) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -85,11 +95,11 @@ pub(crate) async fn state_with_manifest(
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
+    let runtime =
+        override_runtime(RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone()))
+            .build()
+            .await
+            .unwrap();
     let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
     state.registry().insert(id, Arc::new(runtime));
     // Every route needs a principal now; the harness signs in as an admin so
@@ -543,6 +553,8 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
         role: "Growth".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -627,6 +639,8 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         role: "Growth".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     record.overlay_agents.push(OverlayAgent {
         id: "uncapped".to_string(),
@@ -634,6 +648,8 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         role: "Ops".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -2249,4 +2265,288 @@ async fn a_prose_note_projects_no_binary_metadata() {
     assert!(note["mime"].is_null(), "{note}");
     assert!(note["size"].is_null(), "{note}");
     assert!(note["sha256"].is_null(), "{note}");
+}
+
+// ---------------------------------------------------------------------------
+// Run observability: what a company's agents actually did
+// ---------------------------------------------------------------------------
+
+/// Seeds one workflow-node attempt with a two-step trace and a deep half.
+async fn given_a_workflow_node_attempt(state: &AppState) {
+    use crate::ports::deep_trace::{RunStepDetailRecord, TurnStepDetail};
+    use crate::ports::runs::{NewRun, RunStepRecord};
+    use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
+
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("runtime");
+    let runs = runtime.runs();
+
+    let row = runs
+        .create_run(
+            &id,
+            NewRun::for_workflow_node("att-1", "wr-1", "solve", "programmer"),
+        )
+        .await
+        .unwrap();
+    runs.begin_run_untriggered(&id, &row.id).await.unwrap();
+
+    for (seq, kind, label) in [
+        (0u32, TurnStepKind::Thinking, "Thinking"),
+        (1, TurnStepKind::ToolCall, "Shell"),
+    ] {
+        runs.append_run_step(
+            &id,
+            &RunStepRecord {
+                run_id: "att-1".to_string(),
+                step_seq: seq,
+                at_millis: 100 + seq as u64,
+                step: TurnStep {
+                    kind,
+                    status: TurnStepStatus::Ok,
+                    label: label.to_string(),
+                    failure: (seq == 1).then_some(TurnStepFailure::BlockedByPolicy),
+                    result: (seq == 1).then(|| "1 line".to_string()),
+                    ..TurnStep::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    runtime
+        .deep_trace()
+        .append_step_detail(
+            &id,
+            &RunStepDetailRecord {
+                run_id: "att-1".to_string(),
+                step_seq: 0,
+                at_millis: 100,
+                detail: TurnStepDetail {
+                    reasoning: Some("Collatz — memoise the chain".to_string()),
+                    ..TurnStepDetail::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The join, in one request: workflow run → attempts → steps → deep detail.
+///
+/// This is the query that had no answer before an `agent` node minted a row —
+/// its turn has neither a card nor a conversation, so nothing could name it.
+#[tokio::test]
+async fn agent_runs_walks_a_workflow_run_to_its_reasoning() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"wr-1\") { id agentId nodeId workflowRunId status stepCount steps { seq kind label result failure deep { reasoning } } } } }"}"#,
+    )
+    .await;
+
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "one node ran under wr-1: {value}");
+    let run = &runs[0];
+    assert_eq!(run["id"], "att-1");
+    assert_eq!(run["agentId"], "programmer");
+    assert_eq!(run["nodeId"], "solve");
+    assert_eq!(run["workflowRunId"], "wr-1");
+
+    // Live, so the settled count is deliberately null — a client must count the
+    // steps rather than trust a total the settle has not written yet.
+    assert!(
+        run["stepCount"].is_null(),
+        "a running attempt has no settled count"
+    );
+
+    let steps = run["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["kind"], "thinking");
+    assert_eq!(steps[1]["label"], "Shell");
+    assert_eq!(steps[1]["result"], "1 line");
+    assert_eq!(steps[1]["failure"], "blocked_by_policy");
+
+    // The deep half: reasoning the scrubbed step deliberately does not carry.
+    assert_eq!(steps[0]["deep"]["reasoning"], "Collatz — memoise the chain");
+    assert!(
+        steps[1]["deep"].is_null(),
+        "a step with no detail recorded has no deep half"
+    );
+}
+
+/// The deep half is a store read, not a constant: a query that does not select
+/// `steps.deep` must not drag the deep store into the request at all. The
+/// console's Observatory list polls every 4/30 seconds and deliberately selects
+/// no deep bodies, so an eager read would materialize up to `limit` runs ×
+/// hundreds of detail rows per poll for data nothing renders — the lookahead
+/// keeps that read off the hot path.
+#[tokio::test]
+async fn a_list_query_without_deep_does_not_read_the_deep_store() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::ports::deep_trace::{DeepTraceStore, RunStepDetailRecord};
+    use crate::store::fs_ops::FsOps;
+
+    #[derive(Clone)]
+    struct CountingDeepTrace {
+        inner: Arc<FsOps>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl DeepTraceStore for CountingDeepTrace {
+        async fn append_step_detail(
+            &self,
+            company: &CompanyId,
+            record: &RunStepDetailRecord,
+        ) -> crate::error::Result<()> {
+            self.inner.append_step_detail(company, record).await
+        }
+
+        async fn list_step_details(
+            &self,
+            company: &CompanyId,
+            run_id: &str,
+        ) -> crate::error::Result<Vec<RunStepDetailRecord>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.list_step_details(company, run_id).await
+        }
+
+        async fn list_step_details_for_runs(
+            &self,
+            company: &CompanyId,
+            run_ids: &[String],
+        ) -> crate::error::Result<std::collections::HashMap<String, Vec<RunStepDetailRecord>>>
+        {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .list_step_details_for_runs(company, run_ids)
+                .await
+        }
+
+        async fn purge_deep_trace(
+            &self,
+            company: &CompanyId,
+            run_id: Option<&str>,
+        ) -> crate::error::Result<u64> {
+            self.inner.purge_deep_trace(company, run_id).await
+        }
+    }
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let deep = Arc::new(CountingDeepTrace {
+        inner: Arc::new(FsOps::new(home.clone())),
+        reads: reads.clone(),
+    });
+    let state = state_with_builder(&home, manifest(), |b| b.with_deep_trace(deep)).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    // The list read selects no deep bodies…
+    let value = query(
+        router(state.clone()),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq kind label result } } } }"}"#,
+    )
+    .await;
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "the attempt still lists: {value}");
+    assert_eq!(runs[0]["steps"][0]["kind"], "thinking");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "a deep-less list must not read the deep store"
+    );
+
+    // …and the single-run deep read still works when it is selected.
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRun(id:\"att-1\") { steps { seq deep { reasoning } } } } }"}"#,
+    )
+    .await;
+    let steps = value["data"]["company"]["agentRun"]["steps"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRun missing: {value}"));
+    assert_eq!(steps[0]["deep"]["reasoning"], "Collatz — memoise the chain");
+    assert!(
+        reads.load(Ordering::SeqCst) >= 1,
+        "selecting deep must read the store"
+    );
+}
+
+/// The unredacted half is role-gated: a member sees the scrubbed trace and no
+/// `deep`, exactly as approval contents are gated (issue #618). Without this,
+/// any signed-in member could read raw tool arguments and output — which may
+/// carry credentials and file contents — through the Observatory.
+#[tokio::test]
+async fn a_member_gets_the_trace_but_not_the_deep_half() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                .header(
+                    "cookie",
+                    crate::server::test_support::member_cookie("acme"),
+                )
+                .body(Body::from(
+                    r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq kind deep { reasoning } } } } }"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "a member still lists the attempt: {value}");
+    let steps = runs[0]["steps"].as_array().unwrap();
+    // The scrubbed skeleton is the member's answer…
+    assert_eq!(steps[0]["kind"], "thinking");
+    // …and the unredacted half is withheld.
+    assert!(
+        steps.iter().all(|s| s["deep"].is_null()),
+        "a member must not receive deep bodies: {value}"
+    );
+}
+
+/// An unrelated workflow run selects nothing rather than everything — the
+/// failure mode of a filter that is silently dropped.
+#[tokio::test]
+async fn agent_runs_filters_by_workflow_run() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"other\") { id } } }"}"#,
+    )
+    .await;
+    assert_eq!(
+        value["data"]["company"]["agentRuns"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "{value}"
+    );
 }

@@ -6,6 +6,7 @@ import {
   useState,
   type Dispatch,
   type ReactNode,
+  type RefObject,
   type SetStateAction,
 } from "react";
 import { TriangleAlert } from "lucide-react";
@@ -28,6 +29,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  fromHistory,
   makeMessage,
   reconcileIds,
   toHostMessageId,
@@ -51,6 +53,14 @@ import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { TypingLine } from "./chat/TypingLine";
 import { MessageComposer } from "./chat/MessageComposer";
+import {
+  mentionablesFor,
+  sameTarget,
+  mentionsOutsideChannel,
+  utf8ByteLength,
+  type Mention,
+  type Mentionable,
+} from "./chat/mentions";
 import { MessageTimeline } from "./chat/MessageTimeline";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
@@ -58,6 +68,7 @@ import {
   buildChannels,
   buildTimeline,
   buildTimelineItems,
+  channelIdFromSegment,
   channelMembers,
   channelTitle,
   deskFromDto,
@@ -67,6 +78,8 @@ import {
   historyReady,
   HISTORY_UNTRACKED,
   clearTaskCardEverywhere,
+  directMessageChannels,
+  directMessageForId,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -150,6 +163,30 @@ interface Props {
    * answer anyone is going to get.
    */
   onSendFailed?: (threadId: string) => void;
+  /** Called when a delayed response belongs to a previous company scope. */
+  onSendStale?: (threadId: string) => void;
+  /**
+   * The shell's live company ref, so the stale-response check keeps observing
+   * company switches after this view unmounts.
+   *
+   * A component-local ref would freeze at the last render's company once this
+   * subtree disappears — exactly when the operator can walk to another view
+   * and switch companies mid-POST. The shell owns `companyRef` and updates it
+   * on every company change whether or not Chat is mounted, so a send that
+   * resolves or rejects after the switch still sees the new scope and is
+   * declared stale rather than writing the old company's reply into the new
+   * company's transcript.
+   */
+  /**
+   * The latest connection and company scope, updated by the shell while mounted.
+   *
+   * `client` is part of the scope for a reason codex flagged (P1): the registry's
+   * `reseat` path edits a host address by replacing the `OpenCompanyClient` while
+   * deliberately preserving the connection id, so `connection` + `company` alone
+   * do not move when the host underneath a send changes. Comparing the client
+   * instance catches the old host's late completion after reseat.
+   */
+  scopeRef: RefObject<{ connection: string; company: string | null; client: OpenCompanyClient }>;
   /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
@@ -204,6 +241,9 @@ interface Props {
   failedApprovals?: Record<string, string>;
 }
 
+const FIRST_TEAM_BRIEF =
+  "Help us get started: propose the first three priorities for our company and who should own each one.";
+
 /**
  * The chat workspace.
  *
@@ -234,6 +274,8 @@ export function ChatView({
   onSendEnd,
   onSendDetached,
   onSendFailed,
+  onSendStale,
+  scopeRef,
   openTurns,
   liveStepsByThread,
   unread,
@@ -264,6 +306,10 @@ export function ChatView({
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [composerPrefill, setComposerPrefill] = useState<{
+    text: string;
+    revision: number;
+  } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
@@ -495,9 +541,17 @@ export function ChatView({
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
+  //
+  // The shell's live scope ref, not a local one: a local ref would freeze at
+  // the last render's scope once this subtree unmounts, and a `client.chat`
+  // still in flight from before the switch would then pass its stale check and
+  // write the old company's reply into the new company's transcript. The shell
+  // keeps updating its ref on every connection/company change, mounted or not,
+  // so the comparison in `send` stays honest after Chat is gone (codex P1).
+
   const sections = useMemo(
-    () => (desks ? buildChannels(members, desks) : []),
-    [members, desks],
+    () => (desks ? buildChannels(members, desks, transcripts) : []),
+    [members, desks, transcripts],
   );
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
@@ -513,10 +567,25 @@ export function ChatView({
    * nothing is ever addressed or stored under the old id, so this shim can be
    * deleted without leaving anything stranded.
    */
+  const decodedSub = channelIdFromSegment(sub);
   const resolvedSub =
-    sub && !findChannel(sections, sub) ? resolveDmChannelId(sub, members) : null;
+    decodedSub && !findChannel(sections, decodedSub)
+      ? resolveDmChannelId(decodedSub, members)
+      : null;
+  /**
+   * The channel the hash names, else the first one that exists.
+   *
+   * The rail only carries DMs with a transcript (issue #1335), so `findChannel`
+   * answers `null` for an inactive DM — but `dm:<teammate-id>` is still a
+   * valid, directly-addressable conversation. `directMessageForId` is the
+   * all-roster resolver that keeps such a deep link (and the New message
+   * picker's selection) landing on the DM before the first-channel fallback
+   * takes over, without ever adding the inactive DM to the rail.
+   */
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? sub) ?? firstChannel(sections))
+    ? (findChannel(sections, resolvedSub ?? decodedSub) ??
+      directMessageForId(members, resolvedSub ?? decodedSub) ??
+      firstChannel(sections))
     : null;
   /**
    * The hash named a channel this company doesn't have, and the first-channel
@@ -526,9 +595,21 @@ export function ChatView({
    * unknown. Derived rather than stored, so it clears itself the moment the
    * hash changes — there is no stale banner to dismiss. A legacy DM link that
    * the shim above resolved is not unknown; it found its channel.
+   *
+   * An inactive DM is not unknown either: the rail only carries DMs with a
+   * transcript (issue #1335), so `findChannel` answers `null` for a DM the
+   * picker just opened, but `directMessageForId` still resolves it against the
+   * whole roster. Check that resolver explicitly rather than leaning on
+   * `resolvedSub`, whose legacy-id shim is meant to be deletable.
    */
   const unknownChannel =
-    desks && sub && !resolvedSub && !findChannel(sections, sub) ? sub : null;
+    desks &&
+    decodedSub &&
+    !resolvedSub &&
+    !findChannel(sections, decodedSub) &&
+    !directMessageForId(members, decodedSub)
+      ? decodedSub
+      : null;
 
   /**
    * Who is in the channel on screen — `null` when it names no membership, in
@@ -543,6 +624,78 @@ export function ChatView({
     if (channel.kind === "dm") return channel.member ? [channel.member] : null;
     return channelMembers(channel, members);
   }, [channel, members]);
+
+  /**
+   * Everything an `@` can name in this company.
+   *
+   * Fetched once per company rather than per channel: the directory is
+   * company-wide, and only the `inChannel` ranking below is per channel.
+   *
+   * A host that predates the route answers 404, which lands here as `null` —
+   * read as "no picker", so typing an `@` stays plain text and the host still
+   * extracts what it can. An older host therefore degrades to the composer's
+   * previous behaviour rather than to a broken one.
+   */
+  const [directory, setDirectory] = useState<Mentionable[] | null>(null);
+  /**
+   * One epoch token shared by the mount fetch and `reloadDirectory`. Every
+   * fetch bumps it and applies its response only while the token is still
+   * current, so a fetch superseded by a company switch (or by a second roster
+   * write) cannot land after the newer directory and hand the picker stale —
+   * possibly cross-company — rows. Selecting a row the server will demote is a
+   * bad row, so advertising it in the first place is what the guard prevents.
+   */
+  const directoryEpoch = useRef(0);
+  /**
+   * Re-read the mention directory.
+   *
+   * Called on mount and after a roster write, so a teammate added here appears
+   * in the picker at once and one removed does not stay selectable until the
+   * next reload (server revalidation would demote it, but offering a row that
+   * can only fail is a bad row).
+   */
+  const reloadDirectory = useCallback(() => {
+    const epoch = ++directoryEpoch.current;
+    void client
+      .mentionables(company)
+      .then((d) => {
+        if (epoch === directoryEpoch.current) setDirectory(mentionablesFor(d));
+      })
+      .catch(() => {
+        if (epoch === directoryEpoch.current) setDirectory(null);
+      });
+  }, [client, company]);
+  useEffect(() => {
+    const epoch = ++directoryEpoch.current;
+    setDirectory(null);
+    void client
+      .mentionables(company)
+      .then((d) => {
+        if (epoch === directoryEpoch.current) setDirectory(mentionablesFor(d));
+      })
+      .catch(() => {
+        if (epoch === directoryEpoch.current) setDirectory(null);
+      });
+    return () => {
+      directoryEpoch.current += 1;
+    };
+  }, [client, company]);
+
+  /**
+   * The directory with this channel's teammates marked, so they rank first.
+   *
+   * Re-marked rather than re-fetched on a channel switch — the rows are the
+   * same, only their ordering hint changes.
+   */
+  const mentionables = useMemo(() => {
+    if (!directory) return undefined;
+    const inside = new Set((inChannel ?? []).map((m) => m.id));
+    return directory.map((entry) =>
+      entry.target.kind === "agent"
+        ? { ...entry, inChannel: inside.has(entry.target.id) }
+        : entry,
+    );
+  }, [directory, inChannel]);
 
   const outsideChannel = useMemo(() => {
     if (!inChannel) return members;
@@ -725,11 +878,60 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, intent?: MessageIntent, parentId?: string) {
+  async function send(
+    text: string,
+    intent?: MessageIntent,
+    parentId?: string,
+    mentions?: Mention[],
+  ) {
     if (sending) return;
+    const scopeAtSend = {
+      connection: scope.connection,
+      company: scope.company,
+      client,
+    };
     const target = active.id;
     const chatId = activeThreadId;
-    const local = makeMessage("you", text, { parentId });
+
+    // Warn about @-mentioning a teammate who is not on this channel.
+    if (mentions?.length && inChannel) {
+      const channelIds = inChannel.map((m) => m.id);
+      const outside = mentionsOutsideChannel(mentions, channelIds);
+      if (outside.length) {
+        toast.warning(
+          outside.length === 1
+            ? "A teammate you @-mentioned is not on this channel — they won't see the message."
+            : `${outside.length} teammates you @-mentioned are not on this channel — they won't see the message.`,
+        );
+      }
+    }
+
+    // Chips need a label and a `mine` flag, which the wire mention (target +
+    // span) does not carry; the directory supplies the label. The optimistic
+    // row is never replaced by history — the id reconcile below makes the
+    // durable row "known", so `hydrateChannel` skips it — which means the
+    // metadata has to land on this row or the just-sent line renders without
+    // chips until reload.
+    const localMentions = mentions?.map((m) => {
+      // `sameTarget` rather than an inline comparison: narrowing one operand
+      // says nothing about the other, so the inline form does not typecheck —
+      // and the rule belongs in one place regardless.
+      const row = mentionables?.find((e) => sameTarget(e.target, m.target));
+      return {
+        text: m.text,
+        // Incoming/rendered mention offsets use the host's UTF-8 byte contract;
+        // the composer keeps UTF-16 offsets only while editing.
+        offset: utf8ByteLength(text.slice(0, m.offset)),
+        label: row?.label ?? m.text,
+        // `@everyone` addresses the room, the author included; a pick of a
+        // teammate or person names somebody else.
+        mine: m.target.kind === "everyone",
+      };
+    });
+    const local = makeMessage("you", text, {
+      parentId,
+      mentions: localMentions?.length ? localMentions : undefined,
+    });
     append(target, local);
     setSending(true);
     // Claim the thread for the duration of the POST. The backend journals an
@@ -743,7 +945,7 @@ export function ChatView({
     // the delivery path, so telling the shell "ended" for either would take the
     // working row down mid-turn (detached) or throw away the reply it was
     // holding (failed). See `PendingSyncPosts` for the table.
-    let outcome: "resolved" | "detached" | "failed" = "resolved";
+    let outcome: "resolved" | "detached" | "failed" | "stale" = "resolved";
     try {
       const answer = await client.chat(
         text,
@@ -755,7 +957,29 @@ export function ChatView({
         // field ignores this and answers synchronously, which is why the branch
         // below reads the response's shape and never this argument.
         true,
+        // Who the picker resolved. The host re-validates every entry and
+        // demotes what no longer exists, so this is a suggestion; omitting it
+        // asks the host to extract from the text instead.
+        //
+        // The composer tracks offsets as UTF-16 indices (they drive textarea
+        // and reconcile operations); the host reads them as UTF-8 bytes, so
+        // each is converted to the byte length of its prefix here.
+        mentions?.map((m) => ({
+          ...m,
+          offset: utf8ByteLength(text.slice(0, m.offset)),
+        })),
       );
+      const latestScope = scopeRef.current;
+      if (
+        latestScope &&
+        (scopeAtSend.company !== latestScope.company ||
+          scopeAtSend.connection !== latestScope.connection ||
+          scopeAtSend.client !== latestScope.client)
+      ) {
+        outcome = "stale";
+        if (chatId) onSendStale?.(chatId);
+        return;
+      }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
       // journaled at accept time, so its durable id is a fact within
@@ -784,13 +1008,65 @@ export function ChatView({
               steps: r.steps,
               taskId: r.taskId,
               messageId: r.messageId,
+              mentions: r.mentions,
             }),
           )
         : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
+      // The synchronous response predates mention metadata on some hosts. A
+      // reply is already journaled by the time this response arrives, so fetch
+      // the authoritative projection and merge its mention DTOs onto the
+      // optimistic reply instead of leaving the live row chip-less until a
+      // full reload.
+      if (chatId && replies.some((reply) => reply.id.startsWith("h"))) {
+        void client
+          .getChatHistory(chatId, company)
+          .then((entries) => {
+            // The reply was optimistic; the history fetch that hydrates it lands
+            // asynchronously. If the operator switched company, channel or
+            // connection in between, this target has been re-homed — merging the
+            // old scope's mention DTOs onto an unrelated same-id message would
+            // decorate the wrong transcript. Drop the hydration in that case;
+            // the next history fetch for the new scope is authoritative.
+            const latestScope = scopeRef.current;
+            if (
+              latestScope &&
+              (scopeAtSend.company !== latestScope.company ||
+                scopeAtSend.connection !== latestScope.connection ||
+                scopeAtSend.client !== latestScope.client)
+            ) {
+              return;
+            }
+            const hydrated = fromHistory(entries);
+            const byId = new Map(hydrated.map((message) => [message.id, message]));
+            setTranscripts((transcripts) => ({
+              ...transcripts,
+              [target]: (transcripts[target] ?? []).map((message) => {
+                const authoritative = byId.get(message.id);
+                return authoritative?.mentions
+                  ? { ...message, mentions: authoritative.mentions }
+                  : message;
+              }),
+            }));
+          })
+          .catch(() => {
+            /* The next history hydration remains the fallback. */
+          });
+      }
       onReply?.();
     } catch (err) {
       outcome = "failed";
+      const latestScope = scopeRef.current;
+      if (
+        latestScope &&
+        (scopeAtSend.company !== latestScope.company ||
+          scopeAtSend.connection !== latestScope.connection ||
+          scopeAtSend.client !== latestScope.client)
+      ) {
+        outcome = "stale";
+        if (chatId) onSendStale?.(chatId);
+        return;
+      }
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
       // whether their message was taken at all. The two facts are not in
@@ -965,6 +1241,9 @@ export function ChatView({
     if (created) {
       const member = fromDto(created);
       setMembers((m) => [...m, member]);
+      // The host directory is re-read so the new teammate can be @-mentioned
+      // from the picker immediately, rather than after the next reload.
+      void reloadDirectory();
       // A successful host add proves the write plane exists, even for a
       // company that opened on the starter roster (fromHost still false from
       // `boot`) — flip it so this and later actions (inbox, budget) target
@@ -1016,6 +1295,8 @@ export function ChatView({
     try {
       await client.removeTeamMember(member.id, company);
       setMembers((ms) => ms.filter((m) => m.id !== member.id));
+      // The removed teammate leaves the picker now, not on the next reload.
+      void reloadDirectory();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         // The only 409 this route still answers: a company must keep at
@@ -1054,6 +1335,8 @@ export function ChatView({
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
+        directMessages={directMessageChannels(members)}
+        onStartDirectMessage={selectChannel}
         className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
       />
       <ChannelRail
@@ -1063,6 +1346,8 @@ export function ChatView({
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
+        directMessages={directMessageChannels(members)}
+        onStartDirectMessage={selectChannel}
         collapsed={channelsCollapsed}
         onExpand={toggleChannels}
         className="hidden lg:flex"
@@ -1113,6 +1398,12 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onStartBrief={() =>
+                setComposerPrefill((current) => ({
+                  text: FIRST_TEAM_BRIEF,
+                  revision: (current?.revision ?? 0) + 1,
+                }))
+              }
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
@@ -1137,7 +1428,10 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text, intent) => void send(text, intent)}
+              prefill={composerPrefill ?? undefined}
+              onSend={(text, intent, mentions) =>
+                void send(text, intent, undefined, mentions)
+              }
               // Every keystroke asks; the hook throttles to one ping per
               // channel per few seconds and skips entirely while the event
               // stream is down.
@@ -1148,6 +1442,8 @@ export function ChatView({
               // the new position inherits the same channel+DM gating. Only the
               // thread and copilot composers below go without.
               deliverableChoice={offersDeliverableChoice(active.kind)}
+              mentionables={mentionables}
+              channelMemberIds={inChannel?.map((m) => m.id)}
             />
           </div>
 
@@ -1158,7 +1454,11 @@ export function ChatView({
               parent={parent}
               replies={threadReplies}
               sending={sending}
-              onSend={(text) => void send(text, undefined, parent.id)}
+              mentionables={mentionables}
+              channelMemberIds={inChannel?.map((m) => m.id)}
+              onSend={(text, _intent, mentions) =>
+                void send(text, undefined, parent.id, mentions)
+              }
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
               onTyping={() => onTyping?.(active.id, parent.id)}
