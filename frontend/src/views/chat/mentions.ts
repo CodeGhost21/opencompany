@@ -282,11 +282,25 @@ export function insertMention(
  * still lets through (it strips the hash without checking the target kind).
  * A `#`-led label only wins here on a desk row, where `@#name` is exactly
  * the spelling the host resolves; every other kind falls back to its slug.
+ *
+ * The spelling must also survive the message renderer intact. A label with
+ * inline Markdown delimiters — `Ada *Ops*`, ``Ada `Ops` ``, `Ada [Ops]` —
+ * is inserted verbatim as `@Ada *Ops*`, and the host routes it fine, but
+ * react-markdown splits the raw span into text and formatting nodes, so
+ * `chipMentions` can never match the mention's full text against a single
+ * rendered node and draws no chip. Like the emoji case, the row's typable
+ * fallback wins instead. Intraword `_` stays allowed: CommonMark renders
+ * `@Jane_Smith` as one literal text node, so the chip matches.
  */
 function mentionableText(entry: Mentionable): string {
+  // Characters that open an inline-formatting construct anywhere in a
+  // span — backtick, `*`, `~`, `[`, `]`, `\` — render text differently
+  // from its raw form, so such a spelling must not be picked verbatim.
+  const plain = (s: string) => !/[*~`[\]\\]/u.test(s);
   const opens = (s: string) =>
-    /^[\p{L}\p{N}_]/u.test(s) ||
-    (entry.target.kind === "desk" && /^#[\p{L}\p{N}_]/u.test(s));
+    plain(s) &&
+    (/^[\p{L}\p{N}_]/u.test(s) ||
+      (entry.target.kind === "desk" && /^#[\p{L}\p{N}_]/u.test(s)));
   if (opens(entry.label)) return entry.label;
   for (const alias of entry.aliases) {
     if (opens(alias)) return alias;
