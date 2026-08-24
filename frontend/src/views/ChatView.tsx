@@ -1078,6 +1078,7 @@ export function ChatView({
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
+        mentions={mentions}
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
