@@ -346,36 +346,20 @@ export function SetupDialog({
 
     (async () => {
       const fallback = phase.fallback;
-      // A replacing run clears the team the company already has before building
-      // the new one. Without this, a second pass over a staffed company stacks
-      // a duplicate roster on the first — which is the exact failure the gate
-      // exists to prevent. The baseline survives: it is not on the operator's
-      // roster (no `global` row) and cannot be deleted anyway.
-      if (replacing) {
-        try {
-          const roster = await client.listTeam(company);
-          for (const member of staffedTeam(roster)) {
-            if (cancelled) return;
-            if (redesignRoster.current && !redesignRoster.current.has(member.id)) continue;
-            await client.removeTeamMember(member.id, company);
-          }
-        } catch {
-          // Could not clear the old team. Building on top of it would duplicate,
-          // so stop rather than proceed — the standard team already there is the
-          // better outcome, and the operator can try again.
-          if (cancelled) return;
-          building.current = false;
-          setPhase({
-            kind: "failed",
-            reason: "We couldn't replace your current team. Try again in a moment.",
-          });
-          return;
-        }
-      }
+      // A replacing run may only remove the rows the pass it replaces created.
+      // The return-from-Settings path names them from the debt captured when the
+      // operator left; the in-dialog retry has no captured debt, so it falls
+      // back to the rows this mount's first pass created (still in `createdIds`
+      // at this point, before the reset below) — never to "everyone who is not
+      // global", which would sweep up teammates added by hand in the meantime.
+      const boundary = replacing
+        ? redesignRoster.current ?? new Set(createdIds.current)
+        : null;
       // This run's creations are the boundary of the next redesign's
-      // replacement; the previous run's are moot (replaced above, if this run
+      // replacement; the previous run's are moot (replaced below, if this run
       // is one).
       createdIds.current = [];
+      let createdAny = false;
       for (let i = 0; i < agents.length; i++) {
         const agent = agents[i];
         try {
@@ -383,6 +367,7 @@ export function SetupDialog({
             { name: agent.name, role: agent.role, description: agent.description },
             company,
           );
+          createdAny = true;
           if (created.id) createdIds.current.push(created.id);
         } catch {
           // One refused write must not abandon the rest: a company with five of
@@ -394,6 +379,36 @@ export function SetupDialog({
         setPhase({ kind: "building", agents, created: i + 1, fallback });
         if (i + 1 < agents.length) {
           await new Promise((resolve) => setTimeout(resolve, REVEAL_MS));
+          if (cancelled) return;
+        }
+      }
+      // Clear the team a replacing run replaces only once its replacement is in
+      // place. Removing first would leave an unstaffed company if every add
+      // above was refused — the per-agent catch keeps going, so the done screen
+      // would claim success over a team that no longer exists. If no replacement
+      // at all was created, the old team stays and the redesign fails rather
+      // than reporting completion.
+      if (boundary) {
+        if (!createdAny) {
+          if (cancelled) return;
+          building.current = false;
+          setPhase({
+            kind: "failed",
+            reason: "We couldn't build your new team, so we kept the one you have. Try again in a moment.",
+          });
+          return;
+        }
+        try {
+          const roster = await client.listTeam(company);
+          for (const member of staffedTeam(roster)) {
+            if (cancelled) return;
+            if (!boundary.has(member.id)) continue;
+            await client.removeTeamMember(member.id, company);
+          }
+        } catch {
+          // The replacement is in place; a failed sweep leaves a duplicate the
+          // operator can retire by hand rather than failing the whole redesign
+          // over it.
           if (cancelled) return;
         }
       }
