@@ -422,6 +422,11 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [nodes, setNodes] = useState<FsNode[]>([]);
+  // Ref mirror used by async tree refreshes: comparing the last authoritative
+  // tree with the new one must not make `loadTree` depend on state and replay
+  // every live-write effect. It also lets remote deletions invalidate cached
+  // uploaded faces, not only deletes initiated by this view.
+  const nodesRef = useRef<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
