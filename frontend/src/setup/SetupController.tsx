@@ -38,6 +38,7 @@ export function SetupController({
   client,
   company,
   force,
+  routeOpen,
   deepLinked,
   onForceHandled,
   onOpenChange,
@@ -47,6 +48,16 @@ export function SetupController({
   company: string | null;
   /** Opened by hand from the Team page's prompt, regardless of the skip flag. */
   force?: boolean;
+  /**
+   * Whether the `#/setup` recovery address is on screen.
+   *
+   * The shell clears `force` the moment this controller consumes it, so a
+   * dialog a Back pressed from `#/setup` would otherwise leave open over the
+   * page the address bar now names. Closed on the true→false edge only — never
+   * because the route is merely absent — so a dialog the first-run gate or the
+   * Team prompt opened, with no `#/setup` involved, is not yanked away.
+   */
+  routeOpen?: boolean;
   /**
    * The operator arrived on a view they named, so do not open unprompted.
    *
