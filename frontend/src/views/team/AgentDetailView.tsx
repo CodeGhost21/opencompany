@@ -379,6 +379,10 @@ export function AgentDetailView({
    */
   async function saveAvatar(avatar: string | undefined) {
     if (!agent) return;
+    // The picker is disabled for the duration (see `avatarSaving`), so at most
+    // one avatar PATCH can be pending at a time — an older response can never
+    // land after a newer choice was saved.
+    setAvatarSaving(true);
     try {
       const updated = await client.updateAgent(agentId, { avatar: avatar ?? null }, company);
       if (displayedAgentIdRef.current !== agentId) return;
@@ -388,6 +392,8 @@ export function AgentDetailView({
       toast.error(
         error instanceof Error ? error.message : "Couldn't change this teammate's icon.",
       );
+    } finally {
+      setAvatarSaving(false);
     }
   }
 
