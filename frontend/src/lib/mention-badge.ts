@@ -91,16 +91,13 @@ export function mentionCountsByChannel(
     // A row with no channel cannot be placed on the rail. Counted nowhere
     // rather than counted somewhere arbitrary.
     if (n.context === undefined || n.context === null) continue;
-    // An exact rendered channel-id match wins outright: a real desk whose id
-    // happens to be `general` (or `main`, or — impossibly — `""`) is *that*
-    // channel, so a mention stored under the canonical id has to badge that
-    // desk, not the default thread the legacy spellings alias to (issue #65).
-    // Only a context that names no rendered channel falls back to the alias.
-    const channelId = renderedChannelIds.has(n.context)
-      ? n.context
-      : isGeneralChat(n.context)
-        ? mainChannelId
-        : n.context;
+    // The placement arm shared with the app shell's re-read trigger, so a
+    // mention is badged and recovered from the same channel it is placed on.
+    const channelId = renderedChannelIdForContext(
+      n.context,
+      mainChannelId,
+      renderedChannelIds,
+    );
     // A general-chat spelling with no rendered main channel (see the param
     // doc) is dropped, not placed under a channel that can never render or
     // clear.
