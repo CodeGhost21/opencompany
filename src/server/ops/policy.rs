@@ -340,6 +340,11 @@ async fn set_policy(
     {
         return Err(refusal("`autoApproveUnderUsd` must be a non-negative number.").into());
     }
+    if let Some(Some(hours)) = body.approval_ttl_hours
+        && !(1..=8_760).contains(&hours)
+    {
+        return Err(refusal("`approvalTtlHours` must be between 1 hour and 1 year.").into());
+    }
 
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;
