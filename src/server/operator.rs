@@ -9186,7 +9186,8 @@ mode = "full"
     #[tokio::test]
     async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
         let home_dir = home();
-        let c = multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092")).await;
+        let c = multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None)
+            .await;
 
         let response = c
             .app
