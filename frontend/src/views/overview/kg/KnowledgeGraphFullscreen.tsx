@@ -17,7 +17,7 @@ import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
   toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
-  onNavDept, onBack, covered = false, children,
+  onNavDept, onBack, covered = false, emptyState = false, children,
 }: {
   deptList: DeptLite[];
   currentTeamId: string | null;
@@ -39,6 +39,8 @@ export function KnowledgeGraphFullscreen({
   /** an outage overlay covers the shell; the graph must not answer the
       keyboard at all (issue #1314) */
   covered?: boolean;
+  /** the loaded company has no desks, so the graph cannot show its pillars */
+  emptyState?: boolean;
   onNavDept: (teamId: string) => void;
   onBack: () => void;
   children: React.ReactNode;
@@ -113,7 +115,7 @@ export function KnowledgeGraphFullscreen({
           department in its spot in the circle, the active one bloomed into its
           tree with its colour glow, the rest dimmed in the background. */}
       <div className="relative min-w-0 flex-1 overflow-hidden bg-os-surface">
-        {children}
+        {!emptyState && children}
 
         {/* vault search — top-left while the Notes core is open */}
         {searchSlot && <div className="absolute left-5 top-5 z-10">{searchSlot}</div>}
@@ -132,7 +134,7 @@ export function KnowledgeGraphFullscreen({
             legible answer, where a clipped row is not. The colour is the same
             one the desk's node and label carry, so the chip and the pillar are
             visibly the same thing. */}
-        {!coreOpen && (
+        {!coreOpen && !emptyState && (
           <div className="absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
             <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
               {/* Names the group rather than instructing. "Pick a pillar" was
@@ -189,10 +191,8 @@ export function KnowledgeGraphFullscreen({
           </div>
         )}
 
-        {/* compact legend — bottom-left, always on. It must be bounded by the
-            canvas, rather than its contents: at phone widths the old fixed row
-            extended past the right edge with no way to reach its last kinds. */}
-        {legendSlot && (
+        {/* A graph with no desks has no kind to explain. */}
+        {!emptyState && legendSlot && (
           <div
             data-testid="kg-legend"
             className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] sm:bottom-5 sm:left-5 sm:max-w-[calc(100%-2.5rem)]"
@@ -201,12 +201,38 @@ export function KnowledgeGraphFullscreen({
           </div>
         )}
 
+        {/* A newly provisioned company has only its core node. The graph is
+            useful once desks give it pillars, so say that plainly and lead to
+            the one place that can create one instead of leaving inert graph
+            controls around an empty canvas (issue #1313). */}
+        {emptyState && (
+          <div className="absolute inset-0 z-20 grid place-items-center p-5">
+            <section
+              aria-labelledby="overview-empty-title"
+              className="max-w-md rounded-sm-t border border-os-border-strong bg-os-bg/90 px-6 py-5 text-center shadow-lg backdrop-blur"
+            >
+              <p className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">Company overview</p>
+              <h2 id="overview-empty-title" className="mt-2 text-lg font-semibold text-os-text">No desks yet</h2>
+              <p className="mt-2 text-sm leading-6 text-os-muted">
+                This graph shows how your company&apos;s desks, teammates, work, and workflows connect.
+                Create a desk to add its first pillar.
+              </p>
+              <a
+                href="#/company/desks"
+                className="mt-4 inline-flex rounded-sm-t border border-os-border-strong bg-os-surface px-3 py-1.5 text-sm font-medium text-os-text transition-colors hover:bg-os-bg"
+              >
+                Create a desk
+              </a>
+            </section>
+          </div>
+        )}
+
         {/* side paddles: slim, hugging the canvas edges at mid-height — you
             turn the wheel from where you're already looking, never the top.
             The right paddle steps aside when the detail panel is open — see
             `clearOfRail`, which is what finally made that sentence true
             (issue #1307). */}
-        {!coreOpen && (
+        {!coreOpen && !emptyState && (
           <>
             <button
               onClick={() => step(-1)}
