@@ -14,7 +14,7 @@
 // would put one continuation into the channel twice. Same content, different
 // verbs — so the verbs stay with their owners.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import {
   AtSign,
   ChevronDown,
@@ -37,7 +37,11 @@ import {
 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { GRANT_DURATIONS, type ApprovalSummary, type GrantScope } from "@/api/types";
+import {
+  GRANT_DURATIONS,
+  type ApprovalSummary,
+  type GrantScope,
+} from "@/api/types";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import {
   approvalAction,
@@ -68,6 +72,88 @@ const KIND_ICONS: Record<string, LucideIcon> = {
 };
 
 /**
+ * The host's consequence group in the operator's vocabulary (#1426).
+ *
+ * `group` is derived from the tool call and its arguments by the host, which
+ * is the only layer that can know the actual consequence. `other` is the
+ * internal catch-all, while an absent group means an older host: both stay
+ * deliberately unmarked so the badge and tint retain their signal.
+ *
+ * The tints come from the identity palette (`--tone-1` … `--tone-5`), not from
+ * `--status-*`. A consequence group is a category, which is what that palette
+ * exists for — `docs/brand/README.md` ("Identity is not status") reserves the
+ * five status hues for run state and says not to reuse one for anything that
+ * is not that status. These badges did: a pending hire approval was painted
+ * the green that means "finished cleanly", and spend the red that means
+ * "failed". The identity palette deliberately holds no amber, green or red,
+ * so a queue of approvals can no longer read as a queue of run outcomes.
+ *
+ * Six groups over five tones, so `spend` and `hire` share tone 4 — the two
+ * that most often move the same money. Sharing is safe here and precedented
+ * (`lib/team.ts`, `lib/skills.ts` both fold more names onto these five): the
+ * badge always carries its own icon and label, so colour is never the only
+ * carrier of the distinction, which is the rule the brand doc actually sets.
+ */
+const APPROVAL_CONSEQUENCES = {
+  spend: { label: "Spends money", iconClass: "bg-tone-4/15 text-tone-4-text" },
+  send: { label: "Leaves the company", iconClass: "bg-tone-2/15 text-tone-2-text" },
+  sign: { label: "Makes a commitment", iconClass: "bg-tone-1/15 text-tone-1-text" },
+  // Not "Goes public". The group spans genuinely external publishing —
+  // `repo_publish`'s push to the real remote, `hosting_launch_site`,
+  // `hosting_add_domain` — *and* `publish_artifact`, which writes only into the
+  // company's own workspace and artifact chain and sends nothing anywhere. A
+  // card reading "Goes public" over that hand-off is the misleading label
+  // `language.ts` already refuses to print for the same tool. "Publishes work"
+  // is true under either reading: it is the step that makes finished work
+  // visible past the agent's sandbox, whoever is on the other side of it.
+  publish: { label: "Publishes work", iconClass: "bg-tone-3/15 text-tone-3-text" },
+  // `hire` and `identity` are separate rows in the taxonomy
+  // (`docs/spec/company-brain/approvals.md`) and had been sharing one label,
+  // which hid exactly the distinction this change exists to draw. `hire` is an
+  // outbound engagement with another company or the firing of a vendor;
+  // `identity` is handle registration and renewal, key rotation, delegated
+  // signer mint/expand and `composio_authorize` — the company's own name and
+  // credentials, not who it does business with.
+  hire: { label: "Engages or drops a counterparty", iconClass: "bg-tone-4/15 text-tone-4-text" },
+  identity: { label: "Changes its identity or keys", iconClass: "bg-tone-5/15 text-tone-5-text" },
+} as const;
+
+type ApprovalConsequence = (typeof APPROVAL_CONSEQUENCES)[keyof typeof APPROVAL_CONSEQUENCES];
+
+/** The marked consequence, or nothing for internal and old-host approvals. */
+export function approvalConsequence(group: ApprovalSummary["group"]): ApprovalConsequence | null {
+  if (group == null || group === "other") return null;
+  return APPROVAL_CONSEQUENCES[group];
+}
+
+/**
+ * Every distinct consequence a batch of approvals carries, in the order the
+ * batch first raises each one.
+ *
+ * A turn that parks several calls renders as one card with one Approve, so the
+ * warning has to survive the consolidation: a batch of three outbound sends
+ * still leaves the company, and a mixed batch spends money *and* leaves it.
+ * Returning the distinct set rather than a single verdict is what lets the
+ * headline stay honest either way — one badge when the batch agrees with
+ * itself, one per consequence when it does not.
+ *
+ * Deduplicated by label, not by group: `hire` and `identity` are separate
+ * groups, while `spend` and `hire` share a tint, so the label is the thing an
+ * operator actually reads twice.
+ */
+export function batchConsequences(approvals: ApprovalSummary[]): ApprovalConsequence[] {
+  const seen = new Set<string>();
+  const out: ApprovalConsequence[] = [];
+  for (const a of approvals) {
+    const consequence = approvalConsequence(a.group);
+    if (!consequence || seen.has(consequence.label)) continue;
+    seen.add(consequence.label);
+    out.push(consequence);
+  }
+  return out;
+}
+
+/**
  * How much of a payload is shown before it is clamped. Past either bound the
  * block collapses behind a "Show everything" toggle — at a line boundary, so
  * a queue of approvals stays scannable without clipping a line's glyphs.
@@ -92,18 +178,33 @@ export function ApprovalHeadline({
   actions?: React.ReactNode;
 }) {
   const Icon = approvalIcon(a.kind);
+  const consequence = approvalConsequence(a.group);
   return (
     <div className="flex flex-wrap items-start gap-4">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+      <div
+        className={cn(
+          "flex size-10 shrink-0 items-center justify-center rounded-lg",
+          consequence?.iconClass ?? "bg-muted text-foreground",
+        )}
+      >
         <Icon className="size-5" />
       </div>
       {/* 12rem floor, capped at the card's own width: a chat column can be
           narrower than the icon plus a 12rem title, and a hard floor would
           overflow the card there instead of wrapping. */}
       <div className="min-w-[min(12rem,100%)] flex-1">
-        <p className="font-medium">{approvalAction(a)}</p>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p className="font-medium">{approvalAction(a)}</p>
+          {consequence && (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground">
+              {consequence.label}
+            </span>
+          )}
+        </div>
         {a.amount_usd != null && (
-          <p className="text-xs font-medium text-muted-foreground">{money(a.amount_usd)}</p>
+          <p className="text-xs font-medium text-muted-foreground">
+            {money(a.amount_usd)}
+          </p>
         )}
         {/*
          * #618: an absent amount normally means "this effect involves no
@@ -112,7 +213,9 @@ export function ApprovalHeadline({
          * misreading the flag exists to prevent.
          */}
         {a.amount_usd == null && a.contents_hidden && (
-          <p className="text-xs font-medium text-muted-foreground italic">Amount hidden</p>
+          <p className="text-xs font-medium text-muted-foreground italic">
+            Amount hidden
+          </p>
         )}
       </div>
       {actions && (
@@ -177,7 +280,8 @@ export function ApprovalMeta({
       {asker && (
         <>
           <span>
-            Asked by <span className="font-medium text-foreground">{asker}</span>
+            Asked by{" "}
+            <span className="font-medium text-foreground">{asker}</span>
           </span>
           <span aria-hidden>·</span>
         </>
@@ -257,7 +361,9 @@ export function ApprovalMeta({
        * Wording and emphasis both come from `payloadAge`, so they are testable as
        * a string rather than only as rendered output.
        */}
-      <span className={age.emphasise ? "font-medium text-foreground" : undefined}>
+      <span
+        className={age.emphasise ? "font-medium text-foreground" : undefined}
+      >
         {age.text}
       </span>
       {/* The deadline (#971), beside how old the payload is — the two halves of
@@ -281,7 +387,9 @@ export function ApprovalMeta({
       {typeof a.expires_at_millis === "number" && (
         <>
           <span aria-hidden>·</span>
-          <span className={deadlineToneClass(deadline.tone)}>{deadline.text}</span>
+          <span className={deadlineToneClass(deadline.tone)}>
+            {deadline.text}
+          </span>
         </>
       )}
       {status && (
@@ -352,7 +460,8 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
       <div className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
         <EyeOff className="size-3.5 shrink-0" />
         <span>
-          Details hidden by your role. An admin can see what this approval will do and decide it.
+          Details hidden by your role. An admin can see what this approval will
+          do and decide it.
         </span>
       </div>
     );
@@ -361,7 +470,10 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
   // A named action can still be decided from its headline. The generic
   // fallback cannot: without a payload it otherwise leaves the operator with
   // no fact at all about what is being approved (#1419).
-  if (lines.length === 0 && approvalAction(approval) === "Do something that needs your sign-off") {
+  if (
+    lines.length === 0 &&
+    approvalAction(approval) === "Do something that needs your sign-off"
+  ) {
     return (
       <p className="text-xs text-muted-foreground">
         No further details were supplied.
@@ -372,7 +484,8 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
   if (lines.length === 0) return null;
 
   const clampable =
-    lines.length > PREVIEW_LINES || lines.some((l) => l.value.length > PREVIEW_VALUE_CHARS);
+    lines.length > PREVIEW_LINES ||
+    lines.some((l) => l.value.length > PREVIEW_VALUE_CHARS);
   const shown = expanded || !clampable ? lines : lines.slice(0, PREVIEW_LINES);
 
   return (
@@ -396,7 +509,11 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
           onClick={() => setExpanded((v) => !v)}
           className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
         >
-          {expanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+          {expanded ? (
+            <ChevronUp className="size-3" />
+          ) : (
+            <ChevronDown className="size-3" />
+          )}
           {expanded ? "Show less" : "Show everything"}
         </button>
       )}
@@ -450,17 +567,40 @@ export function useApprovalThreadLinks(
   client: OpenCompanyClient,
   company: string | null,
   approvals: ApprovalSummary[],
+  /**
+   * True while the queue is interaction-held (#1593): a desk/roster read that
+   * resolves mid-hold must not swap an "Asked in" link into a card the
+   * operator is aiming at — the link wraps differently from "Origin
+   * unavailable" and can shift the decide buttons. Applied when the hold
+   * releases, exactly like `useAskerNames`. Defaults to off so the other
+   * callers (chat, workflows) keep resolving links immediately.
+   */
+  holding = false,
 ): Map<string, ApprovalThreadLink> {
   const threadKey = useMemo(
     () =>
-      Array.from(new Set(approvals.map((approval) => approval.thread).filter(Boolean)))
+      Array.from(
+        new Set(approvals.map((approval) => approval.thread).filter(Boolean)),
+      )
         .sort()
         .join(","),
     [approvals],
   );
-  const [topology, setTopology] = useState<{ desks: Desk[]; members: TeamMember[] } | null>(
-    null,
-  );
+  const [topology, setTopology] = useState<{
+    desks: Desk[];
+    members: TeamMember[];
+  } | null>(null);
+  // Topology that resolved during a hold. `null` means nothing pending; an
+  // empty topology is a real answer and must not be mistaken for "nothing
+  // arrived".
+  const pending = useRef<{
+    desks: Desk[];
+    members: TeamMember[];
+  } | null>(null);
+  // Live is read inside the async topology read, which must not close over a
+  // stale render — the same ref pattern `useAskerNames` uses.
+  const holdingRef = useRef(holding);
+  holdingRef.current = holding;
 
   useEffect(() => {
     if (!threadKey) {
@@ -481,18 +621,36 @@ export function useApprovalThreadLinks(
       client.listTeam(company).catch(() => []),
     ]).then(([desks, roster]) => {
       if (!live) return;
-      setTopology({ desks, members: roster.map(fromDto) });
+      const next = { desks, members: roster.map(fromDto) };
+      if (holdingRef.current) pending.current = next;
+      else setTopology(next);
     });
     return () => {
       live = false;
     };
   }, [client, company, threadKey]);
 
+  // Topology that resolved during a hold applies the moment it releases.
+  // Without this a read that lands mid-interaction stays invisible until the
+  // next thread-key change, which could be never.
+  useEffect(() => {
+    if (holding) return;
+    if (pending.current !== null) {
+      const next = pending.current;
+      pending.current = null;
+      setTopology(next);
+    }
+  }, [holding]);
+
   return useMemo(() => {
     if (!topology) return new Map();
     return new Map(
       approvals.flatMap((approval) => {
-        const link = approvalThreadLink(approval, topology.desks, topology.members);
+        const link = approvalThreadLink(
+          approval,
+          topology.desks,
+          topology.members,
+        );
         return link ? [[approval.id, link] as const] : [];
       }),
     );
@@ -540,7 +698,9 @@ export function ApprovalScopeControl({
       disabled={disabled}
       className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60"
     >
-      <legend className="px-1 text-xs text-muted-foreground">If you approve</legend>
+      <legend className="px-1 text-xs text-muted-foreground">
+        If you approve
+      </legend>
       <div className="flex flex-col gap-1.5">
         <label className="flex items-center gap-2">
           <input
@@ -561,16 +721,26 @@ export function ApprovalScopeControl({
             // the first option, not an empty one — so there is no state in
             // which "for a period" is selected with no period.
             onChange={() =>
-              onChange({ kind: "tool", expiresInMillis: GRANT_DURATIONS[0].millis })
+              onChange({
+                kind: "tool",
+                expiresInMillis: GRANT_DURATIONS[0].millis,
+              })
             }
             className="size-3.5 accent-primary"
           />
           <span>Let {askerLabel(a, askerNames)} use this tool for</span>
           <select
-            value={scope.kind === "tool" ? scope.expiresInMillis : GRANT_DURATIONS[0].millis}
+            value={
+              scope.kind === "tool"
+                ? scope.expiresInMillis
+                : GRANT_DURATIONS[0].millis
+            }
             disabled={scope.kind !== "tool"}
             onChange={(e) =>
-              onChange({ kind: "tool", expiresInMillis: Number(e.target.value) })
+              onChange({
+                kind: "tool",
+                expiresInMillis: Number(e.target.value),
+              })
             }
             aria-label="How long this permission lasts"
             className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
@@ -585,8 +755,8 @@ export function ApprovalScopeControl({
       </div>
       {scope.kind === "tool" && (
         <p className="mt-1.5 px-1 text-xs text-muted-foreground">
-          It won't ask again for this tool until then — with any arguments. You can take it
-          back from Standing permissions at any time.
+          It won't ask again for this tool until then — with any arguments. You
+          can take it back from Standing permissions at any time.
         </p>
       )}
     </fieldset>
@@ -608,22 +778,68 @@ export function DeclineScopeControl({
   if (!a.broadly_deniable) return null;
   const name = `decline-scope-${a.id}`;
   return (
-    <fieldset disabled={disabled} className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60">
-      <legend className="px-1 text-xs text-muted-foreground">If you decline</legend>
+    <fieldset
+      disabled={disabled}
+      className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60"
+    >
+      <legend className="px-1 text-xs text-muted-foreground">
+        If you decline
+      </legend>
       <div className="flex flex-col gap-1.5">
         <label className="flex items-center gap-2">
-          <input type="radio" name={name} checked={scope.kind === "once"} onChange={() => onChange({ kind: "once" })} className="size-3.5 accent-primary" />
+          <input
+            type="radio"
+            name={name}
+            checked={scope.kind === "once"}
+            onChange={() => onChange({ kind: "once" })}
+            className="size-3.5 accent-primary"
+          />
           <span>Just this once</span>
         </label>
         <label className="flex flex-wrap items-center gap-2">
-          <input type="radio" name={name} checked={scope.kind === "tool"} onChange={() => onChange({ kind: "tool", expiresInMillis: GRANT_DURATIONS[0].millis })} className="size-3.5 accent-primary" />
+          <input
+            type="radio"
+            name={name}
+            checked={scope.kind === "tool"}
+            onChange={() =>
+              onChange({
+                kind: "tool",
+                expiresInMillis: GRANT_DURATIONS[0].millis,
+              })
+            }
+            className="size-3.5 accent-primary"
+          />
           <span>Don't ask again for this tool for</span>
-          <select value={scope.kind === "tool" ? scope.expiresInMillis : GRANT_DURATIONS[0].millis} disabled={scope.kind !== "tool"} onChange={(e) => onChange({ kind: "tool", expiresInMillis: Number(e.target.value) })} aria-label="How long this refusal lasts" className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50">
-            {GRANT_DURATIONS.map((d) => <option key={d.millis} value={d.millis}>{d.label}</option>)}
+          <select
+            value={
+              scope.kind === "tool"
+                ? scope.expiresInMillis
+                : GRANT_DURATIONS[0].millis
+            }
+            disabled={scope.kind !== "tool"}
+            onChange={(e) =>
+              onChange({
+                kind: "tool",
+                expiresInMillis: Number(e.target.value),
+              })
+            }
+            aria-label="How long this refusal lasts"
+            className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
+          >
+            {GRANT_DURATIONS.map((d) => (
+              <option key={d.millis} value={d.millis}>
+                {d.label}
+              </option>
+            ))}
           </select>
         </label>
       </div>
-      {scope.kind === "tool" && <p className="mt-1.5 px-1 text-xs text-muted-foreground">It won't ask again for this tool until then. You can take it back from Standing permissions at any time.</p>}
+      {scope.kind === "tool" && (
+        <p className="mt-1.5 px-1 text-xs text-muted-foreground">
+          It won't ask again for this tool until then. You can take it back from
+          Standing permissions at any time.
+        </p>
+      )}
     </fieldset>
   );
 }
@@ -635,7 +851,10 @@ export function DeclineScopeControl({
  * teammate would be worse than naming none, so this only ever narrows from what
  * the host actually said — it never guesses.
  */
-function askerLabel(a: ApprovalSummary, askerNames: Map<string, string>): string {
+function askerLabel(
+  a: ApprovalSummary,
+  askerNames: Map<string, string>,
+): string {
   // A native `workflow.approve` gate carries no agent — the grant's subject is
   // the workflow itself (issue #1098), so naming a "teammate" would tell the
   // operator the wrong grantee right as they pick the broader scope.
@@ -652,19 +871,40 @@ function askerLabel(a: ApprovalSummary, askerNames: Map<string, string>): string
  * route 404s, which is caught here — the card then shows the raw id rather than
  * dropping the attribution, because "which teammate asked" stays useful even
  * when we cannot pretty-print it.
+ *
+ * `holding` defers the roster names the same way `useStandingGrants` defers
+ * grants (#1593): the labels they populate sit ABOVE the queue (the standing
+ * permissions section), and a name landing mid-interaction (raw id → display
+ * name) can change a card's wrapping and shift every approve/decline control
+ * under the operator's pointer. Names that arrive during the hold are applied
+ * the moment it releases.
  */
 export function useAskerNames(
   client: OpenCompanyClient,
   company: string | null,
   approvals: ApprovalSummary[],
+  /** True while the queue is interaction-held (#1593). Defaults to off so the
+   *  other callers (chat, workflows) keep applying names immediately. */
+  holding = false,
 ): Map<string, string> {
   const [names, setNames] = useState<Map<string, string>>(new Map());
+  // The newest names while the queue is held. `null` means nothing pending; an
+  // empty map is a real answer and must not be mistaken for "nothing arrived".
+  const pending = useRef<Map<string, string> | null>(null);
+  // Live is read inside the async roster read, which must not close over a
+  // stale render — the same ref pattern `useStableList` uses for `live`.
+  const holdingRef = useRef(holding);
+  holdingRef.current = holding;
   // Keyed on the set of asker ids rather than on `approvals` itself: the feed
   // hands us a fresh array on every poll, and depending on the array would
   // refetch the roster every few seconds for a roster that rarely changes.
   const askerKey = useMemo(
     () =>
-      Array.from(new Set(approvals.map((a) => a.agent).filter((id): id is string => !!id)))
+      Array.from(
+        new Set(
+          approvals.map((a) => a.agent).filter((id): id is string => !!id),
+        ),
+      )
         .sort()
         .join(","),
     [approvals],
@@ -676,12 +916,26 @@ export function useAskerNames(
     void (async () => {
       const roster = await client.listTeam(company).catch(() => []);
       if (!live) return;
-      setNames(new Map(roster.map((m) => [m.id, m.name?.trim() || m.role])));
+      const next = new Map(roster.map((m) => [m.id, m.name?.trim() || m.role]));
+      if (holdingRef.current) pending.current = next;
+      else setNames(next);
     })();
     return () => {
       live = false;
     };
   }, [client, company, askerKey]);
+
+  // Names that arrived during a hold render the moment it releases. Without
+  // this a roster resolved mid-interaction stays invisible until the next
+  // asker-key change, which could be never.
+  useEffect(() => {
+    if (holding) return;
+    if (pending.current !== null) {
+      const next = pending.current;
+      pending.current = null;
+      setNames(next);
+    }
+  }, [holding]);
 
   return names;
 }

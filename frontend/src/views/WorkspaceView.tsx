@@ -2084,10 +2084,20 @@ interface TreeProps {
  * {@link childrenOf} sorts everywhere else (issue #973). The pre-#686 ULID ids
  * all sort before every readable slug under the plain id ordering, which is
  * not an order an operator can read anything into.
+ *
+ * Most-recently-modified still comes first here (issue #1687) — `Tree` routes
+ * a roster root through this comparator instead of {@link childrenOf}'s, so
+ * without its own `updatedAt` check the two visible roots that need id
+ * resolution the most would be the two the MRU fix never reached, and stayed
+ * alphabetical underneath it.
  */
 function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
   return [...items].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+    if (a.updatedAt != null && b.updatedAt != null) {
+      const updatedAt = b.updatedAt - a.updatedAt;
+      if (updatedAt !== 0) return updatedAt;
+    }
     // Only a roster folder's name is an id worth resolving. A direct file
     // under `agents/` is unusual but not impossible, and its raw name could
     // coincidentally collide with a roster id — that must not reorder it by

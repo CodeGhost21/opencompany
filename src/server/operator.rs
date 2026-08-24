@@ -1183,6 +1183,7 @@ fn project_event_for_viewer(
             // stays the three structural scalars it already was — the console
             // surfaces diagnostics from the run-detail drawer, not this stream.
             diagnostics: _,
+            agent_run_id,
         } => {
             let mut o = envelope("workflow_node_finished");
             o["workflowId"] = json!(workflow_id);
@@ -1190,6 +1191,15 @@ fn project_event_for_viewer(
             o["nodeId"] = json!(node_id);
             o["status"] = json!(status);
             o["elapsedMs"] = json!(elapsed_ms);
+            // A fourth structural id, on the same terms as the three above: it
+            // is reachable by this same operator through `GET {scope}/runs`, and
+            // it is what lets a console watching the canvas open the node's step
+            // trace directly rather than searching for which attempt was its.
+            // Omitted entirely when the node opened none, so a frame for a
+            // non-agent node is byte-identical to what it was.
+            if let Some(agent_run_id) = agent_run_id {
+                o["agentRunId"] = json!(agent_run_id);
+            }
             o
         }
         // Issue #983: a turn was accepted, so a console watching the
@@ -2161,6 +2171,40 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
         let (mut report, feedback_note) = match outcome {
             Ok(both) => both,
             Err(err) => {
+                // A turn that aborts — most often a tool call that exceeded its
+                // wall-clock budget — was only ever logged server-side. To the
+                // operator watching the thread, the teammate simply vanished
+                // mid-answer with no word. Journal a visible system line in the
+                // same desk thread the reply would have gone to, naming the
+                // failure and what to do next. Same shape and author as the
+                // continuation-failure notice (SYSTEM_AUTHOR): a direct
+                // `AgentReply` so it round-trips through history like any other
+                // reply, and is distinguishable on disk from a real teammate
+                // bubble. `err.0` is the inner error (it carries `Display`);
+                // the `ApiError` newtype does not.
+                let notice = CompanyEvent::AgentReply {
+                    parent,
+                    chat_id: desk.clone(),
+                    agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                    text: format!(
+                        "This turn couldn't be finished — something went wrong or \
+                         a step took too long ({}). Nothing was left half-done. \
+                         Send the message again to retry; if it keeps failing, \
+                         try breaking it into a smaller request.",
+                        err.0
+                    ),
+                    steps: Vec::new(),
+                    task_id: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                };
+                if let Err(journal_err) = runtime.events().append(&company, notice).await {
+                    tracing::warn!(
+                        company = %company,
+                        error = %journal_err,
+                        "an aborted chat turn could not be reported to the operator"
+                    );
+                }
                 settle_chat_turn(&runtime, &company, turn_id.as_deref(), Some(&err)).await;
                 return Err(err);
             }
@@ -4174,6 +4218,8 @@ mode = "full"
             search: None,
             tenant_search: None,
             workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -8347,6 +8393,7 @@ mode = "full"
             status: crate::ports::types::WorkflowNodeStatus::Error,
             elapsed_ms: 1234,
             diagnostics: Vec::new(),
+            agent_run_id: None,
         }))
         .expect("workflow_node_finished reaches the console");
         assert_eq!(node["type"], "workflow_node_finished");

@@ -1415,15 +1415,16 @@ impl Default for Tools {
         Self {
             provider: default_tool_provider(),
             // Grant the full tool belt by default: `*` covers files/docs/shell/
-            // code/web/subagent, and `media`/`composio` are listed literally
-            // because the `*` wildcard deliberately excludes those two
-            // (real-money + per-tenant-credential) namespaces. A company that
-            // wants a narrower belt overrides `[tools].allow` explicitly.
+            // code/web/subagent, while `workspace.*` and the explicit
+            // `workspace.write` grant cover the workspace read/write surface.
+            // `media`/`composio` are listed literally because the `*` wildcard
+            // deliberately excludes those two (real-money + per-tenant-
+            // credential) namespaces. A company that wants a narrower belt
+            // overrides `[tools].allow` explicitly.
             //
-            // `search` (issue #238) is deliberately NOT in this list, unlike
-            // `media`/`composio`: the #188 sign-off admitted it **opt-in**, so a
-            // company that never asked for web search never spends on it.
-            // Making it default-on is a one-word change here.
+            // `search` is now part of the authored default belt so the
+            // first-run setup flow can search without each generated agent
+            // having to rediscover the capability.
             allow: crate::globals::default_tool_allow(),
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
