@@ -104,11 +104,21 @@ const MAX_ARCHIVED_TRACES: usize = TRACE_RETENTION_LIMIT;
 /// it evicts its active trace window. The base and embedded engines have no
 /// archive tier, so they answer a clear refusal instead of an empty list that
 /// would falsely imply there are no archived traces.
+///
+/// Responses map through the same camelCase [`TraceEntry`] DTO as
+/// [`list_traces`], so a client that reads `cycleId`/`atMillis` from one gets
+/// them from the other.
 async fn archived_traces(
     company: ScopedCompany,
-) -> Result<Json<Vec<crate::ports::CompressedTrace>>, ApiError> {
+) -> Result<Json<Vec<TraceEntry>>, ApiError> {
     let mut traces = company.runtime.archived_traces().await?.ok_or_else(|| {
-        OpenCompanyError::Config(
+        // The route is registered for every company, but only a provider-backed
+        // engine has an archive tier. A 500 would read as a server fault (and
+        // prompt retries) for a permanent capability refusal; 404 is the same
+        // "missing surface" answer the feedback board gives without a
+        // credential — the console can treat it as "this engine keeps no
+        // archives" without special-casing an error status.
+        OpenCompanyError::NotFound(
             "the selected memory engine does not provide archived traces; use a provider-backed memory engine to retain evicted traces".into(),
         )
     })?;
@@ -121,7 +131,13 @@ async fn archived_traces(
             .then_with(|| a.cycle_id.cmp(&b.cycle_id))
     });
     let skip = traces.len().saturating_sub(MAX_ARCHIVED_TRACES);
-    Ok(Json(traces.into_iter().skip(skip).collect()))
+    Ok(Json(
+        traces
+            .into_iter()
+            .skip(skip)
+            .map(TraceEntry::from)
+            .collect(),
+    ))
 }
 
 /// Max characters kept for a context entry's synthesised title (its first line).
