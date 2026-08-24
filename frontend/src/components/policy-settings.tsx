@@ -282,6 +282,29 @@ export function PolicySettings({ client, company }: Props) {
   // only a successful load lets the "is not a tool" warning speak.
   const [wiredToolsLoaded, setWiredToolsLoaded] = useState(false);
 
+  // The scope this card's async work belongs to. A save or manual retry issued
+  // for one company must stand down once the operator switches to another:
+  // applying the stale response would overwrite the new company's card and
+  // drafts with the old company's policy. The effect-driven read is already
+  // guarded by its cleanup's `live` flag; this is the same guard for the write
+  // path and the manual retry, following the `scopeRef` pattern `app-shell`
+  // hands `ChatView` so sends cannot cross a company switch.
+  const scopeRef = useRef({ client, company });
+  useEffect(() => {
+    scopeRef.current = { client, company };
+  }, [client, company]);
+
+  /** Whether an async completion still belongs to the scope on screen. */
+  const isCurrentScope = (origin: {
+    client: OpenCompanyClient;
+    company: string | null;
+  }) => {
+    const current = scopeRef.current;
+    return (
+      current.client === origin.client && current.company === origin.company
+    );
+  };
+
   const load = useCallback(
     async (live: () => boolean) => {
       setLoading(true);
@@ -416,11 +439,16 @@ export function PolicySettings({ client, company }: Props) {
       // `dirty` means the operator has unsaved list edits; keep them. The tier
       // request touches neither the cap nor the deadline, so their drafts stay
       // too.
-      apply(
-        await setPolicy(client, company, { mode }),
-        "Autonomy tier updated",
-        { alwaysAsk: !dirty, spendCap: false, deadline: false },
-      );
+      const next = await setPolicy(client, company, { mode });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state — the read path's `live` guard, applied to the
+      // write path.
+      if (!isCurrentScope({ client, company })) return false;
+      apply(next, "Autonomy tier updated", {
+        alwaysAsk: !dirty,
+        spendCap: false,
+        deadline: false,
+      });
       return true;
     } catch (error) {
       toast.error(
@@ -552,16 +580,27 @@ export function PolicySettings({ client, company }: Props) {
     if (!status || saving) return false;
     setSaving(true);
     try {
+      const next = await resetPolicy(client, company);
+      // A reset for a company this card no longer shows must not overwrite the
+      // current company's state.
+      if (!isCurrentScope({ client, company })) return false;
       apply(
-        await resetPolicy(client, company),
+        next,
         "Reverted to the manifest's policy",
         undefined,
         // A reset lands the manifest's deadline on the live gate immediately,
-        // the same way a deadline save does. When that deadline is shorter than
-        // the override it replaces, already-parked approvals can expire on the
-        // next sweep before any new turn — the generic "next turn" line would
-        // hide that retroactive effect, so name it the way `saveDeadline` does.
-        (status.manifestApprovalTtlHours ?? 24) < status.approvalTtlHours
+        // the same way a deadline save does, and a parked card's deadline is
+        // re-evaluated against the current TTL whenever it is displayed or
+        // resolved — so a deadline that CHANGES on a reset is immediate in
+        // both directions. A shorter one lets already-parked approvals expire
+        // on the next sweep before any new turn; a longer one keeps them
+        // actionable past the deadline they were parked under. Either way the
+        // generic "next turn" line would misstate it, so name the change the
+        // way `saveDeadline` does whenever the reset moves the deadline. The
+        // `!= null` guard keeps a host that predates the deadline field on
+        // the generic line, since it has no deadline to have moved.
+        status.approvalTtlHours != null &&
+          (status.manifestApprovalTtlHours ?? 24) !== status.approvalTtlHours
           ? "takes effect immediately — parked approvals are re-checked against the manifest deadline"
           : undefined,
       );
@@ -634,8 +673,14 @@ export function PolicySettings({ client, company }: Props) {
     if (!status || saving) return false;
     setSaving(true);
     try {
+      const next = await setPolicy(client, company, {
+        autoApproveUnderUsd: cap,
+      });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state.
+      if (!isCurrentScope({ client, company })) return false;
       apply(
-        await setPolicy(client, company, { autoApproveUnderUsd: cap }),
+        next,
         "Spend cap updated",
         // An unsaved always-ask edit and a half-typed deadline are the
         // operator's; the PUT only touched the cap.
@@ -686,8 +731,14 @@ export function PolicySettings({ client, company }: Props) {
     }
     setSaving(true);
     try {
+      const next = await setPolicy(client, company, {
+        approvalTtlHours: hours,
+      });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state.
+      if (!isCurrentScope({ client, company })) return;
       apply(
-        await setPolicy(client, company, { approvalTtlHours: hours }),
+        next,
         "Approval deadline updated",
         // An unsaved always-ask edit and a half-typed cap are the operator's;
         // the PUT only touched the deadline.
@@ -780,10 +831,14 @@ export function PolicySettings({ client, company }: Props) {
             <p className="text-sm text-muted-foreground">
               {loadError ?? "Could not load the policy."}
             </p>
+            {/* A manual retry is not tied to an effect cleanup, so its
+                liveness must still be scope-guarded: a retry that resolves
+                after the operator switched companies must not paint the new
+                company's card with the old company's policy. */}
             <Button
               size="sm"
               variant="outline"
-              onClick={() => void load(() => true)}
+              onClick={() => void load(() => isCurrentScope({ client, company }))}
             >
               Try again
             </Button>

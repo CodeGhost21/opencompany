@@ -477,6 +477,49 @@ describe("resetting to the manifest's policy", () => {
     expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
+
+  it("names an immediate deadline when a reset lengthens the deadline", async () => {
+    // The override shortened the deadline to 24h; the manifest names 72h. A
+    // reset lands 72h on the live gate immediately — already-parked approvals
+    // are judged against it on the next display or sweep — so the success
+    // message must not fall back to the generic "next turn" line.
+    const initial: PolicyStatus = {
+      ...status("supervised"),
+      approvalTtlHours: 24,
+      manifestApprovalTtlHours: 72,
+      overridden: true,
+    };
+    const del = vi.fn(async () => ({
+      ...status("supervised"),
+      approvalTtlHours: 72,
+      manifestApprovalTtlHours: 72,
+      overridden: false,
+    }));
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async (path: string) =>
+        path.endsWith("/policy") ? initial : { slugs: [], unwired: [] },
+      put: vi.fn(async () => status("supervised")),
+      del,
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    await act(async () => {
+      const button = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("manifest's policy"),
+      )!;
+      button.click();
+      await Promise.resolve();
+    });
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+    expect(toasts.success).toHaveBeenCalledWith(
+      "Reverted to the manifest's policy",
+      expect.objectContaining({
+        description:
+          "takes effect immediately — parked approvals are re-checked against the manifest deadline",
+      }),
+    );
+  });
 });
 
 describe("changing the spend cap", () => {
@@ -659,5 +702,142 @@ describe("loading the policy", () => {
       container.querySelector<HTMLElement>("[data-testid=policy-tier-readonly]")?.getAttribute("aria-checked"),
     ).toBe("false");
     expect(container.querySelector<HTMLInputElement>("#approval-deadline")?.value).toBe("24");
+  });
+
+  it("discards a save response that resolves after the company changed", async () => {
+    // `get` parks every policy read in call order (mount, then the switch) and
+    // `put` parks the save, so the test controls the response order. The
+    // scenario is the reviewer's: the new company's load resolves FIRST, then
+    // the old company's save resolves — and the late save must not paint the
+    // new company's card with the old company's policy.
+    const heldGet: Array<(value: PolicyStatus) => void> = [];
+    let releasePut!: (value: PolicyStatus) => void;
+    const acme = { ...status("supervised"), autoApproveUnderUsd: 10 };
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: (path: string) =>
+        path.endsWith("/policy")
+          ? new Promise<PolicyStatus>((resolve) => heldGet.push(resolve))
+          : Promise.resolve({ slugs: [], unwired: [] }),
+      put: () =>
+        new Promise<PolicyStatus>((resolve) => (releasePut = resolve)),
+      del: async () => acme,
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      heldGet[0]?.(acme);
+      await Promise.resolve();
+    });
+
+    // Save a tightening cap change (10 -> 5); the PUT stays in flight.
+    await act(async () => {
+      await type(container.querySelector<HTMLInputElement>("#spend-cap")!, "5");
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save cap"))!
+        .click();
+    });
+
+    // The operator switches companies while the save is still pending.
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "other" }));
+      await Promise.resolve();
+    });
+
+    // "other"'s load resolves first and paints its card — full tier, no cap.
+    await act(async () => {
+      heldGet[1]?.(status("full"));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
+    ).toBe("true");
+
+    // The stale "acme" save resolves late; it must not overwrite "other"'s
+    // card or drafts with the old company's cap value.
+    await act(async () => {
+      releasePut({ ...acme, autoApproveUnderUsd: 5 });
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-supervised]")?.getAttribute("aria-checked"),
+    ).toBe("false");
+    // `full` has no cap, so the draft stays empty — "5" from the stale save
+    // must never land in it.
+    expect(container.querySelector<HTMLInputElement>("#spend-cap")?.value).toBe("");
+    expect(toasts.success).not.toHaveBeenCalledWith(
+      "Spend cap updated",
+      expect.anything(),
+    );
+  });
+
+  it("discards a manual retry that resolves after the company changed", async () => {
+    // The first load fails so the card offers a retry; the retry and the
+    // company-switch load both park their `get`, and the switch load resolves
+    // first so the late retry response is the stale one.
+    const heldGet: Array<(value: PolicyStatus) => void> = [];
+    let calls = 0;
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: (path: string) => {
+        if (!path.endsWith("/policy"))
+          return Promise.resolve({ slugs: [], unwired: [] });
+        calls += 1;
+        return calls === 1
+          ? Promise.reject(new Error("network down"))
+          : new Promise<PolicyStatus>((resolve) => heldGet.push(resolve));
+      },
+      put: async () => status("readonly"),
+      del: async () => status("readonly"),
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("network down");
+
+    // Click Try again, then switch companies while the retry is in flight.
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Try again"))!
+        .click();
+    });
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "other" }));
+      await Promise.resolve();
+    });
+
+    // "other"'s load (the second parked `get`, after the rejecting mount and
+    // the parked retry) resolves first and paints its card.
+    await act(async () => {
+      heldGet[1]?.(status("full"));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
+    ).toBe("true");
+
+    // The stale retry from "acme" (the first parked `get`) resolves late; it
+    // must not overwrite it.
+    await act(async () => {
+      heldGet[0]?.(status("readonly"));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-readonly]")?.getAttribute("aria-checked"),
+    ).toBe("false");
   });
 });
