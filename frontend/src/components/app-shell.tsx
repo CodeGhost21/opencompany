@@ -1097,7 +1097,8 @@ export function AppShell({
           // the current connection/company scope landed.
           if (
             scopeRef.current.company !== company ||
-            scopeRef.current.connection !== scope.connection
+            scopeRef.current.connection !== scope.connection ||
+            scopeRef.current.client !== client
           ) return;
           const hydrated = fromHistory(entries);
           setThreads((ts) =>
@@ -1654,7 +1655,8 @@ export function AppShell({
           // would restore a stale turn into the new company's openTurns map.
           if (
             scopeRef.current.company !== company ||
-            scopeRef.current.connection !== scope.connection
+            scopeRef.current.connection !== scope.connection ||
+            scopeRef.current.client !== client
           ) return;
           const open = openTurnsFromRuns(runs);
           // The fold's whole list for this thread, not just its head: the POST
