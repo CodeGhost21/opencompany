@@ -180,13 +180,12 @@ describe("composer paperclip (issue #1682)", () => {
       expect(del).not.toHaveBeenCalled();
     });
 
-    // Codex review finding, round 2: `onSend` is fire-and-forget from the
-    // composer's side, and acceptance is asynchronous — the request can
-    // still fail (a paused company, an expired session, a node that
-    // disappeared) after the chip is already gone. `onSend` may report the
-    // outcome by returning a promise; `false` means the send never
-    // journaled, so the attachment it carried must not stay orphaned.
-    it("deletes the attachment when onSend reports the send did not journal", async () => {
+    // Codex review, round 2: `onSend` is fire-and-forget from the composer's
+    // side, and acceptance is asynchronous — the request can still fail
+    // after the chip is already gone. `onSend` may report the outcome by
+    // returning a promise; an explicit `false` means the host definitely
+    // never saw it, so the attachment it carried must not stay orphaned.
+    it("deletes the attachment when onSend reports the send definitely did not journal", async () => {
       sent = vi.fn().mockResolvedValue(false);
       await render();
       await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
@@ -205,6 +204,30 @@ describe("composer paperclip (issue #1682)", () => {
 
     it("does not delete when onSend reports the send DID journal", async () => {
       sent = vi.fn().mockResolvedValue(true);
+      await render();
+      await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+      await type("here is the diagram");
+
+      await act(async () => {
+        (container.querySelector('[aria-label="Send"]') as HTMLButtonElement).click();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(del).not.toHaveBeenCalled();
+    });
+
+    // Codex review, round 4: `false` and "unknown" are not the same thing.
+    // `ChatView.send` returns `undefined` on a thrown request — a network
+    // drop, a timeout — because `accept_chat_turn` journals the message
+    // before the turn's cycle is spawned onto its own task, so a failure
+    // from deep inside that task reaches the same `catch` a pre-journal
+    // refusal does. Treating `undefined` as "not sent" would delete a node a
+    // delivered message might still reference. Only an explicit `false` may
+    // ever trigger a delete.
+    it("does NOT delete when onSend reports an ambiguous (undefined) outcome", async () => {
+      sent = vi.fn().mockResolvedValue(undefined);
       await render();
       await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
       await type("here is the diagram");

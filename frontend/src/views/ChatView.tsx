@@ -809,20 +809,30 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    *
-   * Returns whether the POST reached the host and journaled — `true` for
-   * every outcome where it did (a normal reply, a detached turn, or a stale
-   * response the caller discards), `false` only when the request itself
-   * threw. The composer uses this to decide whether an attachment this send
-   * carried is now durably claimed or was never journaled and so must be
-   * cleaned up rather than left orphaned (codex review finding on #1682) —
-   * see `deleteAttachment` and `MessageComposer.send`.
+   * Returns whether the POST reached the host and journaled (codex review
+   * round 4, on top of round 2's naive version): `true` for every outcome
+   * where `client.chat` itself resolved (a normal reply, a detached turn, or
+   * a stale response the caller discards) — the host answered, so the
+   * journal write is a fact. `undefined` when the request THREW, because a
+   * throw is genuinely ambiguous: `accept_chat_turn` journals the message
+   * before the turn's cycle is spawned onto its own task, and a synchronous
+   * (non-detached) send then awaits that task — so a failure surfacing from
+   * deep in cycle execution reaches this `catch` looking identical to one
+   * that never reached the journal at all. There is no `false` this function
+   * ever returns: nothing observable here tells "refused before journal"
+   * and "journaled, then the turn itself failed" apart. The composer treats
+   * `undefined` as "unknown — leave it alone", never as "not sent"; see
+   * `deleteAttachment` and `MessageComposer.send`.
    */
   async function send(
     text: string,
     intent?: MessageIntent,
     parentId?: string,
     attachments?: AttachmentDto[],
-  ): Promise<boolean> {
+  ): Promise<boolean | undefined> {
+    // The one genuinely safe `false`: another send is already in flight, so
+    // this call's own text/attachments were never handed to `client.chat` at
+    // all — no server round trip happened for them, no ambiguity possible.
     if (sending) return false;
     const scopeAtSend = {
       connection: scope.connection,
@@ -926,10 +936,9 @@ export function ChatView({
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
         // Unlike the try-block's stale branch above, the request THREW here —
-        // the POST never journaled, so anything it would have carried (an
-        // attachment among them) was not claimed and must not be treated as
-        // sent.
-        return false;
+        // whether it journaled before failing is unknown, not "no" (see this
+        // function's doc comment), so this is `undefined`, not `false`.
+        return undefined;
       }
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
@@ -938,7 +947,8 @@ export function ChatView({
       // the turn goes on to produce.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
-      return false;
+      // Ambiguous, not a confirmed non-send — see this function's doc comment.
+      return undefined;
     } finally {
       // A detached turn ends when its row settles, not when this POST resolves.
       // Calling `onSendEnd` here would clear the live step timeline and take the

@@ -22,17 +22,23 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   /**
-   * May return whether the send actually journaled (issue #1682, codex
-   * review finding): `true`/`false` lets the composer know whether an
-   * attachment it carried was durably claimed or must be cleaned up rather
-   * than left orphaned. `void` (the thread and copilot composers, which
-   * never attach) is treated as "nothing to reconcile."
+   * May report whether the send actually journaled (issue #1682, codex
+   * review round 4): `true` means it definitely did; `false` means the host
+   * definitely never saw it (refused before any journal write — safe to
+   * clean up an attachment it carried); `undefined` means the outcome is
+   * AMBIGUOUS — a network drop, a timeout, an aborted request — where the
+   * message may well have landed even though this call could not confirm it.
+   * The composer only ever deletes an attachment on an explicit `false`.
+   * Treating `undefined` as "not sent" would risk deleting the node out from
+   * under a message that was actually delivered — a worse bug than the rare
+   * orphaned upload this declines to clean up. `void` (the thread and
+   * copilot composers, which never attach) is "nothing to reconcile."
    */
   onSend: (
     text: string,
     intent?: MessageIntent,
     attachments?: AttachmentDto[],
-  ) => void | Promise<boolean>;
+  ) => void | Promise<boolean | undefined>;
   /** A new revision replaces the draft and focuses the composer. */
   prefill?: { text: string; revision: number };
   /**
@@ -210,13 +216,14 @@ export function MessageComposer({
     setPending(null);
     setAttachError(undefined);
     // If the caller reports whether the send journaled (issue #1682, codex
-    // review finding), an attachment it carried that did NOT — the request
-    // threw before the host ever saw it — must not stay orphaned against the
-    // quota. A caller that returns `void` (nothing to attach to) has nothing
-    // to reconcile here.
+    // review round 4), clean up an attachment only on an explicit `false` —
+    // the host definitely never saw it. `undefined` (ambiguous: a network
+    // drop, a timeout — the message may have landed anyway) and `true`
+    // (definitely landed) both leave the node alone. A caller that returns
+    // `void` has nothing to reconcile here.
     if (inFlightNodeId && result instanceof Promise) {
       void result.then((sent) => {
-        if (!sent) deleteAttachment?.(inFlightNodeId);
+        if (sent === false) deleteAttachment?.(inFlightNodeId);
       });
     }
   }
