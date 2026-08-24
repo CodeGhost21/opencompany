@@ -472,6 +472,15 @@ export function useApprovalThreadLinks(
   client: OpenCompanyClient,
   company: string | null,
   approvals: ApprovalSummary[],
+  /**
+   * True while the queue is interaction-held (#1593): a desk/roster read that
+   * resolves mid-hold must not swap an "Asked in" link into a card the
+   * operator is aiming at — the link wraps differently from "Origin
+   * unavailable" and can shift the decide buttons. Applied when the hold
+   * releases, exactly like `useAskerNames`. Defaults to off so the other
+   * callers (chat, workflows) keep resolving links immediately.
+   */
+  holding = false,
 ): Map<string, ApprovalThreadLink> {
   const threadKey = useMemo(
     () =>
@@ -486,6 +495,17 @@ export function useApprovalThreadLinks(
     desks: Desk[];
     members: TeamMember[];
   } | null>(null);
+  // Topology that resolved during a hold. `null` means nothing pending; an
+  // empty topology is a real answer and must not be mistaken for "nothing
+  // arrived".
+  const pending = useRef<{
+    desks: Desk[];
+    members: TeamMember[];
+  } | null>(null);
+  // Live is read inside the async topology read, which must not close over a
+  // stale render — the same ref pattern `useAskerNames` uses.
+  const holdingRef = useRef(holding);
+  holdingRef.current = holding;
 
   useEffect(() => {
     if (!threadKey) {
@@ -506,12 +526,26 @@ export function useApprovalThreadLinks(
       client.listTeam(company).catch(() => []),
     ]).then(([desks, roster]) => {
       if (!live) return;
-      setTopology({ desks, members: roster.map(fromDto) });
+      const next = { desks, members: roster.map(fromDto) };
+      if (holdingRef.current) pending.current = next;
+      else setTopology(next);
     });
     return () => {
       live = false;
     };
   }, [client, company, threadKey]);
+
+  // Topology that resolved during a hold applies the moment it releases.
+  // Without this a read that lands mid-interaction stays invisible until the
+  // next thread-key change, which could be never.
+  useEffect(() => {
+    if (holding) return;
+    if (pending.current !== null) {
+      const next = pending.current;
+      pending.current = null;
+      setTopology(next);
+    }
+  }, [holding]);
 
   return useMemo(() => {
     if (!topology) return new Map();
