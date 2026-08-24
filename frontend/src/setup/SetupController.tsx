@@ -170,12 +170,15 @@ export function SetupController({
       const wasResuming = setupResuming(scope);
       const wasRedesigning = setupRedesign(scope);
       const returned = (wasResuming || wasRedesigning) && !onModelSettings();
-      // Dropped on return whatever we do with it, so a debt cannot outlive the
-      // trip that created it and resurface over some later unrelated
-      // navigation. `empty` decides only whether a *resume* is worth acting on;
-      // a redesign reopens over the staffed company the first pass created.
-      if (wasResuming) clearSetupResuming(scope);
-      if (wasRedesigning) clearSetupRedesign(scope);
+      // Dropped only once the operator has actually come back: a reload while
+      // still *on* the settings page is not a return, and consuming the debt
+      // there would strand the later return. `empty` decides only whether a
+      // *resume* is worth acting on; a redesign reopens over the staffed
+      // company the first pass created.
+      if (returned) {
+        if (wasResuming) clearSetupResuming(scope);
+        if (wasRedesigning) clearSetupRedesign(scope);
+      }
       const resume = returned && (wasRedesigning || empty);
       setRedesigning(wasRedesigning && returned);
       // Only the first evaluation may open the dialog by itself; see
