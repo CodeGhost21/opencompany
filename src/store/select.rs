@@ -59,6 +59,23 @@ pub trait MemoryScopes: Send + Sync {
         &self,
         company: &CompanyId,
     ) -> Result<Vec<crate::ports::CompressedTrace>>;
+    /// Restores traces directly into the archive tier during bundle import.
+    ///
+    /// Implementations that expose only the inspection surface reject this
+    /// operation rather than silently moving retained traces back into the
+    /// live window.
+    async fn restore_archived_traces(
+        &self,
+        company: &CompanyId,
+        traces: &[crate::ports::CompressedTrace],
+    ) -> Result<()> {
+        if traces.is_empty() {
+            return Ok(());
+        }
+        Err(OpenCompanyError::Store(
+            "the selected memory engine cannot restore archived traces".into(),
+        ))
+    }
 }
 
 /// Which storage backend hosts the durable ports.
