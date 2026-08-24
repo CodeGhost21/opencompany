@@ -326,10 +326,11 @@ export function forgetAvatarNode(
   company: string | null,
   nodeId: string,
 ): void {
-  const key = `${client.baseUrl}|${company ?? ""}|${nodeId}`;
-  const url = blobUrlValues.get(key);
+  const key = avatarCacheKey(client, company, nodeId);
+  const url = blobUrlValues.get(key) ?? componentUrls.get(key);
   if (url) URL.revokeObjectURL(url);
   blobUrlValues.delete(key);
+  componentUrls.delete(key);
   blobUrls.delete(key);
 }
 
