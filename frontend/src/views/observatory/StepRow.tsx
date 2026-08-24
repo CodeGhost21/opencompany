@@ -47,7 +47,7 @@ function Pane({
   const shown = expanded ? body : clamped.shown;
   return (
     <div className="flex flex-col gap-1">
-      <div className="text-muted-foreground flex items-center gap-2 text-[10px] uppercase tracking-wide">
+      <div className="text-muted-foreground flex items-center gap-2 text-3xs uppercase tracking-wide">
         <span>{title}</span>
         {clamped.truncated && !expanded && (
           <span className="normal-case tracking-normal">
@@ -116,14 +116,14 @@ export function StepRow({ step }: { step: ObservatoryStep }) {
           )}
         </span>
         {step.failure && (
-          <Badge variant="outline" className="shrink-0 text-[10px]">
+          <Badge variant="outline" className="shrink-0 text-3xs">
             {step.failure}
           </Badge>
         )}
         {/* A reader can tell at a glance which steps have reasoning behind
             them, without opening each one. */}
         {present(deep?.reasoning) && (
-          <span className="text-muted-foreground shrink-0 text-[10px]">reasoning</span>
+          <span className="text-muted-foreground shrink-0 text-3xs">reasoning</span>
         )}
         {step.elapsedMs !== null && (
           <span className="text-muted-foreground shrink-0 tabular-nums">
@@ -148,7 +148,7 @@ export function StepRow({ step }: { step: ObservatoryStep }) {
             present(step.result) && <Pane title="Result (summary)" body={step.result!} />
           )}
           {deep?.clipped && (
-            <p className="text-muted-foreground text-[10px]">
+            <p className="text-muted-foreground text-3xs">
               The store clipped this step to its size cap; the head is shown.
             </p>
           )}
