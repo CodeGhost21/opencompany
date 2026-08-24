@@ -1848,6 +1848,23 @@ async fn resolve_attachments(
     if node_ids.is_empty() {
         return Ok(Vec::new());
     }
+    // Codex review finding: an unbounded, unduplicated list turns one `/chat`
+    // POST into an attacker-controlled multiplier on the extraction work
+    // below — each id, however many times it repeats, is a tree scan plus up
+    // to `MAX_ATTACHMENT_EXTRACT_BYTES` of reads and a parse. Refused before
+    // either cost is paid, on the same terms a malformed `parent` is.
+    if node_ids.len() > MAX_CHAT_ATTACHMENTS {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "a message may carry at most {MAX_CHAT_ATTACHMENTS} attachments, got {}",
+            node_ids.len()
+        ))));
+    }
+    // Deduplicated, order preserved: attaching the same file twice to one
+    // message is never a meaningful distinct attachment, so a repeated id
+    // resolves — and, more to the point, extracts — exactly once rather than
+    // once per repetition.
+    let mut seen = std::collections::HashSet::with_capacity(node_ids.len());
+    let node_ids: Vec<&String> = node_ids.iter().filter(|id| seen.insert(*id)).collect();
     let tree = runtime.workspace().tree(id).await?;
     let mut resolved = Vec::with_capacity(node_ids.len());
     for node_id in node_ids {
@@ -1874,6 +1891,18 @@ async fn resolve_attachments(
     }
     Ok(resolved)
 }
+
+/// The most attachments one chat message may carry (codex review finding).
+///
+/// The composer stages one file at a time (v1), so this is nowhere near the
+/// operator's own path — it exists to bound what an unbounded client
+/// request could otherwise force `resolve_attachments` to do: a tree scan
+/// and an extraction pass per id, and extraction is not free
+/// ([`MAX_ATTACHMENT_EXTRACT_BYTES`] of reads and a parse). Generous enough
+/// for the multi-file UI the wire shape (`Vec<Attachment>`) already allows
+/// room for, small enough that even the worst case — every id resolving and
+/// maxing out the extraction cap — stays bounded per request.
+const MAX_CHAT_ATTACHMENTS: usize = 20;
 
 /// The largest attachment [`resolve_attachments`] reads for extraction, in
 /// bytes.
@@ -1912,34 +1941,66 @@ async fn extracted_attachment_text(
     id: &CompanyId,
     node: &crate::ports::workspace::WorkspaceNode,
 ) -> Option<String> {
-    use futures::TryStreamExt;
-
     let size = node.size?;
     if size == 0 || size > MAX_ATTACHMENT_EXTRACT_BYTES {
         return None;
     }
-    let (_, mut stream) = runtime
+    let (_, stream) = runtime
         .workspace()
         .read_bytes(id, &node.id)
         .await
         .ok()
         .flatten()?;
-    let mut bytes = Vec::with_capacity(size as usize);
-    while let Ok(Some(chunk)) = stream.try_next().await {
-        bytes.extend_from_slice(&chunk);
-        // Belt-and-braces against a store whose streamed length disagrees
-        // with the metadata `size` it reported — never buffer past the cap
-        // just because the node claimed to be under it.
-        if bytes.len() as u64 > MAX_ATTACHMENT_EXTRACT_BYTES {
-            return None;
-        }
-    }
+    let bytes = drain_bounded(stream, MAX_ATTACHMENT_EXTRACT_BYTES).await?;
     match crate::ingest::extract(&node.name, node.mime.as_deref(), &bytes) {
         crate::ingest::Extracted::Text(text) => Some(crate::ledger::budget::truncate(
             &text,
             MAX_ATTACHMENT_EXTRACT_CHARS,
         )),
         crate::ingest::Extracted::Empty | crate::ingest::Extracted::Unsupported(_) => None,
+    }
+}
+
+/// Drains a [`BlobStream`](crate::ports::workspace::BlobStream) into a
+/// buffer, `None` if it ever exceeds `cap` or errors partway through (codex
+/// review finding).
+///
+/// Split out from [`extracted_attachment_text`] so the one property that
+/// matters here — a stream error discards what was read, rather than handing
+/// extraction a truncated payload that looks complete — is directly testable
+/// against a synthetic stream, without a real workspace store behind it.
+///
+/// A stream error mid-read used to fall straight through to extraction on
+/// whatever partial bytes had been collected: `while let Ok(Some(chunk)) =
+/// stream.try_next().await` cannot tell "the stream ended" from "the stream
+/// errored", so it just stopped accumulating either way. A truncated payload
+/// is not a smaller version of the file; it can parse into plausible-looking
+/// but wrong or incomplete text (a document missing its ending, a multi-byte
+/// sequence cut mid-codepoint) with nothing marking it as partial once it
+/// reaches the brain. "No readable text" is honest; a guess dressed as a
+/// read is not.
+async fn drain_bounded(
+    mut stream: crate::ports::workspace::BlobStream,
+    cap: u64,
+) -> Option<Vec<u8>> {
+    use futures::TryStreamExt;
+
+    let mut bytes = Vec::new();
+    loop {
+        match stream.try_next().await {
+            Ok(Some(chunk)) => {
+                bytes.extend_from_slice(&chunk);
+                // Belt-and-braces against a store whose streamed length
+                // disagrees with the metadata length its caller expected —
+                // never buffer past the cap just because the node claimed to
+                // be under it.
+                if bytes.len() as u64 > cap {
+                    return None;
+                }
+            }
+            Ok(None) => return Some(bytes),
+            Err(_) => return None,
+        }
     }
 }
 
@@ -9493,5 +9554,60 @@ mode = "full"
             vec![crate::ports::SYSTEM_AUTHOR.to_string()],
             "the runtime authored this notice, so it must not be stored under its destination"
         );
+    }
+
+    /// Codex review finding: a stream that errors mid-read used to fall
+    /// straight through to extraction on whatever partial bytes it had
+    /// collected. This pins the fix directly against a synthetic stream,
+    /// without needing a real workspace store behind it — a chunk, then an
+    /// error, must discard everything read so far rather than handing back
+    /// a truncated payload that looks complete.
+    #[tokio::test]
+    async fn drain_bounded_discards_everything_on_a_mid_stream_error() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"the first chunk read fine")),
+            Err(crate::error::OpenCompanyError::Store(
+                "transient read failure".to_string(),
+            )),
+        ];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(drain_bounded(synthetic, 1_000_000).await, None);
+    }
+
+    /// The success twin: a stream with no error drains to its bytes, in
+    /// order, across however many chunks it arrives in.
+    #[tokio::test]
+    async fn drain_bounded_concatenates_every_chunk_when_the_stream_never_errors() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"hello ")),
+            Ok(Bytes::from_static(b"world")),
+        ];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(
+            drain_bounded(synthetic, 1_000_000).await,
+            Some(b"hello world".to_vec())
+        );
+    }
+
+    /// A stream that never errors but exceeds the cap is also discarded, not
+    /// truncated — the belt-and-braces the doc comment describes.
+    #[tokio::test]
+    async fn drain_bounded_discards_when_the_stream_exceeds_the_cap() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> =
+            vec![Ok(Bytes::from_static(b"way more than the cap allows"))];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(drain_bounded(synthetic, 4).await, None);
     }
 }

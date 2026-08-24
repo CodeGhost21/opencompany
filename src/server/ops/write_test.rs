@@ -9537,3 +9537,74 @@ async fn chat_message_rejects_foreign_node() {
         "a refused attachment message still reached the transcript: {history}"
     );
 }
+/// Codex review finding: an unbounded attachment list turns one `/chat` POST
+/// into an attacker-controlled multiplier on `resolve_attachments`' tree scan
+/// and extraction work. Refused with a `400` before any of that work runs.
+#[tokio::test]
+async fn chat_message_rejects_too_many_attachments() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let ids: Vec<String> = (0..21).map(|n| format!("node-{n}")).collect();
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "too many", "attachments": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        history
+            .as_array()
+            .expect("history is a list")
+            .iter()
+            .all(|m| m["text"] != "too many"),
+        "a refused attachment message still reached the transcript: {history}"
+    );
+}
+
+/// Codex review finding: the same node id repeated in `attachments` used to
+/// resolve — and extract — once per repetition. A message attaching the same
+/// file three times over carries it exactly once.
+#[tokio::test]
+async fn chat_message_deduplicates_a_repeated_attachment_id() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let text = b"Q3 revenue grew 12%.".to_vec();
+    let (status, reference) = chat_upload(&state, "report.txt", Some("text/plain"), &text).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({
+            "message": "attached three times",
+            "attachments": [node_id.clone(), node_id.clone(), node_id],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = history
+        .as_array()
+        .expect("history is a list")
+        .iter()
+        .find(|m| m["text"] == "attached three times")
+        .expect("the message survived");
+    assert_eq!(
+        mine["attachments"].as_array().map(Vec::len),
+        Some(1),
+        "a repeated id must resolve to one attachment, not three: {mine}"
+    );
+}
