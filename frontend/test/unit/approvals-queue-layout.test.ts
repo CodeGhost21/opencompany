@@ -219,4 +219,76 @@ describe("the approvals backlog queue (#1427)", () => {
     });
     expect(card().textContent).not.toContain("just now");
   });
+
+  it("holds batch positions with the frozen rows while interacting (#1593)", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+
+    // A turn that parked two gated calls reads "1 of 2" and "2 of 2".
+    const batched = (id: string, batch = "turn-7"): ApprovalSummary => ({
+      ...approval(id, NOW + 4 * 60 * 1000),
+      batch,
+    });
+    const feedAt = (approvals: ApprovalSummary[]): CompanyFeed => ({
+      ...feed,
+      approvals,
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(ApprovalsView, {
+          client,
+          company: null,
+          feed: feedAt([batched("first"), batched("second")]),
+          onResolved: () => {},
+          onGoToConversation: () => {},
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const card = (id: string) =>
+      [...container.querySelectorAll("[data-approval-id]")].find(
+        (row) => row.getAttribute("data-approval-id") === id,
+      )!;
+    expect(card("first").textContent).toContain("1 of 2 from the same turn");
+    expect(card("second").textContent).toContain("2 of 2 from the same turn");
+
+    // Aim at the first card's decide control to hold the interaction region.
+    await act(async () => {
+      card("first").querySelector("button")!.focus();
+    });
+
+    // A poll lands while the operator is still inside the queue: "second" was
+    // decided in another tab. The frozen rows still show both cards, and the
+    // batch map must not renumber the card under the pointer to "1 of 1" (line
+    // vanishes) or drop its sibling's count — either would rewrap the card
+    // above the targeted control.
+    await act(async () => {
+      root.render(
+        createElement(ApprovalsView, {
+          client,
+          company: null,
+          feed: feedAt([batched("first")]),
+          onResolved: () => {},
+          onGoToConversation: () => {},
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(card("first").textContent).toContain("1 of 2 from the same turn");
+    expect(card("second").textContent).toContain("2 of 2 from the same turn");
+
+    // Moving away releases the hold and reconciles to the live count: the one
+    // remaining card is now alone in its batch and the line is not shown.
+    await act(async () => {
+      (document.activeElement as HTMLElement).blur();
+    });
+    expect(card("first").textContent).not.toContain("1 of 2");
+  });
 });
