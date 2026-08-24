@@ -812,6 +812,7 @@ export function AppShell({
   // the operator's first message on a fresh page load.
   useEffect(() => {
     let cancelled = false;
+    let disposeRehydratePolling: (() => void) | undefined;
     // Another company's channel ids are another namespace. Drop this one's
     // addressing up front rather than routing the next company's events into
     // channels that no longer exist, and start the unread floor again so the
@@ -908,7 +909,7 @@ export function AppShell({
         });
     };
 
-    const rehydrateAll = (
+    const rehydrateTargets = (
       threadIds: readonly string[],
       channels: readonly { channelId: string; threadId: string }[],
     ) => {
@@ -945,28 +946,34 @@ export function AppShell({
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
         setFirstDeskChannelId(chatDesks[0]?.id ?? null);
-        rehydrateAll(
-          resolved.map((t) => t.id),
-          [
-            ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-            ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
-          ],
-        );
+        const threadIds = resolved.map((t) => t.id);
+        const channels = [
+          ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+          ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+        ];
+        const rehydrateAll = () => rehydrateTargets(threadIds, channels);
+        // SSE remains the fast path. This catches a persisted channel message
+        // whose live frame arrived during a disconnect or before its thread
+        // mapping existed, and pauses automatically while the tab is hidden.
+        rehydrateAll();
+        disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
         // Every channel this pass will hydrate now has a status, so a channel
         // with none is one nothing is coming for.
         setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
+        if (cancelled) return;
         // Host without `/desks`, or offline — keep the static default
         // threads, but the operator/General line still deserves a
         // rehydration attempt (it's the one every deployment has).
         const fallbackDesks = defaultDesks();
         setChatChannelByThread(channelMap(fallbackDesks, []));
         setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
-        rehydrateAll(
-          defaultThreads().map((t) => t.id),
-          fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-        );
+        const threadIds = defaultThreads().map((t) => t.id);
+        const channels = fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id }));
+        const rehydrateAll = () => rehydrateTargets(threadIds, channels);
+        rehydrateAll();
+        disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
         if (!cancelled) setHydration((h) => ({ ...h, discovered: true }));
       });
 
@@ -999,6 +1006,7 @@ export function AppShell({
 
     return () => {
       cancelled = true;
+      disposeRehydratePolling?.();
     };
   }, [client, company]);
 
