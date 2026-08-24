@@ -1482,8 +1482,10 @@ mod test {
         // accepted still-image case used by the normal-size test above.
         check_image_dimensions(&gif(4096, 4096)).expect("header-only GIF is still");
     }
-
-
+    /// An animated WebP can hide a flood of full-canvas frames under the byte
+    /// ceiling exactly like a GIF can; the per-cycle walk must refuse it too.
+    #[test]
+    fn size_check_refuses_an_animated_webp_beyond_the_cost_cap() {
         let busy = webp_animated((4096, 4096), &[(4096, 4096); 10]);
         let err = check_image_dimensions(&busy).unwrap_err().to_string();
         assert!(
