@@ -152,6 +152,18 @@ interface Props {
    */
   onSendFailed?: (threadId: string) => void;
   /**
+   * The chat POST resolved — either shape — for a company the operator has
+   * since left (issue #1000).
+   *
+   * The reply is durably journaled in the OLD company's history, so nothing
+   * about it belongs in the active scope. The shell must release the send
+   * bracket `onSendStart` armed (lift the echo suppression and drop the held
+   * frames — history re-reads them back on return) without folding the turn
+   * into the current company's `openTurns` or transcript routing, which is
+   * what `onSendDetached` would do.
+   */
+  onSendStale?: (threadId: string) => void;
+  /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
    */
