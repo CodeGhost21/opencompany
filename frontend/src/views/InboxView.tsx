@@ -148,10 +148,14 @@ export function InboxView({ client, company }: Props) {
 
   if (load === "loading") {
     return (
-      <div className="flex flex-1 flex-col gap-2 p-4">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <Skeleton key={i} className="h-16 rounded-lg" />
-        ))}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <InboxParkingNotice />
+        <div className="flex flex-1 flex-col gap-2 p-4">
+          <h1 className="sr-only">Inbox</h1>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-16 rounded-lg" />
+          ))}
+        </div>
       </div>
     );
   }
@@ -161,6 +165,7 @@ export function InboxView({ client, company }: Props) {
       <div className="flex flex-1 flex-col overflow-hidden">
         <InboxParkingNotice />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+          <h1 className="sr-only">Inbox</h1>
           <InboxIcon className="size-8" />
           <div className="space-y-1">
             <p className="font-medium text-foreground">Inboxes unavailable</p>
@@ -179,12 +184,16 @@ export function InboxView({ client, company }: Props) {
       <div className="flex flex-1 flex-col overflow-hidden">
         <InboxParkingNotice />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+          <h1 className="sr-only">Inbox</h1>
           <InboxIcon className="size-8" />
           <div className="space-y-1">
             <p className="font-medium text-foreground">No inboxes yet</p>
             <p className="max-w-sm text-sm">
-              Give a teammate its own inbox from <a className="font-medium underline" href="#/chat">Chat</a>'s
-              teammate list — flip on the inbox toggle for anyone who needs to receive email.
+              Give a teammate its own inbox from the{" "}
+              <a className="font-medium text-foreground underline-offset-4 hover:underline" href="#/company">
+                Company page
+              </a>{" "}
+              — open a teammate to flip on the inbox toggle for anyone who needs to receive email.
               Mail sent to that address shows up here.
             </p>
           </div>
@@ -197,6 +206,7 @@ export function InboxView({ client, company }: Props) {
     <div className="flex flex-1 flex-col overflow-hidden">
       <InboxParkingNotice />
       <div className="flex min-h-0 flex-1 overflow-hidden">
+        <h1 className="sr-only">Inbox</h1>
         {/* Message list */}
         <section
           className={cn(
@@ -284,15 +294,20 @@ export function InboxView({ client, company }: Props) {
 
 /** A persistent explanation for Inbox's deliberately direct-URL-only state. */
 function InboxParkingNotice() {
+  // The Alert base supplies `w-full`, so a horizontal margin on the alert itself
+  // would make it 2rem wider than its `overflow-hidden` parent and get its right
+  // edge clipped. Pad the wrapper instead and keep the alert at full width.
   return (
-    <Alert className="m-4 mb-0 shrink-0" data-testid="inbox-parked-notice">
-      <Info className="size-4" />
-      <AlertTitle>Inbox is not in the console navigation right now</AlertTitle>
-      <AlertDescription>
-        This page still works and shows live email data, but nothing in the console links to it.
-        Reach it with a direct link to this address.
-      </AlertDescription>
-    </Alert>
+    <div className="shrink-0 px-4 pt-4">
+      <Alert data-testid="inbox-parked-notice">
+        <Info className="size-4" />
+        <AlertTitle>Inbox is not in the console navigation right now</AlertTitle>
+        <AlertDescription>
+          This page still works and shows live email data, but nothing in the console links to it.
+          Reach it with a direct link to this address.
+        </AlertDescription>
+      </Alert>
+    </div>
   );
 }
 

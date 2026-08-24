@@ -252,6 +252,11 @@ const JOURNAL: &str = "journal";
 /// imported — the gate that makes the import happen exactly once.
 const JOURNAL_IMPORTS: &str = "journal_imports";
 
+/// How many legacy run rows [`MongoStore::backfill_run_agent_ids`] migrates in
+/// one pass. Bounds the memory a first boot's migration holds and gives the
+/// server's own run writes room to interleave between passes.
+const BACKFILL_BATCH_SIZE: usize = 200;
+
 /// A single MongoDB database implementing all five storage ports.
 #[derive(Clone)]
 pub struct MongoStore {
@@ -273,6 +278,31 @@ impl MongoStore {
             senders: Arc::new(StdMutex::new(HashMap::new())),
         };
         store.ensure_indexes().await?;
+        // Issue #1573: give run documents written before the `agent_id` mirror
+        // existed one, so a per-teammate history is the whole history. Spawned
+        // rather than awaited: on a first boot the migration can touch every
+        // legacy run one row at a time, and storage initialization must not sit
+        // in front of `/healthz` (AGENTS.md:170). The sqlite backend heals
+        // synchronously because its migration is a single UPDATE; Mongo's desk
+        // lives inside a JSON string, so there is no equivalent and the cost is
+        // a bounded background churn. Best-effort for the same reason the
+        // orphan-blob sweep is — a store that will not boot is worse than one
+        // whose oldest run rows are not yet filterable by desk.
+        let backfill_store = store.clone();
+        tokio::spawn(async move {
+            match backfill_store.backfill_run_agent_ids().await {
+                Ok(0) => {}
+                Ok(filled) => tracing::info!(
+                    filled,
+                    "backfilled the agent id on run rows written before the column existed"
+                ),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "could not backfill run agent ids; a per-teammate run history will \
+                     under-report until the next boot"
+                ),
+            }
+        });
         // Reclaim workspace payloads whose node document never landed (issue
         // #553). Best-effort by design: the cost of skipping it is disk that is
         // already unreachable, and the cost of failing boot over it would be a
@@ -291,6 +321,75 @@ impl MongoStore {
         Ok(store)
     }
 
+    /// Copies `agentId` out of `run_json` into the indexed `agent_id` field for
+    /// every run document that predates it (issue #1573), returning how many
+    /// were filled.
+    ///
+    /// The MongoDB half of sqlite's `heal_runs_agent_id`, and it exists for the
+    /// same reason: a per-teammate run list that silently omitted every attempt
+    /// written before the upgrade would read as "this teammate has never run",
+    /// which is a wrong answer rather than a missing feature. Mongo cannot do
+    /// this server-side — the desk lives inside a **string** of JSON, not a
+    /// sub-document — so the rows are read back and rewritten one by one.
+    ///
+    /// The `$exists: false` probe finds rows written before the mirror column
+    /// existed and matches nothing once the backfill has run — but a first
+    /// boot can still hold a whole legacy collection's worth of work, so the
+    /// migration is batched. Each pass resumes from the previous batch's last
+    /// `_id`, so it never re-reads rows it has already migrated; each pass
+    /// collects at most [`BACKFILL_BATCH_SIZE`] rows, keeps them in memory
+    /// only long enough to fill them, then moves on. Bounded memory, and the
+    /// server's own run writes interleave between passes. Best-effort at the
+    /// call site for the same reason the orphan blob sweep is — a company
+    /// that will not start is worse than one whose oldest run rows are not
+    /// yet filterable by desk.
+    async fn backfill_run_agent_ids(&self) -> Result<usize> {
+        let runs = self.collection("runs");
+        let mut filled = 0usize;
+        // Resume where the last pass stopped. The probe has no leading
+        // `company_id`, so no compound index can serve it — restarting the
+        // scan per batch would re-examine every already-migrated row to reach
+        // the next legacy one. `_id` is the one index every document has, and
+        // the cursor advances in `_id` order, so the `$gt` bound is both cheap
+        // and lossless: everything at or before the watermark has been filled.
+        let mut after: Option<mongodb::bson::Bson> = None;
+        loop {
+            let mut filter = doc! {"agent_id": {"$exists": false}};
+            if let Some(id) = after.clone() {
+                filter.insert("_id", doc! {"$gt": id});
+            }
+            let mut cursor = runs
+                .find(filter)
+                .sort(doc! {"_id": 1})
+                .limit(BACKFILL_BATCH_SIZE as i64)
+                .await
+                .map_err(mongo_err)?;
+            let mut batch: Vec<(String, String, String)> = Vec::new();
+            while let Some(document) = cursor.try_next().await.map_err(mongo_err)? {
+                let record: crate::ports::runs::RunRecord =
+                    serde_json::from_str(&get_str(&document, "run_json")?)?;
+                batch.push((
+                    get_str(&document, "company_id")?,
+                    get_str(&document, "run_id")?,
+                    record.agent_id,
+                ));
+                after = document.get("_id").cloned();
+            }
+            if batch.is_empty() {
+                return Ok(filled);
+            }
+            for (company_id, run_id, agent_id) in &batch {
+                runs.update_one(
+                    doc! {"company_id": company_id.as_str(), "run_id": run_id.as_str()},
+                    doc! {"$set": {"agent_id": agent_id.as_str()}},
+                )
+                .await
+                .map_err(mongo_err)?;
+            }
+            filled += batch.len();
+        }
+    }
+
     /// Idempotent index creation — the MongoDB equivalent of the sqlite
     /// backend's `CREATE TABLE IF NOT EXISTS` migrations.
     async fn ensure_indexes(&self) -> Result<()> {
@@ -304,7 +403,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 35] = [
+        let plans: [(&str, IndexModel); 36] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -378,6 +477,10 @@ impl MongoStore {
             ("runs", unique(doc! {"company_id": 1, "run_id": 1})),
             // A card has many attempts, and many attempts share a status.
             ("runs", nonunique(doc! {"company_id": 1, "task_id": 1})),
+            // Issue #1573: and many attempts share a desk — the console's
+            // per-teammate run history. See `backfill_run_agent_ids` for why
+            // the field is on every document by the time this index matters.
+            ("runs", nonunique(doc! {"company_id": 1, "agent_id": 1})),
             ("runs", nonunique(doc! {"company_id": 1, "status": 1})),
             (
                 "run_steps",
@@ -2308,6 +2411,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
                 "task_id": run.task_id.as_deref(),
+                "agent_id": run.agent_id.as_str(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
                 "created_ms": run.created_at_millis as i64,
@@ -2344,6 +2448,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
                     "task_id": run.task_id.as_deref(),
+                    "agent_id": run.agent_id.as_str(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
                     "created_ms": run.created_at_millis as i64,
@@ -2364,6 +2469,9 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut query = doc! {"company_id": company.as_ref()};
         if let Some(task_id) = &filter.task_id {
             query.insert("task_id", task_id.as_str());
+        }
+        if let Some(agent_id) = &filter.agent_id {
+            query.insert("agent_id", agent_id.as_str());
         }
         if !filter.statuses.is_empty() {
             let statuses: Vec<&str> = filter.statuses.iter().map(|s| s.as_str()).collect();
@@ -4333,6 +4441,135 @@ mod test {
             names.iter().any(|n| n == "company_id_1_id_1"),
             "a failure on `owners` must not stop other indexes being created; got {names:?}"
         );
+
+        drop_db(&store).await;
+    }
+
+    /// Issue #1573: the backfill copies `agentId` out of `run_json` for rows
+    /// written before the mirror column existed, and does so in bounded batches
+    /// that re-probe between passes rather than holding the whole collection.
+    ///
+    /// Seeded directly into the `runs` collection with no `agent_id` field —
+    /// the exact shape a row predating the upgrade has — because it is not
+    /// reachable through the port: `create_run`/`put_run` always write the
+    /// mirror. The store is built as a bare struct, not through `connect`, so
+    /// no background backfill task shares the database with this one's
+    /// assertions.
+    #[tokio::test]
+    async fn backfill_fills_legacy_run_rows_in_bounded_batches() {
+        let uri = match std::env::var("OPENCOMPANY_TEST_MONGODB_URI") {
+            Ok(uri) => uri,
+            Err(_) => {
+                assert!(
+                    !required(),
+                    "OPENCOMPANY_TEST_MONGODB_REQUIRED is set but \
+                     OPENCOMPANY_TEST_MONGODB_URI is not"
+                );
+                eprintln!("skipping: OPENCOMPANY_TEST_MONGODB_URI is not set");
+                return;
+            }
+        };
+        let client = Client::with_uri_str(&uri).await.unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        let db_name = format!(
+            "oc_test_{}_{}_{}",
+            std::process::id(),
+            nonce,
+            DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let store = MongoStore {
+            db: client.database(&db_name),
+            senders: Arc::new(StdMutex::new(HashMap::new())),
+        };
+
+        let company = CompanyId::new("legacy-co");
+        let runs = store.collection("runs");
+        // More than one batch, so the re-probe loop is exercised — the rows past
+        // the first `BACKFILL_BATCH_SIZE` must be picked up by a later pass.
+        for i in 0..BACKFILL_BATCH_SIZE + 3 {
+            let agent = if i % 2 == 0 { "engineer" } else { "designer" };
+            let record = crate::ports::runs::RunRecord {
+                id: format!("legacy-{i}"),
+                company: company.clone(),
+                task_id: None,
+                agent_id: agent.to_string(),
+                chat_id: None,
+                attempt: 1,
+                status: crate::ports::runs::RunStatus::Succeeded,
+                trigger_event_seq: None,
+                created_at_millis: 1_700_000_000_000,
+                started_at_millis: None,
+                finished_at_millis: None,
+                error: None,
+                usage: Default::default(),
+                step_count: 1,
+            };
+            runs.insert_one(doc! {
+                "company_id": company.as_ref(),
+                "run_id": &record.id,
+                "run_json": serde_json::to_string(&record).unwrap(),
+            })
+            .await
+            .unwrap();
+        }
+        // A row that already carries the mirror (written through the port after
+        // the upgrade) must be neither touched nor counted.
+        let fresh = crate::ports::runs::RunRecord {
+            id: "fresh".to_string(),
+            company: company.clone(),
+            task_id: None,
+            agent_id: "engineer".to_string(),
+            chat_id: None,
+            attempt: 1,
+            status: crate::ports::runs::RunStatus::Pending,
+            trigger_event_seq: None,
+            created_at_millis: 1_700_000_000_000,
+            started_at_millis: None,
+            finished_at_millis: None,
+            error: None,
+            usage: Default::default(),
+            step_count: 0,
+        };
+        runs.insert_one(doc! {
+            "company_id": company.as_ref(),
+            "run_id": &fresh.id,
+            "agent_id": "engineer",
+            "status": "pending",
+            "attempt": 1i64,
+            "created_ms": 1_700_000_000_000i64,
+            "run_json": serde_json::to_string(&fresh).unwrap(),
+        })
+        .await
+        .unwrap();
+
+        let filled = store.backfill_run_agent_ids().await.unwrap();
+        assert_eq!(
+            filled,
+            BACKFILL_BATCH_SIZE + 3,
+            "every legacy row is filled; the fresh row is not counted"
+        );
+
+        // The mirror landed on disk, not just in the return value — one row from
+        // each batch's worth of desks.
+        let migrated = runs
+            .find_one(doc! {"run_id": "legacy-0"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(get_str(&migrated, "agent_id").unwrap(), "engineer");
+        let later = runs
+            .find_one(doc! {"run_id": "legacy-1"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(get_str(&later, "agent_id").unwrap(), "designer");
+
+        // A second pass has nothing left to do — the `$exists: false` probe is
+        // exhausted.
+        assert_eq!(store.backfill_run_agent_ids().await.unwrap(), 0);
 
         drop_db(&store).await;
     }

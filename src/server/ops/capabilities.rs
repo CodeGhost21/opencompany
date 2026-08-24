@@ -16,7 +16,6 @@ use serde::Serialize;
 use crate::AppState;
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
-use crate::company::smithery::DirectoryKeySource;
 use crate::metering::capability::{CapabilityPlan, tokens_in};
 use crate::ports::now_millis;
 use crate::server::error::ApiError;
@@ -120,23 +119,6 @@ struct CapabilityStatusDto {
     /// transient store hiccup is the same class of lie #886 is about.
     #[serde(skip_serializing_if = "Option::is_none")]
     composio_credential_source: Option<CredentialSource>,
-    /// Which Smithery credential this company's MCP **directory** browsing
-    /// presents (issue #1287) — `company` (its own key), `environment` (one key
-    /// set for the whole host and shared by every company on it), or `none`
-    /// (Smithery is not queried, so the directory shows only the open registry's
-    /// hosted entries, which is very little).
-    ///
-    /// A tier and not a boolean, deliberately. `configured: true` would be true
-    /// of both working tiers while hiding that one of them is a shared account,
-    /// and a `configured` that meant "its own" would read `false` for a company
-    /// whose directory works — the two halves of the #886 lie at once. Anything
-    /// boolean the console needs is derivable from this; a second field would
-    /// only be a copy that can drift.
-    ///
-    /// Omitted when there is no company record to resolve for, or when the
-    /// secret store could not be read — an unknown answer is not `none`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mcp_directory_credential: Option<DirectoryKeySource>,
     /// Metered web search (issue #238): whether this company **explicitly**
     /// grants the `search` namespace (a `*` wildcard does NOT count).
     search_granted: bool,
@@ -163,17 +145,6 @@ struct CapabilityStatusDto {
     /// (`[tools].search_daily_calls`, else the built-in default). Reaching it
     /// makes the tool refuse loudly rather than return an empty result set.
     search_daily_call_cap: u32,
-    /// Bound repositories (issue #245, agent half): whether this company
-    /// **explicitly** grants the `repo` namespace (a `*` wildcard does NOT
-    /// count).
-    ///
-    /// The grant alone is not the whole story, and the console says so: a
-    /// company can grant `repo` and bind nothing (the tools are not wired), or
-    /// bind repositories and grant nothing (nobody can read them). Both are
-    /// silent misconfigurations that look like a working setup from one page
-    /// each, which is why this flag travels beside the repositories list rather
-    /// than only inside the manifest.
-    repo_granted: bool,
     /// Publishing (issue #244, panel half #1192): whether this company's grants
     /// confer `publish_artifact` — the only way a file an agent wrote becomes a
     /// deliverable.
@@ -266,15 +237,9 @@ struct OptInFlags {
     /// lies to every company that has one — the failure the issue #567 test
     /// below exists to catch.
     composio_credential_source: Option<CredentialSource>,
-    /// The resolved Smithery directory tier (issue #1287), or `None` when it
-    /// could not be determined. On the flags for the same reason the Composio
-    /// tier is: the DTO is built in two places and a field wired into one of
-    /// them lies to every company that has a plan.
-    mcp_directory_credential: Option<DirectoryKeySource>,
     search_granted: bool,
     search_daily_call_cap: u32,
     search_provider: String,
-    repo_granted: bool,
     /// Issue #1192. Carried on the flags rather than derived per DTO site for
     /// the reason the `composio_credential_source` note above already states:
     /// the DTO is built in two places, and a field wired into one of them alone
@@ -295,13 +260,9 @@ impl OptInFlags {
             // there is no company record to resolve a credential for, which is
             // not the same answer as "no credential resolves".
             composio_credential_source: None,
-            // Likewise undetermined rather than `Some(None)`: no record means
-            // no secret store to ask.
-            mcp_directory_credential: None,
             search_granted: false,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
-            repo_granted: false,
             publish_granted: false,
         }
     }
@@ -327,13 +288,11 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         composio_credential_source: flags.composio_credential_source,
-        mcp_directory_credential: flags.mcp_directory_credential,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
-        repo_granted: flags.repo_granted,
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
@@ -461,19 +420,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
                 .map(std::sync::Arc::new),
         )
         .await,
-        // Issue #1287: which Smithery key the MCP directory browses with. Read
-        // through the resolver rather than a second copy of its precedence, so
-        // this panel cannot name a tier different from the one a search sent.
-        // A store error yields `None` (undetermined) rather than failing the
-        // whole /capabilities response, matching the Composio probe above.
-        mcp_directory_credential: crate::company::smithery::resolve(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            &crate::app::config::ProcessEnv,
-        )
-        .await
-        .ok()
-        .map(|key| key.source()),
         // Issue #238: search is opt-in per tool grant like media/composio, and
         // its daily cap lives on `[tools]` rather than `[plan]` — a call
         // ceiling, not a token budget — so both travel with the plan-independent
@@ -497,7 +443,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // Issue #245: opt-in per tool grant like the three above, and read from
         // the same manifest field, so the repositories card can tell an operator
         // which half of the setup is missing.
-        repo_granted: crate::company::grants_repo_explicit(&record.manifest.tools.allow),
         // Issue #1192: the same predicate `build_agent`'s `wants_files` gate
         // calls, so the panel's verdict and the wired toolbelt cannot disagree.
         // Note the shape difference from its four neighbours above — this one is
@@ -558,13 +503,11 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         composio_credential_source: flags.composio_credential_source,
-        mcp_directory_credential: flags.mcp_directory_credential,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
-        repo_granted: flags.repo_granted,
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
@@ -1162,43 +1105,6 @@ mod tests {
         }
     }
 
-    /// Issue #1287: both DTO construction sites carry the directory tier, and
-    /// it tracks the key that is actually set.
-    ///
-    /// Same #567 precedent as the test above — a field wired into one branch
-    /// alone tells the truth to a company with no plan and lies to every company
-    /// that has one, which is exactly the shape that makes such a bug survive
-    /// review.
-    #[tokio::test]
-    async fn both_response_paths_carry_the_mcp_directory_tier() {
-        use crate::company::smithery;
-
-        for manifest in [
-            GRANTS_COMPOSIO,
-            &format!("{GRANTS_COMPOSIO}[plan]\nname = \"starter\"\n"),
-        ] {
-            let home_dir = home();
-            let home = home_dir.path().to_path_buf();
-            let state = state_with_manifest(&home, manifest).await;
-            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-
-            let (_, dto) = get_capabilities(&state).await;
-            assert_eq!(
-                dto["mcpDirectoryCredential"], "none",
-                "nothing set anywhere, so the directory has only the open registry: {dto}"
-            );
-
-            smithery::store_key(runtime.id(), runtime.secrets().as_ref(), "smithery_key")
-                .await
-                .unwrap();
-            let (_, dto) = get_capabilities(&state).await;
-            assert_eq!(
-                dto["mcpDirectoryCredential"], "company",
-                "the company's own key is its own tier, not a shared one: {dto}"
-            );
-        }
-    }
-
     /// Both DTO construction sites report which provider a company's searches
     /// actually reach, and it tracks what the Search settings page stored.
     ///
@@ -1351,8 +1257,8 @@ mod tests {
         );
 
         // …and the wildcard the majority of manifests actually ship DOES grant
-        // it. Asserted here, beside the negative, because the asymmetry against
-        // `repoGranted` in the same response is the thing a reader gets wrong.
+        // it. Asserted here, beside the negative, so the two shapes read
+        // against each other.
         let wildcard_dir = home();
         let state2 = state_with_manifest(
             wildcard_dir.path(),
@@ -1363,10 +1269,6 @@ mod tests {
         assert_eq!(
             dto2["publishGranted"], true,
             "a bare `*` confers publishing — this is the shape most manifests ship: {dto2}"
-        );
-        assert_eq!(
-            dto2["repoGranted"], false,
-            "…and the same `*` still confers no `repo`; the two rules differ on purpose: {dto2}"
         );
     }
 }

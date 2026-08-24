@@ -6,13 +6,12 @@
 //
 // Replaces the `/spec`-shaped panel tests (issue #914). The panel became a
 // picker when the engine stopped being boot-only, and the state it renders now
-// comes from `GET …/memory/engine` rather than the handshake: `/spec` reports
-// what *boot* bound, which stops being the answer the moment a console change
-// rebinds it live.
+// comes from `GET …/memory/engine` rather than the unauthenticated handshake:
+// an operator can change the binding live, and the engine endpoint refreshes
+// the provider's health for every read.
 import { describe, expect, it } from "vitest";
 
-import { documentSlug, type MemoryEngineState, type MemoryStats } from "@/api/memory";
-import { teammateMemoryCount } from "@/views/MemoryView";
+import { documentSlug, type MemoryEngineState } from "@/api/memory";
 
 function engine(overrides: Partial<MemoryEngineState>): MemoryEngineState {
   return {
@@ -24,17 +23,6 @@ function engine(overrides: Partial<MemoryEngineState>): MemoryEngineState {
     editable: true,
     configPath: "/data/config.toml",
     options: [],
-    ...overrides,
-  };
-}
-
-function stats(overrides: Partial<MemoryStats>): MemoryStats {
-  return {
-    facts: 0,
-    factsUpdatedAtMillis: 0,
-    lastUpdatedAtMillis: 0,
-    agentChunks: 0,
-    taskOutcomes: 0,
     ...overrides,
   };
 }
@@ -89,27 +77,5 @@ describe("documentSlug", () => {
     const slug = documentSlug(`${"a/".repeat(80)}report.pdf`);
     expect(Array.from(slug).length).toBe(96);
     expect(slug.endsWith("report.pdf")).toBe(true);
-  });
-});
-
-// Issue #1402. `/memory/stats` hands back a superset (`agentChunks`, every
-// context chunk) and one of its own slices (`taskOutcomes`, the ones carrying
-// the outcome label prefix). The health strip renders them as neighbouring
-// tiles, so the tile has to subtract or it counts the same rows twice.
-describe("teammateMemoryCount", () => {
-  it("is zero when every chunk is a task outcome — the shape that shipped the bug", () => {
-    expect(teammateMemoryCount(stats({ agentChunks: 13, taskOutcomes: 13 }))).toBe(0);
-  });
-
-  it("counts only the chunks left over once outcomes are carved out", () => {
-    expect(teammateMemoryCount(stats({ agentChunks: 13, taskOutcomes: 5 }))).toBe(8);
-  });
-
-  it("reads zero before the first stats response, not NaN", () => {
-    expect(teammateMemoryCount(null)).toBe(0);
-  });
-
-  it("never goes negative when two live reads cross under a concurrent write", () => {
-    expect(teammateMemoryCount(stats({ agentChunks: 2, taskOutcomes: 7 }))).toBe(0);
   });
 });
