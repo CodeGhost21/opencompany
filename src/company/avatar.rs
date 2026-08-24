@@ -489,6 +489,7 @@ fn apng_animation_cost(bytes: &[u8]) -> Option<u64> {
             cost = cost.saturating_add(w * h);
         } else if chunk_type == b"fcTL" {
             // Sequence(4), then big-endian width and height at 4..12.
+            eprintln!("apng fcTL: data.len={} data[4..8]={:?} data[8..12]={:?}", data.len(), data.get(4..8), data.get(8..12));
             if data.len() < 12 {
                 return None;
             }
