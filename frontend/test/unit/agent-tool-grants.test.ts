@@ -124,6 +124,13 @@ describe("companyCovers", () => {
     expect(companyCovers(["workspace.write"], "workspace.write")).toBe(true);
     // A read-only grant does not cover the write-inclusive bare request.
     expect(companyCovers(["workspace.read"], "workspace")).toBe(false);
+    // And a bare `workspace` allow does not cover a `workspace.*` request: the
+    // request strips to `workspace.` and falls to the generic matcher, where an
+    // unstarred grant matches only itself. The host's `allow_covers` resolves
+    // the same way, so the hint's "will not apply" warning for this pair is the
+    // truth, not a false negative — a company that allows only writes still has
+    // to add `workspace.*` before a teammate's read-glob ask lands.
+    expect(companyCovers(["workspace"], "workspace.*")).toBe(false);
   });
 
   it("covers an explicit opt-in only from a grant that names it", () => {
