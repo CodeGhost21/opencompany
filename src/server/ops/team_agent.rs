@@ -666,14 +666,20 @@ async fn edit_agent(
     // picker does: declared harnesses (and the built-in when a manifest
     // declares none) are always bindable, an undeclared coding CLI only when
     // this host wires an `AcpAgentFactory`, and anything else is refused.
-    if let Some(Some(id)) = &harness
-        && record.manifest.harness_by_id(id).is_none()
-        && !(state.acp_agents().is_some() && ACP_AGENTS.contains(&id.as_str()))
-    {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "no harness named `{id}` is available for this company."
-        )))
-        .into());
+    if let Some(Some(id)) = &harness {
+        let declared = record
+            .manifest
+            .effective_harnesses()
+            .iter()
+            .any(|h| h.id == *id);
+        let bindable =
+            declared || (ACP_AGENTS.contains(&id.as_str()) && state.acp_agents().is_some());
+        if !bindable {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "no harness named `{id}` is available for this company."
+            )))
+            .into());
+        }
     }
 
     // A model override only means anything on an `acp` harness — the same
