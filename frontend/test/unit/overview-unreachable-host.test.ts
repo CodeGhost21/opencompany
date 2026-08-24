@@ -92,6 +92,16 @@ function goUnreachable(mocks: ReturnType<typeof fakeClient>) {
   mocks.listTeam.mockImplementation(fail);
 }
 
+/** Restores the six reads after `goUnreachable`, so a test can heal a host. */
+function goHealthy(mocks: ReturnType<typeof fakeClient>) {
+  mocks.get.mockImplementation((path: string) => {
+    const suffix = Object.keys(HEALTHY_GET).find((k) => path.endsWith(k));
+    return Promise.resolve(suffix ? HEALTHY_GET[suffix] : []);
+  });
+  mocks.listDesks.mockResolvedValue([]);
+  mocks.listTeam.mockResolvedValue([]);
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
