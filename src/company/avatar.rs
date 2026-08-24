@@ -228,15 +228,24 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// answers "how much painting does a viewer do" without doing any of it.
 ///
 /// Returns `None` when the bytes are not a GIF, or a GIF that never reaches an
-/// Image Descriptor (nothing to count).
-fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
+/// Image Descriptor (nothing to count). Returns `Err` when a GIF that has
+/// reached at least one Image Descriptor ends without a clean trailer: a viewer
+/// decodes the frames that are present, so a truncated animation repaints its
+/// counted area just the same and must be held to
+/// [`MAX_AVATAR_ANIMATED_PIXELS`] — treating it as a still would let the frame
+/// flood through the cap.
+fn gif_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
     if !(bytes.starts_with(GIF_SIGNATURE_87) || bytes.starts_with(GIF_SIGNATURE_89)) {
-        return None;
+        return Ok(None);
     }
     // Signature (6) + Logical Screen Descriptor (7). The packed flags at
     // offset 10 carry the global color table size in the low three bits —
     // but only when the table is present, which bit 7 says.
-    let flags = *bytes.get(10)?;
+    let Some(&flags) = bytes.get(10) else {
+        // Shorter than the descriptor: no frame can have been reached, so
+        // there is nothing animated to count.
+        return Ok(None);
+    };
     let mut i = 13;
     if flags & 0x80 != 0 {
         let table_entries = 1 << ((flags & 0x07) + 1);
@@ -245,7 +254,17 @@ fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
     let mut cost: u64 = 0;
     let mut saw_descriptor = false;
     loop {
-        let &kind = bytes.get(i)?;
+        // The stream ends before the trailer. A GIF that already reached a
+        // frame is a truncated animation — a viewer repaints the frames that
+        // are there — and must be refused rather than read as a still. A GIF
+        // with no frame at all is a header-only file: a still, nothing to count.
+        let Some(&kind) = bytes.get(i) else {
+            return if saw_descriptor {
+                Err(truncated_animation())
+            } else {
+                Ok(None)
+            };
+        };
         i += 1;
         match kind {
             // Trailer — the stream is over, and we walked every frame in it.
@@ -254,7 +273,14 @@ fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
             // the raster data. Its payload never contributes pixels.
             0x21 => {
                 i += 1;
-                i = skip_sub_blocks(bytes, i)?;
+                let Some(next) = skip_sub_blocks(bytes, i) else {
+                    return if saw_descriptor {
+                        Err(truncated_animation())
+                    } else {
+                        Ok(None)
+                    };
+                };
+                i = next;
             }
             // Image Descriptor: left/top (4) + width/height (4) + packed flags (1).
             0x2C => {
@@ -272,13 +298,24 @@ fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
                 }
                 // LZW minimum code size byte, then the raster sub-blocks.
                 i += 1;
-                i = skip_sub_blocks(bytes, i)?;
+                let Some(next) = skip_sub_blocks(bytes, i) else {
+                    return Err(truncated_animation());
+                };
+                i = next;
             }
             // Any other block kind is malformed; stop rather than misread it.
-            _ => return None,
+            // Once a frame is on the table the browser has already decoded it,
+            // so this is a truncated animation too, not a still.
+            _ => {
+                return if saw_descriptor {
+                    Err(truncated_animation())
+                } else {
+                    Ok(None)
+                };
+            }
         }
     }
-    saw_descriptor.then_some(cost)
+    Ok(saw_descriptor.then_some(cost))
 }
 
 /// Advances `i` past a run of sub-blocks — each a one-byte length followed by
