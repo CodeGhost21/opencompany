@@ -234,10 +234,14 @@ fn gif_animation_cost(bytes: &[u8]) -> Option<u64> {
         return None;
     }
     // Signature (6) + Logical Screen Descriptor (7). The packed flags at
-    // offset 10 carry the global color table size in the low three bits.
+    // offset 10 carry the global color table size in the low three bits —
+    // but only when the table is present, which bit 7 says.
     let flags = *bytes.get(10)?;
-    let table_entries = 1 << ((flags & 0x07) + 1);
-    let mut i = 13 + 3 * table_entries;
+    let mut i = 13;
+    if flags & 0x80 != 0 {
+        let table_entries = 1 << ((flags & 0x07) + 1);
+        i += 3 * table_entries;
+    }
     let mut cost: u64 = 0;
     let mut saw_descriptor = false;
     loop {
