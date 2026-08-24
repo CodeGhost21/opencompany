@@ -385,6 +385,9 @@ export function decisionLabel(
   if (a.contents_hidden) {
     parts.push(`composed ${timeAgo(a.at_millis, now)} (${a.at_millis})`);
   }
+  // The relative time is intentionally bucketed. Keep the exact timestamp as a
+  // stable, non-sensitive discriminator when hidden requests share a bucket.
+  if (a.contents_hidden) parts.push(`request ${a.at_millis}`);
   const who = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
   if (who != null) parts.push(`asked by ${who}`);
   return parts.join(" — ");
