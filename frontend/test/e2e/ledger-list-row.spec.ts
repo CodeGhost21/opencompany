@@ -19,6 +19,12 @@ test("a list row leads with its title and shows one readable status", async ({
   page,
   request,
 }) => {
+  // The row renders correctly but the whole job slows to a crawl when the CI
+  // runner pool is saturated — page load alone can eat the suite's 60s default
+  // before the assertions run. The assertions below are exact; the budget is
+  // the only thing under-tuned, so it is stated rather than inherited.
+  test.setTimeout(120_000);
+
   const marker = Date.now();
   const slug = `e2e-list-row-${marker}`;
   const title = `E2E list row ${marker}`;
@@ -55,7 +61,9 @@ test("a list row leads with its title and shows one readable status", async ({
     expect(recorded.ok()).toBeTruthy();
 
     await page.goto(`/#/ledgers/${slug}`);
-    await page.getByRole("button", { name: "List", exact: true }).click();
+    // Declared ledgers open in list mode (issue #1351) — `defaultLedgerMode`
+    // keeps the board for the native Tasks ledger only — so there is no "List"
+    // button to click (the toggle reads "Board" while we are on the list).
 
     const row = page.getByTestId(`ledger-entry-${id}`);
     await expect(row).toBeVisible({ timeout: 15_000 });

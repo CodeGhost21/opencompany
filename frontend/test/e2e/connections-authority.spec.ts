@@ -1,8 +1,14 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Issue #403 — the Connections page must not offer a member controls the host
+ * Issue #403 — the connection pages must not offer a member controls the host
  * refuses.
+ *
+ * Since the Connections split there are three of them: OAuth (`#/settings/oauth`),
+ * MCP (`#/settings/mcp`) and Inference (`#/settings/inference`). Each carries
+ * its own read-only banner and its own credential fields, so each is driven
+ * here — a split that left one page still inviting a member to paste a token
+ * would be exactly the regression this spec is about.
  *
  * The host is the boundary: every write on this page answers `403` for a
  * member whatever the console renders. What this spec covers is the other
@@ -24,8 +30,18 @@ type APIRequestContext = import("@playwright/test").APIRequestContext;
 
 const MEMBER_EMAIL = "member-403@example.test";
 
-async function openConnections(page: Page) {
-  await page.goto("/#/settings/connections");
+// The first-run tour offers itself once per browser context and then records
+// `skipped` in that context's localStorage. These tests visit three settings
+// pages within one context, so waiting for the dismiss button on every visit
+// burns a full `waitFor` timeout (10s) on the pages after the first, where the
+// tour can no longer appear — three such waits already blow the 60s test
+// budget. Key the dismissal by page object (one page per context here) so only
+// the first visit in each context waits on it.
+const tourDismissed = new WeakMap<Page, boolean>();
+
+async function openSettingsPage(page: Page, sub: string) {
+  await page.goto(`/#/settings/${sub}`);
+  if (tourDismissed.has(page)) return;
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
@@ -33,6 +49,7 @@ async function openConnections(page: Page) {
     .catch(() => {
       /* already seen in this context — nothing to dismiss */
     });
+  tourDismissed.set(page, true);
 }
 
 /**
@@ -77,7 +94,9 @@ test("a member sees what is connected but is offered nothing that changes it", a
   try {
     await signInAsMember(page.request, memberContext.request);
     const memberPage = await memberContext.newPage();
-    await openConnections(memberPage);
+
+    // ---- OAuth: the third-party accounts the company acts through ----------
+    await openSettingsPage(memberPage, "oauth");
 
     // The page says why, in the operator's language.
     await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({ timeout: 30_000 });
@@ -85,15 +104,12 @@ test("a member sees what is connected but is offered nothing that changes it", a
     // No credential field anywhere on the page. This is the assertion that
     // matters most: a member must never be handed somewhere to paste a token.
     await expect(memberPage.locator("#composio-token")).toHaveCount(0);
-    await expect(memberPage.locator("#tg-token")).toHaveCount(0);
-    await expect(memberPage.locator("#mcp-token")).toHaveCount(0);
 
-    // Nor the controls behind the other refused writes. `exact` matters on the
-    // last two: role-name matching is substring by default, and the Settings
-    // rail carries a "Who can sign in, and as what" item that a loose "Sign in"
-    // matches — which would make this assertion fail for an admin too, and so
-    // prove nothing about either role.
-    await expect(memberPage.getByTestId("inference-save")).toHaveCount(0);
+    // Nor the controls behind the other refused writes. `exact` matters here:
+    // role-name matching is substring by default, and the Settings rail carries
+    // a "Who can sign in, and as what" item that a loose "Sign in" matches —
+    // which would make this assertion fail for an admin too, and so prove
+    // nothing about either role.
     const button = (name: string) => memberPage.getByRole("button", { name, exact: true });
     await expect(button("Save token")).toHaveCount(0);
     await expect(button("Sign in")).toHaveCount(0);
@@ -101,21 +117,46 @@ test("a member sees what is connected but is offered nothing that changes it", a
 
     // But the read is intact — a member can still see what the company is
     // wired to, which is what explains why an agent can reach a provider.
-    await expect(memberPage.getByRole("heading", { name: "Connections" })).toBeVisible();
+    await expect(memberPage.getByRole("heading", { name: "OAuth" })).toBeVisible();
     const status = await memberPage.request.get("/api/v1/company/composio");
     expect(status.ok()).toBeTruthy();
     expect(await status.text()).not.toContain("token");
+
+    // ---- MCP: the tool servers, rows and the file both ---------------------
+    await openSettingsPage(memberPage, "mcp");
+    await expect(memberPage.getByTestId("mcp-read-only")).toBeVisible({ timeout: 30_000 });
+    await expect(memberPage.locator("#mcp-name")).toHaveCount(0);
+    await expect(memberPage.locator("#mcp-token")).toHaveCount(0);
+    // The document is the other way to write the same store, so it must refuse
+    // a member too — read-only, and with no Save to press.
+    await memberPage.getByTestId("mcp-tab-json").click();
+    await expect(memberPage.getByTestId("mcp-json-text")).toHaveAttribute("readonly", "");
+    await expect(memberPage.getByTestId("mcp-json-save")).toHaveCount(0);
+
+    // ---- Inference: what every teammate's turn costs -----------------------
+    await openSettingsPage(memberPage, "inference");
+    await expect(memberPage.getByTestId("inference-save")).toHaveCount(0);
   } finally {
     await memberContext.close();
   }
 });
 
-test("an admin is still offered every control on the same page", async ({ page }) => {
-  await openConnections(page);
-
-  // The member's banner is absent, and the credential surfaces are present.
+test("an admin is still offered every control across the three pages", async ({ page }) => {
+  await openSettingsPage(page, "oauth");
+  // The member's banner is absent, and the credential surface is present.
+  // The company-credential key is the OAuth page's write surface on every
+  // build: the Composio token card only renders when the host reports a
+  // composio credential the admin may override (default-feature hosts never
+  // do), so it is not the invariant to assert here.
   await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
+  await expect(page.locator("#company-credential")).toBeVisible({ timeout: 30_000 });
+
+  await openSettingsPage(page, "mcp");
+  await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);
+  await expect(page.locator("#mcp-name")).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("mcp-tab-json").click();
+  await expect(page.getByTestId("mcp-json-revert")).toBeVisible();
+
+  await openSettingsPage(page, "inference");
   await expect(page.getByTestId("inference-save")).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("#tg-token")).toBeVisible();
-  await expect(page.locator("#mcp-name")).toBeVisible();
 });

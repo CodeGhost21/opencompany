@@ -1,8 +1,8 @@
 # Overview — the knowledge graph
 
-`#/overview` is the graph and nothing else: no page header, no strip, and the
-console's own top bar is hidden for this view (see `app-shell.tsx`). It fills
-the viewport beside the sidebar.
+`#/overview` is the graph and nothing else: no page header or strip. No view
+has a top bar; its remaining controls live in the sidebar. The graph fills the
+shell's content surface beside the sidebar.
 
 ## What it draws
 
@@ -25,6 +25,11 @@ a bottom-up tree; click a job for its steps, a teammate or tool for its card.
 Click the core to bloom the memory constellation, with type-to-find over it.
 Drag the background to pan. `←` / `→` turn the pillar wheel; `Escape` steps
 back out.
+
+The graph is one tab stop. After Tab enters it, `←` / `↑` and `→` / `↓` move
+between visible nodes; `Enter` or `Space` selects the focused node just as a
+click would. The graph announces those instructions and each node's kind and
+name to assistive technology.
 
 Panning is an offset on top of whatever the camera is framing, not a separate
 mode: the shot still tracks its subject, just off-centre by the amount you
@@ -62,7 +67,8 @@ workflow hangs on the wheel**: the host scopes a flow to the *company*, and
 nothing links a flow to a desk, so a flow is drawn on the desk of the first
 teammate it runs through. That is a real relationship read as a placement it was
 never declared to be. `DERIVED_NOTICE` in `kg/adapter.ts` is the standing
-caveat, and the legend chip reads "flow placement".
+caveat; the legend visibly labels its placement as inferred, and its native
+disclosure opens the full explanation for pointer, keyboard, and touch users.
 
 Three rings used to be invented, and were deleted as the host grew the reads
 they were standing in for:
