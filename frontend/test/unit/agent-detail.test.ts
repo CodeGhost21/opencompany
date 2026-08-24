@@ -121,6 +121,7 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: ["workspace.read", "email.send"],
       companyAllow: ["workspace.*"],
+      deskAllow: [],
       effective: ["workspace.read"],
     });
     expect(summary.standardGrant).toBe(false);
