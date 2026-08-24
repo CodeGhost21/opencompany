@@ -532,12 +532,7 @@ describe("changing the spend cap", () => {
     await mount(client);
 
     const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
-    await act(async () => {
-      input.value = "";
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      await Promise.resolve();
-    });
+    await type(input, "");
     await act(async () => {
       [...container.querySelectorAll("button")]
         .find((button) => button.textContent?.includes("Set no cap"))!
