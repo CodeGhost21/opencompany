@@ -2062,7 +2062,8 @@ prompt = "Lead decisively."
         // A PDF labelled `image/png` — stored as a binary node whose declared
         // type is exactly the claim the referent check must not trust.
         let (status, uploaded) =
-            upload_workspace_binary(&state, "face.png", b"%PDF-1.7 not an image").await;
+            upload_workspace_binary(&state, "face.png", "image/png", b"%PDF-1.7 not an image")
+                .await;
         assert_eq!(status, StatusCode::OK, "{uploaded}");
         let id = uploaded["id"].as_str().expect("a node id");
 
@@ -2071,16 +2072,16 @@ prompt = "Lead decisively."
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     }
 
-    /// The positive half of the same rule: a real image uploaded through the
-    /// generic workspace route under a *wrong* declared type is accepted,
-    /// because the bytes sniff as an image. This is what keeps a face pickable
-    /// whatever label the upload carried.
+    /// A real image uploaded through the generic workspace route is accepted
+    /// as a face when its declared type matches what its bytes sniff as. This
+    /// is what keeps a face pickable from the Files tab.
     #[tokio::test]
     async fn a_blob_reference_is_accepted_when_the_bytes_are_an_image() {
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), ROSTER).await;
 
-        let (status, uploaded) = upload_workspace_binary(&state, "face.png", TINY_GIF).await;
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "face.gif", "image/gif", TINY_GIF).await;
         assert_eq!(status, StatusCode::OK, "{uploaded}");
         let id = uploaded["id"].as_str().expect("a node id");
 
@@ -2088,6 +2089,25 @@ prompt = "Lead decisively."
             patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
         assert_eq!(status, StatusCode::OK, "{worn}");
         assert_eq!(worn["avatar"], format!("blob:{id}"), "{worn}");
+    }
+
+    /// The declared type is a claim, and the claim has to match the bytes: the
+    /// same GIF labelled `image/png` is refused, because accepting it would let
+    /// the same bytes render as one type from the avatar's own path and as
+    /// another from the Files tab.
+    #[tokio::test]
+    async fn a_blob_reference_is_refused_when_the_declared_type_does_not_match() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "face.png", "image/png", TINY_GIF).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     }
 
     /// Issue #1530: an overlay teammate's persona is editable the same way. It
