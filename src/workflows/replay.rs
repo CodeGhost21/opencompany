@@ -402,7 +402,7 @@ pub(crate) fn child_calls_to_repeat(
         };
         // Keep the deepest-child node ids in their established local form;
         // ancestor calls carry the namespace so equal local ids remain distinct.
-        for call in child_calls_preceding(&record.graph, gate, &approved, &prefix) {
+        for call in child_calls_preceding(&record.graph, gate, &approved, &prefix, "") {
             if !out.contains(&call) {
                 out.push(call);
             }
