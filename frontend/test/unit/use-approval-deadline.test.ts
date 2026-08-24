@@ -174,4 +174,60 @@ describe("useApprovalDeadline", () => {
     await flush();
     expect(hours()).toBe(72);
   });
+
+  it("discards an out-of-order response from a slower poll", async () => {
+    vi.useFakeTimers();
+    // Two reads started, two deferred responses. A is the older request, B the
+    // newer one, and they resolve in the reverse order they were issued — a
+    // poll that takes longer than the interval, or a visibility-triggered
+    // refresh racing a request started just before the tab hid.
+    let resolveA!: (v: unknown) => void;
+    let resolveB!: (v: unknown) => void;
+    const get = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise((res) => {
+          resolveA = res;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((res) => {
+          resolveB = res;
+        }),
+      );
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get,
+    } as unknown as OpenCompanyClient & { get: typeof get };
+
+    let hours!: () => number;
+    act(() => {
+      hours = probe(() => useApprovalDeadline(client, "acme"));
+    });
+    // A is in flight; nothing has resolved yet.
+    await flush();
+    expect(hours()).toBe(24);
+
+    // The next poll tick starts B.
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+    await flush();
+
+    // B — the newer read — lands first with the raised deadline.
+    await act(async () => {
+      resolveB({ approvalTtlHours: 72, mode: "supervised" });
+    });
+    await flush();
+    expect(hours()).toBe(72);
+
+    // A — the older read — resolves last with the stale deadline. The hook must
+    // discard it: the header already advertises what the host enforces, and
+    // letting A land would repaint a stale TTL until the next poll corrects it.
+    await act(async () => {
+      resolveA({ approvalTtlHours: 24, mode: "supervised" });
+    });
+    await flush();
+    expect(hours()).toBe(72);
+  });
 });
