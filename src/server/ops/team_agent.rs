@@ -708,13 +708,13 @@ async fn edit_agent(
     // Authority **after** existence, and this ordering is forced rather than
     // preferred (review of #745).
     //
-    // The check is conditional on `tools`, so putting it first would make one
-    // route give two answers about whether a teammate exists: `{"name": "x"}`
-    // on an unknown id would 404 while `{"tools": […]}` on the same id would
-    // 403. Nothing about an unrelated field should decide that, and the
-    // non-`tools` path cannot be moved to match — a name edit is member-open
-    // and has no authority check to run first. So this is the only order in
-    // which the two paths agree.
+    // The check is conditional on the admin-gated fields, so putting it first
+    // would make one route give two answers about whether a teammate exists:
+    // `{"name": "x"}` on an unknown id would 404 while `{"tools": […]}` on the
+    // same id would 403. Nothing about an unrelated field should decide that,
+    // and the member-open path cannot be moved to match — a name edit is
+    // member-open and has no authority check to run first. So this is the only
+    // order in which the two paths agree.
     //
     // The usual reason to authorise first — refusing to confirm a resource
     // exists — does not apply: `GET {scope}/team/{agent_id}` is open to any
