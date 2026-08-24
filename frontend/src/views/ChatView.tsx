@@ -800,6 +800,10 @@ export function ChatView({
       onReply?.();
     } catch (err) {
       outcome = "failed";
+      if (scopeCompany !== company) {
+        if (chatId) onSendStale?.(chatId);
+        return;
+      }
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
       // whether their message was taken at all. The two facts are not in
