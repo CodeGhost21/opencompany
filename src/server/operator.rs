@@ -1856,7 +1856,7 @@ async fn accept_chat_turn(
     if let CompanyEvent::OperatorMessage { mentions, .. } = &message_event
         && !mentions.is_empty()
     {
-        notify_mentioned(runtime, id, mentions, &message_seq, by, desk).await;
+        runtime.notify_mentions(id, mentions, &message_seq, by, desk).await;
     }
 
     let turn_id = crate::ports::generate_id();
