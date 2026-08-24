@@ -33,6 +33,19 @@ describe("guessName", () => {
     expect(guessName("123.456@acme.com")).toBeNull();
     expect(guessName("@acme.com")).toBeNull();
   });
+
+  it("judges the prefixes the way the host parses them, not by prefix alone", () => {
+    // An address whose local part merely starts with the prefix is an *email*,
+    // exactly as `LoginIdentity::parse` in `src/ports/users.rs` treats it: only
+    // a base58 string that decodes to 32 bytes after `wallet:`, and the exact
+    // value `local:owner`, have no name in them. The labels below are the same
+    // ones the host's `derive_display_name` produces.
+    expect(guessName("wallet:ada@example.com")).toBe("Wallet:ada");
+    expect(guessName("local:owner@example.com")).toBe("Local:owner");
+    // A base58 local part too short to be a 32-byte key is an email too,
+    // mirroring `decode_wallet_address`'s byte-count requirement.
+    expect(guessName("wallet:hi")).toBe("Wallet:hi");
+  });
 });
 
 describe("personName", () => {
