@@ -81,4 +81,83 @@ describe("MessageAttachments (issue #1682)", () => {
     });
     expect(resolveUrl).toHaveBeenCalledWith("n3");
   });
+
+  // Codex review finding: a failed `resolveUrl` used to leave the download
+  // button looking like it simply did nothing — an unhandled rejection with
+  // no feedback to the operator.
+  it("reports a failed download instead of leaving the button silent", async () => {
+    const resolveUrl = vi.fn(async () => {
+      throw new Error("node not found");
+    });
+    await render([pdf], resolveUrl);
+    await act(async () => {
+      (container.querySelector('[title="Download report.pdf"]') as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("node not found");
+  });
+
+  // Codex review finding: the preview fetch had no rejection handling either
+  // — this pins that a failed preview does not throw an unhandled rejection
+  // or crash the row; the download chip is still there as the fallback.
+  it("does not crash when the preview fetch fails", async () => {
+    const resolveUrl = vi.fn(async () => {
+      throw new Error("gone");
+    });
+    await render([png], resolveUrl);
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector('[title="Download chart.png"]')).not.toBeNull();
+  });
+
+  describe("lazy preview loading (codex review finding)", () => {
+    let observe: ReturnType<typeof vi.fn>;
+    let disconnect: ReturnType<typeof vi.fn>;
+    let intersectCallback: (entries: { isIntersecting: boolean }[]) => void;
+    let originalIO: typeof IntersectionObserver | undefined;
+
+    beforeEach(() => {
+      originalIO = globalThis.IntersectionObserver;
+      observe = vi.fn();
+      disconnect = vi.fn();
+      class FakeIntersectionObserver {
+        constructor(cb: (entries: { isIntersecting: boolean }[]) => void) {
+          intersectCallback = cb;
+        }
+        observe = observe;
+        disconnect = disconnect;
+        unobserve = vi.fn();
+      }
+      // @ts-expect-error -- a minimal stand-in, not the full DOM interface
+      globalThis.IntersectionObserver = FakeIntersectionObserver;
+    });
+
+    afterEach(() => {
+      globalThis.IntersectionObserver = originalIO as typeof IntersectionObserver;
+    });
+
+    it("does not fetch an image preview until it scrolls into view", async () => {
+      const resolveUrl = vi.fn(async () => "blob:the-image");
+      await render([png], resolveUrl);
+
+      expect(observe).toHaveBeenCalledOnce();
+      expect(resolveUrl).not.toHaveBeenCalled();
+
+      await act(async () => {
+        intersectCallback([{ isIntersecting: true }]);
+        await Promise.resolve();
+      });
+
+      expect(resolveUrl).toHaveBeenCalledWith("n1");
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:the-image");
+    });
+
+    it("never observes a non-image attachment — nothing to defer", async () => {
+      await render([pdf]);
+      expect(observe).not.toHaveBeenCalled();
+    });
+  });
 });

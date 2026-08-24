@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, FileText, Loader2 } from "lucide-react";
 
 import { formatBytes } from "@/api/workspace";
@@ -57,30 +57,72 @@ function AttachmentItem({
   const image = isPreviewableImage(attachment.mime);
   const [previewUrl, setPreviewUrl] = useState<string>();
   const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string>();
+  const container = useRef<HTMLDivElement>(null);
+  // Whether this chip has scrolled near the viewport — an image preview only
+  // fetches once this flips true (codex review finding). History can
+  // materialize hundreds of messages at once, and each workspace blob can run
+  // tens of megabytes, so fetching every attachment's bytes the instant it
+  // mounts — most of them off-screen — could pull down gigabytes for one
+  // channel open.
+  const [inView, setInView] = useState(false);
 
-  // Fetch the bytes for an inline image once, and revoke the object URL on
-  // unmount so it does not stay resident for the life of the document.
+  // Arms `inView` once, via IntersectionObserver where the runtime has one.
+  // Without it (a test environment, an old embedded webview) this falls back
+  // to eager — the pre-existing behavior — rather than a preview that can
+  // never load.
   useEffect(() => {
-    if (!image || !resolveUrl) return;
+    if (!image || inView) return;
+    const el = container.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setInView(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setInView(true);
+      },
+      // A little ahead of the viewport, so a fast scroll finds the preview
+      // already loading rather than popping in after the fact.
+      { rootMargin: "200px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [image, inView]);
+
+  // Fetches the bytes for an inline image once it is in view, and revokes the
+  // object URL on unmount so it does not stay resident for the life of the
+  // document.
+  useEffect(() => {
+    if (!image || !inView || !resolveUrl) return;
     let url: string | undefined;
     let alive = true;
-    void resolveUrl(attachment.nodeId).then((got) => {
-      if (alive) {
-        url = got;
-        setPreviewUrl(got);
-      } else {
-        URL.revokeObjectURL(got);
-      }
-    });
+    resolveUrl(attachment.nodeId)
+      .then((got) => {
+        if (alive) {
+          url = got;
+          setPreviewUrl(got);
+        } else {
+          URL.revokeObjectURL(got);
+        }
+      })
+      .catch(() => {
+        // A preview is a nicety the download chip below does not depend on
+        // (codex review finding — a rejection here must not go unhandled),
+        // so a failed fetch stays silent here rather than duplicating the
+        // download button's own error state for a fetch the operator never
+        // asked for directly.
+      });
     return () => {
       alive = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [image, resolveUrl, attachment.nodeId]);
+  }, [image, inView, resolveUrl, attachment.nodeId]);
 
   async function download() {
     if (!resolveUrl || downloading) return;
     setDownloading(true);
+    setDownloadError(undefined);
     try {
       const url = await resolveUrl(attachment.nodeId);
       const anchor = document.createElement("a");
@@ -92,13 +134,21 @@ function AttachmentItem({
       // Revoke after the click has been handed off, not synchronously — the
       // browser needs the URL to still resolve when it starts the download.
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (err) {
+      // Codex review finding: an unhandled rejection here left the button
+      // looking like it simply did nothing — the node was deleted, the
+      // session expired, or the blob request otherwise failed, and the
+      // operator had no way to tell.
+      setDownloadError(
+        err instanceof Error ? err.message : "Couldn't download this file.",
+      );
     } finally {
       setDownloading(false);
     }
   }
 
   return (
-    <div className="flex w-fit max-w-full flex-col gap-1.5">
+    <div ref={container} className="flex w-fit max-w-full flex-col gap-1.5">
       {image && previewUrl && (
         <img
           src={previewUrl}
@@ -127,6 +177,11 @@ function AttachmentItem({
         </span>
         <Download className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
       </button>
+      {downloadError && (
+        <p role="alert" className="text-2xs text-destructive">
+          {downloadError}
+        </p>
+      )}
     </div>
   );
 }
