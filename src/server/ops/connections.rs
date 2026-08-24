@@ -206,7 +206,10 @@ async fn best_effort_revoke(runtime: &CompanyRuntime, provider: &str) {
 async fn best_effort_revoke_from(
     runtime: &CompanyRuntime,
     provider: &str,
-    env: &dyn crate::app::config::EnvSource,
+    // `+ Sync` so the returned future is `Send`, which axum requires of a
+    // handler: a `&T` is `Send` only when `T` is `Sync`, and the bare trait
+    // object is not. Same rule as `server/setup.rs`'s `apply_inner`.
+    env: &(dyn crate::app::config::EnvSource + Sync),
 ) {
     let Some(access_token) = stored_access_token(runtime, provider).await else {
         return;
