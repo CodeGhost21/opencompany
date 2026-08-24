@@ -595,11 +595,14 @@ fn apng_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
             cost = cost.saturating_add(w * h);
         } else if chunk_type == b"fcTL" {
             // Sequence(4), then big-endian width and height at 4..12.
-            if data.len() < 12 {
+            let Some(frame_w) = data.get(4..8).and_then(|b| b.try_into().ok()) else {
                 return Err(truncated_animation());
-            }
-            let frame_w = u32::from_be_bytes(data[4..8].try_into().ok()?) as u64;
-            let frame_h = u32::from_be_bytes(data[8..12].try_into().ok()?) as u64;
+            };
+            let frame_w = u32::from_be_bytes(frame_w) as u64;
+            let Some(frame_h) = data.get(8..12).and_then(|b| b.try_into().ok()) else {
+                return Err(truncated_animation());
+            };
+            let frame_h = u32::from_be_bytes(frame_h) as u64;
             cost = cost.saturating_add(frame_w * frame_h);
         }
         // A PNG chunk is length(4) + type(4) + data + CRC(4); the CRC is not
