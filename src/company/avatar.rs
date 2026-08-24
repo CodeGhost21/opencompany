@@ -1427,8 +1427,9 @@ mod test {
     #[test]
     fn webp_animation_cost_counts_every_anmf_frame() {
         assert_eq!(
-            webp_animation_cost(&webp_animated((100, 100), &[(100, 100), (50, 50)])),
-            Ok(Some(12_500))
+            webp_animation_cost(&webp_animated((100, 100), &[(100, 100), (50, 50)]))
+                .unwrap(),
+            Some(12_500)
         );
         // Frames may be sub-rectangles of the canvas; each one is still paid for.
         assert_eq!(
