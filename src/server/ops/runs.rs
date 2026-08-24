@@ -1010,6 +1010,7 @@ mod tests {
         assert_eq!(
             RunsQuery {
                 task: None,
+                workflow_run: None,
                 agent: None,
                 status: None,
                 limit: None,
