@@ -3,13 +3,14 @@
 // `app-shell.tsx`'s `View`/`NAV` brings this surface straight back. Do not
 // delete it as dead code.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Inbox as InboxIcon, Mail, Send } from "lucide-react";
+import { ArrowLeft, Inbox as InboxIcon, Info, Mail, Send } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { enabledInboxes, preview } from "@/api/inbox";
 import type { InboxDto, InboxMessageDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -147,127 +148,165 @@ export function InboxView({ client, company }: Props) {
 
   if (load === "loading") {
     return (
-      <div className="flex flex-1 flex-col gap-2 p-4">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <Skeleton key={i} className="h-16 rounded-lg" />
-        ))}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <InboxParkingNotice />
+        <div className="flex flex-1 flex-col gap-2 p-4">
+          <h1 className="sr-only">Inbox</h1>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-16 rounded-lg" />
+          ))}
+        </div>
       </div>
     );
   }
 
   if (load === "error") {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-        <InboxIcon className="size-8" />
-        <div className="space-y-1">
-          <p className="font-medium text-foreground">Inboxes unavailable</p>
-          <p className="max-w-sm text-sm">{error}</p>
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <InboxParkingNotice />
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+          <h1 className="sr-only">Inbox</h1>
+          <InboxIcon className="size-8" />
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">Inboxes unavailable</p>
+            <p className="max-w-sm text-sm">{error}</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void loadRoster()}>
+            Try again
+          </Button>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void loadRoster()}>
-          Try again
-        </Button>
       </div>
     );
   }
 
   if (listed.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-        <InboxIcon className="size-8" />
-        <div className="space-y-1">
-          <p className="font-medium text-foreground">No inboxes yet</p>
-          <p className="max-w-sm text-sm">
-            Give a teammate its own inbox from the <span className="font-medium">Team</span> page —
-            flip on the inbox toggle for anyone who needs to receive email. Mail sent to that
-            address shows up here.
-          </p>
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <InboxParkingNotice />
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+          <h1 className="sr-only">Inbox</h1>
+          <InboxIcon className="size-8" />
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">No inboxes yet</p>
+            <p className="max-w-sm text-sm">
+              Give a teammate its own inbox from the{" "}
+              <a className="font-medium text-foreground underline-offset-4 hover:underline" href="#/company">
+                Company page
+              </a>{" "}
+              — open a teammate to flip on the inbox toggle for anyone who needs to receive email.
+              Mail sent to that address shows up here.
+            </p>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-      {/* Message list */}
-      <section
-        className={cn(
-          "w-full shrink-0 flex-col border-r md:flex lg:w-96",
-          mobilePane === "list" ? "flex" : "hidden",
-        )}
-      >
-        <div className="flex items-center gap-2 border-b px-3 py-2.5">
-          <Select
-            value={active?.key}
-            onValueChange={(v) => v && (setActiveKey(v), setOpenId(null))}
-            items={Object.fromEntries(listed.map((i) => [i.key, i.name]))}
-          >
-            <SelectTrigger className="h-8 flex-1" data-testid="inbox-select">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {listed.map((i) => (
-                <SelectItem key={i.key} value={i.key}>
-                  {i.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {active && active.unread > 0 && <Badge variant="secondary">{active.unread}</Badge>}
-        </div>
-        <div className="flex-1 overflow-y-auto" data-testid="inbox-list">
-          {messagesLoading ? (
-            <div className="space-y-2 p-3">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-14 rounded-lg" />
-              ))}
-            </div>
-          ) : messagesError ? (
-            <div
-              className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-foreground"
-              data-testid="inbox-messages-error"
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <InboxParkingNotice />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <h1 className="sr-only">Inbox</h1>
+        {/* Message list */}
+        <section
+          className={cn(
+            "w-full shrink-0 flex-col border-r md:flex lg:w-96",
+            mobilePane === "list" ? "flex" : "hidden",
+          )}
+        >
+          <div className="flex items-center gap-2 border-b px-3 py-2.5">
+            <Select
+              value={active?.key}
+              onValueChange={(v) => v && (setActiveKey(v), setOpenId(null))}
+              items={Object.fromEntries(listed.map((i) => [i.key, i.name]))}
             >
-              <Mail className="size-6" />
-              <div className="space-y-1">
-                <p className="font-medium text-foreground">Couldn't load this inbox</p>
-                <p className="max-w-xs">{messagesError}</p>
+              <SelectTrigger className="h-8 flex-1" data-testid="inbox-select">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {listed.map((i) => (
+                  <SelectItem key={i.key} value={i.key}>
+                    {i.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {active && active.unread > 0 && <Badge variant="secondary">{active.unread}</Badge>}
+          </div>
+          <div className="flex-1 overflow-y-auto" data-testid="inbox-list">
+            {messagesLoading ? (
+              <div className="space-y-2 p-3">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-14 rounded-lg" />
+                ))}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setMessagesReload((n) => n + 1)}
+            ) : messagesError ? (
+              <div
+                className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-foreground"
+                data-testid="inbox-messages-error"
               >
-                Try again
-              </Button>
-            </div>
-          ) : messages.length > 0 ? (
-            messages.map((m) => (
-              <MessageRow
-                key={m.id}
-                message={m}
-                active={m.id === openId}
-                onClick={() => active && void openMessage(active.key, m)}
-              />
-            ))
+                <Mail className="size-6" />
+                <div className="space-y-1">
+                  <p className="font-medium text-foreground">Couldn't load this inbox</p>
+                  <p className="max-w-xs">{messagesError}</p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setMessagesReload((n) => n + 1)}
+                >
+                  Try again
+                </Button>
+              </div>
+            ) : messages.length > 0 ? (
+              messages.map((m) => (
+                <MessageRow
+                  key={m.id}
+                  message={m}
+                  active={m.id === openId}
+                  onClick={() => active && void openMessage(active.key, m)}
+                />
+              ))
+            ) : (
+              <div className="p-8 text-center text-sm text-muted-foreground" data-testid="inbox-empty">
+                No messages yet. Mail sent to{" "}
+                <span className="font-medium">{active?.address || active?.key}</span> lands here.
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Reading pane */}
+        <section className={cn("flex-1 flex-col overflow-hidden md:flex", mobilePane === "read" ? "flex" : "hidden")}>
+          {openMsg && active ? (
+            <Reading message={openMsg} inbox={active} onBack={() => setMobilePane("list")} />
           ) : (
-            <div className="p-8 text-center text-sm text-muted-foreground" data-testid="inbox-empty">
-              No messages yet. Mail sent to{" "}
-              <span className="font-medium">{active?.address || active?.key}</span> lands here.
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
+              <Mail className="size-8" />
+              <p className="text-sm">Select a message to read.</p>
             </div>
           )}
-        </div>
-      </section>
+        </section>
+      </div>
+    </div>
+  );
+}
 
-      {/* Reading pane */}
-      <section className={cn("flex-1 flex-col overflow-hidden md:flex", mobilePane === "read" ? "flex" : "hidden")}>
-        {openMsg && active ? (
-          <Reading message={openMsg} inbox={active} onBack={() => setMobilePane("list")} />
-        ) : (
-          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
-            <Mail className="size-8" />
-            <p className="text-sm">Select a message to read.</p>
-          </div>
-        )}
-      </section>
+/** A persistent explanation for Inbox's deliberately direct-URL-only state. */
+function InboxParkingNotice() {
+  // The Alert base supplies `w-full`, so a horizontal margin on the alert itself
+  // would make it 2rem wider than its `overflow-hidden` parent and get its right
+  // edge clipped. Pad the wrapper instead and keep the alert at full width.
+  return (
+    <div className="shrink-0 px-4 pt-4">
+      <Alert data-testid="inbox-parked-notice">
+        <Info className="size-4" />
+        <AlertTitle>Inbox is not in the console navigation right now</AlertTitle>
+        <AlertDescription>
+          This page still works and shows live email data, but nothing in the console links to it.
+          Reach it with a direct link to this address.
+        </AlertDescription>
+      </Alert>
     </div>
   );
 }
