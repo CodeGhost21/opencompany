@@ -2149,7 +2149,7 @@ impl CompanyRuntime {
                     &self.id,
                     CompanyEvent::AgentReply {
                         parent,
-                        chat_id,
+                        chat_id: chat_id.clone(),
                         // Issue #885: the author, not the destination. Same
                         // fallback as the `/chat` path — a producer that names
                         // no agent keeps the pre-#885 behaviour exactly.
@@ -2160,7 +2160,7 @@ impl CompanyRuntime {
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
-                        mentions: reply_mentions,
+                        mentions: reply_mentions.clone(),
                         // Zero, and stays zero: no reply's mentions reach
                         // dispatch, so no reply is ever a mention hop.
                         mention_depth: 0,
