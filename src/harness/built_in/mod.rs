@@ -3544,13 +3544,14 @@ mod tests {
     #[test]
     fn the_policy_fingerprint_moves_when_the_cap_or_deadline_does() {
         let base = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, None, None)));
-        let explicit_none = policy_fingerprint(Some(&fp_entry_full(
+        let explicit_none =
+            policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, Some(None), None)));
+        let finite = policy_fingerprint(Some(&fp_entry_full(
             Some("auto"),
             None,
-            Some(None),
+            Some(Some(25.0)),
             None,
         )));
-        let finite = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, Some(Some(25.0)), None)));
         let tighter = policy_fingerprint(Some(&fp_entry_full(
             Some("auto"),
             None,
@@ -3564,11 +3565,22 @@ mod tests {
             "setting an explicit no-cap override must rebuild: every spend parks"
         );
         assert_ne!(base, finite, "a finite cap must rebuild");
-        assert_ne!(explicit_none, finite, "no-cap and a finite cap are different states");
+        assert_ne!(
+            explicit_none, finite,
+            "no-cap and a finite cap are different states"
+        );
         assert_ne!(finite, tighter, "a different cap value must rebuild");
         assert_ne!(base, deadline, "a deadline edit must rebuild");
         // Re-setting the same cap is a no-op, like re-setting the same tier.
-        assert_eq!(finite, policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, Some(Some(25.0)), None))));
+        assert_eq!(
+            finite,
+            policy_fingerprint(Some(&fp_entry_full(
+                Some("auto"),
+                None,
+                Some(Some(25.0)),
+                None
+            )))
+        );
     }
 
     /// Issue #661 / L5: an overlay teammate's own `tools` grant flows into the
