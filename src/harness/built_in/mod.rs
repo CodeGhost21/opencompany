@@ -2818,6 +2818,33 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
                 }
                 None => 0u8.hash(&mut hasher),
             }
+            // The spend cap and approval deadline join the fingerprint for the
+            // same reason the tier and list do: `ApprovalPolicy` is built once
+            // per roster, so a cap-only or deadline-only edit must still rebuild.
+            // `auto_approve_under_usd` is `Option<Option<f64>>` — hash the outer
+            // present marker, then the inner value with its own present marker,
+            // so `None` (no override), `Some(None)` (no cap: every spend parks)
+            // and `Some(Some(n))` are three distinct states.
+            match &entry.auto_approve_under_usd {
+                Some(cap) => {
+                    1u8.hash(&mut hasher);
+                    match cap {
+                        Some(amount) => {
+                            1u8.hash(&mut hasher);
+                            amount.to_bits().hash(&mut hasher);
+                        }
+                        None => 0u8.hash(&mut hasher),
+                    }
+                }
+                None => 0u8.hash(&mut hasher),
+            }
+            match &entry.approval_ttl_hours {
+                Some(hours) => {
+                    1u8.hash(&mut hasher);
+                    hours.hash(&mut hasher);
+                }
+                None => 0u8.hash(&mut hasher),
+            }
         }
     }
     hasher.finish()
