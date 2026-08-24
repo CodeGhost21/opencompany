@@ -583,11 +583,18 @@ async fn delete_desk(
 /// dies with its connection instead of leaking for the process's lifetime.
 struct SseStreamGuard {
     company: CompanyId,
+    /// One-shot stop signal for the label-refresh task. Sent before the handle
+    /// is aborted so the loop exits at its next sleep boundary rather than
+    /// waking once more to write a roster map nobody will read.
+    cancel: Option<oneshot::Sender<()>>,
     label_refresh: Option<JoinHandle<()>>,
 }
 
 impl Drop for SseStreamGuard {
     fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
         if let Some(handle) = self.label_refresh.take() {
             handle.abort();
         }
