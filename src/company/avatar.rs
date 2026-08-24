@@ -710,20 +710,30 @@ pub async fn resolve(
     }
 }
 
-/// Whether the node already lives under the [`AVATARS_FOLDER`] — i.e. it was
-/// created by the avatar upload route or by a prior [`resolve`] copy, both of
-/// which store validated bytes that nothing rewrites.
+/// Whether the node already lives under the [`AVATARS_FOLDER`] **and was minted
+/// by this host's own avatar writers** — the upload route or a prior [`resolve`]
+/// copy, both of which store validated bytes that nothing rewrites.
 ///
-/// The folder name, not a stored flag, is the test: the upload route is the
-/// only writer to `avatars/`, and its guarantee is that a face there is one
-/// this host validated. A node with no parent, or under any other folder, has
-/// no such guarantee — the generic workspace upload and the artifact mirror
-/// both write elsewhere.
+/// The folder name alone is not the test. `PATCH …/workspace/{node}` can move
+/// *any* binary beneath a folder named `avatars`, and the artifact mirror
+/// rewrites a published node's bytes under the same id whenever the artifact is
+/// republished — so a face pointed at a moved artifact node would silently
+/// become whatever the next publish wrote, without passing these checks again.
+/// The origin is the tell: every writer to `avatars/` that validates bytes
+/// records [`WorkspaceOrigin::Operator`], and origin is immutable through a
+/// move or a rewrite, while the mirror mints [`WorkspaceOrigin::Agent`] nodes.
+/// A node under `avatars/` that a member or a mirror moved there still carries
+/// its writer's origin, so it is not treated as a face this host validated. A
+/// node with no parent, or under any other folder, has no such guarantee
+/// either — the generic workspace upload writes elsewhere.
 async fn avatar_node_is_immutable(
     workspace: &dyn crate::ports::WorkspaceStore,
     company: &crate::ports::types::CompanyId,
     node: &WorkspaceNode,
 ) -> Result<bool> {
+    if node.created_by != WorkspaceOrigin::Operator {
+        return Ok(false);
+    }
     let Some(parent_id) = node.parent_id.as_deref() else {
         return Ok(false);
     };
