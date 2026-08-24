@@ -195,7 +195,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       `Approve: Make a request to a web address — https://api.example.com/items — method: GET — request ${T0} — approval 1 of 2 — asked by Ops`,
     );
     expect(labelled).toContain(
-      `Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — request ${T0 + 60_000} — asked by Ops`,
+      `Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — request ${T0} — approval 2 of 2 — asked by Ops`,
     );
   });
 
