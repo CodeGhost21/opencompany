@@ -24,12 +24,19 @@ import type { DeskDto, TeamMemberDto } from "@/api/types";
  * `Overview` renders over it.
  */
 
+// Captured by the mock below so a test can assert the outage gates the
+// graph's keyboard (issue #1314).
+let lastCovered: boolean | undefined;
+
 vi.mock("@/views/overview/kg/KnowledgeGraph", () => ({
   // The snapshot corner is a slot the graph's shell positions (issue #1307),
   // because only the shell knows how wide the detail rail is. The stand-in
   // therefore has to render that slot; the outage itself is owned by Overview
   // and deliberately covers that chrome (issue #1314).
-  KnowledgeGraph: ({ statusSlot }: { statusSlot?: unknown }) => statusSlot ?? null,
+  KnowledgeGraph: ({ statusSlot, covered }: { statusSlot?: unknown; covered?: boolean }) => {
+    lastCovered = covered;
+    return statusSlot ?? null;
+  },
 }));
 
 const { Overview } = await import("@/views/Overview");
