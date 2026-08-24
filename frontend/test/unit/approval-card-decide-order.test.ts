@@ -84,6 +84,7 @@ const GRANT: StandingGrant = {
   granted_by: { kind: "user", id: "operator" },
   at_millis: T0,
   expires_at_millis: T0 + 60 * 60_000,
+  verdict: "approve",
 };
 
 describe("ApprovalCard decide ordering (#1406)", () => {
