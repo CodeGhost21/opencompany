@@ -184,7 +184,17 @@ test("a mention badge shows the count, per channel, and is not the unread badge"
 });
 
 test("opening a channel clears only its own mentions", async ({ page }) => {
-  await mockApi(page, seedFeed());
+  // The seed mentions name messages 10 and 11 (`subjectId`), so the mocked
+  // history has to carry them — `mentionsToClear` only clears a mention whose
+  // summoning text is actually in the loaded transcript (codex P1).
+  await mockApi(page, seedFeed(), {
+    history: {
+      engineering: [
+        { id: "10", channel: "engineering", author: "ceo", text: "please review the invoice", atMillis: 3, mine: false },
+        { id: "11", channel: "engineering", author: "ceo", text: "and the contract", atMillis: 2, mine: false },
+      ],
+    },
+  });
   await openChannel(page, "general");
   await expect(mentionBadge(page, "Engineering")).toBeVisible();
 
