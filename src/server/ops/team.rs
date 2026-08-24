@@ -428,7 +428,7 @@ async fn add_member(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     // Setting a cap is admin-only, so an add that carries one is too — but an
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
@@ -436,7 +436,7 @@ async fn add_member(
     let author = match body.budget_usd_daily {
         Some(cap) => {
             if let Some(refusal) = validate_cap(cap) {
-                return Err(refusal);
+                return Err(refusal.into());
             }
             Some(require_admin(&headers, &state, &company.runtime, peer).await?)
         }
@@ -471,6 +471,8 @@ async fn add_member(
         // Issue #661 / L5: the teammate's own grant, intersected with the
         // company allow-list by the shared reads/roster build. Empty = standard.
         tools,
+        model: None,
+        harness: None,
     };
     record.overlay_agents.push(agent.clone());
     let attribution = author.map(|admin| BudgetOverride {
@@ -506,12 +508,7 @@ async fn add_member(
             ..Default::default()
         });
     }
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
@@ -627,13 +624,13 @@ async fn set_budget(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<SetBudget>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
     // `Some(_)` is guaranteed by `SetBudget`'s missing-key rejection; the inner
     // option is the cap-or-uncap the operator asked for.
     let cap = body.budget_usd_daily.flatten();
     if let Some(refusal) = cap.and_then(validate_cap) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let write_lock = company_write_lock(company.id());
@@ -641,7 +638,7 @@ async fn set_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let entry = BudgetOverride {
@@ -656,12 +653,7 @@ async fn set_budget(
     // One override per teammate: replace in place rather than accumulating, so
     // `effective_budget`'s first-match read can never see a stale row.
     record.upsert_budget_override(entry);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -680,7 +672,7 @@ async fn clear_budget(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -688,16 +680,11 @@ async fn clear_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -731,15 +718,16 @@ fn validate_cap(cap: f64) -> Option<Response> {
 }
 
 /// Loads the addressed company's record, or 404s.
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 
@@ -766,7 +754,7 @@ async fn updated_row(
     company: &ScopedCompany,
     record: &CompanyRecord,
     agent_id: &str,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let spend_today = daily_spend_samples(company, Some(record))
         .await
         .map_err(|e| e.into_response())?;
@@ -779,8 +767,7 @@ async fn updated_row(
         .runtime
         .inbox()
         .inboxes(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .into_iter()
         .any(|meta| meta.key == agent_id && meta.enabled);
 

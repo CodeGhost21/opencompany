@@ -1,8 +1,9 @@
 # Overview — the knowledge graph
 
-`#/overview` is the graph and nothing else: no page header or strip. No view
-has a top bar; its remaining controls live in the sidebar. The graph fills the
-shell's content surface beside the sidebar.
+`#/company/graph` is the graph and nothing else: no page header or strip. No
+view has a top bar; its remaining controls live in the sidebar. The graph fills
+the shell's content surface beside the sidebar. `#/overview` is the operator
+landing page; it links here for the company's declared structure (issue #1321).
 
 ## What it draws
 

@@ -98,7 +98,7 @@ type TimelineItem =
  * operator right now. Approvals are never coalesced, so no band can land inside
  * a `×N` group.
  */
-function groupTimeline(
+export function groupTimeline(
   entries: TimelineEntry[],
   waitingSince?: number,
   now: number = Date.now(),

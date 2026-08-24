@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { Bot, CircleDot, Hash, Lock, UserPlus } from "lucide-react";
+import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -54,6 +54,11 @@ interface Props {
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
   /**
+   * Places a first brief into the composer on an empty channel.
+   * Optional so the thread panel — which renders no intro — need not pass it.
+   */
+  onStartBrief?: () => void;
+  /**
    * Opens the members pane, for the "Add people" card on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
    */
@@ -62,6 +67,8 @@ interface Props {
   now?: number;
   /** Agent id → display name, for a card's "Asked by" line. */
   askerNames?: Map<string, string>;
+  /** Host thread id → console channel id, for a card's origin link. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The verdict each inline card is currently waiting on. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
@@ -109,9 +116,11 @@ export function MessageTimeline({
   onReact,
   onDismissCard,
   dismissingCardId,
+  onStartBrief,
   onAddPeople,
   now,
   askerNames,
+  chatChannelByThread,
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
@@ -264,6 +273,7 @@ export function MessageTimeline({
           channel={channel}
           empty={empty}
           loading={loading}
+          onStartBrief={onStartBrief}
           onAddPeople={onAddPeople}
         />
         {loading && <HistorySkeleton />}
@@ -286,6 +296,7 @@ export function MessageTimeline({
               approvals={item.approvals}
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
+              chatChannelByThread={chatChannelByThread}
               compact
               thread={
                 item.approvals[0]?.thread
@@ -369,11 +380,13 @@ function ChannelIntro({
   channel,
   empty,
   loading,
+  onStartBrief,
   onAddPeople,
 }: {
   channel: Channel;
   empty: boolean;
   loading: boolean;
+  onStartBrief?: () => void;
   onAddPeople?: () => void;
 }) {
   return (
@@ -393,7 +406,7 @@ function ChannelIntro({
           offering "add a teammate here" over a channel that turns out to be full
           of conversation reads as data loss. */}
       {empty && !loading && channel.kind === "channel" && (
-        <ActionCards onAddPeople={onAddPeople} />
+        <ActionCards onStartBrief={onStartBrief} onAddPeople={onAddPeople} />
       )}
     </div>
   );
@@ -474,14 +487,20 @@ function MarkTile({ icon: Icon, className }: { icon: typeof Hash; className?: st
  * exactly this, an icon circle — rather than on `muted`, which is the ground
  * for recessed *fills*.
  */
-function ActionCards({ onAddPeople }: { onAddPeople?: () => void }) {
+function ActionCards({
+  onStartBrief,
+  onAddPeople,
+}: {
+  onStartBrief?: () => void;
+  onAddPeople?: () => void;
+}) {
   return (
     <div className="mt-5 flex flex-wrap gap-4">
       <ActionCard
-        icon={Bot}
-        title="Create teammate"
-        hint="Add a teammate here."
-        href="#/company"
+        icon={Send}
+        title="Give the team a brief"
+        hint="Start with a first request."
+        onClick={onStartBrief}
       />
       <ActionCard
         icon={UserPlus}

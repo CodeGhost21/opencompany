@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock, PanelRight } from "lucide-react";
+import { ChevronRight, CircleDot, Hash, Lock, PanelRight, SquarePen } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
+import { NewMessageDialog } from "./NewMessageDialog";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
 
 /**
@@ -30,6 +31,8 @@ interface Props {
    * folds (codex P2 review). Falls back to instance-local state. */
   openSections?: Record<string, boolean>;
   onToggleSection?: (id: string) => void;
+  directMessages?: Channel[];
+  onStartDirectMessage?: (id: string) => void;
   className?: string;
 }
 
@@ -51,6 +54,8 @@ export function ChannelRail({
   onExpand,
   openSections,
   onToggleSection,
+  directMessages = [],
+  onStartDirectMessage,
   className,
 }: Props) {
   // Section disclosure lives here rather than inside `Section`, because the
@@ -110,8 +115,27 @@ export function ChannelRail({
         className,
       )}
     >
-      <div className="px-3 py-3">
+      <div className="flex items-center justify-between px-3 py-3">
         <h2 className="truncate text-sm font-semibold tracking-tight">Chat</h2>
+        {onStartDirectMessage && (
+          <NewMessageDialog
+            directMessages={directMessages}
+            onSelect={onStartDirectMessage}
+            trigger={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                aria-label="New message"
+                disabled={directMessages.length === 0}
+                title="New message"
+              >
+                <SquarePen className="size-4" />
+              </Button>
+            }
+          />
+        )}
       </div>
 
       {sections.map((section) => (

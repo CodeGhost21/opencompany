@@ -28,6 +28,7 @@ import { AlertTriangle, Check, Loader2, Lock, RotateCw } from "lucide-react";
 
 import { requestCode } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import { SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
 import {
   changedFields,
   fieldsFor,
@@ -157,9 +158,18 @@ interface Props {
    * run, where there is no console to go back to.
    */
   onCancel?: () => void;
+  /**
+   * Whether `onDone` hands off to a **fresh** shell mount. The connection
+   * console's re-probe does (it boots a new `AppShell`), so its completion
+   * button writes the one-shot hand-off marker for that shell to consume. The
+   * in-shell dialog does not — it closes in place and the running shell
+   * suppresses the welcome through `onCompleted` — and a marker with no
+   * consuming mount would be read as a fresh hand-off on the next reload.
+   */
+  expectsShellRemount?: boolean;
 }
 
-export function SetupWizard({ client, onDone, onCancel }: Props) {
+export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: Props) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   /**
@@ -349,14 +359,18 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     }
 
     setHandoff({ kind: "arranging" });
-    requestCode(client, company, address)
+    requestCode(client, company, address, SETUP_HANDOFF_FRAGMENT)
       .then((result) => {
         if (result.dev_code) {
           // The only branch holding the code, and so the only one that can hand
-          // over a link rather than describe one.
+          // over a link rather than describe one. The same fragment is passed to
+          // the host above, so a *mailed* link (this host never echoes) carries
+          // the same destination; the magic-link landing preserves the router
+          // hash while it strips the single-use code, so sign-in reaches the
+          // roster setup just created rather than the stale Overview graph.
           setHandoff({
             kind: "link",
-            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
+            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}${SETUP_HANDOFF_FRAGMENT}`,
           });
         } else {
           setHandoff(status.mail.wired ? { kind: "mailed" } : { kind: "unmailable" });
@@ -604,6 +618,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           {handoff?.kind === "link" ? (
             <Button
               data-testid="setup-signin"
+              data-handoff-url={handoff.url}
               onClick={() => {
                 window.location.href = handoff.url;
               }}
@@ -611,7 +626,30 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               Sign in and open my company
             </Button>
           ) : (
-            <Button onClick={onDone} data-testid="setup-open-console">
+            <Button
+              onClick={() => {
+                // The link branch above carries the landing fragment inside its
+                // URL. This branch hands off through `onDone`, and
+                // `expectsShellRemount` says that hands off to a fresh
+                // `AppShell` (the connection console's re-probe), so write the
+                // same fragment first: the fresh shell reads it, routes to the
+                // roster setup just built, suppresses the tour welcome, and
+                // clears the one-shot marker. Without it a no-sign-in host —
+                // and the "anyway" escapes for a mailed sign-in — lands on
+                // Overview with the tour free to open over that roster.
+                //
+                // The in-shell dialog must NOT write it: `onDone` there closes
+                // the dialog in place and the running shell already suppresses
+                // the welcome via `onCompleted`, so the marker would have no
+                // consuming mount and would be read as a fresh hand-off on the
+                // next reload.
+                if (expectsShellRemount && window.location.hash !== SETUP_HANDOFF_FRAGMENT) {
+                  window.location.hash = SETUP_HANDOFF_FRAGMENT;
+                }
+                onDone();
+              }}
+              data-testid="setup-open-console"
+            >
               {/* "Anyway" wherever something is genuinely outstanding — a
                   staged setting, or a sign-in we could not arrange. That word is
                   the only thing saying this button does not finish the job. */}
