@@ -245,7 +245,7 @@ export function ApprovalsView({
   // moment it releases (#1593).
   const batchPosHeld = useRef(batchPosLive);
   if (!holding) batchPosHeld.current = batchPosLive;
-  const batchPos = batchPosLive;
+  const batchPos = holding ? batchPosHeld.current : batchPosLive;
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
