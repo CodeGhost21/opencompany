@@ -58,6 +58,35 @@ export function OperatorOverview({
   const [runLoad, setRunLoad] = useState<RunLoad>("loading");
 
   /**
+   * Which chat ids name a *desk* rather than a DM, from a best-effort desks
+   * read.
+   *
+   * A chat-originated run's `chatId` is a host thread id, and the two kinds
+   * address differently: a desk's channel id *is* its thread id, so the link is
+   * `#/chat/<deskId>`, while a DM's thread id is the roster member's id, so the
+   * link is `#/chat/dm:<id>`. The row below needs this to tell them apart.
+   * Absent — a host without `…/desks`, or a read that failed — every chat run
+   * degrades to the DM form, which is what [`runSource`](run-source) itself
+   * falls back to.
+   */
+  const [deskIds, setDeskIds] = useState<ReadonlySet<string>>();
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => client.listDesks(company))
+      .then((desks) => {
+        if (!live) return;
+        if (Array.isArray(desks)) setDeskIds(new Set(desks.map((desk) => desk.id)));
+      })
+      .catch(() => {
+        /* best-effort: the set stays empty and chat runs link as DMs */
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  /**
    * The generation of the newest in-flight run read.
    *
    * Every read — the initial load and each `run_status_changed` re-read —
