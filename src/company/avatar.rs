@@ -816,6 +816,31 @@ mod test {
         v
     }
 
+    /// A GIF with the given logical screen and one Image Descriptor per entry
+    /// in `frames` — enough of the block stream for the frame walker to count
+    /// decoded pixels, with no color tables and empty raster data. The LZW
+    /// bytes are never decoded by the check being exercised, so empty sub-block
+    /// data is exactly what the parse needs.
+    fn gif_animated(logical: (u16, u16), frames: &[(u16, u16)]) -> Vec<u8> {
+        let mut v = GIF_SIGNATURE_89.to_vec();
+        v.extend_from_slice(&logical.0.to_le_bytes());
+        v.extend_from_slice(&logical.1.to_le_bytes());
+        // No global color table: flags 0, background 0, aspect 0.
+        v.extend_from_slice(&[0x00, 0x00, 0x00]);
+        for &(w, h) in frames {
+            v.push(0x2C);
+            v.extend_from_slice(&[0x00, 0x00]); // left
+            v.extend_from_slice(&[0x00, 0x00]); // top
+            v.extend_from_slice(&w.to_le_bytes());
+            v.extend_from_slice(&h.to_le_bytes());
+            v.push(0x00); // no local color table
+            v.push(0x02); // LZW minimum code size
+            v.push(0x00); // zero-length raster data sub-block (the terminator)
+        }
+        v.push(0x3B); // trailer
+        v
+    }
+
     /// A minimal JPEG whose SOF0 announces the given size, preceded by an APP0
     /// segment so the size is found by walking the marker list, not assumed at
     /// an offset.
