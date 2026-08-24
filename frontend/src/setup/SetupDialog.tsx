@@ -98,13 +98,21 @@ export function SetupDialog({
   open,
   client,
   company,
+  redesign,
   onSkip,
   onLeave,
   onDone,
+  onRedesign,
 }: {
   open: boolean;
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Reopen in **redesign** mode: the company already has a team (the fallback
+   * one from a pass that could not reach a model), and the next build-out must
+   * replace it rather than stack a second one on it.
+   */
+  redesign?: boolean;
   /** "I'll do this later" — records the skip and closes. */
   onSkip: () => void;
   /**
@@ -115,16 +123,32 @@ export function SetupDialog({
    * Leaving to wire a model is the operator starting this flow, not declining
    * it — recording a skip there would suppress the dialog exactly when they
    * came back ready to use it, leaving an unstaffed company and no way back in
-   * short of finding the Team page's separate prompt.
+   * short of finding the Company page's separate prompt.
    */
   onLeave: () => void;
   /** Setup finished; the caller refreshes the roster and hands off to the tour. */
   onDone: () => void;
+  /**
+   * The completion screen's "Add a model in Settings" action: close and send
+   * the operator to wire a model, recording that the fallback team is to be
+   * redesigned on their return.
+   */
+  onRedesign: () => void;
 }) {
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
   const [phase, setPhase] = useState<Phase>({ kind: "asking", step: 0 });
   const [inference, setInference] = useState<InferenceReadiness>("checking");
   const [touched, setTouched] = useState(false);
+  /**
+   * Whether this run of the flow replaces the team the company already has.
+   *
+   * True when the controller reopens setup in redesign mode after the operator
+   * returns from wiring a model, and when the operator retries a build-out that
+   * could not reach a wired model. A replacing build-out clears the existing
+   * operator-authored teammates before creating the new ones — without this,
+   * a second pass stacks a duplicate team on the first.
+   */
+  const [replacing, setReplacing] = useState(Boolean(redesign));
   /**
    * Guards the build-out against a second run.
    *
@@ -134,6 +158,13 @@ export function SetupDialog({
    * on the next render.
    */
   const building = useRef(false);
+
+  // The controller re-mounts this dialog when it reopens, so `useState(redesign)`
+  // above covers the return from wiring a model. This is a belt-and-braces
+  // catch for a prop flip while mounted — it cannot reopen anything on its own.
+  useEffect(() => {
+    if (redesign) setReplacing(true);
+  }, [redesign]);
 
   // A missing model is a supported configuration, but it changes what all
   // three answers can achieve. Learn that before asking for any of them: the
