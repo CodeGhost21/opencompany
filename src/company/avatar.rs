@@ -1098,7 +1098,9 @@ mod test {
             v.extend_from_slice(&(seq as u32).to_be_bytes());
             v.extend_from_slice(&fw.to_be_bytes());
             v.extend_from_slice(&fh.to_be_bytes());
-            v.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // x, y, delays
+            v.extend_from_slice(&0u32.to_be_bytes()); // x offset
+            v.extend_from_slice(&0u32.to_be_bytes()); // y offset
+            v.extend_from_slice(&[0, 0]); // delay_num, delay_den
             v.extend_from_slice(&[0, 0]); // dispose, blend
             v.extend_from_slice(&[0, 0, 0, 0]); // CRC
         }
