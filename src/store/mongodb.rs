@@ -1028,15 +1028,18 @@ impl MemoryStore for MongoStore {
         let traces = self.collection("memory_traces");
         let removed = match policy {
             EvictionPolicy::KeepRecent { n } => {
-                // Collect the seqs to keep (newest n), delete the rest.
-                //
                 // `KeepRecent { n: 0 }` keeps nothing, so there is no query to
                 // run — and must never become `find().limit(0)`, which would
                 // keep EVERYTHING and evict none of it. This arm is the old
                 // `if n > 0` guard, now stated in the shared vocabulary.
-                let mut keep = Vec::new();
                 match find_limit(n) {
-                    FindLimit::Empty => {}
+                    FindLimit::Empty => {
+                        traces
+                            .delete_many(doc! {"company_id": id.as_ref()})
+                            .await
+                            .map_err(mongo_err)?
+                            .deleted_count
+                    }
                     limit => {
                         let mut find = traces
                             .find(doc! {"company_id": id.as_ref()})
@@ -1045,19 +1048,35 @@ impl MemoryStore for MongoStore {
                             find = find.limit(n);
                         }
                         let mut cursor = find.await.map_err(mongo_err)?;
+                        // The n-th newest seq is the eviction cutoff, and the
+                        // delete is `seq < cutoff` rather than `$nin` of the
+                        // snapshot. `next_seq` hands out strictly increasing
+                        // sequences per company, so a trace saved AFTER this
+                        // read has a seq larger than every seq seen here and
+                        // can never satisfy `seq < cutoff`. The `$nin` form
+                        // deleted any doc whose seq was not in the snapshot, so
+                        // a `save_trace` landing between the find and the
+                        // delete was evicted the same pass it was written — and
+                        // the sweep runs every minute, silently dropping the
+                        // newest completed cycle from inspection and export.
+                        let mut cutoff: Option<i64> = None;
                         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-                            keep.push(get_i64(&doc, "seq")?);
+                            let seq = get_i64(&doc, "seq")?;
+                            cutoff = Some(cutoff.map_or(seq, |smallest| smallest.min(seq)));
                         }
+                        let Some(cutoff) = cutoff else {
+                            return Ok(0); // the company has no traces to evict
+                        };
+                        traces
+                            .delete_many(doc! {
+                                "company_id": id.as_ref(),
+                                "seq": {"$lt": cutoff},
+                            })
+                            .await
+                            .map_err(mongo_err)?
+                            .deleted_count
                     }
                 }
-                traces
-                    .delete_many(doc! {
-                        "company_id": id.as_ref(),
-                        "seq": {"$nin": keep},
-                    })
-                    .await
-                    .map_err(mongo_err)?
-                    .deleted_count
             }
             EvictionPolicy::OlderThan { before_millis } => {
                 traces
@@ -5005,6 +5024,65 @@ mod test {
     async fn conformance_export_totality() {
         let Some(s) = store().await else { return };
         conformance::assert_export_totality(s.clone(), s.clone(), s.clone(), s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// KeepRecent eviction deletes strictly-older-than-the-n-th-newest traces,
+    /// so a trace saved after the eviction snapshot can never be evicted by the
+    /// sweep that means to keep it. The old `$nin` predicate deleted any doc
+    /// whose seq was not in the keep set, so a `save_trace` landing between
+    /// evict's find and delete was dropped the same pass it was written — the
+    /// race this delete-by-cutoff form removes.
+    #[tokio::test]
+    async fn evict_keep_recent_spares_a_trace_saved_after_its_snapshot() {
+        let Some(s) = store().await else { return };
+        let id = CompanyId::new("acme");
+        // 33 traces: `next_seq` hands out 0..=32 in save order.
+        for i in 0..=32 {
+            s.save_trace(&id, CompressedTrace::now(format!("c{i}"), format!("s{i}")))
+                .await
+                .unwrap();
+        }
+        // Keeps the newest 32 (seqs 1..=32), evicting exactly seq 0.
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 32 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let kept = s.recent_traces(&id, usize::MAX).await.unwrap();
+        assert_eq!(kept.len(), 32);
+        assert_eq!(kept.first().unwrap().cycle_id, "c1");
+        assert_eq!(kept.last().unwrap().cycle_id, "c32");
+
+        // A trace written after the sweep's snapshot has seq 33, above the
+        // cutoff (1): it must survive the retention policy. This is the write
+        // the `$nin` predicate deleted when it landed between evict's find and
+        // delete.
+        s.save_trace(&id, CompressedTrace::now("c33", "s33"))
+            .await
+            .unwrap();
+        let after = s.recent_traces(&id, usize::MAX).await.unwrap();
+        assert_eq!(after.len(), 33);
+        assert_eq!(after.last().unwrap().cycle_id, "c33");
+
+        // KeepRecent{0} keeps nothing: every trace goes.
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 0 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 33);
+        assert!(s.recent_traces(&id, usize::MAX).await.unwrap().is_empty());
+
+        // KeepRecent above the current count is a no-op.
+        s.save_trace(&id, CompressedTrace::now("c34", "s34"))
+            .await
+            .unwrap();
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 10 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+
         drop_db(&s).await;
     }
 

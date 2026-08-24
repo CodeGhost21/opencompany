@@ -455,10 +455,57 @@ async fn evict_archives_rather_than_destroys() {
         vec!["c4", "c5"]
     );
 
+    // Eviction MOVES the traces out of the live set, and the archive is
+    // bounded by the same policy: of the three evicted, the newest two (c2,
+    // c3) are retained and the oldest (c1) is pruned. The archive keeps the
+    // eviction history nearest to the live window, never the whole lifetime.
     let kept = mem.archived_traces(&id).await.unwrap();
     let mut ids: Vec<&str> = kept.iter().map(|t| t.cycle_id.as_str()).collect();
     ids.sort_unstable();
-    assert_eq!(ids, vec!["c1", "c2", "c3"], "evicted traces live on");
+    assert_eq!(
+        ids,
+        vec!["c2", "c3"],
+        "evicted traces live on, bounded at n"
+    );
+}
+
+#[tokio::test]
+async fn evict_keep_recent_bounds_the_archive() {
+    // The retention policy must bound storage on this backend too, not just
+    // the inspectable live window: a company that cycles for years would
+    // otherwise accumulate every trace it ever evicted in the archive.
+    let mem = engine();
+    let id = acme_id();
+    let memory = mem.memory();
+    // 100 cycles in batches of 10, evicting down to 8 after each batch.
+    for batch in 0..10 {
+        for n in 0..10 {
+            let i = batch * 10 + n;
+            memory
+                .save_trace(
+                    &id,
+                    CompressedTrace {
+                        cycle_id: format!("c{i}"),
+                        summary: "s".into(),
+                        at_millis: 100 + i as u64,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        memory
+            .evict(&id, EvictionPolicy::KeepRecent { n: 8 })
+            .await
+            .unwrap();
+    }
+    let live = memory.recent_traces(&id, usize::MAX).await.unwrap();
+    assert_eq!(live.len(), 8, "the live window stays bounded");
+    let archived = mem.archived_traces(&id).await.unwrap();
+    assert!(
+        archived.len() <= 8,
+        "the archive stays bounded at n too: {} traces retained from 100 cycles",
+        archived.len()
+    );
 }
 
 #[tokio::test]
