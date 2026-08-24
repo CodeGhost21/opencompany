@@ -299,6 +299,27 @@ describe("reconcileMentions", () => {
     expect(out[0].offset).toBe(0);
   });
 
+  /**
+   * The deletion fix only sees the deleted region, and a pure insertion leaves
+   * that region empty — so without the same check collapsing onto the
+   * insertion point, breaking the first span's text (`@Sam` -> `@Sxam`) would
+   * re-anchor the mention onto the unrelated hand-typed `@Sam` and ping its
+   * target on the wrong span. The edit touched the mention, so it is dropped.
+   */
+  it("drops a mention broken by an insertion rather than re-anchoring to an unrelated occurrence", () => {
+    const a: Mention = { target: { kind: "user", id: "a" }, text: "@Sam", offset: 0 };
+    const out = reconcileMentions("@Sxam then @Sam", [a], "@Sam then @Sam");
+    expect(out).toHaveLength(0);
+  });
+
+  it("keeps a mention when the insertion is outside its span", () => {
+    const a: Mention = { target: { kind: "user", id: "a" }, text: "@Sam", offset: 0 };
+    const out = reconcileMentions("hi @Sam", [a], "@Sam");
+    expect(out).toHaveLength(1);
+    expect(out[0].target).toEqual(a.target);
+    expect(out[0].offset).toBe(3);
+  });
+
   it("keeps the selected identity when an identical span is inserted before it", () => {
     const selected: Mention = {
       target: { kind: "user", id: "selected" },
