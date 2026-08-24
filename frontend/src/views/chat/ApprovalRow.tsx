@@ -663,7 +663,7 @@ function BatchHeadline({
   // internal call spends money — that warning would be attached to a decision
   // nobody is about to make.
   const consequences = batchConsequences(pending);
-  const uniform = consequences.length === 1 ? consequences[0] : null;
+  const uniform = uniformConsequence(pending);
 
   return (
     <div className="flex flex-wrap items-start gap-4">
