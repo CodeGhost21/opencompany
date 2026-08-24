@@ -738,7 +738,6 @@ export function SetupDialog({
             finished={phase.kind === "done"}
             fallback={phase.fallback}
             harnessReachable={harnessReachable}
-            canManage={canManage}
             onDone={onDone}
             onRedesign={() => onRedesign(createdIds.current)}
             onTryAgain={tryRedesign}
@@ -871,7 +870,6 @@ function BuildOut({
   finished,
   fallback,
   harnessReachable,
-  canManage,
   onDone,
   onRedesign,
   onTryAgain,
@@ -890,13 +888,6 @@ function BuildOut({
    * harness-less binary on the design path, so the CTA is omitted.
    */
   harnessReachable: boolean;
-  /**
-   * Whether the operator may wire or check the company's model. The Settings
-   * links below render only under management authority — the Connections card
-   * is read-only for a member — so an operator who cannot land the action is
-   * told to ask an admin instead of being handed a link that can only 403.
-   */
-  canManage: boolean;
   onDone: () => void;
   /**
    * The completion screen's "Add a model in Settings" action: close and send the
@@ -977,23 +968,14 @@ function BuildOut({
             offered alongside the retry rather than instead of it.
           */}
           {fallback === "no_model" && harnessReachable && (
-            canManage ? (
-              <a
-                href="#/settings/connections"
-                onClick={onRedesign}
-                data-testid="setup-add-model"
-                className={buttonVariants({ variant: "outline" })}
-              >
-                Add a model in Settings
-              </a>
-            ) : (
-              <span
-                className="text-sm text-muted-foreground"
-                data-testid="setup-add-model-member"
-              >
-                Ask an admin to add a model, or carry on with the standard team.
-              </span>
-            )
+            <a
+              href="#/settings/connections"
+              onClick={onRedesign}
+              data-testid="setup-add-model"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              Add a model in Settings
+            </a>
           )}
           {fallback === "not_designable" && (
             <Button
@@ -1015,23 +997,14 @@ function BuildOut({
                 <RotateCcw className="size-4" />
                 Try again
               </Button>
-              {canManage ? (
-                <a
-                  href="#/settings/connections"
-                  onClick={onRedesign}
-                  data-testid="setup-check-connection"
-                  className={buttonVariants({ variant: "outline" })}
-                >
-                  Check connection in Settings
-                </a>
-              ) : (
-                <span
-                  className="text-sm text-muted-foreground"
-                  data-testid="setup-check-connection-member"
-                >
-                  Ask an admin to check the connection, or carry on with the standard team.
-                </span>
-              )}
+              <a
+                href="#/settings/connections"
+                onClick={onRedesign}
+                data-testid="setup-check-connection"
+                className={buttonVariants({ variant: "outline" })}
+              >
+                Check connection in Settings
+              </a>
             </>
           )}
           <Button onClick={onDone} data-testid="setup-finish">
