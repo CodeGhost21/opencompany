@@ -206,6 +206,32 @@ describe("insertMention", () => {
     const { text } = insertMention("hey @eng please", { start: 4, end: 8 }, engineer);
     expect(text).toBe("hey @engineer  please");
   });
+
+  /**
+   * The host only opens a mention when the character after `@` is word-like,
+   * so a person whose display name starts with an emoji cannot be picked by
+   * their label — `@👩‍💻 Ada` would be dropped server-side. The row's slug
+   * alias is the typable spelling that survives revalidation.
+   */
+  it("inserts a server-valid spelling when the display name cannot open a mention", () => {
+    const emoji: Mentionable = {
+      target: { kind: "user", id: "u1" },
+      label: "👩‍💻 Ada",
+      aliases: ["👩‍💻 ada", "ada"],
+    };
+    const { text, mention } = insertMention("hey @", { start: 4, end: 5 }, emoji);
+    expect(text).toBe("hey @ada ");
+    expect(mention.text).toBe("@ada");
+    expect(text.slice(mention.offset, mention.offset + mention.text.length)).toBe(
+      "@ada",
+    );
+  });
+
+  /** A name the host *can* open keeps its friendly label as the inserted text. */
+  it("keeps the display label when it opens a mention", () => {
+    const { text } = insertMention("hey @", { start: 4, end: 5 }, jane);
+    expect(text).toBe("hey @Jane Doe ");
+  });
 });
 
 describe("reconcileMentions", () => {
