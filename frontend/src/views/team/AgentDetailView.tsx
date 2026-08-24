@@ -930,17 +930,19 @@ function Tools({
             data-testid="agent-tools-field"
           />
           <p className="text-xs text-muted-foreground">
-            One glob per grant, separated by commas or spaces. Each is narrowed by the company
-            tool list below, so this can only ever take capability away from what the company
-            allows — never add to it.
+            One glob per grant, separated by commas or spaces. Each is narrowed by the
+            company tool list below
+            {deskCeilingActive ? " and by this teammate's desk ceiling" : ""}, so this
+            can only ever take capability away — never add to it.
           </p>
           {draft.length === 0 && (
             // Not a warning about losing tools — the opposite, and the
             // inversion is exactly what an operator clearing this field
             // expects to be told.
             <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
-              An empty list means the company's standard grant, not "no tools" — this teammate
-              would hold everything the company allows.
+              {deskCeilingActive
+                ? "An empty list means the standard grant, not \"no tools\" — this teammate would hold what its desk and the company allow."
+                : "An empty list means the company's standard grant, not \"no tools\" — this teammate would hold everything the company allows."}
             </p>
           )}
           {willNotApply.length > 0 && (
