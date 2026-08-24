@@ -326,6 +326,7 @@ export function Overview({ client, company, companyName }: Props) {
             })}`}
       </span>
       <button
+        ref={refreshButtonRef}
         type="button"
         onClick={refresh}
         disabled={loading}
