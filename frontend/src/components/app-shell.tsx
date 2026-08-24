@@ -1313,6 +1313,11 @@ export function AppShell({
             mentionFeedRef.current,
             channelId,
             chatChannelByThread.main,
+            new Set(
+              Object.keys(chatChannelByThread).filter(
+                (threadId) => chatChannelByThread[threadId] === channelId,
+              ),
+            ),
           );
       if (clearing.length > 0) {
         // Optimistic, so the badge goes at once; the next poll reconciles.

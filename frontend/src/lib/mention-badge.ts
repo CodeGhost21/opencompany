@@ -65,7 +65,8 @@ export function mentionsToClear(
         n.readAt === undefined &&
         n.kind === "mention" &&
         n.context !== undefined &&
-        ((n.context === channelId && visibleThreadIds.has(channelId)) ||
+        ((n.context === channelId &&
+          (channelId !== mainChannelId || visibleThreadIds.has(channelId))) ||
           (channelId === mainChannelId &&
             n.context === MAIN_THREAD_ID &&
             visibleThreadIds.has(MAIN_THREAD_ID))),
