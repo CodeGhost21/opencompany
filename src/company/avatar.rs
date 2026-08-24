@@ -1472,9 +1472,9 @@ mod test {
     /// `MAX_AVATAR_ANIMATED_PIXELS` by omitting only a trailer or later chunk.
     #[test]
     fn size_check_refuses_truncated_animations() {
-        let mut gif = gif_animated((4096, 4096), &[(4096, 4096); 9]);
-        gif.pop(); // remove the trailer
-        let gif_err = check_image_dimensions(&gif).unwrap_err().to_string();
+        let mut gif_bytes = gif_animated((4096, 4096), &[(4096, 4096); 9]);
+        gif_bytes.pop(); // remove the trailer
+        let gif_err = check_image_dimensions(&gif_bytes).unwrap_err().to_string();
         assert!(gif_err.contains("truncated animation"), "GIF: {gif_err}");
 
         let mut webp = webp_animated((4096, 4096), &[(4096, 4096); 9]);
