@@ -9,13 +9,17 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type {
-  DeliveryReport,
-  DeliveryStatus,
-  WorkflowGraph,
-  WorkflowRunNode,
-  WorkflowRunOutcome,
+import type { OpenCompanyClient } from "@/api/client";
+import {
+  fetchRunArtifacts,
+  type DeliveryReport,
+  type DeliveryStatus,
+  type RunArtifactRow,
+  type WorkflowGraph,
+  type WorkflowRunNode,
+  type WorkflowRunOutcome,
 } from "@/api/workflows";
+import { artifactHref } from "@/lib/task-output";
 
 import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { failedNodeOf, nodeName } from "./graph";
@@ -160,6 +164,8 @@ export function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
  * operator. These rows come back from the company's journal, so they survive a
  * console reload and a run nobody was watching. */
 export function RunHistoryPanel({
+  client,
+  company,
   runs,
   graph,
   workflowName,
@@ -173,6 +179,15 @@ export function RunHistoryPanel({
   onLoadOlder,
   loadingOlder,
 }: {
+  /**
+   * The host client the lazy per-run "Files associated" fetch reads through
+   * (issue #1684). Optional, like {@link onFixWithCopilot}: when absent the
+   * files affordance is simply not offered — the live view always passes it, so
+   * the omission only happens in focused render tests that assert other rows.
+   */
+  client?: OpenCompanyClient;
+  /** The scoped company for that fetch — `null` for the default scope. */
+  company?: string | null;
   runs: WorkflowRunOutcome[];
   /**
    * The selected workflow's graph, for turning a node id into the name the
@@ -279,6 +294,8 @@ export function RunHistoryPanel({
             {runs.map((run) => (
               <RunHistoryRow
                 key={run.seq}
+                client={client}
+                company={company}
                 run={run}
                 graph={graph}
                 now={now}
@@ -319,6 +336,8 @@ export function RunHistoryPanel({
  * which is what makes a scheduled run's failure point visible, the case the
  * live canvas by definition cannot cover because nobody was watching. */
 function RunHistoryRow({
+  client,
+  company,
   run,
   graph,
   now,
@@ -330,6 +349,10 @@ function RunHistoryRow({
   fixDisabled,
   fixReason,
 }: {
+  /** The host client for this row's lazy files fetch (issue #1684), if wired. */
+  client?: OpenCompanyClient;
+  /** The scoped company for that fetch. */
+  company?: string | null;
   run: WorkflowRunOutcome;
   /** The selected workflow's graph, for node ids → names (issue #1007). */
   graph: WorkflowGraph | null;
@@ -765,7 +788,132 @@ function RunHistoryRow({
           {notice}
         </p>
       ))}
+      {/* Issue #1684: the files this run produced, deep-linked into the card
+          that made each. Rendered ONLY when the run carries a `runId` — a
+          pre-#371 orphan row has nothing to key a per-run fetch on — and the
+          fetch is lazy, fired on first expand, so a collapsed row (the common
+          case in a long history) makes zero network calls. */}
+      {run.runId && client && (
+        <RunFilesSection
+          client={client}
+          company={company ?? null}
+          runId={run.runId}
+        />
+      )}
     </div>
+  );
+}
+
+/** The lazy "Files associated" disclosure on a run row (issue #1684).
+ *
+ * A native `<details>` so the row makes no request until an operator opens it —
+ * the whole point of the lazy per-run route behind it. The fetch fires once, on
+ * the first expand; a failed fetch clears the latch so the next open retries.
+ * Each file deep-links into its card's Artifacts tab at the run's version
+ * ({@link artifactHref}), with the workspace-node link offered as a second hop
+ * when the file was mirrored into the shared tree. */
+function RunFilesSection({
+  client,
+  company,
+  runId,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  runId: string;
+}) {
+  const [files, setFiles] = useState<RunArtifactRow[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  // A one-shot latch: the fetch runs on the first open and not on every toggle,
+  // and a collapse-then-reopen does not re-hit the route. Cleared on failure so
+  // a reopen can retry.
+  const requested = useRef(false);
+
+  function load() {
+    if (requested.current) return;
+    requested.current = true;
+    setLoading(true);
+    setError(false);
+    fetchRunArtifacts(client, company, runId)
+      .then((rows) => setFiles(rows))
+      .catch(() => {
+        requested.current = false;
+        setError(true);
+      })
+      .finally(() => setLoading(false));
+  }
+
+  return (
+    <details
+      className="mt-1.5"
+      data-testid="workflow-run-files"
+      onToggle={(e) => {
+        if ((e.currentTarget as HTMLDetailsElement).open) load();
+      }}
+    >
+      <summary
+        className="cursor-pointer text-2xs text-muted-foreground"
+        data-testid="workflow-run-files-toggle"
+      >
+        Files associated
+      </summary>
+      <div className="mt-1 space-y-1">
+        {loading && (
+          <p className="text-2xs text-muted-foreground">Loading…</p>
+        )}
+        {error && (
+          <p
+            className="text-2xs text-status-failed-text"
+            data-testid="workflow-run-files-error"
+          >
+            Couldn't load this run's files. Reopen to try again.
+          </p>
+        )}
+        {files && files.length === 0 && (
+          <p
+            className="text-2xs text-muted-foreground"
+            data-testid="workflow-run-files-empty"
+          >
+            No files from this run.
+          </p>
+        )}
+        {files?.map((file) => (
+          <div
+            key={`${file.taskId}-${file.artifactId}`}
+            className="flex flex-col"
+            data-testid="workflow-run-file"
+          >
+            {/* The canonical Artifacts-tab hash the whole console navigates
+                by — no new routing, the Tasks view reads it and focuses the
+                card + artifact at the run's version. */}
+            <a
+              className="truncate text-2xs text-primary hover:underline"
+              href={artifactHref(file.taskId, file.artifactId, file.latestVersion)}
+            >
+              {file.title}
+            </a>
+            <span className="text-3xs text-muted-foreground">
+              {file.taskTitle ? `${file.taskTitle} · ` : ""}
+              {/* A legacy record (issue #244) has no source path; label it as
+                  such rather than showing an empty secondary line. */}
+              {file.source ?? "(legacy)"}
+              {file.workspaceNodeId && (
+                <>
+                  {" · "}
+                  <a
+                    className="hover:underline"
+                    href={`#/workspace/${encodeURIComponent(file.workspaceNodeId)}`}
+                    data-testid="workflow-run-file-workspace"
+                  >
+                    Open in workspace
+                  </a>
+                </>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 
