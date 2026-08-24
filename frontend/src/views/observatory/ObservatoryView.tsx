@@ -68,6 +68,11 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   // every render would fight the poll; mirror it and let the writer update both.
   const [agent, setAgent] = useState<string | null>(() => readObservatoryHash().agent);
   const focusStep = useRef(readObservatoryHash().step);
+  // Bumped per `reload`; a response whose generation is stale (a company or
+  // runId change happened while it was in flight) is discarded so a previous
+  // route's attempts — including raw deep-trace bodies — cannot paint the
+  // current route.
+  const reloadGeneration = useRef(0);
 
   // Navigating between runs (following an Observatory link to another run)
   // changes `runId` while this view stays mounted, and such links deliberately
@@ -78,6 +83,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   }, [runId]);
 
   const reload = useCallback(async () => {
+    const generation = ++reloadGeneration.current;
     // GraphQL addresses a company by an explicit id, unlike the REST scope's
     // single-company alias — so there is nothing to ask for until one is
     // selected. An empty id would query for a company that cannot exist and
@@ -90,8 +96,10 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
       const runs = runId
         ? await fetchRunsForWorkflowRun(client, company, runId)
         : await fetchRecentRuns(client, company, 100);
+      if (generation !== reloadGeneration.current) return;
       setLoad({ phase: "ready", runs });
     } catch (err) {
+      if (generation !== reloadGeneration.current) return;
       // A host that predates the GraphQL surface answers 404. That is
       // "unavailable", not "broken", and it gets its own honest empty state
       // rather than an error the operator cannot act on.
