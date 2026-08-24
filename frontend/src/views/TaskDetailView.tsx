@@ -177,12 +177,11 @@ function neverDispatched(task: Task): boolean {
 /**
  * Extends a host-computed duration to `now` while its span is still open.
  *
- * The worked/waiting arithmetic — the dispatch-window pairing and the approval
- * interval merge — used to live here *and* in the exporter
+ * The worked/waiting arithmetic used to live here *and* in the exporter
  * (`src/server/ops/task_export.rs`), so the screen and the exported record of
- * the same task could disagree about how long a person was waited on with
- * nothing failing. The host now computes both totals once in `TaskDurations`
- * and hands them to whoever reads the task; this is all that is left client-side.
+ * the same task could disagree with nothing failing. The host now computes the
+ * totals once in `TaskDurations` and hands them to whoever reads the task; this
+ * is all that is left client-side.
  *
  * The extension is exact rather than an approximation, which is why the merge
  * does not have to be repeated here: every closed span ends in the past, so past
@@ -402,6 +401,8 @@ export function TaskDetailView({
         : null,
     [detail, now],
   );
+  // This remains an input to the worked-time calculation below, but is not a
+  // second current-wait presentation. Pending approvals own that display.
   const waiting = useMemo(
     () =>
       detail
@@ -414,21 +415,13 @@ export function TaskDetailView({
         : null,
     [detail, now],
   );
-
   // Only tick the 1s clock while something is actually running: a dispatch
-  // window is open, the task is parked on an operator right now, an attempt has
-  // not settled, or this task still owns a pending approval.
-  //
-  // The pending-approval term is not redundant with `waiting?.live`. That one
-  // derives from `waitingSince`, which the server gates on an *open run
-  // window* (#305) — so a finished card that still has a sign-off outstanding
-  // reports no `waitingSince` at all, and the Approvals tab's "waiting Xs"
-  // froze at whatever it read on mount. Since #333 the backend deliberately
-  // returns that row, so the clock has to keep up with it.
+  // window is open, an attempt has not settled, or this task still owns a
+  // pending approval. Pending approvals are the one source for the current
+  // wait clock, including after the run that created one has settled.
   const awaitingApproval = Boolean(detail?.approvals.some((a) => a.status === "pending"));
   const ticking =
     Boolean(worked?.live) ||
-    Boolean(waiting?.live) ||
     Boolean(detail?.runs.some(isRunOpen)) ||
     awaitingApproval;
   useEffect(() => {
@@ -485,25 +478,34 @@ export function TaskDetailView({
         </div>
       ) : detail ? (
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto w-full max-w-3xl space-y-5 p-4">
-            <DetailHeader
-              task={detail.task}
-              worked={worked}
-              waiting={waiting}
-              columns={columns}
-            />
+          <div className="w-full space-y-4 p-4">
+            <section className="overflow-hidden rounded-xl border bg-card">
+              <DetailHeader
+                task={detail.task}
+                worked={worked}
+                waiting={waiting}
+                columns={columns}
+              />
 
-            <ControlBar
-              task={detail.task}
-              inflight={inflight}
-              irreversible={detail.irreversibleEffects}
-              historyIncomplete={detail.historyIncomplete}
-              client={client}
-              company={company}
-              onChanged={load}
-              onSaved={onSaved}
-              onEdit={() => setEditing(true)}
-            />
+              <ControlBar
+                task={detail.task}
+                inflight={inflight}
+                irreversible={detail.irreversibleEffects}
+                historyIncomplete={detail.historyIncomplete}
+                client={client}
+                company={company}
+                onChanged={load}
+                onSaved={onSaved}
+                onEdit={() => setEditing(true)}
+              />
+
+              <AwaitingApprovalRow
+                approvals={detail.approvals}
+                parked={parked}
+                taskId={detail.task.id}
+                now={now}
+              />
+            </section>
 
             <OriginThreadRow
               originChatId={detail.task.originChatId}
@@ -514,13 +516,6 @@ export function TaskDetailView({
               lineage={detail.lineage}
               onNavigate={onNavigate}
               columns={columns}
-            />
-
-            <AwaitingApprovalRow
-              approvals={detail.approvals}
-              parked={parked}
-              taskId={detail.task.id}
-              now={now}
             />
 
             {/* Issue #580: the built workflow awaiting approval, shown only while
@@ -710,7 +705,7 @@ function DetailHeader({
   // all, not a "Waiting 0s".
   const showWaiting = waitedMs > 0 || Boolean(waiting?.live);
   return (
-    <div className="rounded-xl border bg-card p-4">
+    <div className="p-4">
       <div className="flex items-start justify-between gap-3">
         <h1 className="text-lg font-semibold leading-snug">{task.title}</h1>
         <Badge
@@ -784,23 +779,6 @@ function DetailHeader({
               </>
             ) : (
               <span>Not yet dispatched</span>
-            )}
-          </span>
-        )}
-        {showWaiting && (
-          <span className="inline-flex items-center gap-1.5">
-            <Hourglass className="size-3.5 text-status-blocked-text" />
-            <span className="font-medium text-status-blocked-text">
-              Waiting {formatDuration(waitedMs)}
-            </span>
-            {waiting!.live && (
-              <span className="inline-flex items-center gap-1 text-status-blocked-text">
-                <span
-                  className="size-1.5 animate-pulse rounded-full bg-current"
-                  aria-hidden
-                />
-                on you
-              </span>
             )}
           </span>
         )}
@@ -963,7 +941,7 @@ function ControlBar({
   const resumeLabel = task.stage === "paused" ? "Resume" : "Retry";
 
   return (
-    <div className="rounded-xl border bg-card/40 p-3">
+    <div className="border-t bg-card/40 p-3">
       <div className="flex flex-wrap items-center gap-2">
         {inflight ? (
           <>
@@ -1247,6 +1225,10 @@ function LineageRail({
   );
 }
 
+export { groupTimeline } from "@/views/runs/RunTimeline";
+
+// Timeline rendering lives in `@/views/runs/RunTimeline`; the task and attempt
+// surfaces share the same grouping, waiting bands, and step-state treatment.
 
 // ---------------------------------------------------------------------------
 // Attempts (#242)
@@ -1628,7 +1610,7 @@ function AwaitingApprovalRow({
   const href = `#/approvals/${encodeURIComponent(taskId)}`;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2 text-xs">
+    <div className="flex items-center gap-2 border-t border-status-blocked/30 bg-status-blocked-soft px-4 py-3 text-xs">
       <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
       <span className="min-w-0 flex-1 text-status-blocked-text">
         {/* Issue #883: name the call, not the mechanism. "Waiting on an

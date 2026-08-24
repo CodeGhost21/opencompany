@@ -65,7 +65,14 @@ fi
 
 if [[ "${PW_SKIP_CONSOLE_BUILD:-}" != "1" ]]; then
   echo "[e2e host] building the console bundle (PW_SKIP_CONSOLE_BUILD=1 to skip)" >&2
-  ( cd "$root/frontend" && npm run build >&2 )
+  (
+    cd "$root/frontend"
+    npm run build >&2
+    # The pages SDK is a separate Vite build. The main build clears `dist/`,
+    # so it must be emitted afterward or the shell's import map resolves
+    # `/pages-sdk/*.mjs` to the SPA fallback instead of a module.
+    npm run build:pages-sdk >&2
+  )
 fi
 
 if [[ ! -f "$root/frontend/dist/index.html" ]]; then

@@ -1,7 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   // AppWindow,  // re-add with the Pages nav entry below
-  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -83,7 +82,7 @@ import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
-import { Overview } from "@/views/Overview";
+import { OperatorOverview } from "@/views/OperatorOverview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
@@ -103,7 +102,6 @@ import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
-import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { SettingsSection } from "@/views/SettingsSection";
@@ -221,11 +219,6 @@ const NAV: NavItem[] = [
   // through the switcher on `LedgersView`'s own title. See the comment above
   // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
-  // What the company remembers, and — now that an operator can select a
-  // memory engine — WHERE it remembers: the engine panel shows which driver
-  // is bound, what it negotiated, and whether the boot probe reached it.
-  // Re-listed (issue #302 parked it; the memory-engine work un-parks it).
-  { view: "memory", label: "Brain", icon: Brain },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   // Re-listed. Issue #302 parked the flat Finances page — a single ledger
@@ -2002,7 +1995,17 @@ export function AppShell({
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
           {(view === "overview" || view === "setup") && (
-            <Overview client={client} company={company} companyName={feed.status.name} />
+            <OperatorOverview
+              client={client}
+              company={company}
+              companyName={feed.status.name}
+              feed={feed}
+              scope={scope}
+              // Issue #1015: re-read the run panels when a run parks or fails
+              // while this page stays open (the same tick TaskDetailView
+              // re-reads on).
+              attemptEventTick={attemptEventTick}
+            />
           )}
           {view === "company" && (
             <CompanyView
@@ -2027,6 +2030,10 @@ export function AppShell({
               onOpenAgent={(agentId) =>
                 agentId ? navigate("team", agentId) : navigate("company")
               }
+              // The graph at `#/company/graph` names its core node after the
+              // company the way the rest of the console does (issue #1219),
+              // not after the slug.
+              companyName={feed.status.name}
               // Setup just staffed the company, so the roster read is stale.
               refreshKey={teamBuilt}
               // Skipping setup must not be a dead end: an unstaffed company keeps
@@ -2200,7 +2207,6 @@ export function AppShell({
               onNavigateToDesk={(deskId) => navigate("company", deskId)}
             />
           )}
-          {view === "memory" && <MemoryView client={client} company={company} />}
           {view === "workspace" && (
             <Suspense
               fallback={
