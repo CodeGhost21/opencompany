@@ -24,11 +24,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_graphql::{ID, Object, SimpleObject};
+use async_graphql::{Context, ID, Object, SimpleObject};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::deep_trace::TurnStepDetail;
 use crate::ports::runs::{RunFilter, RunRecord, RunStepRecord};
+use crate::server::approval_visibility;
+use crate::server::graphql::auth::GqlAuth;
 
 /// Token and cost totals for one attempt.
 #[derive(SimpleObject, Default)]
