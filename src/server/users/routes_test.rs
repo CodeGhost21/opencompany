@@ -1216,6 +1216,25 @@ async fn a_temporary_password_is_a_boundary_not_a_suggestion() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
+    // The read stays open, the write does not: a temporary password must not be
+    // spendable on the account's public name or face before it is replaced —
+    // the admin who reset it knows the value and conveyed it over a channel
+    // they do not control.
+    let app = router(state.clone());
+    let response = app
+        .oneshot(patch_with_cookie(
+            "/api/v1/companies/acme/auth/me",
+            serde_json::json!({ "displayName": "Bob the Temp" }),
+            &temp_cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(response).await["code"],
+        "password_change_required"
+    );
+
     let app = router(state.clone());
     let response = app
         .oneshot(post_with_cookie(
