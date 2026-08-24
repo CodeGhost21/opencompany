@@ -372,7 +372,7 @@ pub(crate) fn child_calls_to_repeat(
         // ancestor child before the next `sub_workflow` node are repeated too.
         // Walk each intermediate graph before descending to the record below it.
         for segment in segments {
-            let Some(child_id) = child_id_of(graph, segment, Some(trigger_input)) else {
+            let Some(child_id) = child_id_of(&graph, segment, Some(trigger_input)) else {
                 record = None;
                 break;
             };
