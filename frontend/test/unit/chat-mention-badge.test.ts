@@ -239,4 +239,59 @@ describe("mentionsToClear", () => {
   it("returns an empty list rather than undefined when there is nothing to clear", () => {
     expect(mentionsToClear([], "engineering")).toEqual([]);
   });
+
+  /**
+   * A mention whose subject message is outside the loaded history window must
+   * not silently clear — the person was never shown the summoning text, and
+   * clearing it would lose the summons for good (Codex P1).
+   */
+  describe("with loadedMessageIds restricting what is visible", () => {
+    const loaded = new Set(["h1", "h2", "h7"]);
+
+    it("clears a top-level mention whose subject IS in the loaded transcript", () => {
+      expect(
+        mentionsToClear(
+          [note({ id: "visible", subjectId: "1" })],
+          "engineering",
+          "engineering",
+          new Set(["engineering"]),
+          new Set(),
+          new Map(),
+          null,
+          loaded,
+        ),
+      ).toEqual(["visible"]);
+    });
+
+    it("keeps a top-level mention whose subject is NOT in the loaded transcript", () => {
+      expect(
+        mentionsToClear(
+          [note({ id: "ghost", subjectId: "99" })],
+          "engineering",
+          "engineering",
+          new Set(["engineering"]),
+          new Set(),
+          new Map(),
+          null,
+          loaded,
+        ),
+      ).toEqual([]);
+    });
+
+    it("still clears a thread reply mention when its parent thread is open and the reply is loaded", () => {
+      const replies = new Map([["h42", "h7"]]);
+      expect(
+        mentionsToClear(
+          [note({ id: "r", context: "engineering", subjectId: "42" })],
+          "engineering",
+          "engineering",
+          new Set(["engineering"]),
+          new Set(),
+          replies,
+          "h7",
+          loaded,
+        ),
+      ).toEqual(["r"]);
+    });
+  });
 });
