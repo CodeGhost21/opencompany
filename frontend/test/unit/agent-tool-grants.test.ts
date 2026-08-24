@@ -163,7 +163,7 @@ describe("companyCovers", () => {
 
 describe("grantCeiling", () => {
   it("is the company allow-list when no desk states a ceiling", () => {
-    // `deskAllow` empty means no desk narrows anything — the same
+    // `deskCeilingActive` false means no desk narrows anything — the same
     // empty-is-not-nothing trap `requested` carries, not "this desk grants no
     // tools". The company list is the whole gate.
     expect(
@@ -171,6 +171,7 @@ describe("grantCeiling", () => {
         requested: [],
         companyAllow: ["*", "media"],
         deskAllow: [],
+        deskCeilingActive: false,
         effective: ["*", "media"],
       }),
     ).toEqual(["*", "media"]);
@@ -185,9 +186,27 @@ describe("grantCeiling", () => {
         requested: [],
         companyAllow: ["*", "media"],
         deskAllow: ["*"],
+        deskCeilingActive: true,
         effective: ["*"],
       }),
     ).toEqual(["*"]);
+  });
+
+  it("keeps the desk level as the gate when an active ceiling resolves to empty", () => {
+    // A company allowing only `*` with a desk naming only `media` (an explicit
+    // opt-in a bare `*` does not confer) narrows everything away. `deskAllow`
+    // is empty but the ceiling is still active, so the preview must not fall
+    // back to `companyAllow` and promise `docs.*` will apply — the host drops
+    // it and the saved grant confers nothing.
+    expect(
+      grantCeiling({
+        requested: [],
+        companyAllow: ["*"],
+        deskAllow: [],
+        deskCeilingActive: true,
+        effective: [],
+      }),
+    ).toEqual([]);
   });
 
   it("lets the desk ceiling narrow what an editor warns about", () => {
@@ -200,6 +219,7 @@ describe("grantCeiling", () => {
       requested: [],
       companyAllow: ["*", "media"],
       deskAllow: ["*"],
+      deskCeilingActive: true,
       effective: ["*"],
     });
     expect(companyCovers(ceiling, "media")).toBe(false);
