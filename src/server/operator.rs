@@ -6561,6 +6561,7 @@ mode = "full"
                         text: SLOW_TURN_REPLY.into(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -6741,6 +6742,7 @@ mode = "full"
                         text: format!("answered: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -8897,6 +8899,7 @@ mode = "full"
                             text: format!("re-issued {approval_id}"),
                             steps: Vec::new(),
                             reply_to: None,
+                        mentions: Vec::new(),
                         });
                     }
                     _ => {}

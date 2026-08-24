@@ -235,6 +235,7 @@ fn system_notice(text: String) -> OutboundMessage {
         text,
         steps: Vec::new(),
         reply_to: None,
+                        mentions: Vec::new(),
     }
 }
 
@@ -263,6 +264,7 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
         agent: Some(confine::CONFINED_AGENT_ID.to_string()),
         text: outcome.reply,
         reply_to: None,
+                        mentions: Vec::new(),
         steps: outcome.steps,
     }
 }
@@ -687,6 +689,7 @@ impl HarnessBrain {
             text,
             steps: Vec::new(),
             reply_to: None,
+                        mentions: Vec::new(),
         }))
     }
 
@@ -2994,6 +2997,7 @@ impl HarnessBrain {
                         agent: Some(responder.clone()),
                         text: operator_reply,
                         reply_to: None,
+                        mentions: Vec::new(),
                         steps: operator_steps,
                     });
                     // Issue #926: a turn that paused at its step cap says so,
@@ -3023,6 +3027,7 @@ impl HarnessBrain {
                             text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
                             steps: Vec::new(),
                             reply_to: None,
+                        mentions: Vec::new(),
                         });
                     }
                     // Issue #1032: and a turn halted for spend says so, in its
@@ -3048,6 +3053,7 @@ impl HarnessBrain {
                             text: spend_halt_notice(halt),
                             steps: Vec::new(),
                             reply_to: None,
+                        mentions: Vec::new(),
                         });
                     }
                     channel_responses.extend(turn.bubbles);

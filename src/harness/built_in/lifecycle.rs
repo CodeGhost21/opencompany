@@ -402,6 +402,7 @@ pub fn relay_reply(
         text: relay_text(card, responder, orchestrator),
         reply_to: Some(ReplyTo {
             chat_id: origin_chat_id,
+                        mentions: Vec::new(),
         }),
         steps: Vec::new(),
     }
