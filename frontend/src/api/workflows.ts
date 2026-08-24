@@ -988,6 +988,20 @@ export interface RunArtifactRow {
   taskTitle?: string;
 }
 
+/** The `GET …/workflows/runs/{rid}/artifacts` response. A wrapper rather than a
+ * bare array so a run whose file count exceeds the host's defensive cap can say
+ * so instead of the console presenting an incomplete list as exhaustive. */
+export interface RunArtifactsResponse {
+  /** The run's files, newest first (the host's sort). */
+  files: RunArtifactRow[];
+  /**
+   * Whether older rows were cut by the host's cap. `false` for every run in
+   * practice — the cap is a ceiling, not a page size — but when `true` the
+   * console labels the list rather than silently showing a subset.
+   */
+  truncated: boolean;
+}
+
 /**
  * Fetches the files one past run produced (issue #1684), for the run inspector's
  * lazy "Files associated" disclosure.
@@ -995,18 +1009,18 @@ export interface RunArtifactRow {
  * Lazy per-run by design, exactly like {@link workflowRunOutput}: the history
  * list stays structural, and only the run an operator expands is fetched.
  *
- * **Answers `200 []` — never `404` — for a run that produced no files**, which
- * is the common case (a run that opened no cards, or cards that published
- * nothing). That is the one contract difference from `workflowRunOutput`: a
- * fileless run is normal, so callers render the empty state off an empty array
- * rather than off a caught 404.
+ * **Answers `200 { files: [] }` — never `404` — for a run that produced no
+ * files**, which is the common case (a run that opened no cards, or cards that
+ * published nothing). That is the one contract difference from
+ * `workflowRunOutput`: a fileless run is normal, so callers render the empty
+ * state off an empty array rather than off a caught 404.
  */
 export function fetchRunArtifacts(
   client: OpenCompanyClient,
   company: string | null,
   runId: string,
-): Promise<RunArtifactRow[]> {
-  return client.get<RunArtifactRow[]>(
+): Promise<RunArtifactsResponse> {
+  return client.get<RunArtifactsResponse>(
     `${client.scopeFor(company)}/workflows/runs/${encodeURIComponent(runId)}/artifacts`,
   );
 }
