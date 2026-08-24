@@ -34,7 +34,11 @@ let root: Root;
 const client = clientWith();
 const scope = { connection: "conn-test", company: "acme" as string | null };
 
-async function show(props: { force?: boolean; routeOpen?: boolean } = {}) {
+async function show(props: {
+  force?: boolean;
+  routeOpen?: boolean;
+  onRouteDismiss?: () => void;
+} = {}) {
   await act(async () => {
     root.render(
       createElement(
