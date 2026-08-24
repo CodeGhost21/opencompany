@@ -29,19 +29,22 @@ function item(label: string): HTMLElement {
 }
 
 describe("the overview graph legend", () => {
-  it("distinguishes adjacent workflow and stage rings by colour", () => {
+  it("gives stages a colour distinct from both workflows and AI teammates", () => {
     const workflowIcon = item("Workflow").querySelector("svg");
     const stageIcon = item("Stage").querySelector("svg");
+    const employeeIcon = item("AI teammate").querySelector("svg");
 
     expect(workflowIcon?.style.color).toBe("var(--brain-2)");
-    expect(stageIcon?.style.color).toBe("var(--accent)");
+    expect(employeeIcon?.style.color).toBe("var(--accent)");
+    expect(stageIcon?.style.color).toBe("var(--ok)");
     expect(stageIcon?.style.color).not.toBe(workflowIcon?.style.color);
+    expect(stageIcon?.style.color).not.toBe(employeeIcon?.style.color);
   });
 
   it("wraps legend items instead of letting a narrow graph crop them", () => {
     const legend = host.querySelector('[aria-label="Graph legend"]');
     expect(legend?.className).toContain("flex-wrap");
-    expect(legend?.className).toContain("max-w-[calc(100%-2.5rem)]");
+    expect(legend?.className).toContain("max-w-full");
     expect(item("Workflow").className).toContain("whitespace-nowrap");
     expect(item("Stage").className).toContain("whitespace-nowrap");
   });

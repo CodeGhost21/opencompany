@@ -1,0 +1,25 @@
+{
+  "$comment": "Engineers read other people's code and current API docs all day, and diagnose incidents from production evidence rather than from memory.",
+  "mcpServers": {
+    "deepwiki": {
+      "url": "https://mcp.deepwiki.com/mcp",
+      "description": "Documentation and Q&A for any public GitHub repository. Public and no-auth."
+    },
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "description": "Version-accurate API and library documentation, so answers match the release in use."
+    },
+    "sentry": {
+      "url": "https://mcp.sentry.dev/mcp",
+      "description": "Production errors and their stack traces, for diagnosing an incident from evidence. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/sentry/auth"
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "description": "Issues and cycles, when the work is tracked outside this board. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/linear/auth"
+    }
+  }
+}

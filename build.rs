@@ -121,6 +121,9 @@ fn embed_globals(root: &Path) {
     }
 
     let manifest = std::fs::read_to_string(globals.join("globals.toml")).unwrap_or_default();
+    // The baseline's seed board cards. A file at the `globals/` root, so the
+    // watch above already covers it — no `rerun-if-changed` of its own needed.
+    let tasks = std::fs::read_to_string(globals.join("tasks.toml")).unwrap_or_default();
 
     let mut agents = Vec::new();
     collect(
@@ -168,6 +171,10 @@ fn embed_globals(root: &Path) {
     out.push_str(&format!(
         "/// `globals/globals.toml`, verbatim (empty when the directory is absent).\n\
          pub static EMBEDDED_GLOBALS_MANIFEST: &str = {manifest:?};\n"
+    ));
+    out.push_str(&format!(
+        "/// `globals/tasks.toml`, verbatim (empty when the file is absent).\n\
+         pub static EMBEDDED_GLOBAL_TASKS: &str = {tasks:?};\n"
     ));
     write_pairs(
         &mut out,
