@@ -168,8 +168,16 @@ interface Props {
    * declared stale rather than writing the old company's reply into the new
    * company's transcript.
    */
-  /** The latest connection and company scope, updated by the shell while mounted. */
-  scopeRef: RefObject<{ connection: string; company: string | null }>;
+  /**
+   * The latest connection and company scope, updated by the shell while mounted.
+   *
+   * `client` is part of the scope for a reason codex flagged (P1): the registry's
+   * `reseat` path edits a host address by replacing the `OpenCompanyClient` while
+   * deliberately preserving the connection id, so `connection` + `company` alone
+   * do not move when the host underneath a send changes. Comparing the client
+   * instance catches the old host's late completion after reseat.
+   */
+  scopeRef: RefObject<{ connection: string; company: string | null; client: OpenCompanyClient }>;
   /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
