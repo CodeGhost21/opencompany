@@ -256,19 +256,30 @@ export function reconcileMentions(text: string, mentions: Mention[]): Mention[] 
 
   for (let i = mentions.length - 1; i >= 0; i--) {
     const mention = mentions[i];
-    // The span is exactly where it was recorded: keep it as-is.
+    // Prefer the recorded occurrence only when it is not also the start of an
+    // occurrence that belongs to a later duplicate. When identical text was
+    // inserted at an earlier offset, the old offset is ambiguous; the later
+    // mention's recorded position identifies the newly inserted occurrence and
+    // lets this one re-anchor to the next occurrence instead.
+    const laterDuplicateAtSameOffset = mentions
+      .slice(i + 1)
+      .some(
+        (later) =>
+          later.text === mention.text &&
+          later.offset === mention.offset &&
+          text.slice(later.offset, later.offset + later.text.length) === later.text,
+      );
     if (
+      !laterDuplicateAtSameOffset &&
       !overlaps(mention.offset, mention.text.length) &&
-      text.slice(mention.offset, mention.offset + mention.text.length) ===
-        mention.text
+      text.slice(mention.offset, mention.offset + mention.text.length) === mention.text
     ) {
       claim(mention, mention.offset);
       continue;
     }
     // Re-anchor to the free occurrence closest to where it was. Editing shifts
     // a mention's home by the edit's size, so the nearest same-text span is
-    // the one most likely to be it — greedy first-free would hand a displaced
-    // later mention an occurrence that still belongs to an intact earlier one.
+    // the one most likely to be it.
     let nearest: number | undefined;
     let from = 0;
     for (;;) {
