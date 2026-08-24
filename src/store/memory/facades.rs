@@ -900,6 +900,16 @@ mod test {
     use super::*;
 
     /// Captures warnings emitted synchronously on this test's thread.
+    ///
+    /// Every exercise of a warn callsite this helper later asserts on must
+    /// itself run through `warnings_from` — never bare. A `tracing::warn!`
+    /// fired on a thread with no subscriber registers its callsite against the
+    /// global NoSubscriber, whose `register_callsite` is `Interest::never()`,
+    /// and tracing caches that answer process-wide: the warn silently stops
+    /// firing everywhere, including here. The CI flake this helper was built
+    /// to make deterministic (`unreadable_content` racing
+    /// `decode_classifies`) was exactly that. See the load-bearing comments on
+    /// those two tests.
     fn warnings_from(body: impl FnOnce()) -> String {
         use std::io::Write;
 
