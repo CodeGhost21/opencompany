@@ -637,12 +637,20 @@ async fn company_events(
     let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> = Arc::new(
         std::sync::RwLock::new(author_labels(&scope.runtime).await.unwrap_or_default()),
     );
+    let (cancel, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let label_refresh = {
         let runtime = scope.runtime.clone();
         let shared = Arc::clone(&authors);
         tokio::spawn(async move {
+            let mut cancel = cancel_rx;
             loop {
-                tokio::time::sleep(LABEL_REFRESH_EVERY).await;
+                // The guard's one-shot fires when the stream closes, so the
+                // loop stops at the next boundary instead of waking once more
+                // to attempt a write nobody will read.
+                tokio::select! {
+                    _ = tokio::time::sleep(LABEL_REFRESH_EVERY) => {}
+                    _ = &mut cancel => return,
+                }
                 if let Ok(fresh) = author_labels(&runtime).await {
                     *shared
                         .write()
@@ -653,6 +661,7 @@ async fn company_events(
     };
     let guard = SseStreamGuard {
         company: company.clone(),
+        cancel: Some(cancel),
         label_refresh: Some(label_refresh),
     };
     let durable = subscription.filter_map(move |item| {
