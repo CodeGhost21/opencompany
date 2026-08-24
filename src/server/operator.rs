@@ -8812,6 +8812,10 @@ mode = "full"
         /// the park records the shape a workflow node's gated tool call has:
         /// explicitly unlinked from any card, and carrying a run.
         run_id: Option<String>,
+        /// An `@mention` to append to every continuation reply. Exercises the
+        /// durable half of a reply's mention: the re-issue's reply journaling
+        /// must badge the person it names, same as the `/chat` path.
+        continuation_mention: Option<String>,
     }
 
     #[async_trait::async_trait]
