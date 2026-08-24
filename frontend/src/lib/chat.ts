@@ -20,19 +20,8 @@ export interface Reaction {
   mine: boolean;
 }
 
-/** One mention on one line. Mirrors `ChatMentionDto` on the host. */
-export interface Mention {
-  /** The literal span the author typed, `@` included. */
-  text: string;
-  /** Byte offset of `text` in the message body. */
-  offset: number;
-  /** Who was named, as a display label — never a raw user id. */
-  label: string;
-  /** Whether the reader is the one named (or was named by `@everyone`). */
-  mine: boolean;
-  /** Whether this mention renders but pinged nobody. */
-  quiet?: boolean;
-}
+/** One mention on one line, exactly as the host resolved it. */
+export type Mention = ChatMentionDto;
 
 /** One line in the conversation with the company. */
 export interface ChatMessage {
