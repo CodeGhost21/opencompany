@@ -889,91 +889,82 @@ export function AppShell({
     setDecidingApprovals(new Map());
     setFailedApprovals({});
 
-    // Which threads/channels this effect has already hydrated once, so the
-    // 5-second poll below (`rehydrateAll` reused as both the mount-time call
-    // and the recurring one) can tell a cold load from a recovery tick: a
-    // cold load's `fresh` rows are the whole history and belong in front of
-    // whatever local/optimistic messages beat the response back; a poll's
-    // `fresh` rows are new tail rows `chat/history` just grew and belong
-    // after everything already shown, the same rule `reReadSettledThread`
-    // uses for its own re-read.
-    const hydratedThreads = new Set<string>();
+    // How far each channel's cold hydration has got, and which thread's
+    // request is still in flight, so the 5-second poll below (`rehydrateAll`
+    // reused as both the mount-time call and the recurring one) can tell a
+    // cold load from a recovery tick. A cold load marks each channel
+    // `"loading"` before its first request — the gap between "this channel
+    // exists" and "its history is in flight" is precisely the window the
+    // timeline used to fill with the empty-channel copy — and a poll tick
+    // must not: the channel is already `"ready"`, and cycling it back through
+    // `"loading"` every five seconds is what forced `MessageTimeline` to
+    // re-anchor to the bottom on the same cadence (its scroll-to-bottom
+    // effect is keyed on `historyPending`), yanking an operator reading
+    // scrollback back down every poll even though nothing new arrived.
+    //
+    // A channel counts as hydrated only once its cold read has *settled*, not
+    // when it merely started: a first request still in flight when the timer
+    // fires must not be treated as a poll, and a transient failure must not
+    // make the next tick fold the whole persisted history in as new tail data.
     const hydratedChannels = new Set<string>();
+    const inFlight = new Set<string>();
 
-    const hydrate = (threadId: string) => {
-      const isPoll = hydratedThreads.has(threadId);
-      hydratedThreads.add(threadId);
-      client
-        .getChatHistory(threadId, company)
-        .then((entries) => {
-          if (cancelled || requestCompany !== company || entries.length === 0) return;
-          const hydrated = fromHistory(entries);
-          setThreads((ts) =>
-            ts.map((t) => {
-              if (t.id !== threadId) return t;
-              const known = new Set(t.messages.map((m) => m.id));
-              const fresh = hydrated.filter((m) => !known.has(m.id));
-              if (fresh.length === 0) return t;
-              return {
-                ...t,
-                messages: isPoll ? [...t.messages, ...fresh] : [...fresh, ...t.messages],
-              };
-            }),
-          );
-        })
-        .catch(() => {
-          /* host without `/chat/history`, or offline — thread stays empty */
-        });
-    };
-
-    // Same rehydration, into `transcripts` instead of `threads` — the Chat
-    // workspace's own transcript store. Chat's channel id and the host's
-    // thread id agree for a desk (`deskFromDto` keeps `DeskDto.id`
-    // untouched), but not for a DM: the channel id is the console-local
-    // `dmChannelId`, while the thread id `getChatHistory`/`chat` read is the
-    // roster agent id (see `ChatView`'s `send`) — so this takes both.
     const markHistory = (channelId: string, status: HistoryStatus) =>
       setHydration((h) => ({ ...h, byChannel: { ...h.byChannel, [channelId]: status } }));
 
-    const hydrateChannel = (channelId: string, threadId: string) => {
-      const isPoll = hydratedChannels.has(channelId);
-      hydratedChannels.add(channelId);
-      // Marked before the request, not after: the gap between "this channel
-      // exists" and "its history is in flight" is precisely the window the
-      // timeline used to fill with the empty-channel copy. Skipped on a poll
-      // tick — the channel is already `"ready"`, and cycling it back through
-      // `"loading"` every five seconds is what forced `MessageTimeline` to
-      // re-anchor to the bottom on the same cadence (its scroll-to-bottom
-      // effect is keyed on `historyPending`), yanking an operator reading
-      // scrollback back down every poll even though nothing new arrived.
-      if (!isPoll) markHistory(channelId, "loading");
+    // One history fetch per thread, fanned into both transcript stores. The
+    // Chat workspace keeps `transcripts` keyed by channel id, and the parked
+    // Conversation keeps `threads` keyed by thread id; a desk's channel id *is*
+    // its thread id, and a DM's channel id is the console-local `dmChannelId`
+    // while its thread id is the roster agent id (see `ChatView`'s `send`).
+    // Fetching per unique thread instead of per store means a thread that
+    // renders as both a thread and a channel is read once, not twice, on every
+    // tick (issue #1690).
+    const hydrateThread = (threadId: string, channels: readonly { channelId: string }[]) => {
+      // Serialize: a tick that fires while the cold read is still in flight
+      // does not fire a second request for the same thread (issue #1690).
+      if (inFlight.has(threadId)) return;
+      inFlight.add(threadId);
+      channels.forEach(({ channelId }) => {
+        if (!hydratedChannels.has(channelId)) markHistory(channelId, "loading");
+      });
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
           if (cancelled || requestCompany !== company) return;
-          if (entries.length === 0) {
-            // An empty answer is still an answer, and the only thing that ever
-            // makes the "start of your direct message" copy true.
-            markHistory(channelId, "ready");
-            return;
-          }
           const hydrated = fromHistory(entries);
-          setTranscripts((t) => {
-            const known = new Set((t[channelId] ?? []).map((m) => m.id));
-            const fresh = hydrated.filter((m) => !known.has(m.id));
-            if (fresh.length === 0) return t;
-            return {
-              ...t,
-              [channelId]: isPoll
-                ? [...(t[channelId] ?? []), ...fresh]
-                : [...fresh, ...(t[channelId] ?? [])],
-            };
-          });
-          markHistory(channelId, "ready");
+          if (hydrated.length > 0) {
+            // Both folds use the same rule: persisted rows take the history's
+            // own oldest-first order, and local rows the host has not
+            // persisted yet stay at the tail — so a row the live SSE path
+            // missed lands where the host says it belongs, gap or tail
+            // (issue #1690).
+            setThreads((ts) =>
+              ts.map((t) => {
+                if (t.id !== threadId) return t;
+                const messages = mergeHistoryInOrder(t.messages, hydrated);
+                return messages === t.messages ? t : { ...t, messages };
+              }),
+            );
+            channels.forEach(({ channelId }) => {
+              setTranscripts((t) => {
+                const merged = mergeHistoryInOrder(t[channelId] ?? [], hydrated);
+                return merged === (t[channelId] ?? []) ? t : { ...t, [channelId]: merged };
+              });
+            });
+          }
+          channels.forEach(({ channelId }) => markHistory(channelId, "ready"));
         })
         .catch(() => {
-          /* host without `/chat/history`, or offline — channel stays empty */
-          if (!cancelled) markHistory(channelId, "ready");
+          /* host without `/chat/history`, or offline — stores stay as they are */
+          if (!cancelled) channels.forEach(({ channelId }) => markHistory(channelId, "ready"));
+        })
+        .finally(() => {
+          inFlight.delete(threadId);
+          // Settled — success or failure — is the moment a channel stops being
+          // a cold load and starts being a poll target. Not the moment the
+          // request was *sent* (issue #1690).
+          channels.forEach(({ channelId }) => hydratedChannels.add(channelId));
         });
     };
 
@@ -981,8 +972,19 @@ export function AppShell({
       threadIds: readonly string[],
       channels: readonly { channelId: string; threadId: string }[],
     ) => {
-      threadIds.forEach(hydrate);
-      channels.forEach(({ channelId, threadId }) => hydrateChannel(channelId, threadId));
+      const channelsByThread = new Map<string, { channelId: string }[]>();
+      for (const { channelId, threadId } of channels) {
+        const list = channelsByThread.get(threadId);
+        if (list) list.push({ channelId });
+        else channelsByThread.set(threadId, [{ channelId }]);
+      }
+      // Every resolved thread gets its own fetch, even when nothing renders as
+      // a channel — the main line is a thread with no Chat channel. And every
+      // channel's backing thread is in `threadIds`, so the union is the full
+      // set, each exactly once (issue #1690).
+      [...new Set([...threadIds, ...channelsByThread.keys()])].forEach((threadId) =>
+        hydrateThread(threadId, channelsByThread.get(threadId) ?? []),
+      );
     };
 
     client
