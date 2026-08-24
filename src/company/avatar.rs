@@ -257,12 +257,14 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         match fourcc {
             b"VP8 " => {
                 // Lossy: frame tag (3) + start code (3), then 14-bit width and
-                // height (RFC 6386 §9.1).
-                if data.len() < 9 {
+                // height packed into the 4 bytes after them (RFC 6386 §9.1).
+                if data.len() < 10 {
                     return None;
                 }
                 let w = (data[6] as u32) | (((data[7] & 0x3F) as u32) << 8);
-                let h = (((data[7] & 0xC0) as u32) >> 6) | ((data[8] as u32) << 2);
+                let h = (((data[7] & 0xC0) as u32) >> 6)
+                    | ((data[8] as u32) << 2)
+                    | ((data[9] as u32) << 10);
                 return Some((w, h));
             }
             b"VP8L" => {
