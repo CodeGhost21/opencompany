@@ -69,6 +69,14 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   const [agent, setAgent] = useState<string | null>(() => readObservatoryHash().agent);
   const focusStep = useRef(readObservatoryHash().step);
 
+  // Navigating between runs (following an Observatory link to another run)
+  // changes `runId` while this view stays mounted, and such links deliberately
+  // omit the old `agent` query parameter. Re-read the address so the filter
+  // does not keep silently applying to the newly fetched attempts.
+  useEffect(() => {
+    setAgent(readObservatoryHash().agent);
+  }, [runId]);
+
   const reload = useCallback(async () => {
     // GraphQL addresses a company by an explicit id, unlike the REST scope's
     // single-company alias — so there is nothing to ask for until one is
