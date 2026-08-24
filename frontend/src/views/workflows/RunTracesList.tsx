@@ -157,7 +157,14 @@ export function RunTracesList({
         case "trigger":
           return dir * (Number(a.scheduled) - Number(b.scheduled));
         case "status":
-          return dir * (rank(a) - rank(b));
+          // `a`/`b` swapped rather than `dir` alone (issue #1697 review):
+          // `VERDICTS` lists the states worth a person's attention FIRST
+          // (`running`, `failed`, …) and `ok` last, so a plain rank
+          // difference sorts `ok` to the top on the very first click, which
+          // is the one direction a "descending" status sort must not read
+          // as. Swapping puts the highest-attention rows first on that first
+          // click, and the reverse — `ok` first — one more click away.
+          return dir * (rank(b) - rank(a));
         case "startedAt":
         default:
           return dir * (startedAt(a) - startedAt(b));
@@ -270,6 +277,9 @@ function RunTraceHeader({
           type="button"
           onClick={() => onSort(key)}
           data-testid={`workflow-run-traces-sort-${key}`}
+          aria-label={`Sort by ${label}${
+            sortKey === key ? `, ${sortDir === "asc" ? "ascending" : "descending"}` : ""
+          }`}
           className={`flex items-center gap-1 text-2xs font-medium text-muted-foreground hover:text-foreground ${
             align === "right" ? "justify-end" : ""
           }`}

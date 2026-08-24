@@ -38,6 +38,16 @@ async function openRunsTab(page: import("@playwright/test").Page) {
   await page.getByTestId("workflow-index-tab-runs").click();
   const list = page.getByTestId("workflow-run-traces");
   await expect(list).toBeVisible();
+  // The container renders during the run-page fetch too, when the list is a
+  // skeleton — `indexRuns` is a separate request from the workflow list, so
+  // the container can be visible before the runs arrive. Settle on the
+  // loaded state so a row count taken right after this helper is real.
+  await expect(
+    list
+      .getByTestId("workflow-run-trace-row")
+      .first()
+      .or(list.getByText(/No workflow runs yet/)),
+  ).toBeVisible({ timeout: 30_000 });
   return list;
 }
 
@@ -118,14 +128,19 @@ test("running a workflow surfaces it in the traces list, and its sheet's canvas 
   await page.getByTestId("workflow-back-to-index").click();
   const list = await openRunsTab(page);
 
-  const row = list.getByTestId("workflow-run-trace-row").filter({ hasText: name ?? "" }).first();
+  expect(name, "could not read the first workflow card's name").toBeTruthy();
+  const row = list.getByTestId("workflow-run-trace-row").filter({ hasText: name! }).first();
   await expect(row).toBeVisible({ timeout: 60_000 });
   await row.click();
 
   const sheet = page.getByTestId("run-trace-sheet");
   await expect(sheet).toBeVisible();
 
-  await sheet.getByRole("button", { name: /Show on canvas/ }).click();
+  // Only a run with a per-node trail offers this control — a run refused
+  // before its first step settled has none.
+  const canvasLink = sheet.getByRole("button", { name: /Show on canvas/ });
+  await expect(canvasLink).toBeVisible({ timeout: 30_000 });
+  await canvasLink.click();
   // The sheet's canvas link is the one deliberate exception to "opening a run
   // never navigates" — it is an opt-in, not the row click.
   await expect(page).toHaveURL(/#\/workflows\/[^/]+\?run=/);

@@ -1230,6 +1230,11 @@ export function WorkflowsView({
   useEffect(() => {
     setIndexRuns([]);
     setIndexRunsLoaded(false);
+    // Issue #1697: the open transcript names a run of the company being
+    // left. Left up, its header resolves `workflowId` against the NEW
+    // company's workflows — ids are not unique across companies — and its
+    // output fetch 404s against a run the new company's host never held.
+    setTraceRun(null);
   }, [company]);
 
   // The run page grouped by workflow, newest first.
@@ -1245,6 +1250,20 @@ export function WorkflowsView({
     }
     return byId;
   }, [indexRuns]);
+
+  // The traces sheet's run, kept LIVE (issue #1697 review): `traceRun` names
+  // which run is open by its `seq`, and this re-resolves that seq against the
+  // freshest `indexRuns` page on every render. Without it the sheet held the
+  // snapshot from the moment it was opened, so a run still in flight when
+  // clicked stayed "running" in the sheet forever — the index around it kept
+  // refreshing and settling, but the sheet never saw it. Falls back to the
+  // held snapshot when the run has aged off the capped page, which is the
+  // same degradation `indexRuns` itself already accepts.
+  const liveTraceRun = useMemo(
+    () =>
+      traceRun ? (indexRuns.find((r) => r.seq === traceRun.seq) ?? traceRun) : null,
+    [traceRun, indexRuns],
+  );
 
   // `input` is the trigger payload for THIS dispatch (issue #1204), handed in by
   // whichever control fired rather than read out of `request` state. The toolbar's
@@ -3229,10 +3248,10 @@ export function WorkflowsView({
       <RunTraceSheet
         client={client}
         company={company}
-        run={traceRun}
+        run={liveTraceRun}
         workflowName={
-          (traceRun && workflows.find((w) => w.id === traceRun.workflowId)?.name) ??
-          traceRun?.workflowId ??
+          (liveTraceRun && workflows.find((w) => w.id === liveTraceRun.workflowId)?.name) ??
+          liveTraceRun?.workflowId ??
           ""
         }
         onClose={() => setTraceRun(null)}

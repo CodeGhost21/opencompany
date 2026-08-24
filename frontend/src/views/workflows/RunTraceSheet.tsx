@@ -15,10 +15,9 @@
 // button's `onSelect` to navigate is the same affordance under the name this
 // console already uses for it.
 
-import { useEffect, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useEffect, useMemo, useState } from "react";
 
+import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -67,13 +66,24 @@ export function RunTraceSheet({
   const runId = run?.runId ?? null;
   const [output, setOutput] = useState<OutputFetch | null>(null);
   const now = useRunningClock(run !== null && isRunning(run));
+  // Whether the run this sheet is showing has settled. `run` itself is a live
+  // reference (`WorkflowsView` looks it up in `indexRuns` on every render), so
+  // this flips from `false` to `true` in place as the SAME run finishes —
+  // rather than only ever being read once at mount.
+  const runSettled = run !== null && !isRunning(run);
 
-  // Issue #596's durable snapshot, fetched once per run id. A run journaled
-  // before output capture, a dry run (persists nothing), or a hard-aborted run
-  // 404s — settled to `record: null`, which renders as an honest empty state
-  // rather than an error.
+  // Issue #596's durable snapshot. A run journaled before output capture, a
+  // dry run (persists nothing), or a hard-aborted run 404s — settled to
+  // `record: null`, which renders as an honest empty state rather than an
+  // error.
+  //
+  // Deferred until the run SETTLES, and re-run when it does (issue #1697
+  // review): the snapshot is written when the run finishes, so fetching it
+  // while still running only ever finds a 404 — and without `runSettled` in
+  // the dependency list, that miss would be cached until the sheet is closed
+  // and reopened, even though the run went on to finish moments later.
   useEffect(() => {
-    if (!runId) {
+    if (!runId || !runSettled) {
       setOutput(null);
       return;
     }
@@ -89,12 +99,18 @@ export function RunTraceSheet({
     return () => {
       cancelled = true;
     };
-  }, [runId, client, company]);
+  }, [runId, runSettled, client, company]);
 
-  const nodeResults =
-    output && output.runId === runId && output.record
-      ? parseRunNodes(output.record.nodes, null)
-      : null;
+  // Memoized so a tick of `now` (the running clock above) cannot re-derive
+  // this from scratch — it only has to change when the fetch actually lands a
+  // new record.
+  const nodeResults = useMemo(
+    () =>
+      output && output.runId === runId && output.record
+        ? parseRunNodes(output.record.nodes, null)
+        : null,
+    [output, runId],
+  );
 
   return (
     <Sheet open={run !== null} onOpenChange={(next) => !next && onClose()}>
@@ -127,6 +143,9 @@ export function RunTraceSheet({
                   now={now}
                   selected={false}
                   onSelect={() => {
+                    // The destination IS a canvas, so the sheet must not stay
+                    // open over it — unlike the row click, which opens it.
+                    onClose();
                     window.location.hash = workflowHref(run.workflowId, run.runId);
                   }}
                 />
@@ -137,6 +156,7 @@ export function RunTraceSheet({
                   </p>
                   <NodeOutputList
                     runId={run.runId}
+                    runSettled={runSettled}
                     fetch={output}
                     nodeResults={nodeResults}
                   />
@@ -154,12 +174,17 @@ export function RunTraceSheet({
  * the part of a transcript {@link RunHistoryRow} does not carry. */
 function NodeOutputList({
   runId,
+  runSettled,
   fetch,
   nodeResults,
 }: {
   /** Absent on a run journaled before issue #371 minted a correlation id — no
    * output was ever captured for it, so there is nothing to fetch. */
   runId: string | undefined;
+  /** Whether the run has finished. The durable snapshot is written when a run
+   * settles, so fetching before then only ever finds a 404 — this renders an
+   * honest "still going" state instead of a premature empty one. */
+  runSettled: boolean;
   fetch: OutputFetch | null;
   nodeResults: ReturnType<typeof parseRunNodes>;
 }) {
@@ -167,6 +192,13 @@ function NodeOutputList({
     return (
       <p className="text-xs text-muted-foreground">
         This run predates output capture, so no node text was recorded.
+      </p>
+    );
+  }
+  if (!runSettled) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Still running — output appears here once it finishes.
       </p>
     );
   }
@@ -218,9 +250,7 @@ function NodeOutputList({
                     </p>
                   )}
                   {m.text ? (
-                    <div className="prose prose-sm max-w-none text-xs dark:prose-invert">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
-                    </div>
+                    <Markdown className="text-xs">{m.text}</Markdown>
                   ) : (
                     <p className="text-xs text-muted-foreground">—</p>
                   )}
