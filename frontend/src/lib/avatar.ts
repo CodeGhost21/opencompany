@@ -127,7 +127,11 @@ export function staticAvatarSrc(ref: string): string | null {
  * the host in the key means visiting other hosts multiplies the same set — and
  * each entry pins a blob of up to 4 MB for as long as it is kept. Past the cap
  * the oldest entry is dropped and its object URL revoked; a face that was
- * evicted is simply fetched again the next time it scrolls into view.
+ * evicted is simply fetched again the next time it scrolls into view. An entry
+ * still in flight is never evicted — it pins no blob, so dropping it would save
+ * nothing and would throw away a fetch a mounted tile is waiting on — and a
+ * face whose node is deleted is dropped on the spot by {@link forgetAvatarNode}
+ * rather than kept drawing a file that no longer exists.
  *
  * The host is part of the key because the map outlives a connection switch: the
  * desktop console remounts `AppShell` when it changes hosts, but this module
