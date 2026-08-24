@@ -287,6 +287,13 @@ mod tests {
         }
     }
 
+    fn thinking(delta: &str) -> AgentProgress {
+        AgentProgress::ThinkingDelta {
+            delta: delta.to_string(),
+            iteration: 1,
+        }
+    }
+
     fn completed(call_id: &str, tool: &str) -> AgentProgress {
         AgentProgress::ToolCallCompleted {
             call_id: call_id.to_string(),
