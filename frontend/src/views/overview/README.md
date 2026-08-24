@@ -11,19 +11,19 @@ Five concentric rings, read outward from the centre:
 | Ring | What | Where it comes from |
 |---|---|---|
 | 0 | the company, drawn as its memory constellation | `lib/memory.ts` (local store) |
-| 1 | departments (pillars) | `…/desks` — the company's real desks |
-| 2 | the jobs on each pillar, and the workflows it runs | `…/tasks` grouped through their assignee; `…/workflows` for the flows |
+| 1 | desks | `…/desks` — the company's real desks |
+| 2 | the jobs on each desk, and the workflows it runs | `…/tasks` grouped through their assignee; `…/workflows` for the flows |
 | 3 | the teammate who does each job, each workflow stage, and the humans | `…/team` matched by `task.assignee`; humans from `…/users`; stages are the saved graph's nodes |
 | 4 | that teammate's tools | `…/team` — the grants the host resolved for that agent |
 
 Rings 2 and 3 each carry two kinds. A workflow sits beside the SOP tasks
-because both are work a department runs; a workflow's stages sit beside the
+because both are work a desk runs; a workflow's stages sit beside the
 workers because a stage is where the flow meets the person who performs it.
 
-Hover any node to trace its whole pillar chain. Click a pillar to grow it into
+Hover any node to trace its whole desk chain. Click a desk to grow it into
 a bottom-up tree; click a job for its steps, a teammate or tool for its card.
 Click the core to bloom the memory constellation, with type-to-find over it.
-Drag the background to pan. `←` / `→` turn the pillar wheel; `Escape` steps
+Drag the background to pan. `←` / `→` turn the desk wheel; `Escape` steps
 back out.
 
 The graph is one tab stop. After Tab enters it, `←` / `↑` and `→` / `↓` move
@@ -42,9 +42,9 @@ names (issue #1104).
 
 | When | Named |
 |---|---|
-| at rest | the company, every department, and the roster — agents and people |
+| at rest | the company, every desk, and the roster — agents and people |
 | hovering | the node under the pointer — the lit chain behind it stays unnamed |
-| in a focused tree | the node you clicked and its direct children — a pillar names its tasks, an agent names its tools |
+| in a focused tree | the node you clicked and its direct children — a desk names its tasks, an agent names its tools |
 
 Selection ranks just below hover, so it keeps its name against everything
 except the node under the pointer. Every node keeps a `<title>`, so a native
@@ -73,9 +73,9 @@ disclosure opens the full explanation for pointer, keyboard, and touch users.
 Three rings used to be invented, and were deleted as the host grew the reads
 they were standing in for:
 
-- **Ring 1, departments** — `assignDepartment` keyword-matched a role string into
-  one of five hardcoded buckets, falling back to Operations. Departments are the
-  company's **desks** now (issue #486): a `[[group_chat]]` in the manifest or an
+- **Ring 1, desks** — `assignDepartment` keyword-matched a role string into
+  one of five hardcoded buckets, falling back to Operations. The company's
+  **desks** (issue #486) are now a `[[group_chat]]` in the manifest or an
   operator-created overlay desk, the same source the Company org chart reads.
 - **Ring 4, tools** — `assignTools` dealt each teammate a slice of the
   company-wide `[tools] allow` list, positionally. A teammate's tools are the
@@ -141,7 +141,7 @@ the graph says so rather than guessing:
 
 - **A teammate on no desk.** They are on the roster and nowhere in the
   structure, so they hang off the company core in a sector of their own, with no
-  pillar above them. Their open board cards are dropped, because ring 2 hangs
+  desk above them. Their open board cards are dropped, because ring 2 hangs
   off ring 1 and there is no honest desk to hang them from.
 - **A human.** Desks staff agents, so the company declares no desk for a person
   and this graph does not guess one — the same answer the org chart gives, for
@@ -155,8 +155,8 @@ the graph says so rather than guessing:
   dropped: the company really does declare the flow, so it is drawn stageless
   rather than going missing with no error anywhere.
 
-An empty declared desk draws no pillar: `buildKnowledgeGraph` only draws a
-department somebody claims. That is pre-existing behaviour, not a decision this
+An empty declared desk draws no desk: `buildKnowledgeGraph` only draws a desk
+somebody claims. That is pre-existing behaviour, not a decision this
 made.
 
 Everything else is real: a card's assignee, the desks that seat each teammate,
@@ -173,13 +173,13 @@ labels survive), and the `KnowledgeGraph` /
 the two board predicates the adapter needs. Theme tokens live under `.oc-kg`
 in `src/index.css`.
 
-The graph is the whole page, so its chrome stays minimal: a pillar selector, a
+The graph is the whole page, so its chrome stays minimal: a desk selector, a
 kind legend, the side paddles, and the detail card. The selector names every
 desk rather than numbering them (issue #1309) — it used to draw one anonymous
-dot per desk under the words "Pick a pillar", so the control that exists to
+dot per desk under the words "Pick a desk", so the control that exists to
 choose a desk said which was which only on hover, and said nothing at all to a
 touch device. The chips wrap rather than scroll or clip; each carries the
-colour its pillar's node and label already carry. The docked directory index
+colour its desk's node and label already carry. The docked directory index
 and the entity/function/action lenses were removed — with nothing else on the
 page competing for attention, they covered more of the graph than they earned.
 
