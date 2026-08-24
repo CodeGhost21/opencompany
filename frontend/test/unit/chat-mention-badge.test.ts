@@ -101,7 +101,13 @@ describe("mentionsToClear", () => {
     expect(mentionsToClear(feed, "design")).toEqual(["design-1"]);
   });
 
-  it("returns nothing for a channel with no mentions", () => {
+  it("clears legacy main mentions when the rendered main channel is opened", () => {
+    expect(mentionsToClear([note({ id: "a", context: "main" })], "general", "general")).toEqual([
+      "a",
+    ]);
+  });
+
+
     expect(mentionsToClear(feed, "random")).toEqual([]);
   });
 
