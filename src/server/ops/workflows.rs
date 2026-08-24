@@ -6981,10 +6981,10 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body[0]["artifactId"], "art-a1", "{body}");
-            assert_eq!(body[0]["workspaceNodeId"], "node-9", "{body}");
+            assert_eq!(body["files"][0]["artifactId"], "art-a1", "{body}");
+            assert_eq!(body["files"][0]["workspaceNodeId"], "node-9", "{body}");
             assert!(
-                body[1]["workspaceNodeId"].is_null(),
+                body["files"][1]["workspaceNodeId"].is_null(),
                 "an unmirrored file omits the workspace link: {body}"
             );
         }
