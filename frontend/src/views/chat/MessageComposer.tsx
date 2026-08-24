@@ -245,8 +245,16 @@ export function MessageComposer({
     const range = { start: query.start, end: Math.max(selectionEnd, tokenEnd) };
     const result = insertMention(draft, range, entry);
     setDraft(result.text);
+    // A pick replaces the token under the caret, so any mention the range
+    // touched is gone from the draft. Drop those before reconciling, or the
+    // replaced identity re-anchors onto a same-text duplicate elsewhere —
+    // replacing the picked first `@Sam` in `@Sam then @Sam` with `@engineer`
+    // would otherwise move Sam onto the second, hand-typed span.
     setMentions((current) =>
-      reconcileMentions(result.text, [...current, result.mention]),
+      reconcileMentions(result.text, [
+        ...mentionsOutsideRange(current, range),
+        result.mention,
+      ]),
     );
     setOutsideWarning(null);
     closePicker();
