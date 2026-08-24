@@ -6854,7 +6854,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array response");
+            let rows = body["files"].as_array().expect("files array");
             assert_eq!(rows.len(), 3, "only run-1's cards' files: {body}");
 
             // Newest-first: art-a1 (30), art-b1 (20), art-a2 (10).
