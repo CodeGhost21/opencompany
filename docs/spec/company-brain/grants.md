@@ -163,10 +163,10 @@ notes run unattended under `auto` while an operator- or teammate-authored node
 still parks. The lift never reaches the standing-grant mint path, which keeps
 reading the table — so the shared note tree stays non-grantable (above) however
 `auto` treats a call on it. Two extra bounds follow from what the tools
-themselves allow: `workspace_delete` parks on a folder that still holds
-anything (the tool refuses those anyway), and `workspace_rename` of a folder
-parks unless every node inside it is the agent's own, because the rename
-re-renders all of their paths. A `workspace_rename` that *moves* a node is
+themselves allow: `workspace_delete` is refused at execution time when a
+folder still holds anything (the policy allows an owned target, so no approval
+card is parked), and `workspace_rename` of a folder parks unless every node
+inside it is the agent's own, because the rename re-renders all of their paths. A `workspace_rename` that *moves* a node is
 bound by the same landing-zone rule `workspace_create` applies to a nested
 parent: the destination folder must also be the agent's own (the home root
 excepted), so an operator-authored folder inside the home cannot become an
