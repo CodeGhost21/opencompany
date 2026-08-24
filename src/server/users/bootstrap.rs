@@ -197,6 +197,8 @@ mod test {
         (ops.clone(), ops.clone(), ops)
     }
 
+    const GOOD: &str = "a long enough bootstrap password";
+
     fn context<'a>(
         users: &'a Arc<dyn UserStore>,
         sessions: &'a Arc<dyn crate::ports::sessions::SessionStore>,
