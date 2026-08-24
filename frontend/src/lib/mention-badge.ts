@@ -36,7 +36,16 @@ function isGeneralChat(context: string | null | undefined): boolean {
  */
 export function mentionCountsByChannel(
   notifications: readonly NotificationDto[],
-  mainChannelId = MAIN_THREAD_ID,
+  /**
+   * The id of the rendered channel that stands in for the legacy general
+   * thread. `undefined` means there is none yet — the desk list has not
+   * loaded, or a company has no desks at all — and a general-chat spelling
+   * then has nowhere to badge. It is dropped rather than placed under an id
+   * the rail never has, which would render nowhere and could never be cleared
+   * (tinysweeper). Direct desk/DM ids are unaffected: they badge from the
+   * `renderedChannelIds` arm regardless.
+   */
+  mainChannelId: string | undefined = MAIN_THREAD_ID,
   renderedChannelIds: ReadonlySet<string> = new Set(),
 ): Record<string, number> {
   const out: Record<string, number> = {};
@@ -65,6 +74,10 @@ export function mentionCountsByChannel(
       : isGeneralChat(n.context)
         ? mainChannelId
         : n.context;
+    // A general-chat spelling with no rendered main channel (see the param
+    // doc) is dropped, not placed under a channel that can never render or
+    // clear.
+    if (channelId === undefined) continue;
     out[channelId] = (out[channelId] ?? 0) + 1;
   }
   return out;
