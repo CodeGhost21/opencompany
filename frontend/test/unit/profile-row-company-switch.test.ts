@@ -31,7 +31,15 @@ function deferred<T>() {
 }
 
 function meFor(company: string): Me {
-  return { id: `${company}-me`, email: `me@${company}.test`, displayName: `${company} user` };
+  return {
+    id: `${company}-me`,
+    email: `me@${company}.test`,
+    displayName: `${company} user`,
+    role: "member",
+    company,
+    hasPassword: false,
+    mustChangePassword: false,
+  };
 }
 
 function host() {
