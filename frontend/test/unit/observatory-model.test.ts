@@ -92,8 +92,11 @@ describe("spansFromRuns", () => {
 });
 
 describe("spansFromSteps", () => {
-  it("gives a step its elapsed duration", () => {
-    const spans = spansFromSteps(run({ steps: [step({ atMillis: 100, elapsedMs: 250 })] }));
+  it("anchors a completed tool span at its actual start", () => {
+    // A completed call's `atMillis` is its end stamp — the completion row
+    // rewrote the start row with a fresh timestamp — so the span runs
+    // *backward* from there by the elapsed duration.
+    const spans = spansFromSteps(run({ steps: [step({ atMillis: 350, elapsedMs: 250 })] }));
     expect(spans[0].startMs).toBe(100);
     expect(spans[0].endMs).toBe(350);
   });
