@@ -200,7 +200,7 @@ export function SetupController({
       const resume = returned && (wasRedesigning || empty);
       setRedesigning(wasRedesigning && returned);
       // eslint-disable-next-line no-console
-      console.log("GATE", { hash: window.location.hash, wasResuming, wasRedesigning, returned, resume, empty, first, deepLinked, skipped: setupSkipped(scope), should: shouldOfferSetup({ roster, skipped: setupSkipped(scope) }) });
+      console.log(`GATE|hash=${window.location.hash}|resuming=${wasResuming}|redesign=${wasRedesigning}|returned=${returned}|resume=${resume}|empty=${empty}|first=${first}|dl=${deepLinked}|skipped=${setupSkipped(scope)}|should=${shouldOfferSetup({ roster, skipped: setupSkipped(scope) })}`);
       // Only the first evaluation may open the dialog by itself; see
       // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
       // keeps holding and the Team page keeps prompting.
