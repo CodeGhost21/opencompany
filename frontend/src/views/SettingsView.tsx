@@ -39,6 +39,7 @@ import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
+import { withHostParam } from "@/hooks/use-host-route";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
 import { useLocalScope } from "@/connections/ConnectionContext";
