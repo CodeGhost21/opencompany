@@ -410,6 +410,7 @@ impl StepTrace {
                 self.thinking_open = true;
                 let seq = self.claim();
                 if self.deep {
+                    self.thinking_pending_bytes = delta.len();
                     self.thinking_buf = Some((seq, delta.clone()));
                 }
                 vec![(
