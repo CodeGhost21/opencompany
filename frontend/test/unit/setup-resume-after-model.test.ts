@@ -355,7 +355,8 @@ describe("leaving the completion screen to wire a model", () => {
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       listTeam: async () => [...BASELINE],
-      get: async () => ({ cognition: "echo" }),
+      get: async (path: string) =>
+        path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
       post: async () => ({
         agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
@@ -393,7 +394,8 @@ describe("leaving the completion screen to wire a model", () => {
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       listTeam: async () => [...roster],
-      get: async () => ({ cognition: "echo" }),
+      get: async (path: string) =>
+        path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
       post: async () => ({
         agents: [
           { name: "Ada", role: "Operations", description: "Runs the desk." },
@@ -453,7 +455,8 @@ describe("leaving the completion screen to wire a model", () => {
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       listTeam: async () => [...roster],
-      get: async () => ({ cognition: "echo" }),
+      get: async (path: string) =>
+        path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
       post: async () => ({
         agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
@@ -488,7 +491,8 @@ describe("leaving the completion screen to wire a model", () => {
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       listTeam: async () => [...roster],
-      get: async () => ({ cognition: "echo" }),
+      get: async (path: string) =>
+        path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
       post: async () => ({
         agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
@@ -522,7 +526,8 @@ describe("leaving the completion screen to wire a model", () => {
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       listTeam: async () => [...BASELINE],
-      get: async () => ({ cognition: "echo" }),
+      get: async (path: string) =>
+        path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
       post: async () => ({
         agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
@@ -569,7 +574,8 @@ describe("leaving the completion screen to wire a model", () => {
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       listTeam: async () => [...BASELINE],
-      get: async () => ({ cognition: "echo" }),
+      get: async (path: string) =>
+        path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
       post: async () => ({
         agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
@@ -612,7 +618,8 @@ describe("leaving the completion screen to wire a model", () => {
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       listTeam: async () => [...roster],
-      get: async () => ({ cognition: "echo" }),
+      get: async (path: string) =>
+        path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
       post: async () => ({
         agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
         template: "ecommerce",
