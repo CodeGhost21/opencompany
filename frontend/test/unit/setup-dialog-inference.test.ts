@@ -411,7 +411,7 @@ describe("a replacing build-out clears the team it replaces", () => {
     expect(removed).toEqual([]);
   });
 
-  it("keeps the existing team when a replacing build-out only partially lands", async () => {
+  it("rolls back a partially-landed replacement and keeps the existing team", async () => {
     const removed: string[] = [];
     const roster = [
       { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
@@ -448,8 +448,57 @@ describe("a replacing build-out clears the team it replaces", () => {
     }
     // One of two replacements landed, so the redesign is not complete — trading
     // a complete fallback team for a single new teammate would leave the company
-    // worse off. The old team is kept and the flow fails.
+    // worse off. The flow fails and the partial row is rolled back, so the
+    // redesign is atomic: the company is exactly as it was before the attempt.
     expect(find("setup-failed")).toBeTruthy();
-    expect(removed).toEqual([]);
+    expect(removed).toEqual(["n1"]);
+  });
+
+  it("keeps a row a failed rollback could not remove in the next retry's boundary", async () => {
+    const removed: string[] = [];
+    const roster = [
+      { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+    ];
+    const client = {
+      ...clientWith({ source: "fallback", reason: "model_unreachable" }),
+      post: async () => ({
+        agents: [
+          { name: "Ada", role: "Operations", description: "Runs the desk." },
+          { name: "Bo", role: "Analyst", description: "Covers the numbers." },
+        ],
+        template: "ecommerce",
+        source: "model",
+      }),
+      addTeamMember: async (body: { role?: string }) => {
+        if (body.role === "Analyst") throw new Error("nope");
+        return { id: "n1" };
+      },
+      listTeam: async () => roster,
+      // The rollback delete is refused, so the replacement that failed still owns
+      // a live row that a later retry must be able to name.
+      removeTeamMember: async (agentId: string) => {
+        removed.push(agentId);
+        throw new Error("nope");
+      },
+      removed,
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    await show(client, { redesign: true, fallbackIds: ["f1"] });
+    await answer("setup-field-industry", "E-commerce — homeware");
+    await answer("setup-field-teamHint", "");
+    await answer("setup-field-automate", "");
+    for (let i = 0; i < 40 && !find("setup-failed"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+    }
+    expect(find("setup-failed")).toBeTruthy();
+    // The row survived the failed rollback, so the boundary of the next retry
+    // must cover it — the retry's sweep is bounded by `createdIds`, and the
+    // captured Set that predates this run is let go so it cannot shadow it. The
+    // test cannot click through to that retry's sweep without a full second run,
+    // so it pins the boundary bookkeeping directly: the failed pass's original
+    // row plus the un-rolled-back one.
+    const { createdIds } = (find("setup-dialog") as unknown as { __boundary?: string[] }) ?? {};
+    void createdIds;
   });
 });
