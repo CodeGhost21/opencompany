@@ -620,9 +620,6 @@ fn apng_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
         // counted in `len`, so the next chunk starts 12 bytes past this header.
         i += 12 + len;
     }
-    if animated && i != bytes.len() {
-        return Err(truncated_animation());
-    }
     Ok(animated.then_some(cost))
 }
 
