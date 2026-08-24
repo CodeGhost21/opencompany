@@ -203,10 +203,10 @@ export function mentionsToClear(
  * until reloading. Re-read those threads so the mentioned message lands.
  *
  * `seenSubjects` is the set of subject ids already scheduled this session —
- * the caller adds each returned subject to it, so one mention triggers at most
- * one re-read rather than one per poll. The fold that rebuilds the transcript
- * dedupes by message id, so re-reading a thread whose message arrived some
- * other way is a no-op.
+ * the caller adds each returned `subjects` entry to it, so one mention
+ * triggers at most one re-read rather than one per poll. The fold that
+ * rebuilds the transcript dedupes by message id, so re-reading a thread whose
+ * message arrived some other way is a no-op.
  */
 export function threadsToReReadForMentions(
   notifications: readonly NotificationDto[],
@@ -219,8 +219,9 @@ export function threadsToReReadForMentions(
   chatChannelByThread: Readonly<Record<string, string>>,
   mainChannelId: string | undefined,
   seenSubjects: ReadonlySet<string>,
-): string[] {
+): { threadIds: string[]; subjects: string[] } {
   const threadIds = new Set<string>();
+  const subjects = new Set<string>();
   const renderedChannelIds = new Set(Object.values(chatChannelByThread));
   for (const n of notifications) {
     if (n.readAt !== undefined || n.kind !== "mention") continue;
@@ -237,7 +238,10 @@ export function threadsToReReadForMentions(
     const threadId = Object.entries(chatChannelByThread).find(
       ([, c]) => c === channelId,
     )?.[0];
-    if (threadId !== undefined) threadIds.add(threadId);
+    if (threadId !== undefined) {
+      threadIds.add(threadId);
+      subjects.add(subject);
+    }
   }
-  return [...threadIds];
+  return { threadIds: [...threadIds], subjects: [...subjects] };
 }
