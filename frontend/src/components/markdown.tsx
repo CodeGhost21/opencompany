@@ -31,7 +31,12 @@ export interface MentionSpan {
  * render with their own record, and a third, unresolved `@engineer` elsewhere
  * in the text renders plain.
  */
-function chipMentions(nodes: ReactNode, mentions: MentionSpan[], source: string): ReactNode {
+function chipMentions(
+  nodes: ReactNode,
+  mentions: MentionSpan[],
+  source: string,
+  seen: Map<string, number>,
+): ReactNode {
   if (mentions.length === 0) return nodes;
   const pattern = mentionRegex(mentions);
   // Offsets are UTF-8 bytes in the host DTO, while source is indexed in UTF-16.
@@ -52,8 +57,6 @@ function chipMentions(nodes: ReactNode, mentions: MentionSpan[], source: string)
     byOrdinal.set(ordinal, m);
     occurrences.set(m.text, byOrdinal);
   }
-  const seen = new Map<string, number>();
-
   const split = (node: ReactNode, key: string): ReactNode => {
     if (typeof node === "string") {
       const parts = node.split(pattern);
@@ -145,6 +148,8 @@ export function Markdown({
   mentions?: MentionSpan[];
 }) {
   const spans = mentions ?? [];
+  const seen = new Map<string, number>();
+  const sourceText = children;
   return (
     <div className={cn("prose prose-sm max-w-none dark:prose-invert", className)}>
       <ReactMarkdown
@@ -163,10 +168,10 @@ export function Markdown({
           // through a remark plugin, so the mention list stays a plain prop and
           // no AST transform has to be kept in step with it.
           p: ({ children: content, ...rest }) => (
-            <p {...rest}>{chipMentions(content, spans, children)}</p>
+            <p {...rest}>{chipMentions(content, spans, sourceText, seen)}</p>
           ),
           li: ({ children: content, ...rest }) => (
-            <li {...rest}>{chipMentions(content, spans, children)}</li>
+            <li {...rest}>{chipMentions(content, spans, sourceText, seen)}</li>
           ),
         }}
       >
