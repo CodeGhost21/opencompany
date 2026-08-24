@@ -152,11 +152,7 @@ impl RunTraceSink {
     /// failed or interrupted turn still keeps the reasoning that led to its end.
     /// No-op when nothing is open.
     pub async fn flush(&self) {
-        let emitted = self
-            .trace
-            .lock()
-            .expect("run trace")
-            .finish();
+        let emitted = self.trace.lock().expect("run trace").finish();
         self.persist(emitted).await;
     }
 
