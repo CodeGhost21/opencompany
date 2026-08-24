@@ -444,6 +444,13 @@ pub struct AppState {
     /// the process. Lazy because it is a disk read that only `/spec` needs, and
     /// `AppState::new` is deliberately IO-free.
     instance_id: Arc<OnceLock<String>>,
+    /// Who is currently present, per company.
+    ///
+    /// Host-global and in-memory, like the live turn bus it publishes
+    /// alongside — presence is a lease, not a record, so it has no port and no
+    /// backend. See [`crate::server::presence`] for the TTL contract and for
+    /// why a second replica knowing nothing about this one is acceptable.
+    presence: Arc<crate::server::presence::PresenceRegistry>,
     /// Which storage backend is serving the durable ports. Reported by `/spec`
     /// as a kind only — never a path or a connection string.
     storage_kind: crate::store::StorageKind,
@@ -509,6 +516,10 @@ pub struct AppState {
     /// [`rebuilder`](Self::rebuilder) above is: the desktop supplies it, this
     /// crate only defines the seam.
     acp_agents: Option<Arc<dyn crate::ports::acp::AcpAgentFactory>>,
+    /// Live inbound ACP sessions. Kept on the host, rather than on a company,
+    /// because one ACP connection may open sessions for several companies.
+    #[cfg(feature = "acp")]
+    acp_sessions: Arc<crate::server::acp::SessionRegistry>,
     /// The boot-only builder inputs recorded per company at registration, so a
     /// rebuild configures the successor exactly as boot configured its
     /// predecessor. See [`BootInputs`](crate::runtime::BootInputs) for why
@@ -544,6 +555,7 @@ impl AppState {
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
+            presence: Arc::new(crate::server::presence::PresenceRegistry::new()),
             storage_kind: crate::store::StorageKind::default(),
             // Fails "not set up", so a host that never calls `with_setup_complete`
             // — every test fixture — presents the wizard rather than silently
@@ -559,6 +571,8 @@ impl AppState {
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rebuilder: None,
             acp_agents: None,
+            #[cfg(feature = "acp")]
+            acp_sessions: Arc::new(crate::server::acp::SessionRegistry::new()),
             boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -578,6 +592,12 @@ impl AppState {
     /// This host's local-transport ACP agent factory, when one is wired.
     pub fn acp_agents(&self) -> Option<Arc<dyn crate::ports::acp::AcpAgentFactory>> {
         self.acp_agents.clone()
+    }
+
+    /// Sessions opened through the host's ACP HTTP transport.
+    #[cfg(feature = "acp")]
+    pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
+        Arc::clone(&self.acp_sessions)
     }
 
     /// This host's in-place runtime rebuilder, when one is wired.
@@ -961,6 +981,18 @@ impl AppState {
         &self.registry
     }
 
+    /// Who is currently present, per company.
+    pub fn presence(&self) -> &crate::server::presence::PresenceRegistry {
+        &self.presence
+    }
+
+    /// A cloned handle to the same host-global registry [`Self::presence`]
+    /// borrows from, for a background task (the periodic sweep) that must
+    /// outlive any single request's borrow of `self`.
+    pub fn presence_handle(&self) -> std::sync::Arc<crate::server::presence::PresenceRegistry> {
+        self.presence.clone()
+    }
+
     /// The prebuilt GraphQL read-plane schema.
     pub fn schema(&self) -> &crate::server::graphql::OcSchema {
         &self.schema
@@ -1051,7 +1083,6 @@ impl AppState {
             display_name: self.config.instance_name.clone(),
             capabilities: self.capabilities(),
             storage: self.storage_kind.as_str(),
-            memory: self.memory_spec(),
             // Not the raw stamp: a host already serving a company is set up as
             // far as the console is concerned, whether or not it was this flow
             // that got it there. `--company` predates setup, so every existing
@@ -1069,28 +1100,6 @@ impl AppState {
         }
     }
 
-    /// What memory engine is live, for [`AppSpec::memory`].
-    ///
-    /// No overlay means the base storage backend serves memory — the
-    /// `OPENCOMPANY_MEMORY=store` default — so there is no separate engine to
-    /// name and nothing was negotiated.
-    fn memory_spec(&self) -> MemorySpec {
-        match self.memory_overlay() {
-            None => MemorySpec {
-                backend: crate::store::MemoryBackend::Store.as_str(),
-                driver_id: None,
-                capabilities: Vec::new(),
-                healthy: None,
-            },
-            Some(overlay) => MemorySpec {
-                backend: overlay.descriptor.backend.as_str(),
-                driver_id: Some(overlay.descriptor.driver_id.clone()),
-                capabilities: overlay.descriptor.capabilities.clone(),
-                healthy: overlay.descriptor.healthy,
-            },
-        }
-    }
-
     /// What this host can do, as flat feature names a client can test for.
     ///
     /// Additive and open-ended by design. A client reading an **older** host's
@@ -1099,7 +1108,7 @@ impl AppState {
     /// capability rather than a version number. Growing the list must never
     /// break a client that has not heard of the new entry.
     fn capabilities(&self) -> Vec<&'static str> {
-        let mut out = vec!["rest", "graphql", "sse", "approvals", "devices"];
+        let mut out = vec!["rest", "graphql", "sse", "approvals"];
         if self.hub_identity.is_some() {
             out.push("hub-identity");
         }
@@ -1144,8 +1153,6 @@ pub struct AppSpec {
     /// The storage backend kind. Deliberately the kind alone: `/spec` is
     /// unauthenticated, so a path or connection string here would be a gift.
     pub storage: &'static str,
-    /// Which memory engine is live, and what it can do (issue #914).
-    pub memory: MemorySpec,
     /// Whether the first-run setup flow has been completed on this instance.
     ///
     /// Reported here, on the unauthenticated handshake the console already
@@ -1154,44 +1161,6 @@ pub struct AppSpec {
     /// unreachable exactly when it is needed. A bare boolean is the whole
     /// disclosure: the configuration itself lives behind `/api/v1/setup`.
     pub setup_complete: bool,
-}
-
-/// The bound memory engine, as `/spec` reports it.
-///
-/// Carries the engine's *identity* and its negotiated capabilities, and nothing
-/// else. The endpoint and the credential are deliberately absent for the same
-/// reason [`AppSpec::storage`] is a kind rather than a connection string: this
-/// route is unauthenticated. `driver_id` is safe by the contract's own reading —
-/// it names an engine, it is not a secret.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct MemorySpec {
-    /// `store` | `embedded` | `remote` | `null`.
-    pub backend: &'static str,
-    /// The bound engine's own name, when one is bound through the provider
-    /// contract. Absent for `store`, where the base backend serves memory and
-    /// there is no separate engine to name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub driver_id: Option<String>,
-    /// The capability families negotiated at bind time.
-    ///
-    /// Empty means "not negotiated" — either the base backend serves memory, or
-    /// the in-pod engine is driven directly rather than through a bound
-    /// provider. An operator reads this to see what a hosted engine does *not*
-    /// support before a cycle discovers it.
-    pub capabilities: Vec<String>,
-    /// Whether the boot-time reachability probe found the engine usable —
-    /// `Ready` or `Degraded` (reachable, possibly reduced); only `Down`
-    /// serializes as `false`.
-    ///
-    /// Absent means "not probed": the base backend serves memory, the in-pod
-    /// engine is driven directly, or this host predates the probe — a client
-    /// must treat absence as unknown, not unhealthy. `false` is a bound
-    /// engine whose probe failed at boot: still bound. A boot-time snapshot,
-    /// not a live gauge — the provider can recover (or fail) after boot
-    /// without this bit moving, so treat `false` as "was unreachable at
-    /// boot", never "the next operation will fail".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub healthy: Option<bool>,
 }
 
 #[cfg(test)]

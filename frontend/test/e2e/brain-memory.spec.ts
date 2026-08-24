@@ -24,8 +24,9 @@ test("operator adds a Brain memory that persists across reload and can be delete
 }) => {
   // Settings → Brain reads the real FactStore over `…/memory`; adding a note must
   // survive a reload (proving it hit the backend, not localStorage) and delete
-  // must remove it.
-  await page.goto("/#/settings/brain");
+  // must remove it. The legacy `#/memory` address must land here too.
+  await page.goto("/#/memory");
+  await expect(page.getByRole("heading", { name: "Brain", level: 1 })).toBeVisible();
 
   const title = `e2e memory ${Date.now()}`;
   await page.getByTestId("memory-add").click();

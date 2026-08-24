@@ -106,7 +106,7 @@ async function openConnections(page: Page): Promise<void> {
   });
   expect(set.ok(), `setting the composio token failed: ${set.status()}`).toBeTruthy();
 
-  await page.goto("/#/settings/connections");
+  await page.goto("/#/settings/oauth");
   await dismissTour(page);
   await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible({ timeout: 30_000 });
 }
@@ -300,7 +300,7 @@ test("usage is counted per provider, and an unmetered host reports no figure", a
     (route) => route.fulfill({ status: 404, json: { error: "not_found" } }),
   );
 
-  // `reload`, not another `goto`. The URL is already `#/settings/connections`, so
+  // `reload`, not another `goto`. The URL is already `#/settings/oauth`, so
   // a `goto` to it is a same-document no-op that leaves this panel open — and
   // while a Radix dialog is open everything behind it is `aria-hidden`, so the
   // wait for the Providers heading would time out against a page that is fine.
@@ -404,7 +404,7 @@ test("a member is told what is connected and offered nothing that changes it", a
     expect((await verified.json()).role).toBe("member");
 
     const memberPage = await memberContext.newPage();
-    await memberPage.goto("/#/settings/connections");
+    await memberPage.goto("/#/settings/oauth");
     await dismissTour(memberPage);
     await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({ timeout: 30_000 });
 
