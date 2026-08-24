@@ -382,15 +382,15 @@ export function SetupController({
   );
 
   /**
-   * Settle the persisted redesign debt the moment a replacement lands, so a
-   * reload on the completion screen cannot reopen setup against the rows the
-   * replacement just deleted.
+   * Settle the persisted redesign debt when a replacement build-out changes
+   * what a future replacement must sweep.
    *
-   * A designed replacement means the owed redesign is done: clear the whole
-   * record, exactly as completing setup would, so the flow re-offers if the
-   * operator later empties the team. A replacement that fell back again is
-   * still owed, but now names the new fallback team — re-key the debt so the
-   * next return (or reload) replaces those rows rather than the swept ones.
+   * `null` means the owed redesign is done — a designed replacement landed, so
+   * the whole record is cleared, exactly as completing setup would. A non-empty
+   * list re-keys the debt to those rows: the new fallback when a replacement
+   * fell back again, or the expanded boundary when a partial replacement was
+   * rolled back but a rollback removal failed. Either way the next return (or
+   * reload) replaces those rows rather than the swept ones.
    */
   const onReplacementComplete = useCallback(
     (fallbackIds: string[] | null) => {
