@@ -286,7 +286,10 @@ describe("a replacing build-out clears the team it replaces", () => {
         { id: "b2", name: "Baseline", role: "Founder", global: true } as TeamMemberDto,
       ],
     });
-    await show(client, { redesign: true });
+    // `fallbackIds` is the fallback team the previous pass created, captured
+    // when the operator left for model settings — in this direct render it is
+    // named by hand rather than read from the debt.
+    await show(client, { redesign: true, fallbackIds: ["a1"] });
     await runFlow();
     // The baseline survives — it is not on the operator's roster and cannot be
     // deleted anyway. Only the fallback team the last pass created goes.
