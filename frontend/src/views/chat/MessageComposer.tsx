@@ -216,7 +216,10 @@ export function MessageComposer({
     const text = e.target.value;
     setDraft(text);
     // Trailing the text, so a mention whose span was edited away goes with it.
-    setMentions((current) => reconcileMentions(text, current));
+    // The previous draft disambiguates which of two same-text mentions the
+    // edit deleted — without it, deleting the second `@Sam @Sam` re-anchors
+    // the deleted Sam onto the survivor and pings the wrong person.
+    setMentions((current) => reconcileMentions(text, current, draft));
     setOutsideWarning(null);
     syncQuery(text, e.target.selectionStart);
     onTyping?.();
