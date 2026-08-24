@@ -329,7 +329,7 @@ instructions the host writes rather than the model, a copy of the reference team
 refused the name "designed", and a fallback that says which fallback it is. Each
 is a boundary rather than a line in a prompt, and each has a test that fails when
 it stops holding:
-[company-setup-guarantees.md](company-setup-guarantees.md).
+[company-setup-guarantees.md](../company-setup-guarantees.md).
 
 ## Nobody gets stuck
 
