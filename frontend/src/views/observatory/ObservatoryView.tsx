@@ -316,7 +316,8 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
                 key={run.id}
                 run={run}
                 nowMs={nowMs}
-                focusStep={focusStep.current}
+                turn={turn}
+                focusStep={focusStep}
               />
             ))}
           </section>
