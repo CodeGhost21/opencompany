@@ -382,12 +382,14 @@ export function decisionLabel(
   // Two hidden cards of the same kind from the same asker carry identical
   // redaction phrases, so the composition time is what tells their buttons
   // apart — the same non-sensitive number the card's meta line already shows.
+  // The relative phrase is intentionally bucketed; the exact timestamp rides
+  // along in parentheses as a stable discriminator when hidden requests share
+  // a bucket, and it is emitted nowhere else — the caller omits its usual
+  // `request <timestamp>` suffix on redacted cards — so a screen reader never
+  // announces the opaque epoch twice.
   if (a.contents_hidden) {
     parts.push(`composed ${timeAgo(a.at_millis, now)} (${a.at_millis})`);
   }
-  // The relative time is intentionally bucketed. Keep the exact timestamp as a
-  // stable, non-sensitive discriminator when hidden requests share a bucket.
-  if (a.contents_hidden) parts.push(`request ${a.at_millis}`);
   const who = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
   if (who != null) parts.push(`asked by ${who}`);
   return parts.join(" — ");
