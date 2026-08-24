@@ -184,7 +184,8 @@ pub trait NotificationStore: Send + Sync {
     async fn list(&self, company: &CompanyId, user: &str) -> Result<Vec<NotificationView>>;
 
     /// Marks notifications read for this person — the given `ids`, or every
-    /// notification in the company when `ids` is `None`.
+    /// notification **visible to this person** when `ids` is `None`. A row
+    /// targeted at someone else is left alone.
     ///
     /// **A latch.** Once read it stays read; re-marking an already-read
     /// notification is a no-op and preserves the original `read_at`. Ids that
