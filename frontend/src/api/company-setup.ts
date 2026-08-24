@@ -44,6 +44,12 @@ export type RosterFallback =
   /** Nothing was reachable, so no design pass ran. The action is to wire a key. */
   | "no_model"
   /**
+   * A builder exists and its call was attempted but never landed — a timeout,
+   * or a provider that could not be reached. A model is wired, so the action is
+   * to retry or check the provider, not to add a key.
+   */
+  | "model_unreachable"
+  /**
    * A model answered and its answer could not be used — unreadable, too thin to
    * be a company, or the reference team handed back unchanged. Almost always
    * means the answers were too sparse to design from, so the action is to say
