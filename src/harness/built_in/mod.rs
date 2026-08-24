@@ -3448,12 +3448,21 @@ mod tests {
     use crate::runtime::builder::agent_effective_grants;
 
     fn fp_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
+        fp_entry_full(mode, always, None, None)
+    }
+
+    fn fp_entry_full(
+        mode: Option<&str>,
+        always: Option<Vec<&str>>,
+        cap: Option<Option<f64>>,
+        ttl: Option<u64>,
+    ) -> PolicyOverride {
         use crate::ports::types::{Actor, ActorKind};
         PolicyOverride {
             mode: mode.map(str::to_string),
             always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
-            auto_approve_under_usd: None,
-            approval_ttl_hours: None,
+            auto_approve_under_usd: cap,
+            approval_ttl_hours: ttl,
             set_by: Actor {
                 kind: ActorKind::User,
                 id: "user-1".to_string(),
