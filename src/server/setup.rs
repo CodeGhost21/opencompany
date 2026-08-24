@@ -71,7 +71,7 @@
 
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -479,7 +479,7 @@ async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
-) -> Result<(), Response> {
+) -> Result<(), crate::server::Rejection> {
     if state.config().is_local_only()
         && (!state.setup_complete() || state.registry().is_empty())
         && crate::server::graphql::auth::request_looks_local(peer, headers)
@@ -510,11 +510,11 @@ async fn read(
     State(state): State<AppState>,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
-) -> Result<Json<SetupDto>, Response> {
+) -> Result<Json<SetupDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
     snapshot(&state, &ProcessEnv)
         .map(Json)
-        .map_err(|e| ApiError::from(e).into_response())
+        .map_err(|e| ApiError::from(e).into_response().into())
 }
 
 /// The manifest the resolution pass runs against.
@@ -690,12 +690,12 @@ async fn apply(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
     Json(req): Json<SetupRequest>,
-) -> Result<Json<AppliedDto>, Response> {
+) -> Result<Json<AppliedDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
     apply_inner(&state, req, &ProcessEnv)
         .await
         .map(Json)
-        .map_err(|e| ApiError::from(e).into_response())
+        .map_err(|e| ApiError::from(e).into_response().into())
 }
 
 /// `+ Sync` so the returned future is `Send`, which axum requires of a handler:
@@ -1123,7 +1123,7 @@ async fn test_inference(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
     Json(req): Json<InferenceTestRequest>,
-) -> Result<Json<InferenceTestDto>, Response> {
+) -> Result<Json<InferenceTestDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
     Ok(Json(probe_inference(&req, &ProcessEnv).await))
 }
@@ -1283,7 +1283,7 @@ async fn propose_roster(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
     Json(req): Json<SetupRosterRequest>,
-) -> Result<Json<SetupRosterDto>, Response> {
+) -> Result<Json<SetupRosterDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
 
     let template_name = req
@@ -1293,10 +1293,7 @@ async fn propose_roster(
             crate::desktop::preset(id)
                 .map(|preset| preset.name)
                 .ok_or_else(|| {
-                    ApiError::from(OpenCompanyError::InvalidRequest(format!(
-                        "unknown company template `{id}`"
-                    )))
-                    .into_response()
+                    OpenCompanyError::InvalidRequest(format!("unknown company template `{id}`"))
                 })
         })
         .transpose()?;

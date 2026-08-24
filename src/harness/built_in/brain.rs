@@ -282,11 +282,22 @@ impl HarnessBrain {
         let responder =
             orchestrator::orchestrator_id(&record.effective_agents()).unwrap_or_default();
         let default_harness = record.manifest.default_harness_id();
+        // Effective agents plus the overlay roster — the same two halves
+        // `lanes::agents_on` folds together. Built from the raw manifest, this
+        // map saw neither a console-created teammate nor an admin's harness
+        // edit to a blueprint one, so the lane excluded such a teammate from
+        // the default pool while this router still dispatched it there. The
+        // binding was saved, survived a restart, and did nothing.
         let bindings = record
-            .manifest
-            .agents
-            .iter()
-            .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
+            .effective_agents()
+            .into_iter()
+            .filter_map(|a| a.harness.clone().map(|h| (a.id, h)))
+            .chain(
+                record
+                    .overlay_agents
+                    .iter()
+                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h))),
+            )
             .collect();
         Self {
             pool,
@@ -5346,6 +5357,8 @@ members = ["engineer"]
                 role: "Growth".into(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             })
         });
         tasks
@@ -6010,6 +6023,8 @@ members = ["eng1", "eng2"]
                 role: "CTO".to_string(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             }],
             overlay_desk_members: vec![crate::ports::types::OverlayDeskMember {
                 desk_id: "eng".to_string(),

@@ -67,6 +67,7 @@ import {
   buildChannels,
   buildTimeline,
   buildTimelineItems,
+  channelIdFromSegment,
   channelMembers,
   channelTitle,
   deskFromDto,
@@ -522,10 +523,13 @@ export function ChatView({
    * nothing is ever addressed or stored under the old id, so this shim can be
    * deleted without leaving anything stranded.
    */
+  const decodedSub = channelIdFromSegment(sub);
   const resolvedSub =
-    sub && !findChannel(sections, sub) ? resolveDmChannelId(sub, members) : null;
+    decodedSub && !findChannel(sections, decodedSub)
+      ? resolveDmChannelId(decodedSub, members)
+      : null;
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? sub) ?? firstChannel(sections))
+    ? (findChannel(sections, resolvedSub ?? decodedSub) ?? firstChannel(sections))
     : null;
   /**
    * The hash named a channel this company doesn't have, and the first-channel
@@ -537,7 +541,9 @@ export function ChatView({
    * the shim above resolved is not unknown; it found its channel.
    */
   const unknownChannel =
-    desks && sub && !resolvedSub && !findChannel(sections, sub) ? sub : null;
+    desks && decodedSub && !resolvedSub && !findChannel(sections, decodedSub)
+      ? decodedSub
+      : null;
 
   /**
    * Who is in the channel on screen — `null` when it names no membership, in

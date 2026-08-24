@@ -865,6 +865,10 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 ///   function cannot see. So the roster entry answers the fail-closed base
 ///   (`Reach::Consequence`), and the downgrade is applied by
 ///   [`mcp_call_reach`], which the policy calls with the declaration in hand.
+/// * `workspace_create` / `workspace_write` / `workspace_delete` /
+///   `workspace_rename` — #877, keyed on the resolved node's durable
+///   authorship. The company-scoped lookup lives at the policy seam, so this
+///   pure classifier deliberately returns the fail-closed table verdict.
 ///
 /// Every name here must be **lower-case**: [`consequence_of`] matches against a
 /// lower-cased tool name, so a mixed-case entry would be an entry that never
@@ -876,6 +880,10 @@ const ARGUMENT_GRADED: &[(&str, Grader)] = &[
     (GIT_OPERATIONS, git_operations_consequence),
     (MCP_CALL_TOOL, mcp_call_tool_consequence),
     (MCP_REGISTRY_TOOL_CALL, mcp_call_tool_consequence),
+    ("workspace_create", workspace_mutation_consequence),
+    ("workspace_write", workspace_mutation_consequence),
+    ("workspace_delete", workspace_mutation_consequence),
+    ("workspace_rename", workspace_mutation_consequence),
 ];
 
 /// The classifier that answers for `name`, or `None` when the table does.
@@ -1533,6 +1541,20 @@ const GIT_READ_ONLY_OPERATIONS: &[&str] = &["status", "diff", "log", "show", "br
 /// this tool, a missing or non-string `server`/`tool` argument, and a build
 /// whose policy carries no declaration all resolve here, never to a downgrade.
 fn mcp_call_tool_consequence(_args: &serde_json::Value) -> Consequence {
+    Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    }
+}
+
+/// The pure, fail-closed half of workspace authorship grading (issue #877).
+///
+/// A call only becomes safe once the live company tree confirms that the node
+/// was both created and last written by the calling agent. That lookup belongs
+/// to `ApprovalPolicy`, alongside the MCP declaration lookup; this function is
+/// what callers without that company context receive.
+fn workspace_mutation_consequence(_args: &serde_json::Value) -> Consequence {
     Consequence {
         group: EffectGroup::Other,
         reach: Reach::Consequence,

@@ -71,7 +71,7 @@ describe("the overview graph keyboard control", () => {
     expect(nodes.filter((node) => node.tabIndex === 0)).toHaveLength(1);
     expect(nodes.map((node) => node.getAttribute("aria-label"))).toEqual([
       "Notes: Acme. Press Enter or Space to select.",
-      "Pillars: Engineering. Press Enter or Space to select.",
+      "Desks: Engineering. Press Enter or Space to select.",
     ]);
 
     act(() => {
@@ -133,7 +133,7 @@ describe("the overview graph keyboard control", () => {
       "Notes: Acme. 2 notes.",
       "Memory note: Onboarding. Press Enter or Space to open.",
       "Memory note: Vault. Press Enter or Space to open.",
-      "Pillars: Engineering. Press Enter or Space to select.",
+      "Desks: Engineering. Press Enter or Space to select.",
     ]);
 
     // ArrowRight walks self → first note → second note → the department,

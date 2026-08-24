@@ -5,22 +5,31 @@
 // authenticated session and posts the result back. Both queries and
 // mutations travel the same way: GraphQL's own operation type is what
 // distinguishes them, not this client.
+//
+// The channel is the bridge's credential. The console transfers one half of a
+// `MessageChannel` to this document on load, and every request and its reply
+// travel over that port. The port is document-bound: a document the page
+// navigates itself to never receives it, so it cannot speak through the
+// bridge (or observe a reply) no matter what it can capture from the page
+// that was here before it.
 
 const TIMEOUT_MS = 15_000;
 
 // The per-document bridge capability handed to us by the console on load
 // (`PagesView.tsx` mints a fresh one for every iframe document). Every
-// `oc:graphql` message carries it, so the console can tell this exact
-// document apart from one the page navigated itself to. Opaque-origin frames
-// cannot share real storage or identity, so a document that replaces us has no
-// way to learn this value.
+// `oc:graphql` message carries it, so the console has a second, redundant
+// check on top of the port it transferred with the same `oc:init` message.
 let capability: string | null = null;
-let capabilityWaiters: Array<(cap: string) => void> = [];
+// The document-bound port the console transferred with `oc:init`. Requests go
+// out over it and replies come back on it; possession of the port is the
+// actual authorization, which is why the capability is only a backstop.
+let port: MessagePort | null = null;
+let initWaiters: Array<() => void> = [];
 
-function waitForCapability(): Promise<string> {
-  if (capability) return Promise.resolve(capability);
+function waitForInit(): Promise<void> {
+  if (port) return Promise.resolve();
   return new Promise((resolve) => {
-    capabilityWaiters.push(resolve);
+    initWaiters.push(resolve);
   });
 }
 
@@ -28,9 +37,11 @@ window.addEventListener("message", function onInit(event: MessageEvent) {
   const data = event.data as { type?: unknown; capability?: unknown } | null;
   if (data && data.type === "oc:init" && typeof data.capability === "string") {
     capability = data.capability;
-    const waiters = capabilityWaiters;
-    capabilityWaiters = [];
-    for (const resolve of waiters) resolve(capability);
+    port = event.ports[0] ?? null;
+    if (port) port.onmessage = onResultMessage;
+    const waiters = initWaiters;
+    initWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 });
 
@@ -234,26 +245,28 @@ function isBridgeResult(value: unknown): value is BridgeResultMessage {
   );
 }
 
+/** In-flight round trips, keyed by their correlation `id`. */
+const pending = new Map<string, (result: GraphQLResult) => void>();
+
+function onResultMessage(event: MessageEvent) {
+  const data = event.data as BridgeResultMessage | null;
+  if (!data || !isBridgeResult(data)) return;
+  const resolve = pending.get(data.id);
+  if (!resolve) return;
+  pending.delete(data.id);
+  resolve({ data: data.data as unknown, errors: data.errors });
+}
+
 /**
  * Runs one GraphQL operation — query or mutation — against the console's own
  * GraphQL endpoint, by way of the parent frame.
  *
  * Internally: generates a random correlation `id`, posts
- * `{type: "oc:graphql", id, capability, query, variables}` to `window.parent`, and
- * resolves when a matching `{type: "oc:graphql:result", id, ...}` reply
- * arrives — a one-shot listener that removes itself either way. The `id` is
- * what lets several concurrent calls share the same `window` without their
+ * `{type: "oc:graphql", id, capability, query, variables}` over the
+ * document-bound port, and resolves when a matching
+ * `{type: "oc:graphql:result", id, ...}` reply arrives on the same port. The
+ * `id` is what lets several concurrent calls share the port without their
  * replies crossing.
- *
- * `targetOrigin` is deliberately `"*"` on the outgoing post, not this
- * document's real parent origin — because this document cannot know it. It
- * runs inside a `sandbox="allow-scripts"` iframe with no `allow-same-origin`
- * (docs/spec/runtime/pages.md §5), so its own origin is the opaque string
- * `"null"` and there is no legitimate origin to address the parent by. That
- * is intentional, not a shortcut: the real trust boundary is enforced on the
- * *parent* side (`PagesView.tsx`'s message listener), which only ever acts
- * on an event whose `source` is this exact iframe's own `contentWindow` —
- * something a page itself has no way to spoof.
  */
 function query<T = unknown>(
   document: string,
@@ -266,23 +279,24 @@ function query<T = unknown>(
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     const timeout = window.setTimeout(() => {
-      window.removeEventListener("message", onMessage);
+      pending.delete(id);
       reject(new Error("oc:graphql timed out waiting for a reply from the console"));
     }, TIMEOUT_MS);
 
-    function onMessage(event: MessageEvent) {
-      if (!isBridgeResult(event.data) || event.data.id !== id) return;
+    pending.set(id, (result: GraphQLResult) => {
       window.clearTimeout(timeout);
-      window.removeEventListener("message", onMessage);
-      resolve({ data: event.data.data as T | undefined, errors: event.data.errors });
-    }
+      // The reply's payload is opaque to the bridge — it is whatever GraphQL
+      // returned for this document — so the unknown only becomes `T` here, at
+      // the point the caller's generic names it. This is the one cast.
+      resolve(result as GraphQLResult<T>);
+    });
 
-    window.addEventListener("message", onMessage);
-    waitForCapability().then((cap) => {
-      window.parent.postMessage(
-        { type: "oc:graphql", id, capability: cap, query: document, variables },
-        "*",
-      );
+    // `targetOrigin` is deliberately `"*"` on the outgoing `oc:init` that
+    // delivered this port, and the port itself needs no origin: the console
+    // minted the channel and transferred one half to exactly this document,
+    // so any message arriving on the other half is from here by construction.
+    waitForInit().then(() => {
+      port?.postMessage({ type: "oc:graphql", id, capability, query: document, variables });
     });
   });
 }

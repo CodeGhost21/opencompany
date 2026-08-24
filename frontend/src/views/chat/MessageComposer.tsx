@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   AtSign,
@@ -30,6 +30,8 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
+  /** A new revision replaces the draft and focuses the composer. */
+  prefill?: { text: string; revision: number };
   /**
    * Called as the box is typed in, so the company can show a typing
    * indicator.
@@ -133,6 +135,7 @@ export function MessageComposer({
   placeholder,
   disabled,
   onSend,
+  prefill,
   compact,
   channelMemberIds,
   deliverableChoice,
@@ -165,6 +168,24 @@ export function MessageComposer({
   const [formatting, setFormatting] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
 
+  // A first-run card lives above the timeline, outside this component. The
+  // revision lets it request the same prompt more than once after an operator
+  // edits or clears it; comparing text alone would make the second click inert.
+  useEffect(() => {
+    if (!prefill) return;
+    setDraft(prefill.text);
+    setMentions([]);
+    setOutsideWarning(null);
+    closePicker();
+    setIntent("once");
+    input.current?.focus();
+  }, [prefill]);
+
+  function closePicker() {
+    setQuery(null);
+    setActiveRow(0);
+  }
+
   const rows = useMemo(
     () => (query && mentionables ? rankMentionables(mentionables, query.query) : []),
     [query, mentionables],
@@ -175,11 +196,6 @@ export function MessageComposer({
     [mentionables],
   );
   const pickerOpen = query !== null && rows.length > 0;
-
-  function closePicker() {
-    setQuery(null);
-    setActiveRow(0);
-  }
 
   /** Re-read the caret's mention query after any edit or caret move. */
   function syncQuery(text: string, caret: number | null) {
@@ -228,6 +244,7 @@ export function MessageComposer({
     setMentions((current) =>
       reconcileMentions(result.text, [...current, result.mention]),
     );
+    setOutsideWarning(null);
     closePicker();
     // After React repaints, same as `wrap` below.
     requestAnimationFrame(() => {
@@ -328,6 +345,7 @@ export function MessageComposer({
     const { selectionStart: start, selectionEnd: end } = el;
     const next = `${draft.slice(0, start)}${mark}${draft.slice(start, end)}${mark}${draft.slice(end)}`;
     setDraft(next);
+    setOutsideWarning(null);
     // Restore the selection around what was wrapped, after React repaints.
     requestAnimationFrame(() => {
       el.focus();
