@@ -2466,21 +2466,6 @@ pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutput
 /// `mcp/<name>/auth`, `harness/<id>/…`). **Every value is an obviously fake
 /// placeholder**; nothing here resembles a live credential.
 ///
-/// # One property this does NOT yet assert, and why
-///
-/// **Two distinct keys must stay distinct.** They do not on the filesystem
-/// backend: `Bundle::secret` slugs the key through
-/// [`slug`](crate::store::paths), which folds every character outside
-/// `[A-Za-z0-9._-]` to `_` and is therefore not injective, so `mcp/acme
-/// prod/auth` and `mcp/acme_prod/auth` are one file. SQLite and MongoDB keep
-/// them apart. Two MCP servers whose names differ only by such a character
-/// consequently share one credential on fs — issue #1510, found while writing
-/// this function.
-///
-/// The case is left out rather than added-and-failing because the fix is an
-/// on-disk filename change with a migration to think about, not a test fix.
-/// It is named here so the gap is countable instead of silent, which is the
-/// same complaint #1505 was filed about one level up.
 pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
@@ -2556,7 +2541,123 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "writing unrelated keys disturbed an existing secret"
     );
 
-    // 4. Overwrite replaces. A backend that appended, or that served a cached or
+    // 4. Keys remain distinct even when a filesystem-safe filename needs to
+    // encode them differently. MCP server names are trimmed but otherwise
+    // accepted verbatim, so these are two valid server credential keys.
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme prod/auth",
+            SecretValue("token-for-space-name".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme_prod/auth",
+            SecretValue("token-for-underscore-name".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/acme prod/auth").await.as_deref(),
+        Some("token-for-space-name"),
+        "a distinct key with a space was overwritten by its underscore variant"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/acme_prod/auth").await.as_deref(),
+        Some("token-for-underscore-name"),
+        "a distinct key with an underscore was overwritten by its space variant"
+    );
+
+    // Letter case is the same hazard one level down: on case-insensitive
+    // volumes (macOS, Windows) `mcp/Acme/auth` and `mcp/acme/auth` are one
+    // path, and a backend that let them share a file would overwrite one
+    // server's credential with another's. `validate_servers` treats them as
+    // two valid names.
+    secrets
+        .set(
+            &alpha,
+            "mcp/Acme/auth",
+            SecretValue("token-for-upper-case".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme/auth",
+            SecretValue("token-for-lower-case".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/Acme/auth").await.as_deref(),
+        Some("token-for-upper-case"),
+        "a distinct key that differs only in case was overwritten by its lower-case variant"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/acme/auth").await.as_deref(),
+        Some("token-for-lower-case"),
+        "a distinct key that differs only in case was overwritten by its upper-case variant"
+    );
+
+    // Windows strips trailing periods from a path component, so `foo` and
+    // `foo.` are one directory entry there — the filesystem backend has to
+    // encode the trailing dot, and every backend has to keep the two keys
+    // apart regardless.
+    secrets
+        .set(&alpha, "foo", SecretValue("token-for-plain".to_string()))
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "foo.",
+            SecretValue("token-for-trailing-dot".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("token-for-plain"),
+        "a distinct key ending in a period was overwritten by its plain variant"
+    );
+    assert_eq!(
+        read(&alpha, "foo.").await.as_deref(),
+        Some("token-for-trailing-dot"),
+        "a distinct key ending in a period lost its own value"
+    );
+
+    // A key that is itself shaped like a legacy filename must not alias another
+    // key. On the filesystem backend the canonical namespace and the legacy
+    // slug fallback have to stay disjoint, so `key-foo` must not read the value
+    // written for `foo`, and writing `key-foo` must not touch `foo`.
+    secrets
+        .set(&alpha, "foo", SecretValue("value-for-foo".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "key-foo").await,
+        None,
+        "reading a key-shaped legacy slug reached another key's value"
+    );
+    secrets
+        .set(
+            &alpha,
+            "key-foo",
+            SecretValue("value-for-key-foo".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("value-for-foo"),
+        "writing a key-shaped legacy slug deleted another key"
+    );
+
+    // 5. Overwrite replaces. A backend that appended, or that served a cached or
     //    stale row, would hand a rotated credential's *predecessor* to the next
     //    outbound call — which fails as an authentication error days later, far
     //    from the rotation that caused it.
@@ -2574,7 +2675,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "an overwritten secret still reads as its previous value"
     );
 
-    // 5. Clearing writes an empty value, and an empty value is NOT absence. This
+    // 6. Clearing writes an empty value, and an empty value is NOT absence. This
     //    distinction is load-bearing: `clear_auth`/`clear_key` clear a credential
     //    by writing `""`, and a backend that collapsed that into "unset" would
     //    fall back to whatever the manifest or the environment supplies — so the
@@ -2589,7 +2690,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "a cleared secret decayed into an unset one, so the revocation did not take"
     );
 
-    // 6. ISOLATION — the property with security consequences. `beta` has written
+    // 7. ISOLATION — the property with security consequences. `beta` has written
     //    nothing, and must not observe `alpha`'s credentials under any key.
     for key in [
         "inference/key",
@@ -2604,7 +2705,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         );
     }
 
-    // 7. And the isolation holds in both directions once `beta` writes the SAME
+    // 8. And the isolation holds in both directions once `beta` writes the SAME
     //    key: neither company sees the other's value. A backend that keyed only
     //    on `key` (dropping the company scope) passes step 6 and fails here,
     //    because until `beta` writes there is nothing for the missing scope to
@@ -2629,7 +2730,7 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
          is not part of the key"
     );
 
-    // 8. A key that exists only for `beta` is still absent for `alpha`, which is
+    // 9. A key that exists only for `beta` is still absent for `alpha`, which is
     //    the mirror of step 6 and catches a scope applied on write but not read.
     secrets
         .set(
