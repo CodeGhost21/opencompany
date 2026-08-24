@@ -4610,8 +4610,8 @@ mod tests {
         use tower::ServiceExt;
 
         use super::super::{
-            CompanyEvent, DEFAULT_RUN_LIMIT, WorkflowNodeStatus, WorkflowRunOutcome,
-            WorkflowRunVerdict, select_run_page,
+            CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
+            WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
         };
         use crate::company::CompanyManifest;
         use crate::ports::CompanyStore;
