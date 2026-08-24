@@ -155,14 +155,16 @@ export function SetupDialog({
    */
   onRetry?: (fallbackIds: string[]) => void;
   /**
-   * Settle the persisted redesign debt once a replacement build-out lands.
+   * Settle the persisted redesign debt when a replacement build-out changes
+   * what a future replacement must sweep.
    *
-   * The debt names the team this run replaced — rows the sweep is deleting as
-   * it lands. Called before the completion screen shows, so a reload there
-   * cannot reopen setup against a boundary that no longer exists: `null` when
-   * the replacement is a designed team (the debt is paid), or the new
-   * fallback's ids when the replacement fell back again (still owed, but now
-   * naming the rows that must go).
+   * The debt names the team the operator is owed a replacement for. Called
+   * with `null` when a designed replacement just paid it, with the new
+   * fallback's ids when a replacement fell back again, and with the expanded
+   * boundary when a partial replacement was rolled back but a rollback removal
+   * failed — in every case before the next screen shows, so a reload cannot
+   * reopen redesign against a boundary that no longer exists or leaves a row
+   * stranded beside the eventual team.
    */
   onReplacementComplete?: (fallbackIds: string[] | null) => void;
 }) {
