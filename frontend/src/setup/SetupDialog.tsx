@@ -325,7 +325,19 @@ export function SetupDialog({
           // check here rather than relying on it.
           if (cancelled) return;
           setHarnessReachable(status.harnessReachable !== false);
-          settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable");
+          // `restartRequired` outranks `cognition`: a company whose stored
+          // config predates the running brain is *configured* — offering "Set
+          // up a model" again would send the operator round a loop they cannot
+          // close by configuring more. Name the restart the config is waiting
+          // on instead (the flag is only ever set where a restart can help, so
+          // this arm needs no reachability test of its own).
+          settle(
+            status.restartRequired
+              ? "restart"
+              : status.cognition === DESIGNING_COGNITION
+                ? "ready"
+                : "unavailable",
+          );
         },
         () => {
           // Do not silently treat an unreadable status as a configured model.
