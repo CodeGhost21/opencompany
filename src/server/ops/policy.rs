@@ -42,7 +42,7 @@
 //! On the company's **next turn**, not on the turn already running.
 //! `ApprovalPolicy` is built once per roster build, and
 //! `HarnessPool::ensure` rebuilds the roster when the policy fingerprint moves
-//! (issue #562's `policy_fingerprint`). So the write lands, the next `ensure`
+//! (issue #562's `effective_policy_fingerprint`). So the write lands, the next `ensure`
 //! rebuilds, and the following turn runs on the new tier — an in-flight turn
 //! finishes under the old one. Since "stop the flood **now**" is the motivating
 //! complaint, the response says so rather than leaving an operator to discover
