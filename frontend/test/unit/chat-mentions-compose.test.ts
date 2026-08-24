@@ -478,8 +478,8 @@ describe("mentionablesFor", () => {
   it("excludes the current user from the picker when selfId is provided", () => {
     const rows = mentionablesFor(directory, [], "engineer");
     const labels = rows.map((r) => r.label);
-    expect(labels).not.toContain("engineer");
-    expect(labels).toContain("ceo");
+    expect(labels).not.toContain("Ada");
+    expect(labels).toContain("Rae");
     expect(labels).toContain("Jane Doe");
     expect(labels).toContain("everyone");
   });
