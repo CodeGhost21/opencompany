@@ -2327,21 +2327,31 @@ impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
         // Prune to the cap: collect this company's run ids newest-first and delete
         // everything past `MAX`. Two statements, like the revision prune — Mongo
         // has no "delete all but the newest N" operator; the recency index keeps
-        // the read cheap.
+        // the read cheap. Each run owns at most one row here (this method
+        // upserts by run id), so a row a concurrent writer refreshes mid-scan
+        // carries a newer `at_ms` than the cap row — conditioning the delete on
+        // `at_ms <= cutoff` spares exactly the refreshed outputs, closing the
+        // scan-to-delete race the deep prune beside it re-verifies in full.
         let mut cursor = coll
             .find(doc! {"company_id": company.as_ref()})
             .sort(doc! {"at_ms": -1, "run_id": -1})
             .await
             .map_err(mongo_err)?;
-        let mut ids: Vec<String> = Vec::new();
+        let mut ranked: Vec<(String, i64)> = Vec::new();
         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            ids.push(get_str(&doc, "run_id")?);
+            ranked.push((get_str(&doc, "run_id")?, get_i64(&doc, "at_ms")?));
         }
-        if ids.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
-            let stale: Vec<&String> = ids.iter().skip(MAX_RUN_OUTPUTS_PER_COMPANY).collect();
+        if ranked.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
+            let cutoff = ranked[MAX_RUN_OUTPUTS_PER_COMPANY - 1].1;
+            let stale: Vec<&str> = ranked
+                .iter()
+                .skip(MAX_RUN_OUTPUTS_PER_COMPANY)
+                .map(|(id, _)| id.as_str())
+                .collect();
             coll.delete_many(doc! {
                 "company_id": company.as_ref(),
                 "run_id": {"$in": stale},
+                "at_ms": {"$lte": cutoff},
             })
             .await
             .map_err(mongo_err)?;
