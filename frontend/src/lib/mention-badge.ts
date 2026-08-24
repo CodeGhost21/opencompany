@@ -227,17 +227,34 @@ export function threadsToReReadForMentions(
     if (n.readAt !== undefined || n.kind !== "mention") continue;
     const subject = hostMessageId(n.subjectId);
     if (seenSubjects.has(subject)) continue;
+    const context = n.context;
+    if (context === undefined || context === null) continue;
     const channelId = renderedChannelIdForContext(
-      n.context,
+      context,
       mainChannelId,
       renderedChannelIds,
     );
     if (channelId === undefined) continue;
     // The message is already on screen for this channel — nothing to recover.
     if (loadedByChannel[channelId]?.has(subject)) continue;
-    const threadId = Object.entries(chatChannelByThread).find(
-      ([, c]) => c === channelId,
-    )?.[0];
+    // The host thread to re-read, decided from the *context* rather than a
+    // channel→thread lookup. When the mention sits on the first desk, the map
+    // holds both `main -> <first desk>` and `<first desk> -> <first desk>`,
+    // with the alias inserted first — a naive lookup would win `main` and
+    // re-read the legacy General thread instead of the desk's own, so the
+    // mentioned message stays absent and the badge stays stuck (Codex P2).
+    const threadId = renderedChannelIds.has(context)
+      ? // A real rendered channel. A desk's channel id doubles as its thread
+        // id (self-mapping), which must win over the `main` alias. A DM
+        // channel has no self-mapping — the member id keys it — so the
+        // reverse lookup is unambiguous there.
+        chatChannelByThread[context] === context
+        ? context
+        : Object.entries(chatChannelByThread).find(([, c]) => c === context)?.[0]
+      : isGeneralChat(context)
+        ? // A legacy general-chat spelling — the console's default thread.
+          MAIN_THREAD_ID
+        : undefined;
     if (threadId !== undefined) {
       threadIds.add(threadId);
       subjects.add(subject);
