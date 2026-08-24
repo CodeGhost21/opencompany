@@ -23,7 +23,8 @@ GET    /api/v1/companies/{id}/chat/history     one desk's transcript (?desk=<thr
 POST   /api/v1/companies/{id}/chat/messages/{seq}/reactions
                                                { "emoji": "👍", "on": true } → 204
 GET    /api/v1/companies/{id}/events?since=SEQ SSE stream of events/effects (work feed)
-GET    /api/v1/companies/{id}/approvals        pending approvals
+GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
+PUT    /api/v1/companies/{id}/notifications  mark notifications read (`{ "ids": [...] }`; empty body or null ids marks all)
 POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
                                                "detach": false }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
