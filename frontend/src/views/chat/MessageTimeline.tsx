@@ -62,6 +62,8 @@ interface Props {
   now?: number;
   /** Agent id → display name, for a card's "Asked by" line. */
   askerNames?: Map<string, string>;
+  /** Host thread id → console channel id, for a card's origin link. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The verdict each inline card is currently waiting on. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
@@ -112,6 +114,7 @@ export function MessageTimeline({
   onAddPeople,
   now,
   askerNames,
+  chatChannelByThread,
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
@@ -286,6 +289,7 @@ export function MessageTimeline({
               approvals={item.approvals}
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
+              chatChannelByThread={chatChannelByThread}
               compact
               thread={
                 item.approvals[0]?.thread

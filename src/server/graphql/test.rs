@@ -543,6 +543,8 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
         role: "Growth".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -627,6 +629,8 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         role: "Growth".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     record.overlay_agents.push(OverlayAgent {
         id: "uncapped".to_string(),
@@ -634,6 +638,8 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         role: "Ops".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,

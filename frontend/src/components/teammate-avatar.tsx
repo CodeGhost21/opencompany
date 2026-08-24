@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Building2 } from "lucide-react";
 
 import { useConsole } from "@/lib/console-context";
-import { resolveAvatarSrc, staticAvatarSrc } from "@/lib/avatar";
+import { resolveAvatarSrc, staticAvatarSrc, retainAvatar, releaseAvatar, blobNodeId } from "@/lib/avatar";
 import { TEAM_TONES, avatarFor, initials } from "@/lib/team";
 import { cn } from "@/lib/utils";
 
@@ -172,6 +172,13 @@ function useAvatarSrc(ref: string): string | null {
   // and the stateful path only ever holds an uploaded one.
   const [fetched, setFetched] = useState<{ ref: string; src: string | null } | null>(null);
   const src = fetched?.ref === ref ? fetched.src : immediate;
+
+  useEffect(() => {
+    const node = blobNodeId(ref);
+    if (!node || !client) return;
+    retainAvatar(client, company, node);
+    return () => releaseAvatar(client, company, node);
+  }, [client, company, ref]);
 
   useEffect(() => {
     // No client means no authenticated fetch is possible — outside the console

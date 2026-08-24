@@ -2769,13 +2769,21 @@ impl RuntimeBuilder {
                                 (Some(engine), true, true) => engine.clone(),
                                 _ => {
                                     let default_harness = record.manifest.default_harness_id();
+                                    // Effective agents plus the overlay
+                                    // roster, matching `lanes::agents_on`.
+                                    // Reading the raw manifest here left the
+                                    // router treating a console-bound teammate
+                                    // as default-bound while the lane it was
+                                    // moved to had already excluded it — so
+                                    // the saved harness was ignored even after
+                                    // a restart.
                                     let bindings: HashMap<String, String> = record
-                                        .manifest
-                                        .agents
-                                        .iter()
-                                        .filter_map(|a| {
+                                        .effective_agents()
+                                        .into_iter()
+                                        .filter_map(|a| a.harness.clone().map(|h| (a.id, h)))
+                                        .chain(record.overlay_agents.iter().filter_map(|a| {
                                             a.harness.clone().map(|h| (a.id.clone(), h))
-                                        })
+                                        }))
                                         .collect();
                                     Arc::new(HarnessRouter::from_lanes(
                                         &default_harness,
@@ -6560,6 +6568,7 @@ needs_reason = true
             tools: None,
             instructions: None,
             avatar: None,
+            ..Default::default()
         });
         record.retire_agent("cto");
         store.save(&record).await.unwrap();

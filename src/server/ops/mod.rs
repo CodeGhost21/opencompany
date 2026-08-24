@@ -28,6 +28,10 @@ pub mod connections_read;
 pub mod domain;
 pub mod finance;
 pub mod finances;
+/// `GET {scope}/harnesses` (issue #1245's harness-picker follow-up): the
+/// company's declared `[[harness]]` set, read-only. What Settings' Harnesses
+/// page and the per-agent Harness picker both read.
+pub mod harnesses;
 pub mod hosting;
 pub mod imap;
 pub mod inbox;
@@ -181,6 +185,7 @@ impl std::fmt::Debug for ConnectionsRuntime {
 pub fn router() -> Router<AppState> {
     let router = Router::new()
         .merge(capabilities::router())
+        .merge(harnesses::router())
         .merge(tool_catalog::router())
         .merge(connections_read::router())
         .merge(billing::router())

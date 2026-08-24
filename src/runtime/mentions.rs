@@ -1597,6 +1597,7 @@ members = ["engineer", "ceo"]
             tools: None,
             instructions: None,
             avatar: None,
+            ..Default::default()
         });
         let found = resolve("hey @Ada, got a sec?", None, None, &record, &people());
         assert_eq!(targets(&found), vec![&agent("ceo")], "{found:?}");

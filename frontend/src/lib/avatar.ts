@@ -146,6 +146,8 @@ export function staticAvatarSrc(ref: string): string | null {
 const blobUrls = new Map<string, Promise<string | null>>();
 /** The resolved URL for a cache key, kept separately so eviction can revoke it. */
 const blobUrlValues = new Map<string, string>();
+/** Mounted avatar consumers by cache key; pinned URLs cannot be evicted. */
+const blobUrlRefs = new Map<string, number>();
 
 /**
  * The most distinct uploaded faces the cache keeps at once.
@@ -170,12 +172,30 @@ const MAX_BLOB_URLS = 64;
 function evictOldestBlobUrl() {
   for (const key of blobUrls.keys()) {
     const url = blobUrlValues.get(key);
-    if (url === undefined) continue; // still in flight — nothing to revoke
+    if (url === undefined || (blobUrlRefs.get(key) ?? 0) > 0) continue;
     URL.revokeObjectURL(url);
     blobUrlValues.delete(key);
     blobUrls.delete(key);
     return;
   }
+}
+
+function avatarCacheKey(client: OpenCompanyClient, company: string | null, nodeId: string): string {
+  return `${client.baseUrl}|${company ?? ""}|${nodeId}`;
+}
+
+/** Pin an uploaded avatar while its component is mounted. */
+export function retainAvatar(client: OpenCompanyClient, company: string | null, nodeId: string): void {
+  const key = avatarCacheKey(client, company, nodeId);
+  blobUrlRefs.set(key, (blobUrlRefs.get(key) ?? 0) + 1);
+}
+
+/** Release a mounted avatar's cache pin. */
+export function releaseAvatar(client: OpenCompanyClient, company: string | null, nodeId: string): void {
+  const key = avatarCacheKey(client, company, nodeId);
+  const count = blobUrlRefs.get(key) ?? 0;
+  if (count <= 1) blobUrlRefs.delete(key);
+  else blobUrlRefs.set(key, count - 1);
 }
 
 /**
@@ -202,7 +222,7 @@ export function resolveAvatarSrc(
   if (staticSrc) return staticSrc;
   const node = blobNodeId(ref);
   if (!node) return Promise.resolve(null);
-  const key = `${client.baseUrl}|${company ?? ""}|${node}`;
+  const key = avatarCacheKey(client, company, node);
   let pending = blobUrls.get(key);
   if (!pending) {
     pending = client

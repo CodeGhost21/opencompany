@@ -436,17 +436,105 @@ pub async fn oc_delete_local_instance(
     state.local.lock().await.delete(&id).await
 }
 
-/// Every coding harness this shell knows how to drive over ACP, and whether
-/// each is actually usable right now.
+/// Every coding harness this shell knows how to drive over ACP, and what the
+/// **filesystem** says about each right now.
 ///
 /// Takes no state and no connection id: unlike everything else in this file,
-/// readiness is a property of *this machine*, not of a host it talks to. The
-/// probe reads `PATH` and the credential files each harness keeps under the
-/// user's home — see `acp::discovery`'s module docs for why that is checked by
-/// file rather than by starting the harness.
+/// readiness is a property of *this machine*, not of a host it talks to.
+///
+/// Answers nothing on its own. Every harness comes back `checking`, because
+/// nothing short of running the adapter can say whether it is installed,
+/// working, and signed in — and this call runs nothing. It exists to paint the
+/// list; [`oc_acp_confirm_harness`] is what settles each row.
 #[tauri::command]
 pub fn oc_acp_harnesses() -> Vec<crate::acp::discovery::HarnessStatus> {
-    crate::acp::discovery::survey(&crate::acp::discovery::SystemProbe)
+    crate::acp::discovery::survey()
+}
+
+/// Actually starts one harness, resolving its `checking` state to `ready` or
+/// `spawnFailed` — and returning the models it advertises.
+///
+/// Both answers come from one spawn because they come from the same call:
+/// `session/new` is where an adapter both proves it can open a session and
+/// lists what it can run. Asking twice would spawn twice for no more
+/// information.
+///
+/// Split from [`oc_acp_harnesses`] rather than folded into it so the list
+/// paints immediately and each row settles on its own: one slow CLI must not
+/// hold up the others, and the operator sees "Checking…" rather than an empty
+/// pane. Safe to call concurrently for every harness.
+///
+/// The subprocess is killed when the probe's client drops, so nothing is left
+/// running whether it succeeded, failed, or timed out.
+#[tauri::command]
+pub async fn oc_acp_confirm_harness(
+    state: tauri::State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<crate::acp::discovery::ConfirmedHarness, String> {
+    // A dedicated empty directory, not the data root itself.
+    //
+    // Still stable and ordinary — an agent that inspects its working directory
+    // on startup sees a real place, and nothing is left behind to clean up —
+    // but no longer the root holding every company's journal, ledger and
+    // derived state. These CLIs read their working directory on startup
+    // looking for project configuration and repository markers, and pointing
+    // one at the whole data root hands it that surface for no benefit the
+    // probe actually needs.
+    let cwd = state.data_dir.join("acp-probe");
+    if let Err(error) = std::fs::create_dir_all(&cwd) {
+        // Not fatal: the probe only needs *a* directory. Falling back keeps a
+        // read-only or full disk from turning every harness into "won't start"
+        // when the real answer has nothing to do with the harness.
+        tracing::debug!(%error, "could not create the ACP probe directory");
+        return Ok(crate::acp::discovery::confirm(&id, &state.data_dir).await);
+    }
+    Ok(crate::acp::discovery::confirm(&id, &cwd).await)
+}
+
+/// Installs (or updates) the ACP adapter this app owns for one harness.
+///
+/// The adapter is *our* dependency, not the operator's: they installed Claude
+/// Code, and `@agentclientprotocol/claude-agent-acp` is the piece that makes it
+/// speak this protocol. So the app fetches it, into its own directory, at the
+/// version this build pins — never into the operator's global npm prefix.
+///
+/// **Explicit, never automatic.** It is a network fetch that writes
+/// executables, and doing that unannounced on launch is not something an app
+/// should decide for someone. The console offers a button; this is what the
+/// button calls.
+///
+/// One install per harness at a time. Two concurrent `npm install --prefix`
+/// runs against the same directory interleave their writes, and the failure
+/// that produces is a half-populated `node_modules` that reads as a corrupt
+/// install rather than as a collision.
+#[tauri::command]
+pub async fn oc_acp_install_harness(id: String) -> Result<(), String> {
+    use tokio::sync::Mutex;
+
+    /// Serialises **every** install, not one per harness.
+    ///
+    /// Both adapters install into the same `npm --prefix` root, so two
+    /// concurrent `npm install` runs there interleave their writes to one
+    /// `node_modules` and one lockfile. An earlier version of this guarded
+    /// per-id so Claude's install would not block Codex's — which is exactly
+    /// the case that corrupts the tree, since those are the two that share the
+    /// prefix. The wait is seconds and the button is per-row, so the cost of
+    /// serialising is a queue nobody notices.
+    ///
+    /// A `tokio::sync::Mutex` rather than the `std` one because it is held
+    /// across an await. The guard also removes the need to un-register an id
+    /// by hand: a cancelled or panicking install drops the guard and releases
+    /// the lock, where the previous insert/remove pair leaked the id forever
+    /// and made every later attempt report "already running".
+    static INSTALLING: Mutex<()> = Mutex::const_new(());
+
+    let harness = crate::acp::discovery::HARNESSES
+        .iter()
+        .find(|h| h.id == id)
+        .ok_or_else(|| format!("`{id}` is not a harness this build knows"))?;
+
+    let _guard = INSTALLING.lock().await;
+    crate::acp::tools::install(harness).await
 }
 
 #[cfg(test)]
