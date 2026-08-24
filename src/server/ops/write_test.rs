@@ -4701,7 +4701,7 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(withdrawn["redacted"], true);
     assert_eq!(
-        withdrawn["redactedBy"], "harness-admin",
+        withdrawn["redactedBy"], "Harness Admin",
         "a withdrawal nobody's name is on is a message that can vanish quietly"
     );
     assert_eq!(
