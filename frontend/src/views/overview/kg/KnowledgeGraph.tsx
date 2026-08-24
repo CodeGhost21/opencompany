@@ -210,7 +210,7 @@ type SimLink = { source: SimNode | string; target: SimNode | string; kind: strin
  */
 export function KnowledgeGraph({
   graph, agents = [], departments = [], people = [], tasks = [], memory, runsByAgent = {}, toolLabels = {},
-  statusSlot,
+  statusSlot, covered = false,
   repelDefault = 150, linkDistDefault = 60, centerDefault = 0.32,
 }: {
   graph: KGData; agents?: Agent[]; departments?: Department[]; people?: Person[]; tasks?: SopTask[];
@@ -228,6 +228,9 @@ export function KnowledgeGraph({
    * operator opened.
    */
   statusSlot?: React.ReactNode;
+  /** an outage overlay covers the graph; it must not answer the keyboard at
+      all — `inert` cannot suppress a `window` listener (issue #1314) */
+  covered?: boolean;
   /** latest run per agent id, for the harness card */
   runsByAgent?: Record<string, AgentRun>;
   /** Tool slug → display name, so a card can name a tool as its source does. */
