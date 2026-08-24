@@ -412,8 +412,12 @@ export function SetupDialog({
         if (createdCount < agents.length) {
           // Keep the old team, and keep the next retry's boundary covering both
           // the rows this pass was meant to replace and the rows it did create,
-          // so a successful retry replaces the whole partial attempt.
+          // so a successful retry replaces the whole partial attempt. The
+          // return-from-Settings boundary is a captured Set that would otherwise
+          // shadow those rows on the next retry, so it is let go now that the
+          // expanded boundary lives in `createdIds`.
           createdIds.current = [...boundaryIds, ...createdThisRun];
+          redesignRoster.current = null;
           if (cancelled) return;
           building.current = false;
           setPhase({
