@@ -1024,7 +1024,7 @@ function BuildOut({
                 <RotateCcw className="size-4" />
                 Try again
               </Button>
-              {canManage ? (
+              {canManage === true && (
                 <a
                   href="#/settings/connections"
                   onClick={onRedesign}
@@ -1033,7 +1033,8 @@ function BuildOut({
                 >
                   Check connection in Settings
                 </a>
-              ) : (
+              )}
+              {canManage === false && (
                 <span
                   className="text-sm text-muted-foreground"
                   data-testid="setup-check-connection-member"
