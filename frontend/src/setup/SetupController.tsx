@@ -6,10 +6,13 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
 import { SetupDialog } from "./SetupDialog";
 import {
+  clearSetupRedesign,
   clearSetupResuming,
   clearSetupSkipped,
+  markSetupRedesign,
   markSetupResuming,
   markSetupSkipped,
+  setupRedesign,
   setupResuming,
   setupSkipped,
 } from "./state";
