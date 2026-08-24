@@ -95,7 +95,9 @@ Twenty-two companies. One operator. Pick one and run it, or run several at once.
 
 You do not need a software background to run a company. You need
 [Docker Desktop](https://www.docker.com/products/docker-desktop/), a terminal,
-and about fifteen minutes.
+and about fifteen minutes. On Windows the terminal must be POSIX —
+[WSL](https://learn.microsoft.com/windows/wsl/install) or Git Bash — because the
+quickstart below uses `export` and `./scripts/launch-demo.sh`.
 
 ```sh
 git clone --recurse-submodules https://github.com/tinyhumansai/opencompany.git
