@@ -108,4 +108,20 @@ describe("resolving an address", () => {
     expect(seen).toEqual(["not-found", "nope"]);
     expect(window.location.hash).toBe("#/not-found/nope");
   });
+
+  // Retired top-level addresses keep working through `REWRITE_RETIRED`. Each
+  // has a real replacement; asserting the replacement (and that the address bar
+  // follows it) is what keeps a bookmark or habit written before the move alive.
+  it.each([
+    ["#/connections", "settings", "oauth"],
+    ["#/oauth", "settings", "oauth"],
+    ["#/mcp", "settings", "mcp"],
+    ["#/people", "settings", "people"],
+    ["#/settings/not-a-page", "settings", "general"],
+  ])("rewrites retired %s onto its replacement", async (hash, view, sub) => {
+    rewrite = REWRITE_RETIRED;
+    await visit(hash);
+    expect(seen).toEqual([view, sub]);
+    expect(window.location.hash).toBe(`#/${view}/${sub}`);
+  });
 });
