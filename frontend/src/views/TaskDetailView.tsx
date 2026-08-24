@@ -586,8 +586,6 @@ export function TaskDetailView({
                     />
                   }
                   entries={detail.timeline}
-                  waitingSince={detail.waitingSince}
-                  now={now}
                 />
               </TabsContent>
 
