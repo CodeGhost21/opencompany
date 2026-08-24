@@ -1,4 +1,5 @@
 import type { NotificationDto } from "@/api/types";
+import { MAIN_THREAD_ID } from "@/lib/chat";
 
 /**
  * The mention badge: how many unread mentions of **you** sit in each channel.
