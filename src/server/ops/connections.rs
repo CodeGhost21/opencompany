@@ -275,6 +275,11 @@ async fn do_disconnect(
     Ok(Json(json!({ "connected": false, "provider": provider })))
 }
 
+/// [`do_disconnect`] over an injected environment seam, for revocation tests.
+/// Test-only: production `disconnect` goes through [`do_disconnect`]'s
+/// `ProcessEnv` pin, so this is compiled only under `cfg(test)` rather than
+/// carrying an `allow(dead_code)` that would hide a real orphan.
+#[cfg(test)]
 async fn do_disconnect_from(
     runtime: Arc<CompanyRuntime>,
     provider: &str,
