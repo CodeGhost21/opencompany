@@ -276,6 +276,13 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
     // without this an operator's explicit pause/archive would still pay for
     // provider and tool work driven here.
     runtime.ensure_running().await.map_err(|e| e.to_string())?;
+    // A runtime being replaced refuses *before* the prompt is journaled. The
+    // append below persists the message and its mention rows, and
+    // `run_journaled_cycle` then re-checks this gate — a refusal ordered after
+    // the append would leave an answered-nothing message and a durable badge
+    // in the transcript. Same ordering the REST chat path holds in
+    // `accept_chat_turn` (codex P2).
+    runtime.ensure_accepting().map_err(|e| e.to_string())?;
     // Keep the person, drop the credential, exactly as `ScopedCompany` does: a
     // human-authored ACP prompt is attributed to that user in the journal and
     // the audit trail. Only platform credentials stay anonymous.
