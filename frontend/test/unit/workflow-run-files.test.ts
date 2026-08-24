@@ -229,6 +229,32 @@ describe("run row — files associated (issue #1684)", () => {
     ).toBeNull();
   });
 
+  it("labels the list when the host truncated older files (issue #1693)", async () => {
+    const sink = { calls: [] as string[] };
+    await renderPanel(completedRun("run-1"), filesClient([FILE], sink, true));
+    await expandFiles();
+
+    const note = container.querySelector(
+      '[data-testid="workflow-run-files-truncated"]',
+    );
+    expect(note?.textContent).toContain("newest files");
+    // The files that did come back still render.
+    expect(
+      container.querySelector('[data-testid="workflow-run-file"]')
+        ?.textContent,
+    ).toContain("Launch spec");
+  });
+
+  it("shows no truncation note for a normal file list", async () => {
+    const sink = { calls: [] as string[] };
+    await renderPanel(completedRun("run-1"), filesClient([FILE], sink));
+    await expandFiles();
+
+    expect(
+      container.querySelector('[data-testid="workflow-run-files-truncated"]'),
+    ).toBeNull();
+  });
+
   it("renders no files control for a run with no runId", async () => {
     const sink = { calls: [] as string[] };
     await renderPanel(completedRun(undefined), filesClient([FILE], sink));
