@@ -613,12 +613,9 @@ async fn company_events(
         .as_ref()
         .map(|actor| Viewer::User(actor.id.clone()))
         .unwrap_or(Viewer::Operator);
+    let subscription = scope.runtime.events().subscribe(&company);
     let authors = author_labels(&scope.runtime).await.unwrap_or_default();
-    let durable = scope
-        .runtime
-        .events()
-        .subscribe(&company)
-        .filter_map(move |item| {
+    let durable = subscription.filter_map(move |item| {
             // Keep the teardown guard alive for the life of the stream.
             let _ = &guard;
             let event = project_stream_item_for_viewer(&item, &authors, &viewer)
