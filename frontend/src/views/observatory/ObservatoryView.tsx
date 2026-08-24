@@ -338,7 +338,7 @@ function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
                   )}
                 />
                 <code className="truncate text-xs">{workflowRunId}</code>
-                <Badge variant="secondary" className="shrink-0 text-[10px]">
+                <Badge variant="secondary" className="shrink-0 text-3xs">
                   {own.length} {own.length === 1 ? "agent" : "agents"}
                 </Badge>
                 <span className="text-muted-foreground flex-1 truncate text-xs">
