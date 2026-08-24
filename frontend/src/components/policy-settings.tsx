@@ -197,9 +197,9 @@ export function PolicySettings({ client, company }: Props) {
   // A looser tier changes what teammates can do without stopping for approval.
   // Keep the target, rather than a boolean, so the dialog can compare the
   // host-provided consequences that actually apply to this deployment.
-  const [pendingTier, setPendingTier] = useState<
-    PolicyStatus["tiers"][number] | null
-  >(null);
+  const [pendingTier, setPendingTier] = useState<PolicyStatus["tiers"][number] | null>(
+    null,
+  );
   // A reset restores the manifest's tier AND always-ask list, so the widening
   // check must run on it too — otherwise "Use the manifest's policy" is a
   // one-click way around the confirmation the tier buttons get, and the same
@@ -310,11 +310,7 @@ export function PolicySettings({ client, company }: Props) {
   const apply = (
     next: PolicyStatus,
     message: string,
-    resync: {
-      alwaysAsk?: boolean;
-      spendCap?: boolean;
-      deadline?: boolean;
-    } = {},
+    resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
     takesEffect?: string,
   ) => {
     setStatus(next);
@@ -449,11 +445,7 @@ export function PolicySettings({ client, company }: Props) {
         { alwaysAsk: !dirty, deadline: false },
       );
     } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Could not save the spend cap.",
-      );
+      toast.error(error instanceof Error ? error.message : "Could not save the spend cap.");
     } finally {
       setSaving(false);
     }
@@ -506,9 +498,7 @@ export function PolicySettings({ client, company }: Props) {
         "takes effect immediately — parked approvals are re-checked against the new deadline",
       );
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not save the deadline.",
-      );
+      toast.error(error instanceof Error ? error.message : "Could not save the deadline.");
     } finally {
       setSaving(false);
     }
@@ -632,8 +622,8 @@ export function PolicySettings({ client, company }: Props) {
                                 (tier) => tier.value === status.mode,
                               )?.description
                             }{" "}
-                            With {pendingTier.label}:{" "}
-                            {pendingTier.description}{" "}
+                            With {pendingTier.label}: {pendingTier.description}
+                            {" "}
                           </>
                         )}
                         {pendingReset && (
@@ -647,13 +637,7 @@ export function PolicySettings({ client, company }: Props) {
                               ? status.manifestAlwaysApprove.join(", ")
                               : "none"}
                             {removedAlwaysAsk.length > 0 && (
-                              <>
-                                ; {removedAlwaysAsk.join(", ")}{" "}
-                                {removedAlwaysAsk.length === 1
-                                  ? "stops"
-                                  : "stop"}{" "}
-                                always asking for approval
-                              </>
+                              <>; {removedAlwaysAsk.join(", ")} {removedAlwaysAsk.length === 1 ? "stops" : "stop"} always asking for approval</>
                             )}
                             {spendCapWidens && (
                               <>
@@ -664,8 +648,7 @@ export function PolicySettings({ client, company }: Props) {
                                   status.manifestMode,
                                 )
                                   ? " It also"
-                                  : " This"}{" "}
-                                restores the manifest's looser spend cap.
+                                  : " This"} restores the manifest's looser spend cap.
                               </>
                             )}
                             .
@@ -743,9 +726,7 @@ export function PolicySettings({ client, company }: Props) {
                   disabled={saving}
                   onClick={() => {
                     if (!noSpendCap && draftSpend.trim() === "") {
-                      toast.error(
-                        "Enter a non-negative amount, or choose no cap.",
-                      );
+                      toast.error("Enter a non-negative amount, or choose no cap.");
                       return;
                     }
                     setNoSpendCap((current) => !current);
@@ -754,23 +735,16 @@ export function PolicySettings({ client, company }: Props) {
                 >
                   {noSpendCap ? "No cap" : "Set no cap"}
                 </Button>
-                <Button
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => void saveSpendCap()}
-                >
+                <Button size="sm" disabled={saving} onClick={() => void saveSpendCap()}>
                   Save cap
                 </Button>
               </div>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="approval-deadline">
-                Decline anything undecided after
-              </Label>
+              <Label htmlFor="approval-deadline">Decline anything undecided after</Label>
               <p className="text-xs text-muted-foreground">
-                Each approval stays decidable for this long before it is
-                declined.
+                Each approval stays decidable for this long before it is declined.
               </p>
               <div className="flex items-center gap-2">
                 <Input
@@ -785,11 +759,7 @@ export function PolicySettings({ client, company }: Props) {
                   onChange={(event) => setDraftDeadline(event.target.value)}
                 />
                 <span className="text-sm text-muted-foreground">hours</span>
-                <Button
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => void saveDeadline()}
-                >
+                <Button size="sm" disabled={saving} onClick={() => void saveDeadline()}>
                   Save deadline
                 </Button>
               </div>
@@ -817,15 +787,14 @@ export function PolicySettings({ client, company }: Props) {
                 these win even on Full. Comma-separated. An entry is a tool name
                 (<code>shell</code>, <code>http_request</code>), or a dotted
                 effect kind a hosted brain emits; a leading segment matches the
-                rest, so <code>invoice</code> covers <code>invoice.send</code>.
+                rest, so <code>invoice</code> covers{" "}
+                <code>invoice.send</code>.
               </p>
               <Input
                 id="always-approve"
                 value={draftAlways}
                 disabled={saving}
-                list={
-                  wiredTools.length > 0 ? "always-approve-tools" : undefined
-                }
+                list={wiredTools.length > 0 ? "always-approve-tools" : undefined}
                 placeholder={alwaysAskPlaceholder(wiredTools)}
                 onChange={(event) => {
                   setDraftAlways(event.target.value);
@@ -858,8 +827,8 @@ export function PolicySettings({ client, company }: Props) {
             {status.overridden && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-dashed p-3">
                 <p className="text-xs text-muted-foreground">
-                  Set here{status.setBy ? ` by ${status.setBy}` : ""},
-                  overriding the manifest ({status.manifestMode}). Editing{" "}
+                  Set here{status.setBy ? ` by ${status.setBy}` : ""}, overriding
+                  the manifest ({status.manifestMode}). Editing{" "}
                   <code>[policy]</code> in <code>company.toml</code> clears it —
                   version control wins when it speaks.
                 </p>
