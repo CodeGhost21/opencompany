@@ -9513,14 +9513,14 @@ mode = "full"
         // A desk addressed by its display name files under the desk's id —
         // `"Engineering"` names the desk whose id is `engineering`.
         assert_eq!(
-            mention_context(&runtime, &id, &[], "Engineering").await,
+            runtime.mention_context(&id, &[],"Engineering").await,
             "engineering",
             "a desk named by its display name has to store the desk id, not the raw key"
         );
         // A teammate addressed by a case-variant of their id files under the
         // canonical agent id, re-keyed into the console's DM channel space.
         assert_eq!(
-            mention_context(&runtime, &id, &[], "BACKEND_ENGINEER").await,
+            runtime.mention_context(&id, &[],"BACKEND_ENGINEER").await,
             "dm:backend_engineer",
             "a teammate named by a noncanonical key has to store dm:<agent-id>"
         );
@@ -9541,7 +9541,7 @@ mode = "full"
 
         for general in ["General", "general", "main", ""] {
             assert_eq!(
-                mention_context(&runtime, &id, &[], general).await,
+                runtime.mention_context(&id, &[],general).await,
                 crate::server::chat_history::MAIN_THREAD_ID,
                 "a mention in the General desk ({general:?}) has to store the console's \
                  main-thread id, which the rail aliases onto its first rendered desk \
@@ -9551,7 +9551,7 @@ mode = "full"
         // A desk that does resolve keeps its canonical id — the general-chat
         // mapping must not swallow a real desk.
         assert_eq!(
-            mention_context(&runtime, &id, &[], "Engineering").await,
+            runtime.mention_context(&id, &[],"Engineering").await,
             "engineering",
             "a real desk keeps its canonical id even when its name looks general"
         );
