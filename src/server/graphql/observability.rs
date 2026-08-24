@@ -246,9 +246,18 @@ impl AgentRunGql {
 ///
 /// The scrubbed skeleton is the primary answer, so a failure to read it must
 /// reach the client rather than masquerade as "no steps".
+///
+/// `may_read_deep` is the principal's [`may_read_deep_trace`] verdict: the deep
+/// half carries unredacted secrets, so a caller who may not read them is not
+/// even given a store read that would be discarded. `None` for that caller is
+/// indistinguishable from "no deep trace recorded", which is the honest answer
+/// to a reader who is not entitled to one.
+///
+/// [`may_read_deep_trace`]: crate::server::approval_visibility::may_read_deep_trace
 async fn load(
     runtime: &Arc<CompanyRuntime>,
     record: RunRecord,
+    may_read_deep: bool,
 ) -> async_graphql::Result<AgentRunGql> {
     let steps = runtime
         .runs()
@@ -257,11 +266,15 @@ async fn load(
     // A missing deep store, or a read that fails, degrades to "no deep half"
     // rather than failing the query: the scrubbed trace is the answer, and the
     // unredacted companion is the bonus.
-    let details = runtime
-        .deep_trace()
-        .list_step_details(runtime.id(), &record.id)
-        .await
-        .unwrap_or_default();
+    let details = if may_read_deep {
+        runtime
+            .deep_trace()
+            .list_step_details(runtime.id(), &record.id)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     Ok(assemble(record, steps, details))
 }
 
