@@ -245,7 +245,8 @@ pub struct MessageView {
 }
 
 /// One mention inside one message, as a reader sees it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MentionView {
     /// The literal span the author typed, so the renderer highlights what is
     /// actually in the text rather than what the target is called now.
