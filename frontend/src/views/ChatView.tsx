@@ -523,8 +523,20 @@ export function ChatView({
    */
   const resolvedSub =
     sub && !findChannel(sections, sub) ? resolveDmChannelId(sub, members) : null;
+  /**
+   * The channel the hash names, else the first one that exists.
+   *
+   * The rail only carries DMs with a transcript (issue #1335), so `findChannel`
+   * answers `null` for an inactive DM — but `dm:<teammate-id>` is still a
+   * valid, directly-addressable conversation. `directMessageForId` is the
+   * all-roster resolver that keeps such a deep link (and the New message
+   * picker's selection) landing on the DM before the first-channel fallback
+   * takes over, without ever adding the inactive DM to the rail.
+   */
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? sub) ?? firstChannel(sections))
+    ? (findChannel(sections, resolvedSub ?? sub) ??
+      directMessageForId(members, resolvedSub ?? sub) ??
+      firstChannel(sections))
     : null;
   /**
    * The hash named a channel this company doesn't have, and the first-channel
