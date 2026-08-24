@@ -156,6 +156,19 @@ interface Props {
   /** Called when a delayed response belongs to a previous company scope. */
   onSendStale?: (threadId: string) => void;
   /**
+   * The shell's live company ref, so the stale-response check keeps observing
+   * company switches after this view unmounts.
+   *
+   * A component-local ref would freeze at the last render's company once this
+   * subtree disappears — exactly when the operator can walk to another view
+   * and switch companies mid-POST. The shell owns `companyRef` and updates it
+   * on every company change whether or not Chat is mounted, so a send that
+   * resolves or rejects after the switch still sees the new scope and is
+   * declared stale rather than writing the old company's reply into the new
+   * company's transcript.
+   */
+  scopeCompanyRef: RefObject<string | null>;
+  /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
    */
