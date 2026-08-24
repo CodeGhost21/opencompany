@@ -6721,6 +6721,7 @@ needs_reason = true
             by: None,
             chat: Some("eng".to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
 
         // Baseline: the blueprint lead answers. Asserted rather than assumed, so
@@ -6870,6 +6871,7 @@ needs_reason = true
                 by: None,
                 chat: Some("design".to_string()),
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .expect("cycle");
@@ -6989,6 +6991,7 @@ needs_reason = true
                 by: None,
                 chat: Some("eng".to_string()),
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .expect("cycle");

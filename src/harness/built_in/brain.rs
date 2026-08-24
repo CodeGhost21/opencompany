@@ -3285,6 +3285,7 @@ description = "Runs Acme."
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -6025,6 +6026,7 @@ members = ["eng1", "eng2"]
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -6085,6 +6087,7 @@ members = ["eng1", "eng2"]
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -6131,6 +6134,7 @@ members = ["eng1", "eng2"]
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -8186,6 +8190,7 @@ members = ["eng1", "eng2"]
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -8253,6 +8258,7 @@ members = ["eng1", "eng2"]
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -8294,6 +8300,7 @@ members = ["eng1", "eng2"]
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
