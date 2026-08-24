@@ -486,9 +486,6 @@ most likely to go stale — trust the code over this list.
 | The three-question dialog + build-out screen | `frontend/src/` | **new** |
 | Storing the raw answers for Phase 2 | — | **new** |
 
-The important line in that table: Phase 1 needs **no new backend route**. Agent
-creation, agent editing, roster reads and folder scaffolding all exist. The new
-work is the synthesis step, the UI, and somewhere to keep the answers.
 
 ### Phase 2 needs (not now)
 
