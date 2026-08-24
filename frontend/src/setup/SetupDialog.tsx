@@ -1006,14 +1006,23 @@ function BuildOut({
                 <RotateCcw className="size-4" />
                 Try again
               </Button>
-              <a
-                href="#/settings/connections"
-                onClick={onRedesign}
-                data-testid="setup-check-connection"
-                className={buttonVariants({ variant: "outline" })}
-              >
-                Check connection in Settings
-              </a>
+              {canManage ? (
+                <a
+                  href="#/settings/connections"
+                  onClick={onRedesign}
+                  data-testid="setup-check-connection"
+                  className={buttonVariants({ variant: "outline" })}
+                >
+                  Check connection in Settings
+                </a>
+              ) : (
+                <span
+                  className="text-sm text-muted-foreground"
+                  data-testid="setup-check-connection-member"
+                >
+                  Ask an admin to check the connection, or carry on with the standard team.
+                </span>
+              )}
             </>
           )}
           <Button onClick={onDone} data-testid="setup-finish">
