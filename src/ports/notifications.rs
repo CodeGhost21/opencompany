@@ -136,16 +136,27 @@ pub struct Notification {
     pub context: Option<String>,
 }
 
+/// Whether an audience admits `user` — `None` is the whole company.
+///
+/// The one place the audience rule is written down, so three backends cannot
+/// each interpret it slightly differently. [`Notification::visible_to`]
+/// delegates here, and the SQLite backend decodes its stored audience string
+/// and delegates here too, so a change to the rule cannot leave one backend
+/// behind.
+pub(crate) fn audience_admits(audience: Option<&[String]>, user: &str) -> bool {
+    match audience {
+        None => true,
+        Some(ids) => ids.iter().any(|id| id == user),
+    }
+}
+
 impl Notification {
     /// Whether `user` should see this row.
     ///
     /// The one place the audience rule is written down, so three backends
     /// cannot each interpret it slightly differently.
     pub fn visible_to(&self, user: &str) -> bool {
-        match &self.audience {
-            None => true,
-            Some(audience) => audience.iter().any(|id| id == user),
-        }
+        audience_admits(self.audience.as_deref(), user)
     }
 }
 
