@@ -1163,20 +1163,26 @@ async fn edit_me(
         // about the avatar"; the inner value is the stored reference (`None`
         // clears back to the hashed default).
         None => None,
-        Some(inner) => Some(match inner
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            // Validated against what this host holds before it is stored — the
-            // value ends up in an `src=` on every surface that draws this
-            // person's face. See `crate::company::avatar`.
-            Some(value) => Some(
-                crate::company::avatar::resolve(runtime.workspace().as_ref(), runtime.id(), &value)
+        Some(inner) => Some(
+            match inner
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                // Validated against what this host holds before it is stored — the
+                // value ends up in an `src=` on every surface that draws this
+                // person's face. See `crate::company::avatar`.
+                Some(value) => Some(
+                    crate::company::avatar::resolve(
+                        runtime.workspace().as_ref(),
+                        runtime.id(),
+                        &value,
+                    )
                     .await
                     .map_err(|e| ApiError(e).into_response())?,
-            ),
-            None => None,
-        }),
+                ),
+                None => None,
+            },
+        ),
     };
     let mut user = runtime
         .users()
