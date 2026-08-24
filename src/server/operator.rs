@@ -2721,7 +2721,7 @@ async fn react_to_message(
         });
     if !is_message {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}"))).into_response().into(),
         );
     }
     runtime
