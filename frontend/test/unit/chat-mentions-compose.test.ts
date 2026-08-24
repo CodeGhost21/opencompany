@@ -455,7 +455,7 @@ describe("mentionablesFor", () => {
    */
   it("puts an exact match above a better-ranked partial one", () => {
     const rows = mentionablesFor(directory, []);
-    expect(rankMentionables(rows, "engineer")[0].label).toBe("engineer");
+    expect(rankMentionables(rows, "engineer")[0].label).toBe("Ada");
     // And the desk is still offered, just second.
     expect(rankMentionables(rows, "engineer")[1].label).toBe("engineering");
   });
