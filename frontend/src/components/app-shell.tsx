@@ -1513,7 +1513,7 @@ export function AppShell({
               taskId: event.taskId,
               mentions: event.mentions,
               // Issue #483: same identity as the thread store above. This is
-              // the store `hydrateChannel` writes into, so this is where the
+              // the store `hydrateThread` folds into, so this is where the
               // duplicate was visible.
               ...liveReplyIdentity(event),
               // Issue #364: a reply to a thread joins that thread live, instead
