@@ -655,6 +655,14 @@ describe("resolvableMentions", () => {
     expect(resolvableMentions("/docs/@eng", directory)).toEqual([]);
   });
 
+  it("matches the host's ASCII-only mention boundaries", () => {
+    // `opens_mention`/`closes_mention` accept only ASCII whitespace. A pasted
+    // non-breaking space must neither open nor close a mention here, or the
+    // picker would offer a span the host then drops.
+    expect(resolvableMentions("hey @engineer", directory)).toEqual([]);
+    expect(resolvableMentions("@engineer next", directory)).toEqual([]);
+  });
+
   it("prefers the longest alias when one name prefixes another", () => {
     const ann: Mentionable = {
       target: { kind: "user", id: "a" },
