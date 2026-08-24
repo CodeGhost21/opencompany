@@ -17,7 +17,18 @@ describe("first-run setup recovery (issue #1417)", () => {
   it("offers the same route beside the product-tour replay control", () => {
     const settings = read("views/SettingsView.tsx");
 
-    expect(settings).toContain('href="#/setup"');
-    expect(settings.indexOf('href="#/setup"')).toBeGreaterThan(settings.indexOf("Replay tour"));
+    // The anchor must carry the host scope (`withHostParam`) so a Ctrl/Cmd-click
+    // into a fresh tab opens setup on the company the operator was looking at,
+    // not on the bootstrap/default host (issue #1417 review).
+    expect(settings).toContain('withHostParam("setup")');
+    expect(settings.indexOf('withHostParam("setup")')).toBeGreaterThan(
+      settings.indexOf("Replay tour"),
+    );
+  });
+
+  it("keeps the not-found page's Overview anchor on the active host", () => {
+    const unknown = read("views/UnknownRouteView.tsx");
+
+    expect(unknown).toContain('withHostParam("overview")');
   });
 });
