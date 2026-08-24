@@ -969,6 +969,10 @@ base_url = "https://byo.example/v1"
             !dto.restart_required,
             "a platform endpoint strands no tenant config behind a restart"
         );
+        assert!(
+            !dto.harness_reachable,
+            "a runtime built without a harness pool cannot reach the design path"
+        );
     }
 
     #[tokio::test]
