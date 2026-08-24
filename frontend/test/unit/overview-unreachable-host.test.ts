@@ -131,7 +131,10 @@ function clickRefresh() {
 }
 
 function retryButton(): HTMLButtonElement | undefined {
-  return container.querySelector('[aria-label="Retry loading the company overview"]') ?? undefined;
+  return (
+    container.querySelector<HTMLButtonElement>('[aria-label="Retry loading the company overview"]') ??
+    undefined
+  );
 }
 
 describe("a host that cannot be reached at all", () => {
