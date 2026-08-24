@@ -293,15 +293,37 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
     // is; no synthetic `@`-mention is needed, and one would only be dropped by
     // revalidation against a body that does not contain it.
     let mentions = runtime.resolve_mentions(&text, None, by.as_ref()).await;
+    // Journal the prompt up front so the transcript is right from acceptance
+    // and the durable mention rows share its sequence — the same shape as the
+    // operator `/chat` route (issue #983). `run_journaled_cycle` then runs the
+    // turn on the already-recorded message instead of appending it again.
+    let chat = session.chat.clone();
+    let event = CompanyEvent::OperatorMessage {
+        text,
+        by: by.clone(),
+        chat: Some(chat.clone()),
+        parent: None,
+        deliverable: None,
+        mentions,
+    };
+    let message_seq = runtime
+        .events()
+        .append(&session.company, event.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    // The durable half of a mention, exactly as the REST chat path files it.
+    // The ACP surface is just another operator ingress: an `@user` an ACP
+    // client types must badge that person the same way a console message
+    // does, or the reply renders as a chip and nothing else.
+    if let CompanyEvent::OperatorMessage { mentions, .. } = &event
+        && !mentions.is_empty()
+    {
+        runtime
+            .notify_mentions(&session.company, mentions, &message_seq, by.as_ref(), &chat)
+            .await;
+    }
     let report = runtime
-        .run_cycle(vec![CompanyEvent::OperatorMessage {
-            text,
-            by,
-            chat: Some(session.chat.clone()),
-            parent: None,
-            deliverable: None,
-            mentions,
-        }])
+        .run_journaled_cycle(vec![(message_seq, event)], None)
         .await
         .map_err(|e| e.to_string())?;
     let updates = report
