@@ -535,6 +535,16 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         for (const previous of nodesRef.current) {
           if (!nextIds.has(previous.id)) forgetAvatarNode(client, company, previous.id);
         }
+        // On a fresh mount there is no previous tree to diff — the ref starts
+        // empty — so a face whose node was deleted while this view was
+        // unmounted would otherwise stay cached for the life of the tab. The
+        // module cache is revalidated against this authoritative tree once;
+        // from the next load the diff above carries the job.
+        if (nodesRef.current.length === 0) {
+          for (const id of cachedAvatarNodeIds(client, company)) {
+            if (!nextIds.has(id)) forgetAvatarNode(client, company, id);
+          }
+        }
         nodesRef.current = tree;
         setNodes(tree);
         setError(null);
