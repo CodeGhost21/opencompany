@@ -1052,6 +1052,8 @@ export function ChatView({
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
+        openSections={railOpenSections}
+        onToggleSection={toggleRailSection}
         className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
       />
       <ChannelRail
@@ -1059,6 +1061,8 @@ export function ChatView({
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
+        openSections={railOpenSections}
+        onToggleSection={toggleRailSection}
         collapsed={channelsCollapsed}
         onExpand={toggleChannels}
         className="hidden lg:flex"
