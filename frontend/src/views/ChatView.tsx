@@ -834,8 +834,10 @@ export function ChatView({
       );
       const latestScope = scopeRef.current;
       if (
-        scopeAtSend.company !== latestScope.company ||
-        scopeAtSend.connection !== latestScope.connection
+        latestScope &&
+        (scopeAtSend.company !== latestScope.company ||
+          scopeAtSend.connection !== latestScope.connection ||
+          scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
@@ -878,8 +880,10 @@ export function ChatView({
       outcome = "failed";
       const latestScope = scopeRef.current;
       if (
-        scopeAtSend.company !== latestScope.company ||
-        scopeAtSend.connection !== latestScope.connection
+        latestScope &&
+        (scopeAtSend.company !== latestScope.company ||
+          scopeAtSend.connection !== latestScope.connection ||
+          scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
