@@ -47,6 +47,7 @@ use futures::StreamExt;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 
 /// The leading bytes that announce each accepted format.
 ///
