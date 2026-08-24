@@ -74,10 +74,11 @@ if [ -n "$hits" ]; then
 fi
 
 # ---- 2. SVG font sizes below the floor ----------------------------------
-# `fixedLabel` is the graph's SVG font-size seam. A one-digit literal is below
-# the 10px floor; named constants and computed values stay reviewable at their
-# definition, while this catches the literal escape hatch that Tailwind cannot.
-hits=$(grep -rnE 'fixedLabel\([[:space:]]*[0-9](\.[0-9]+)?[[:space:]]*[,)]' "$SRC" "${INCLUDES[@]}" 2>/dev/null \
+# `fixedLabel` is the graph's SVG font-size seam. A numeric literal below 10px
+# is below the floor — one-digit, decimal, signed or leading-decimal forms all
+# count; 10 itself and named constants stay reviewable, while this catches the
+# literal escape hatch that Tailwind cannot.
+hits=$(grep -rnE 'fixedLabel\([[:space:]]*[+-]?([0-9](\.[0-9]+)?|\.[0-9]+)[[:space:]]*[,)]' "$SRC" "${INCLUDES[@]}" 2>/dev/null \
   | strip_comments || true)
 if [ -n "$hits" ]; then
   report "SVG font size below 10px" \
