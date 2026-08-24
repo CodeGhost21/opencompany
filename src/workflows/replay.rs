@@ -1402,7 +1402,62 @@ mod tests {
         assert_eq!(ids, vec!["notify"], "{warned:?}");
     }
 
-    /// Issue #617, the nested half. A gate two levels down reports as
+    /// Issue #617, nested ancestor calls are included too. A call in the
+    /// intermediate child has already happened before that child enters its
+    /// nested workflow, so approving the grandchild gate restarts and repeats
+    /// the intermediate call as well.
+    #[test]
+    fn a_nested_gate_warns_for_calls_in_ancestor_children() {
+        let mut ancestor = graph(vec![
+            node(
+                "notify_parent_child",
+                NodeKind::HttpRequest,
+                json!({ "method": "POST", "url": "https://api.test/ancestor" }),
+            ),
+            node(
+                "nested",
+                NodeKind::SubWorkflow,
+                json!({ "workflow_id": "b" }),
+            ),
+        ]);
+        ancestor.edges = vec![tinyflows::model::Edge {
+            from_node: "notify_parent_child".into(),
+            from_port: "main".into(),
+            to_node: "nested".into(),
+            to_port: "main".into(),
+        }];
+
+        let registry = ChildGateRegistry::default();
+        registry.record(
+            "a",
+            ChildGateRecord {
+                graph: ancestor,
+                gated: Vec::new(),
+            },
+        );
+        registry.record(
+            "b",
+            ChildGateRecord {
+                graph: two_gate_child_graph(),
+                gated: Vec::new(),
+            },
+        );
+
+        let warned = child_calls_to_repeat(
+            &child_parent_graph("a"),
+            &["sub::nested::work2".to_string()],
+            &registry,
+            &json!({ "approvals": ["sub::nested::work"] }),
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sub::notify_parent_child", "notify", "work"],
+            "{warned:?}"
+        );
+    }
+
     /// `sub::nested::work`; the child whose graph holds `work` is the
     /// grandchild, reachable only by descending the registry through the
     /// intermediate `sub_workflow` node's `workflow_id`. The approved first
