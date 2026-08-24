@@ -681,7 +681,7 @@ fn project_stream_item(
     viewer: &Viewer,
 ) -> Option<serde_json::Value> {
     match item {
-        EventStreamItem::Event(stored) => project_event(stored, authors, viewer),
+        EventStreamItem::Event(stored) => project_event_for_viewer(stored, authors, viewer),
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
             "missed": missed,
@@ -706,7 +706,11 @@ fn project_stream_item(
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
-fn project_event(
+fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
+    project_event_for_viewer(stored, &std::collections::HashMap::new(), &Viewer::Operator)
+}
+
+fn project_event_for_viewer(
     stored: &StoredEvent,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
