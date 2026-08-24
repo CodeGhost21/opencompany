@@ -396,6 +396,9 @@ async fn an_env_owned_engine_is_read_only_and_refuses_a_write() {
 #[tokio::test]
 async fn applying_an_engine_persists_it_to_config_toml() {
     let dir = tempfile::tempdir().unwrap();
+    let guard = EnvVarGuard::capture(&MEMORY_ENV);
+    guard.remove("OPENCOMPANY_MEMORY");
+    guard.set("OPENCOMPANY_DATA_DIR", dir.path().to_str().unwrap());
     let state = state_at(dir.path()).await;
 
     let (status, body) = call(
