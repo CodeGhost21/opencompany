@@ -139,6 +139,13 @@ impl CompanyManifest {
     /// default. `None` only when the named harness does not exist — which
     /// [`validate`](Self::validate) rejects, so a validated manifest always
     /// answers.
+    ///
+    /// An id that no `[[harness]]` declares but that names a coding CLI this
+    /// build can drive locally resolves to
+    /// [`Harness::implicit_local`](crate::company::Harness::implicit_local) —
+    /// see that constructor for why a local ACP harness is not something a
+    /// `company.toml` should have to declare. A declared harness of the same
+    /// id is found first and always wins.
     pub fn harness_for(&self, agent_id: &str) -> Option<Harness> {
         let named = self
             .agents
@@ -146,9 +153,23 @@ impl CompanyManifest {
             .find(|a| a.id == agent_id)
             .and_then(|a| a.harness.clone());
         let want = named.unwrap_or_else(|| self.default_harness_id());
+        self.harness_by_id(&want)
+    }
+
+    /// The harness `id` names: a declared `[[harness]]` first, else the
+    /// synthesized local one when `id` is a coding CLI this build drives.
+    ///
+    /// The single resolver for "does this harness id mean anything?" — used
+    /// by [`harness_for`](Self::harness_for) resolving an agent's own binding
+    /// and by the console's write path validating a submitted one. Two copies
+    /// of the declared-then-implicit precedence would eventually disagree,
+    /// and the shape that disagreement takes is a harness the picker offers
+    /// and the `PATCH` then refuses.
+    pub fn harness_by_id(&self, id: &str) -> Option<Harness> {
         self.effective_harnesses()
             .into_iter()
-            .find(|h| h.id == want)
+            .find(|h| h.id == id)
+            .or_else(|| Harness::is_implicit_local_id(id).then(|| Harness::implicit_local(id)))
     }
 
     /// Reads, parses, and validates a manifest from `path`.
@@ -700,9 +721,17 @@ impl CompanyManifest {
         let mut problems = Vec::new();
 
         // An absent block is the implicit built_in harness, which is always
-        // valid — and is what every shipped company has. Nothing to check.
+        // valid — and is what every shipped company has. Nothing to check
+        // beyond a binding to something that cannot resolve: a coding CLI this
+        // build drives locally needs no declaration (see
+        // `Harness::implicit_local`), so only a *different* name is a problem.
         if self.harnesses.is_empty() {
-            if let Some(agent) = self.agents.iter().find(|a| a.harness.is_some()) {
+            if let Some(agent) = self.agents.iter().find(|a| {
+                a.harness
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|named| !Harness::is_implicit_local_id(named))
+            }) {
                 let named = agent.harness.as_deref().unwrap_or_default();
                 problems.push(format!(
                     "agent `{}` names harness `{named}`, but the manifest declares no `[[harness]]`. \
@@ -792,12 +821,56 @@ impl CompanyManifest {
             let Some(named) = agent.harness.as_deref().map(str::trim) else {
                 continue;
             };
-            if !seen.contains(named) {
+            // A coding CLI this build drives locally needs no declaration —
+            // whether it is installed is a fact about the machine, not the
+            // blueprint (see `Harness::implicit_local`).
+            if !seen.contains(named) && !Harness::is_implicit_local_id(named) {
                 problems.push(format!(
                     "agent `{}` names harness `{named}`, which no `[[harness]]` declares. Declared: {}.",
                     agent.id,
                     join_backticked(&seen.iter().copied().collect::<Vec<_>>())
                 ));
+            }
+        }
+
+        // Issue #1245's per-agent follow-up: `agent.model` only means anything
+        // on an `acp` harness, exactly like `[harness.acp].model` above — see
+        // `validate_acp_harness`'s own doctrine on why silently accepting it
+        // elsewhere is worse than refusing it. Skipped when the agent names an
+        // unknown harness: the loop above already reports that, and piling a
+        // second, confusing complaint about its model on top would not help.
+        for agent in &self.agents {
+            let Some(model) = agent.model.as_deref() else {
+                continue;
+            };
+            if model.trim().is_empty() {
+                problems.push(format!(
+                    "agent `{}`'s `model` is set but empty. Drop the key to use the harness's \
+                     own default, rather than naming an empty one.",
+                    agent.id
+                ));
+                continue;
+            }
+            match self.harness_for(&agent.id) {
+                Some(harness) if harness.kind == "acp" => {
+                    if harness.acp.as_ref().map(|a| a.transport.as_str()) == Some("runner") {
+                        problems.push(format!(
+                            "agent `{}` names a `model` but its harness `{}` uses \
+                             `transport = \"runner\"`. Model overrides aren't supported for a \
+                             runner yet — the runner wire protocol doesn't carry them.",
+                            agent.id, harness.id
+                        ));
+                    }
+                }
+                Some(harness) => {
+                    problems.push(format!(
+                        "agent `{}` names a `model` but runs on harness `{}` (`kind = \"{}\"`), \
+                         which has no ACP transport to forward it to. Bind this agent to an \
+                         `acp` harness, or drop `model`.",
+                        agent.id, harness.id, harness.kind
+                    ));
+                }
+                None => {}
             }
         }
 
@@ -2229,6 +2302,62 @@ provider = "openrouter"
         );
     }
 
+    /// Issue #1245's detected-harness follow-up: whether `claude-agent-acp` is
+    /// installed is a fact about the **machine**, so binding to it must not
+    /// require a `company.toml` edit — the same manifest is opened from
+    /// machines where the answer differs. Accepted with a harness block
+    /// declared and without one, and it resolves to a `local` acp harness.
+    #[test]
+    fn a_coding_cli_is_bindable_without_being_declared() {
+        for tail in [
+            "",
+            "\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n",
+        ] {
+            let manifest = parse(&format!("{BASE}harness = \"claude\"\n{tail}"));
+            assert!(
+                harness_problems(&manifest).is_empty(),
+                "`claude` needs no declaration ({tail:?}): {:?}",
+                harness_problems(&manifest)
+            );
+
+            let resolved = manifest.harness_for("ceo").expect("resolves");
+            assert_eq!(resolved.id, "claude");
+            assert_eq!(resolved.kind, "acp");
+            let acp = resolved.acp.expect("acp section");
+            assert_eq!(acp.transport, "local");
+            assert_eq!(acp.agent.as_deref(), Some("claude"));
+        }
+    }
+
+    /// The synthesized harness must never be the default: which harness an
+    /// *unbound* teammate runs on stays a blueprint decision, or something a
+    /// machine happens to have installed could silently redirect the roster.
+    #[test]
+    fn an_implicit_local_harness_is_never_the_default() {
+        let manifest = parse(&format!("{BASE}harness = \"claude\"\n"));
+        assert_ne!(manifest.default_harness_id(), "claude");
+        assert!(manifest.default_harness().is_built_in());
+        assert!(!Harness::implicit_local("claude").default);
+    }
+
+    /// A declared `[[harness]]` of the same id wins — otherwise a company that
+    /// deliberately pinned a model on its `claude` harness would silently get
+    /// the bare synthesized one instead.
+    #[test]
+    fn a_declared_harness_wins_over_the_synthesized_one() {
+        let manifest = parse(&format!(
+            "{BASE}harness = \"claude\"\n\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n\n\
+             [[harness]]\nid = \"claude\"\nkind = \"acp\"\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"\nmodel = \"opus-4-5\"\n"
+        ));
+        assert!(harness_problems(&manifest).is_empty());
+        let resolved = manifest.harness_for("ceo").expect("resolves");
+        assert_eq!(
+            resolved.acp.expect("acp").model.as_deref(),
+            Some("opus-4-5"),
+            "the declared harness, not the synthesized one"
+        );
+    }
+
     #[test]
     fn duplicate_harness_ids_are_rejected() {
         let manifest = parse(&format!(
@@ -2393,6 +2522,54 @@ provider = "openrouter"
                 Some(msg) => assert!(
                     problems.iter().any(|p| p.contains(msg)),
                     "`{acp}` should report {msg:?}, got {problems:?}"
+                ),
+            }
+        }
+    }
+
+    /// Issue #1245's per-agent follow-up: `agent.model` follows the exact
+    /// same doctrine as `[harness.acp].model` — valid on `local`, rejected on
+    /// `runner`, rejected when empty — plus one rule the harness-level field
+    /// has no need for: it is meaningless on a `built_in` harness, since
+    /// there is no ACP session to steer a model through.
+    #[test]
+    fn agent_model_follows_the_harness_level_models_own_doctrine() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "kind = \"built_in\"\ndefault = true",
+                "model = \"opus-4-5\"",
+                Some("has no ACP transport to forward it to"),
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"",
+                "model = \"opus-4-5\"",
+                None,
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"runner\"\nrunner = \"laptop\"",
+                "model = \"opus-4-5\"",
+                Some("uses `transport = \"runner\"`"),
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"",
+                "model = \"   \"",
+                Some("is set but empty"),
+            ),
+        ];
+        for (harness, agent_model, expected) in cases {
+            let manifest = parse(&format!(
+                "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n{agent_model}\n\n\
+                 [[harness]]\nid = \"a\"\n{harness}\n"
+            ));
+            let problems = manifest.validate();
+            match expected {
+                None => assert!(
+                    !problems.iter().any(|p| p.contains("model")),
+                    "{harness} / {agent_model} should be valid: {problems:?}"
+                ),
+                Some(msg) => assert!(
+                    problems.iter().any(|p| p.contains(*msg)),
+                    "{harness} / {agent_model} should report {msg:?}, got {problems:?}"
                 ),
             }
         }

@@ -72,7 +72,7 @@ pub const ACP_TRANSPORTS: &[&str] = &["local", "runner"];
 /// Kept in step with the desktop's own `ACP_HARNESSES` catalogue, which encodes
 /// how to put each one into ACP mode — guessing those arguments wrong spawns a
 /// process that hangs waiting for interactive input.
-pub const ACP_AGENTS: &[&str] = &["claude", "codex", "goose"];
+pub const ACP_AGENTS: &[&str] = &["claude", "codex"];
 
 /// The abstract cognition tiers the tenant `[inference].models` table maps to
 /// concrete provider model ids. These are the workload names the harness
@@ -524,6 +524,20 @@ pub struct Agent {
     /// moving between harnesses.
     #[serde(default)]
     pub harness: Option<String>,
+    /// A model hint forwarded to this agent's ACP harness for this agent's
+    /// own turns, overriding that `[[harness]].acp.model` when both are set
+    /// (issue #1245's per-agent follow-up).
+    ///
+    /// Not a credential, for the same reason [`AcpHarness::model`] is not
+    /// one — the ACP agent already holds its own. Meaningful only when this
+    /// agent resolves to an `acp` harness with `transport = "local"`;
+    /// validation rejects it on a `built_in`-harness agent rather than
+    /// silently ignoring it, matching the harness-level field's own
+    /// doctrine. Two agents sharing one `local` acp harness process still
+    /// share the subprocess — the override steers that agent's own ACP
+    /// *session* (`session/set_config_option`), not the process env.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Tool grant globs, intersected with `[tools].allow`.
     #[serde(default)]
     pub tools: Vec<String>,
@@ -1158,6 +1172,55 @@ impl Harness {
             inference: None,
             acp: None,
         }
+    }
+
+    /// The harness a teammate gets by naming a coding CLI this build knows how
+    /// to drive, without any `[[harness]]` declaring it (issue #1245's
+    /// detected-harness follow-up).
+    ///
+    /// A local ACP harness is a property of the **machine**, not of the
+    /// company: whether `claude-agent-acp` is installed and signed in is
+    /// answered by the desktop's own `acp::discovery` survey, and a
+    /// version-controlled `company.toml` is the wrong place to record it —
+    /// the same manifest is opened from a machine where the answer differs.
+    /// So the manifest vocabulary ([`ACP_AGENTS`]) is treated as a set of ids
+    /// that are *bindable without being declared*, and this synthesizes the
+    /// harness a binding to one resolves to.
+    ///
+    /// Deliberately **never** `default`: which harness an unbound teammate
+    /// runs on stays a blueprint decision, so nothing a machine happens to
+    /// have installed can silently redirect a company's whole roster.
+    ///
+    /// Synthesized on demand rather than folded into
+    /// [`effective_harnesses`](crate::company::CompanyManifest::effective_harnesses):
+    /// a company that references none of these must produce **no** extra lanes
+    /// and **no** extra `unavailable` entries, because
+    /// `brain.rs` returns the plain engine when both are empty — and adding
+    /// three phantom entries to every company would skip that path for all of
+    /// them.
+    ///
+    /// A declared `[[harness]]` of the same id always wins; this is only ever
+    /// the fallback for an id nothing declares.
+    pub fn implicit_local(agent: &str) -> Self {
+        Self {
+            id: agent.to_string(),
+            kind: "acp".to_string(),
+            default: false,
+            inference: None,
+            acp: Some(AcpHarness {
+                transport: "local".to_string(),
+                agent: Some(agent.to_string()),
+                runner: None,
+                model: None,
+            }),
+        }
+    }
+
+    /// Whether `id` names a coding CLI this build can drive locally, and so is
+    /// bindable even when no `[[harness]]` declares it. See
+    /// [`implicit_local`](Self::implicit_local).
+    pub fn is_implicit_local_id(id: &str) -> bool {
+        ACP_AGENTS.contains(&id)
     }
 
     /// Whether this is the embedded loop — the only kind that consults
