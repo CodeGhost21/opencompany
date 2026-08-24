@@ -25,6 +25,11 @@ interface Props {
   onSelect: (id: string) => void;
   collapsed?: boolean;
   onExpand?: () => void;
+  /** Controlled section-disclosure state, shared across the desktop and
+   * sub-`lg` rail instances so crossing the breakpoint keeps the operator's
+   * folds (codex P2 review). Falls back to instance-local state. */
+  openSections?: Record<string, boolean>;
+  onToggleSection?: (id: string) => void;
   className?: string;
 }
 
