@@ -280,11 +280,11 @@ function mentionableText(entry: Mentionable): string {
  * with both spans recorded at 0 and 5 — so no text-only rule can serve both,
  * which is why the caller with the pre-edit text hands it over: `previous`
  * lets the edited region be recovered, and a mention whose recorded span the
- * edit touched is the one that was deleted. Dropping it before the reverse
- * scan runs keeps its same-text sibling's identity instead of re-anchoring the
- * deleted mention onto the survivor's span. The composer passes the previous
- * draft on `onChange`; the pick/send/trim paths omit it and keep the historical
- * behavior.
+ * edit touched is the one that was removed or broken. Dropping it before the
+ * reverse scan runs keeps its same-text sibling's identity instead of
+ * re-anchoring the broken mention onto the survivor's span. The composer
+ * passes the previous draft on `onChange`; the pick/send/trim paths omit it
+ * and keep the historical behavior.
  */
 export function reconcileMentions(
   text: string,
