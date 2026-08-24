@@ -2979,6 +2979,30 @@ impl RuntimeBuilder {
             })
             .await?;
 
+        // The gate above was built from the seed's `[policy]` alone, before the
+        // persisted record was read. Now that the carried override is known —
+        // and the record carrying it is durably saved — apply the effective
+        // policy to the live gate. It is deliberately after the last fallible
+        // build step: `gate` is the outgoing runtime's shared approval gate on a
+        // hot rebuild, so mutating it before the successor is committed would
+        // leave the still-live runtime enforcing a policy whose record and API
+        // still describe the old one if `store.save` above failed (a loosening
+        // override could then bypass approvals despite the failed deployment).
+        // Parked approvals and the emergency switch are untouched; only the
+        // evaluation policy and the derived deadline move.
+        //
+        // Otherwise `GET …/policy` reports the console's deadline/cap/tier while
+        // the gate enforces the manifest snapshot, and a persisted override
+        // silently reverts on every restart (issue #1455). A test-injected gate
+        // is exempt: it carries its own policy/TTL on purpose (e.g. a zero-TTL
+        // gate for expiry tests).
+        if !gate_injected {
+            gate.apply_effective_policy(effective_policy(
+                &self.manifest.policy,
+                overlay_policy.as_ref(),
+            ));
+        }
+
         // Economy: an injected economy wins; otherwise the `tinyplace` feature
         // auto-wires one for a discoverable company with a handle. Going-public
         // (the paid handle-claim) fires only when discovery is enabled.
