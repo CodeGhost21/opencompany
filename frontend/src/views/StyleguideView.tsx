@@ -1080,7 +1080,7 @@ function ComponentSection() {
             <CardTitle className="text-sm">Sidebar</CardTitle>
           </CardHeader>
           <CardContent>
-            <SidebarProvider className="h-32 overflow-hidden rounded-md border" defaultOpen>
+            <SidebarProvider className="h-32 min-h-32 overflow-hidden rounded-md border" defaultOpen>
               <Sidebar collapsible="none" className="w-48">
                 <SidebarContent>
                   <SidebarGroup>
