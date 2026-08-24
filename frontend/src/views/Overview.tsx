@@ -181,7 +181,6 @@ export function Overview({ client, company, companyName }: Props) {
     if (!loading && !loadError && restoreFocusToRefreshRef.current) {
       restoreFocusToRefreshRef.current = false;
       const active = document.activeElement;
-      console.log("[probe] handoff run, active is shell:", active === graphShellRef.current, "active is body:", active === document.body, "refresh exists:", !!refreshButtonRef.current);
       if (active === graphShellRef.current || active === document.body) {
         refreshButtonRef.current?.focus();
       }
