@@ -6901,7 +6901,11 @@ mod tests {
                 "a run with no files is 200, never 404"
             );
             let body = json_body(response).await;
-            assert_eq!(body.as_array().expect("array").len(), 0, "{body}");
+            assert_eq!(
+                body["files"].as_array().expect("files array").len(),
+                0,
+                "{body}"
+            );
         }
 
         /// `latestVersion` pins the newest revision, so the deep-link opens the
