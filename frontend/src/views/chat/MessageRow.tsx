@@ -6,6 +6,7 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { timeAgo } from "@/lib/language";
+import { MessageAttachments } from "./MessageAttachments";
 import { cn } from "@/lib/utils";
 import {
   formatTime,
@@ -28,6 +29,12 @@ interface Props {
   onDismissCard: (taskId: string) => void;
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
+  /**
+   * Resolves an attachment's bytes to an object URL for preview/download
+   * (issue #1682). Threaded from the shell, which holds the authenticated
+   * client the blob route needs.
+   */
+  resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
 }
 
 /**
@@ -67,6 +74,7 @@ export function MessageRow({
   onReact,
   onDismissCard,
   dismissingCardId,
+  resolveAttachmentUrl,
 }: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
@@ -107,6 +115,13 @@ export function MessageRow({
       <div className="flex min-w-0 flex-1 flex-col">
         {!continuation && <AuthorLine sender={sender} at={message.at} />}
         <Markdown className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+
+        {message.attachments && message.attachments.length > 0 && (
+          <MessageAttachments
+            attachments={message.attachments}
+            resolveUrl={resolveAttachmentUrl}
+          />
+        )}
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.taskId && (

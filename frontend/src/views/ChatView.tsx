@@ -16,9 +16,12 @@ import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type MessageIntent } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
+import { uploadChatAttachment } from "@/api/chat";
+import { fetchBlobUrl } from "@/api/workspace";
 import {
   ApiError,
   type ApprovalSummary,
+  type AttachmentDto,
   type GrantScope,
   type TeamMemberDto,
   type TurnStep,
@@ -725,11 +728,20 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, intent?: MessageIntent, parentId?: string) {
+  async function send(
+    text: string,
+    intent?: MessageIntent,
+    parentId?: string,
+    attachments?: AttachmentDto[],
+  ) {
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
-    const local = makeMessage("you", text, { parentId });
+    // The optimistic bubble carries the attachments too, so the operator sees
+    // the file on their own message the instant they send (issue #1682) — the
+    // SSE echo / reload copy then matches it, projected from the same durable
+    // references the host resolved.
+    const local = makeMessage("you", text, { parentId, attachments });
     append(target, local);
     setSending(true);
     // Claim the thread for the duration of the POST. The backend journals an
@@ -755,6 +767,10 @@ export function ChatView({
         // field ignores this and answers synchronously, which is why the branch
         // below reads the response's shape and never this argument.
         true,
+        // Node ids only (issue #1682): the host re-resolves each against this
+        // company's workspace and takes the name/mime/size from the store, so
+        // the client neither sends nor is trusted for that metadata.
+        attachments?.map((a) => a.nodeId),
       );
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
@@ -817,6 +833,23 @@ export function ChatView({
       setSending(false);
     }
   }
+
+  // Upload one attachment's bytes for the composer (issue #1682). Bound to the
+  // active connection's client/company so the composer stays agnostic of both.
+  const uploadAttachment = useCallback(
+    (file: File) => uploadChatAttachment(client, company, file),
+    [client, company],
+  );
+
+  // Fetch a stored attachment's bytes as an object URL for the transcript
+  // (issue #1682). The blob route needs the client's bearer, which an `<img>`
+  // or a bare link cannot carry — so the row resolves through this and the
+  // caller revokes the URL when done. Reuses the hardened `/workspace/blob`
+  // serve untouched.
+  const resolveAttachmentUrl = useCallback(
+    (nodeId: string) => fetchBlobUrl(client, company, nodeId),
+    [client, company],
+  );
 
   /**
    * Set or clear the operator's own reaction on a message (issue #364).
@@ -1113,6 +1146,7 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              resolveAttachmentUrl={resolveAttachmentUrl}
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
@@ -1137,7 +1171,12 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text, intent) => void send(text, intent)}
+              onSend={(text, intent, attachments) =>
+                void send(text, intent, undefined, attachments)
+              }
+              // Issue #1682: only the channel/DM composer attaches — the paperclip
+              // is present exactly because this prop is.
+              uploadAttachment={uploadAttachment}
               // Every keystroke asks; the hook throttles to one ping per
               // channel per few seconds and skips entirely while the event
               // stream is down.
