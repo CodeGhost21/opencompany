@@ -820,7 +820,10 @@ async fn deliver_code(
         Ok(()) => true,
         Err(err) => {
             // Logged, not returned: the caller must not learn the address exists.
-            tracing::warn!(company = %runtime.id(), "login mail failed: {err}");
+            // `error!`, not `warn!`: without `RUST_LOG` the default
+            // `EnvFilter` shows errors only, and this is the sole record of why
+            // nobody can sign in.
+            tracing::error!(company = %runtime.id(), "login mail failed: {err}");
             false
         }
     }
