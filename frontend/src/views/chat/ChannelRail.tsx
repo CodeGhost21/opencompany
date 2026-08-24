@@ -22,6 +22,8 @@ interface Props {
   activeId: string | null;
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
+  /** Channel id → how many unread mentions name this person there. */
+  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
   collapsed?: boolean;
   onExpand?: () => void;
