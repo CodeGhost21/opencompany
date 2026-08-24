@@ -199,11 +199,20 @@ pub(super) struct AgentToolsDto {
     /// The ceiling contributed by the desks this agent sits on — the union of
     /// their `tools`, already narrowed by `company_allow`.
     ///
-    /// **Empty means no desk narrows anything**, which is the same "empty is not
-    /// nothing" trap `requested` carries: a console rendering an empty list as
-    /// "this desk grants no tools" would invert the meaning. It is empty for
-    /// every company that has not set a desk ceiling, which is most of them.
+    /// **Empty means the narrowed ceiling grants nothing**, which is *not* the
+    /// same as "no desk narrows anything" — see `desk_ceiling_active`. A desk
+    /// ceiling can resolve to an empty list while still being active (its only
+    /// grant is an explicit opt-in the company's bare `*` does not confer), and
+    /// the console has to tell those apart or it substitutes `company_allow`
+    /// and promises grants the host drops. It is empty for every company that
+    /// has not set a desk ceiling, which is most of them.
     desk_allow: Vec<String>,
+    /// Whether any desk this agent sits on states a `tools` ceiling — distinct
+    /// from `desk_allow`, which is that ceiling *narrowed by the company grant*
+    /// and can legitimately resolve to empty. This is the sentinel the console
+    /// preview keys on: `true` means the desk level is in play even when the
+    /// narrowed list is empty.
+    desk_ceiling_active: bool,
     /// What the agent actually holds, after all three levels.
     effective: Vec<String>,
 }
