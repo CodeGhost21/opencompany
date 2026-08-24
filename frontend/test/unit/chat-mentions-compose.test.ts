@@ -251,6 +251,38 @@ describe("insertMention", () => {
     const { text } = insertMention("hey @", { start: 4, end: 5 }, jane);
     expect(text).toBe("hey @Jane Doe ");
   });
+
+  /**
+   * The `#` spelling is desk-only server-side (`extract_with_known` narrows
+   * `@#…` to desk targets), so a user whose display label starts with `#`
+   * must fall back to a plain alias rather than inserting a visually
+   * desk-shaped `@#Ada` that revalidation would still accept as the user.
+   */
+  it("falls back off a `#`-prefixed label for a user row", () => {
+    const hashUser: Mentionable = {
+      target: { kind: "user", id: "u1" },
+      label: "#Ada",
+      aliases: ["#ada", "ada"],
+    };
+    const { text, mention } = insertMention("hey @", { start: 4, end: 5 }, hashUser);
+    expect(text).toBe("hey @ada ");
+    expect(mention.text).toBe("@ada");
+    expect(
+      text.slice(mention.offset, mention.offset + mention.text.length),
+    ).toBe("@ada");
+  });
+
+  /** On a desk row the `#` spelling is the point — `@#support` resolves. */
+  it("keeps the `#` spelling on a desk row", () => {
+    const hashDesk: Mentionable = {
+      target: { kind: "desk", id: "#support" },
+      label: "#support",
+      aliases: ["#support", "support"],
+    };
+    const { text, mention } = insertMention("hey @", { start: 4, end: 5 }, hashDesk);
+    expect(text).toBe("hey @#support ");
+    expect(mention.text).toBe("@#support");
+  });
 });
 
 describe("mentionsOutsideRange", () => {
