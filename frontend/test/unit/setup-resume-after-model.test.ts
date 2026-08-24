@@ -401,7 +401,16 @@ describe("leaving the completion screen to wire a model", () => {
         reason: "no_model",
       }),
       addTeamMember: async (input: { name: string; role: string }) => {
-        const member = { id: input.name.toLowerCase(), role: input.role, inboxEnabled: false } as TeamMemberDto;
+        // The host mints ids from the name, unique against the roster it already
+        // holds (issue #686) — a replacing build-out's creates run while the
+        // rows they replace still exist, so a second Ada becomes "ada-2". The
+        // replacement sweep below must not then remove the new rows.
+        const base = input.name.toLowerCase();
+        let id = base;
+        for (let suffix = 2; roster.some((m) => m.id === id); suffix++) {
+          id = `${base}-${suffix}`;
+        }
+        const member = { id, role: input.role, inboxEnabled: false } as TeamMemberDto;
         roster.push(member);
         return member;
       },
