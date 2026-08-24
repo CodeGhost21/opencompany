@@ -101,6 +101,7 @@ describe("what the panel says a teammate is", () => {
           requested: ["workspace.*", "finance.*"],
           companyAllow: ["workspace.*"],
           deskAllow: [],
+          deskCeilingActive: false,
           effective: ["workspace.*"],
         },
       }),
