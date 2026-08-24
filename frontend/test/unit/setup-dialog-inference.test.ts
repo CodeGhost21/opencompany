@@ -100,6 +100,7 @@ async function show(
     fallbackIds?: string[];
     onRedesign?: (fallbackIds: string[]) => void;
     onRetry?: (fallbackIds: string[]) => void;
+    onReplacementComplete?: (fallbackIds: string[] | null) => void;
   } = {},
 ) {
   await act(async () => {
@@ -119,6 +120,7 @@ async function show(
         onDone: () => {},
         onRedesign: over.onRedesign ?? (() => {}),
         onRetry: over.onRetry,
+        onReplacementComplete: over.onReplacementComplete,
       }),
     );
   });
