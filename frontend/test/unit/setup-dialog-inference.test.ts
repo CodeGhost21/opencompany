@@ -253,16 +253,32 @@ describe("the finished build-out points at what would actually help", () => {
     expect(find("setup-buildout-title")?.textContent).toContain("Your starting team is ready");
   });
 
-  it("offers a retry instead of a new key when a wired model was unreachable", async () => {
+  it("offers a retry and a connection check when a wired model was unreachable", async () => {
     await show(clientWith({ source: "fallback", reason: "model_unreachable" }));
     await runFlow();
-    // A credential is already wired; the CTA that fixes a *missing* model cannot
-    // help, and the copy must not promise that it can.
+    // A credential is already wired, so the CTA that fixes a *missing* model
+    // cannot help — but the failure could be the credential itself (rejected
+    // rather than merely busy), so the route that checks it is offered beside
+    // the retry that fixes a transient blip.
     expect(find("setup-add-model")).toBeNull();
     expect(find("setup-try-redesign")).toBeTruthy();
+    expect(find("setup-check-connection")).toBeTruthy();
     expect(find("setup-buildout-title")?.parentElement?.textContent).toContain(
       "couldn't reach it just now",
     );
+  });
+
+  it('"Check connection in Settings" records the redesign debt like the wiring CTA', async () => {
+    const redesigned: string[][] = [];
+    await show(clientWith({ source: "fallback", reason: "model_unreachable" }), {
+      onRedesign: (ids) => redesigned.push(ids),
+    });
+    await runFlow();
+    await click(find("setup-check-connection")!);
+    // The fallback team is to be replaced when the operator returns from
+    // checking the connection — the same debt the wiring CTA records, because
+    // the next build-out must replace the shipped team, not stack on it.
+    expect(redesigned).toEqual([[]]);
   });
 
   it('"Try again" returns to the questions in replacing mode', async () => {
