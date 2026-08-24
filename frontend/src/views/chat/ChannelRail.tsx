@@ -246,6 +246,7 @@ function Section({
                 channel={channel}
                 active={channel.id === activeId}
                 unread={unread[channel.id] ?? 0}
+                mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
               />
             </li>
