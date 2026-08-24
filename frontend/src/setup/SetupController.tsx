@@ -163,19 +163,24 @@ export function SetupController({
       const empty = teamIsUnstaffed(roster);
       setUnstaffed(empty);
       // A console reloaded after wiring a provider — a restart is a thing that
-      // page asks for — lands here rather than on a `hashchange`, so the debt is
-      // honoured on this path too. Not while still *on* that page: the operator
-      // has not come back yet, and the listener below is what notices when they
-      // do.
-      const returned = setupResuming(scope) && !onModelSettings();
+      // page asks for — lands here rather than on a `hashchange`, so both debts
+      // are honoured on this path too. Not while still *on* that page: the
+      // operator has not come back yet, and the listener below is what notices
+      // when they do.
+      const wasResuming = setupResuming(scope);
+      const wasRedesigning = setupRedesign(scope);
+      const returned = (wasResuming || wasRedesigning) && !onModelSettings();
       // Dropped on return whatever we do with it, so a debt cannot outlive the
       // trip that created it and resurface over some later unrelated
-      // navigation. `empty` decides only whether it is worth acting on.
-      if (returned) clearSetupResuming(scope);
-      const resume = returned && empty;
+      // navigation. `empty` decides only whether a *resume* is worth acting on;
+      // a redesign reopens over the staffed company the first pass created.
+      if (wasResuming) clearSetupResuming(scope);
+      if (wasRedesigning) clearSetupRedesign(scope);
+      const resume = returned && (wasRedesigning || empty);
+      setRedesigning(wasRedesigning && returned);
       // Only the first evaluation may open the dialog by itself; see
       // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
-      // keeps holding and the Team page keeps prompting.
+      // keeps holding and the Company page keeps prompting.
       setOpen(
         resume ||
           (first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) })),
