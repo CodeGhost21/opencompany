@@ -57,6 +57,17 @@ pub(crate) fn may_read_approval_contents(auth: &GqlAuth) -> bool {
     }
 }
 
+/// May this principal read a run's **deep** trace — the unredacted reasoning,
+/// tool arguments and raw output the Observatory shows behind a fold?
+///
+/// The same rule as [`may_read_approval_contents`]: those bodies can carry
+/// credentials and file contents, exactly as an approval payload can, so the
+/// admin/tenant boundary applies to them too. Kept beside the approval rule so
+/// the two sensitive-content gates cannot drift.
+pub(crate) fn may_read_deep_trace(auth: &GqlAuth) -> bool {
+    may_read_approval_contents(auth)
+}
+
 /// Applies [`may_read_approval_contents`] to a projection on its way out.
 ///
 /// Takes the whole list rather than one summary because every caller has a

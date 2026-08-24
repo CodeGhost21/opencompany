@@ -427,6 +427,7 @@ pub struct RuntimeBuilder {
     workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
     run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
+    deep_trace: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
@@ -560,6 +561,7 @@ impl RuntimeBuilder {
             workflow_revisions: None,
             schedule_fires: None,
             run_output_store: None,
+            deep_trace: None,
             usage: None,
             skills: None,
             read_state: None,
@@ -692,6 +694,7 @@ impl RuntimeBuilder {
         self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.schedule_fires = Some(handles.schedule_fires.clone());
         self.run_output_store = Some(handles.run_outputs.clone());
+        self.deep_trace = Some(handles.deep_trace.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.read_state = Some(handles.read_state.clone());
@@ -750,6 +753,19 @@ impl RuntimeBuilder {
         store: Arc<dyn crate::ports::journal::JournalStore>,
     ) -> Self {
         self.journal_store = Some(store);
+        self
+    }
+
+    /// Swaps the deep-trace store (default: fs-backed).
+    ///
+    /// The default is what every production host runs; a test swaps it for a
+    /// counting or in-memory store to observe whether the unredacted half was
+    /// actually read.
+    pub fn with_deep_trace(
+        mut self,
+        store: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
+    ) -> Self {
+        self.deep_trace = Some(store);
         self
     }
 
@@ -1291,6 +1307,7 @@ impl RuntimeBuilder {
                     self.runs.unwrap_or_else(|| fs_ops.clone()),
                     events.clone(),
                 )),
+                deep_trace: self.deep_trace.unwrap_or_else(|| fs_ops.clone()),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 workflow_run_outputs: self
@@ -2472,7 +2489,14 @@ impl RuntimeBuilder {
                                 serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
-                                meter: Some(fs_ops.clone()),
+                                // The harness must write usage to the SELECTED
+                                // backend, not always the filesystem. The read
+                                // side (`company.usage`) reads `ops.usage` — the
+                                // selected backend — so on a non-fs store the
+                                // samples were written to disk while the console
+                                // read an empty table. Same handle the read side
+                                // resolves to (see the `usage:` field below).
+                                meter: Some(ops.usage.clone()),
                                 workspace_root: home.join("harness"),
                                 // The company's own MCP store, so the
                                 // registry tools on the belt read the same
@@ -2539,6 +2563,13 @@ impl RuntimeBuilder {
                                 // here so a past run is readable from the console.
                                 // `None` degrades to no-persist, like `events`.
                                 run_output_store: self.run_output_store.clone(),
+                                // The SAME run store the dispatch path uses
+                                // (`HarnessBrain::with_runs` below), so a
+                                // workflow node's attempt and a card's
+                                // attempt land in one place by construction
+                                // rather than by two call sites agreeing.
+                                workflow_runs: Some(ops.runs.clone()),
+                                deep_trace: Some(ops.deep_trace.clone()),
                                 // Issue #661 (M7): the SAME revision store the
                                 // console's workflow PUT/DELETE routes use, so
                                 // an agent edit snapshots the prior body and an

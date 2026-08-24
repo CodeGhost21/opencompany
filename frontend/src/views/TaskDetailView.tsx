@@ -586,8 +586,6 @@ export function TaskDetailView({
                     />
                   }
                   entries={detail.timeline}
-                  waitingSince={detail.waitingSince}
-                  now={now}
                 />
               </TabsContent>
 
@@ -1542,7 +1540,7 @@ function RunDrawer({
                      case is handled by the guard above, so no `empty` copy is
                      needed here — the task-card dispatch sentence would be
                      wrong for a run's trace anyway. */
-                  <TimelineList entries={detail.steps} now={now} />
+                  <TimelineList entries={detail.steps} />
                 ) : null}
               </div>
             </ScrollArea>

@@ -932,6 +932,7 @@ mod test {
                     status: crate::ports::types::WorkflowNodeStatus::Ok,
                     elapsed_ms: 12,
                     diagnostics: Vec::new(),
+                    agent_run_id: None,
                 },
             )
             .await
@@ -1343,6 +1344,7 @@ mod test {
                     status: crate::ports::types::WorkflowNodeStatus::Ok,
                     elapsed_ms: 3,
                     diagnostics: Vec::new(),
+                    agent_run_id: None,
                 },
             )
             .await

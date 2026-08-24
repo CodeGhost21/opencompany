@@ -94,15 +94,14 @@ type TimelineItem =
  *
  * Waiting bands (#305) are spliced in *before* the approval row that ended the
  * wait — the band is the pause that led to the decision, so it reads in that
- * order — and a live band is appended at the foot when the task is parked on an
- * operator right now. Approvals are never coalesced, so no band can land inside
- * a `×N` group.
+ * order. Approvals are never coalesced, so no band can land inside a `×N`
+ * group.
+ *
+ * Only *completed* waits appear here: the live wait on a task parked on an
+ * operator right now is the task detail's `AwaitingApprovalRow`, not a band in
+ * this timeline (issue #1354).
  */
-export function groupTimeline(
-  entries: TimelineEntry[],
-  waitingSince?: number,
-  now: number = Date.now(),
-): TimelineItem[] {
+export function groupTimeline(entries: TimelineEntry[]): TimelineItem[] {
   const groups: TimelineGroup[] = [];
   for (const e of entries) {
     const last = groups[groups.length - 1];
@@ -142,14 +141,6 @@ export function groupTimeline(
       });
     }
     items.push({ row: "group", key: g.key, group: g });
-  }
-  if (waitingSince !== undefined) {
-    items.push({
-      row: "wait",
-      key: "wait-live",
-      millis: Math.max(0, now - waitingSince),
-      live: true,
-    });
   }
   return items;
 }
@@ -225,19 +216,12 @@ function isFailureRow(entry: TimelineEntry): boolean {
  */
 export function TimelineList({
   entries,
-  waitingSince,
-  now,
   empty = null,
 }: {
   entries: TimelineEntry[];
-  waitingSince?: number;
-  now: number;
   empty?: ReactNode;
 }) {
-  const items = useMemo(
-    () => groupTimeline(entries, waitingSince, now),
-    [entries, waitingSince, now],
-  );
+  const items = useMemo(() => groupTimeline(entries), [entries]);
   if (items.length === 0) return <>{empty}</>;
   return (
     <ol className="space-y-1.5">

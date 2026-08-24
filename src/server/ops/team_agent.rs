@@ -634,15 +634,13 @@ async fn edit_agent(
         require_admin(&headers, &state, &company.runtime, peer).await?;
     }
 
-    let name = trimmed_field(body.name.as_deref(), "name")
-        .map_err(|e| Rejection::from(e.into_response()))?;
-    let role = trimmed_field(body.role.as_deref(), "role")
-        .map_err(|e| Rejection::from(e.into_response()))?;
+    let name = trimmed_field(body.name.as_deref(), "name").map_err(|e| e.into_response())?;
+    let role = trimmed_field(body.role.as_deref(), "role").map_err(|e| e.into_response())?;
     let tools = body
         .tools
         .map(|globs| trimmed_globs(&globs))
         .transpose()
-        .map_err(|e| Rejection::from(e.into_response()))?;
+        .map_err(|e| e.into_response())?;
     // Present-and-null clears; a blank string clears too — an empty override
     // and no override mean the same thing (the harness's own default model
     // applies), and storing `Some("")` would only make the two look
@@ -666,11 +664,9 @@ async fn edit_agent(
     if let Some(Some(id)) = &harness
         && record.manifest.harness_by_id(id).is_none()
     {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "no harness named `{id}` is available for this company."
-        )))
-        .into_response()
-        .into());
+        return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+            format!("no harness named `{id}` is available for this company."),
+        ))));
     }
 
     // A model override only means anything on an `acp` harness — the same
@@ -691,13 +687,13 @@ async fn edit_agent(
             .unwrap_or_else(|| record.manifest.default_harness_id());
         let bound = record.manifest.harness_by_id(&resulting_harness_id);
         if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but this teammate's harness has no ACP \
-                 transport to forward it to. Bind it to an ACP harness first, or clear \
-                 the model."
-            )))
-            .into_response()
-            .into());
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but this teammate's harness has no ACP \
+                     transport to forward it to. Bind it to an ACP harness first, or clear \
+                     the model."
+                ),
+            ))));
         }
         // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
         // still cannot carry a model, because the runner wire protocol has no
@@ -712,13 +708,13 @@ async fn edit_agent(
             .map(|acp| acp.transport.as_str())
             == Some("runner")
         {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
-                 `transport = \"runner\"`. Model overrides aren't supported for a runner \
-                 yet — the runner wire protocol doesn't carry them."
-            )))
-            .into_response()
-            .into());
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                     `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                     yet — the runner wire protocol doesn't carry them."
+                ),
+            ))));
         }
     }
 
@@ -726,6 +722,7 @@ async fn edit_agent(
     // carried the field at all — including a `null` that clears it, which
     // changes routing exactly as much as setting one does.
     let routing_changed = model.is_some() || harness.is_some();
+
     if is_manifest {
         // Stored as an overlay on the record, exactly like the daily-budget
         // override #343 modelled: `company.toml` keeps saying what the company

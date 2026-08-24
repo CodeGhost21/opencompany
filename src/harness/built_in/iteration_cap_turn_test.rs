@@ -245,6 +245,8 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         search: None,
         tenant_search: None,
         workspace: None,
+        workflow_runs: None,
+        deep_trace: None,
     }
 }
 
