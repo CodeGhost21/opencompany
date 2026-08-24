@@ -2704,6 +2704,20 @@ pub enum TurnStepKind {
     Note,
 }
 
+impl TurnStepKind {
+    /// The stable `snake_case` wire name, matching the serde rename above.
+    ///
+    /// GraphQL serializes the kind as a string; lowercasing the Rust `Debug`
+    /// name instead would yield `toolcall`, which no consumer understands.
+    pub fn wire_word(self) -> &'static str {
+        match self {
+            TurnStepKind::ToolCall => "tool_call",
+            TurnStepKind::Thinking => "thinking",
+            TurnStepKind::Note => "note",
+        }
+    }
+}
+
 /// How a [`TurnStep`] ended. Serialized in `snake_case` (`ok` / `error` /
 /// `running` / `awaiting_approval`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
