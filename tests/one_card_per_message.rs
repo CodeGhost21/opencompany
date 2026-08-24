@@ -91,9 +91,7 @@ enum Effect {
 
 /// What the endpoint can see about one request.
 struct Ctx {
-    /// The persona line of the system prompt, e.g.
-    /// "You are the Chief Executive at Acme…". Located by its opening, not
-    /// by position — see `Ctx::of`.
+    /// The `role` line of the system prompt, e.g. "Chief Executive".
     role: String,
     /// Text of every `tool` message already in the transcript.
     tool_results: Vec<String>,
@@ -101,31 +99,42 @@ struct Ctx {
     user: String,
 }
 
+/// The persona's opening line, which is what identifies the agent asking.
+///
+/// Not simply the prompt's first line. OpenHuman prepends a `## Tool Policy
+/// Boundary` block to the whole assembled prompt when the session has tool
+/// restrictions (`agent/harness/session/turn/context.rs`), so the persona is no
+/// longer at the top. Keying on line one silently matched that heading for
+/// every agent, no rule fired, and each turn fell through to the endpoint's
+/// plain-text default — which reads here as "the turn opened no card" rather
+/// than as "the script stopped matching".
+fn persona_line(system_prompt: &str) -> String {
+    let mut lines = system_prompt.lines();
+    if system_prompt.starts_with("## Tool Policy Boundary") {
+        // The block is a heading, its bullet list, then a blank line.
+        for line in lines.by_ref() {
+            if line.trim().is_empty() {
+                break;
+            }
+        }
+    }
+    lines
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
 impl Ctx {
     fn of(body: &Value) -> Self {
         let msgs = body["messages"].as_array().cloned().unwrap_or_default();
         let text = |m: &Value| m["content"].as_str().unwrap_or("").to_string();
-        // The persona line, found by its opening rather than by position.
-        //
-        // It used to be line one, and this took `.lines().next()`. openhuman
-        // now prepends a `## Tool Policy Boundary` section ahead of it, so
-        // position-based extraction read that heading as the role and every
-        // `is(...)` rule stopped matching — the model fell through to its
-        // default, no desk was delegated to, and eight of these tests failed
-        // with "0 cards" and nothing pointing at the prompt.
-        //
-        // Searching for `You are the ` is what a model does: it reads the whole
-        // system prompt rather than assuming a layout.
-        let system = msgs
-            .iter()
-            .find(|m| m["role"] == "system")
-            .map(text)
-            .unwrap_or_default();
-        let role = system
-            .lines()
-            .find(|line| line.starts_with("You are the "))
-            .unwrap_or("")
-            .to_string();
+        let role = persona_line(
+            &msgs
+                .iter()
+                .find(|m| m["role"] == "system")
+                .map(text)
+                .unwrap_or_default(),
+        );
         Ctx {
             role,
             tool_results: msgs

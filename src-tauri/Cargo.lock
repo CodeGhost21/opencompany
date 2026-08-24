@@ -3618,13 +3618,8 @@ dependencies = [
  "swc_core",
  "thiserror 2.0.20",
  "tinyagents",
- "tinycortex",
  "tinyflows",
- "tinymemory",
- "tinymemory-api",
- "tinymemory-core",
- "tinymemory-remote",
- "tinymemory-tinycortex",
+ "tinymcp",
  "tokio",
  "tokio-util",
  "toml 1.1.4+spec-1.1.0",
@@ -6489,21 +6484,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinymemory-remote"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tinymemory-api",
- "tokio",
-]
-
-[[package]]
 name = "tinymemory-sources"
 version = "0.1.0"
 dependencies = [
@@ -8338,8 +8318,3 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
-
-[[patch.unused]]
-name = "whisper-rs-sys"
-version = "0.15.0"
-source = "git+https://github.com/tinyhumansai/whisper-rs-sys.git?branch=main#229cb4c97e41ca302d3f13b1fa7e93a9b417a5f9"

@@ -67,8 +67,9 @@ describe("settings sub-rail collapses to chips below lg (issue #1383)", () => {
   });
 
   it("shows the chip-row fallback below lg, so the pane gets full width", () => {
-    expect(settings).toContain("flex gap-1 overflow-x-auto border-b p-2 lg:hidden");
-    expect(settings).not.toContain("flex gap-1 overflow-x-auto border-b p-2 sm:hidden");
+    expect(settings).toContain("border-b lg:hidden");
+    expect(settings).toContain("flex gap-1 overflow-x-auto p-2");
+    expect(settings).not.toContain("border-b sm:hidden");
   });
 });
 

@@ -96,7 +96,14 @@ export function FinanceSection({ client, company, sub, onNavigate }: Props) {
         aria-label="Finance"
         className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 sm:flex"
       >
-        <h2 className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">Finance</h2>
+        {/* A visual caption for the rail, not a heading. The `nav` is already
+            named by its `aria-label`, so an `h2` here added nothing for a screen
+            reader and broke the document outline: the rail renders before the
+            sub-page, so heading navigation met a section-level heading ahead of
+            the page's own `h1` (issue #1392). */}
+        <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">
+          Finance
+        </div>
         {FINANCE_PAGES.map((item) => (
           <button
             key={item.id}

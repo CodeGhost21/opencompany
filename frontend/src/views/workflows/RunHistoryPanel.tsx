@@ -534,8 +534,8 @@ function RunHistoryRow({
                 wrong name. */}
             <p className="text-2xs font-medium text-status-failed-text">
               {failedNode
-                ? `The “${nodeName(graph, failedNode)}” step failed.`
-                : "This run failed."}
+                ? `This run failed at “${nodeName(graph, failedNode)}”: ${errorMessage}`
+                : `This run failed: ${errorMessage}`}
             </p>
             <p className="mt-1 text-2xs text-muted-foreground">
               Review the error details, then correct the workflow and run it again.
@@ -545,7 +545,7 @@ function RunHistoryRow({
                 Details
               </summary>
               <pre className="mt-1 overflow-auto rounded border bg-muted/40 p-2 font-mono text-2xs leading-snug text-foreground">
-                {errorMessage}
+                {run.error}
               </pre>
             </details>
           </div>

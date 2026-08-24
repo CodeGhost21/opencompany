@@ -497,6 +497,7 @@ mod test {
         // tombstone. Pruning any of them dangles a stored pointer.
         for event in [
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 text: "hi".into(),
                 by: None,
                 chat: None,
@@ -504,6 +505,8 @@ mod test {
                 deliverable: None,
             },
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 chat_id: "desk".into(),
                 agent_id: "ceo".into(),
                 text: "hello".into(),

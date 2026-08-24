@@ -270,6 +270,7 @@ fn build_brain(
         // The agent workspaces hang off here. Nothing has created a single
         // directory under it — that is the precondition under test.
         workspace_root: dir.join("harness"),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.join("harness"),
         model_override: Some("stub-model".to_string()),
@@ -307,9 +308,6 @@ fn build_brain(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
         tenant_search: None,
         workflow_runs: None,

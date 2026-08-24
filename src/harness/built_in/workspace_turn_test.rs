@@ -278,6 +278,7 @@ async fn harness(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: None,
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
@@ -320,9 +321,7 @@ async fn harness(
         // backend is the fail-closed default outside the runtime builder.
         search: None,
         tenant_search: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
+        workspace: None,
         workflow_runs: None,
         deep_trace: None,
     };

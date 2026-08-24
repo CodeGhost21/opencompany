@@ -1946,6 +1946,7 @@ description = "Runs Acme."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -1984,9 +1985,6 @@ description = "Runs Acme."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
             workflow_runs: None,
             deep_trace: None,
         }

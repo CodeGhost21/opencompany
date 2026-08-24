@@ -5655,7 +5655,7 @@ mod tests {
         /// names for production hosts. Every other agent-turn test in this module
         /// (and `workflow_build::test`) is plain `#[tokio::test]` and relies on
         /// CI setting `RUST_MIN_STACK=16777216` for this job
-        /// (`.github/workflows/ci.yml`'s `Rust (openhuman, tinycortex)` lane) —
+        /// (`.github/workflows/ci.yml`'s `Rust (openhuman, tinymemory)` lane) —
         /// this one follows the same convention rather than wrapping itself in a
         /// custom-stack thread, which no sibling test does. Run locally with
         /// `RUST_MIN_STACK=16777216 cargo test …` if it overflows outside CI.
