@@ -257,6 +257,56 @@ describe("leaving to wire a model", () => {
     expect(dialog(), "the retried return should resume setup").toBeTruthy();
   });
 
+  it("ignores a stale return read that resolves after the company switches", async () => {
+    // A return from model settings starts a roster read. If the operator
+    // switches companies before it resolves, the callback must not reopen setup
+    // over the new company: the listener is removed on the switch, but the
+    // in-flight read is not cancelled, so without a guard the callback's
+    // `setOpen` would land on a controller rendering a company its read never
+    // saw — and the dialog it opened would then run replacement against the
+    // wrong company's roster.
+    let acmeReads = 0;
+    let resolveAcme!: (roster: TeamMemberDto[]) => void;
+    const acmeRead = new Promise<TeamMemberDto[]>((resolve) => {
+      resolveAcme = resolve;
+    });
+    const client = {
+      ...clientWith([...BASELINE]),
+      listTeam: async (company: string | null) => {
+        if (company === "acme" && ++acmeReads >= 2) return acmeRead;
+        return [...STAFFED];
+      },
+    } as unknown as OpenCompanyClient;
+    const render = (company: string | null) =>
+      act(async () => {
+        root.render(
+          createElement(ConnectionScopeProvider, {
+            scope: SCOPE,
+            children: createElement(SetupController, { client, company, deepLinked: false }),
+          }),
+        );
+      });
+
+    // Mount on acme; the gate read is served and setup offers itself.
+    await render("acme");
+    expect(dialog(), "setup should have opened").toBeTruthy();
+    await leaveForModelSettings();
+
+    // Return to acme: `arrive` starts the roster read we hold open.
+    await goTo("#/overview");
+    expect(dialog(), "return read in flight").toBeNull();
+
+    // Switch to a second company before the read lands. The stale callback
+    // must not open setup over it — the second company's own gate read is the
+    // only thing allowed to decide that.
+    await render("globex");
+    await act(async () => {
+      resolveAcme([...BASELINE]);
+    });
+
+    expect(dialog(), "stale return read reopened setup over the new company").toBeNull();
+  });
+
   it('drops the debt when the operator then says "I\'ll do this later"', async () => {
     await mount(clientWith(BASELINE));
     await leaveForModelSettings();
