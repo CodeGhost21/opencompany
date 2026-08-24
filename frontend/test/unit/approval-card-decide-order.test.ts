@@ -371,54 +371,16 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ).not.toBeNull();
   });
   it("distinguishes revocations for identical grants with different expirations (#1411)", async () => {
-  it("distinguishes revocations for identical grants with different expirations (#1411)", async () => {
     const first: StandingGrant = { ...GRANT, id: "grant-short", expires_at_millis: T0 + 60 * 60 * 1000 };
     const second: StandingGrant = { ...GRANT, id: "grant-long", expires_at_millis: T0 + 7 * 24 * 60 * 60 * 1000 };
-
     await act(async () => {
-      root.render(
-        createElement(StandingPermissions, {
-          grants: [first, second],
-          now: T0,
-          askerNames: new Map([["ops", "Ops"]]),
-          granterNames: new Map([["operator", "you"]]),
-          onRevoke: async () => {},
-        }),
-      );
+      root.render(createElement(StandingPermissions, { grants: [first, second], now: T0, askerNames: new Map([["ops", "Ops"]]), granterNames: new Map([["operator", "you"]]), onRevoke: async () => {} }));
     });
-
-    const labels = Array.from(container.querySelectorAll("button"), (button) =>
-      button.getAttribute("aria-label"),
-    );
+    const labels = Array.from(container.querySelectorAll("button"), (button) => button.getAttribute("aria-label"));
     expect(labels).toEqual([
       "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h",
       "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 7d",
     ]);
-  });
-
-    const second: StandingGrant = { ...GRANT, id: "grant-long", expires_at_millis: T0 + 7 * 24 * 60 * 60 * 1000 };
-
-    await act(async () => {
-      root.render(
-        createElement(StandingPermissions, {
-          grants: [first, second],
-          now: T0,
-          askerNames: new Map([["ops", "Ops"]]),
-          granterNames: new Map([["operator", "you"]]),
-          onRevoke: async () => {},
-        }),
-      );
-    });
-
-    const labels = Array.from(container.querySelectorAll("button"), (button) =>
-      button.getAttribute("aria-label"),
-    );
-    expect(labels).toEqual([
-      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h",
-      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 7d",
-    ]);
-  });
-
   });
 
   it("names a workflow grant revocation after the workflow (#1411)", async () => {
@@ -450,3 +412,5 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       ),
     ).not.toBeNull();
   });
+
+});
