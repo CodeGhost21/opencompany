@@ -541,30 +541,62 @@ fn webp_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
 /// `fcTL` adds its own rectangle. The walk reads chunk headers only — the same
 /// promise as [`image_dimensions`], never a decode.
 ///
-/// Returns `None` when the bytes are not a PNG, or a PNG with no `acTL` (a
-/// still image — nothing animated to count).
-fn apng_animation_cost(bytes: &[u8]) -> Option<u64> {
+/// Returns `Ok(None)` when the bytes are not a PNG, or a PNG with no `acTL` (a
+/// still image — nothing animated to count). Returns `Err` when an APNG's chunk
+/// stream is cut off after its animation chunks begin: a viewer decodes the
+/// frames that are present, so a truncated animation must be held to
+/// [`MAX_AVATAR_ANIMATED_PIXELS`] just like a complete one.
+fn apng_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
     if !bytes.starts_with(PNG_SIGNATURE) {
-        return None;
+        return Ok(None);
     }
     // The canvas the default image covers — the same bytes `image_dimensions`
     // reads, re-read here so the cost is computed in one place.
-    let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?) as u64;
-    let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?) as u64;
+    let Some(w) = bytes.get(16..20).and_then(|b| b.try_into().ok()) else {
+        // Shorter than an IHDR: no animation chunk can have been reached.
+        return Ok(None);
+    };
+    let w = u32::from_be_bytes(w) as u64;
+    let Some(h) = bytes.get(20..24).and_then(|b| b.try_into().ok()) else {
+        return Ok(None);
+    };
+    let h = u32::from_be_bytes(h) as u64;
     let mut cost: u64 = 0;
     let mut animated = false;
     let mut i = 8;
     while i + 8 <= bytes.len() {
-        let len = u32::from_be_bytes(bytes.get(i..i + 4)?.try_into().ok()?) as usize;
-        let chunk_type = bytes.get(i + 4..i + 8)?;
-        let data = bytes.get(i + 8..i + 8 + len)?;
+        let Some(len) = bytes.get(i..i + 4).and_then(|b| b.try_into().ok()) else {
+            return if animated {
+                Err(truncated_animation())
+            } else {
+                Ok(None)
+            };
+        };
+        let len = u32::from_be_bytes(len) as usize;
+        let Some(chunk_type) = bytes.get(i + 4..i + 8) else {
+            return if animated {
+                Err(truncated_animation())
+            } else {
+                Ok(None)
+            };
+        };
+        let Some(data) = bytes.get(i + 8..i + 8 + len) else {
+            // The chunk's declared payload is not all present. A truncated
+            // acTL or fcTL is itself proof of animation — the chunk type names
+            // it — so it is refused even before `animated` has been set.
+            return if animated || chunk_type == b"acTL" || chunk_type == b"fcTL" {
+                Err(truncated_animation())
+            } else {
+                Ok(None)
+            };
+        };
         if chunk_type == b"acTL" {
             animated = true;
             cost = cost.saturating_add(w * h);
         } else if chunk_type == b"fcTL" {
             // Sequence(4), then big-endian width and height at 4..12.
             if data.len() < 12 {
-                return None;
+                return Err(truncated_animation());
             }
             let frame_w = u32::from_be_bytes(data[4..8].try_into().ok()?) as u64;
             let frame_h = u32::from_be_bytes(data[8..12].try_into().ok()?) as u64;
@@ -574,7 +606,7 @@ fn apng_animation_cost(bytes: &[u8]) -> Option<u64> {
         // counted in `len`, so the next chunk starts 12 bytes past this header.
         i += 12 + len;
     }
-    animated.then_some(cost)
+    Ok(animated.then_some(cost))
 }
 
 /// Refuses an image whose decoded size is a decompression bomb.
