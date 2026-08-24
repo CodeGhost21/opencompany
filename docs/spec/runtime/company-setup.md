@@ -355,9 +355,17 @@ open, so merely not persisting the skip would still strand them.
 
 **Decision D3b: the fallback says which fallback, because the next action
 differs.** `no_model` means nothing was reachable — wire a credential.
-`not_designable` means a model answered unusably, almost always because the
-answers were too sparse. "Add a model in Settings" shows only for `no_model`;
-elsewhere it would send someone to fix a credential that had just worked.
+`model_unreachable` means a credential is wired but the provider did not answer
+— check the connection or retry. `not_designable` means a model answered
+unusably, almost always because the answers were too sparse. "Add a model in
+Settings" shows only for `no_model`; elsewhere it would send someone to fix a
+credential that had just worked.
+
+**Decision D3c: redesign replaces the fallback team rather than stacking on it.**
+When an operator follows "Add a model in Settings" after receiving a fallback,
+the controller records a redesign debt. On return, setup reopens over the staffed
+company, removes only its operator-authored teammates, and creates the newly
+designed roster. The global baseline is preserved.
 
 ## How we know it is someone's first time
 
