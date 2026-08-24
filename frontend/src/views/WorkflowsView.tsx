@@ -2886,6 +2886,7 @@ export function WorkflowsView({
             <RunTracesList
               runs={indexRuns}
               workflows={workflows}
+              company={company}
               loading={!indexRunsLoaded}
               onSelectRun={setTraceRun}
             />
