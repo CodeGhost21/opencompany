@@ -2292,6 +2292,7 @@ export function AppShell({
               // this view knows whether the id matches anything parked, so it
               // does that check itself and says so when it does not.
               sub={sub}
+              chatChannelByThread={chatChannelByThread}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
               // Issue #1211: mark this id as "mine" before the resolve POST
