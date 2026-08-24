@@ -847,11 +847,16 @@ impl MemoryStore for ProviderMemoryStore {
     /// the archive-then-delete order behaving as designed under partial failure
     /// — a duplicate the next read reconciles, never a loss.
     ///
-    /// A `KeepRecent` eviction additionally bounds the archive itself to the
-    /// newest `n` evicted traces (see [`ProviderMemoryStore::prune_archive`]),
-    /// so the policy that bounds the live window also bounds storage: a company
+    /// Every eviction additionally bounds the archive itself to the newest
+    /// `n` evicted traces (see [`ProviderMemoryStore::prune_archive`]): a
+    /// `KeepRecent { n }` eviction bounds it to `n`, and `OlderThan` — which
+    /// has no `n` of its own — to the retention limit, so the policy that
+    /// bounds the live window also bounds storage on every path: a company
     /// that runs for years does not accumulate every trace it ever evicted
-    /// beside the 32 it keeps.
+    /// beside the 32 it keeps, and an operator-sized `OlderThan` sweep cannot
+    /// grow the archive without bound. That bound is what keeps
+    /// `GET /memory/archives` a bounded read by construction rather than a
+    /// download of the whole archive followed by a discard.
     async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
         let traces = self.ordered_traces(id).await?;
         let doomed: Vec<CompressedTrace> = match &policy {
@@ -873,12 +878,16 @@ impl MemoryStore for ProviderMemoryStore {
                 evicted += 1;
             }
         }
-        // Bound the archive only on the path production calls (`KeepRecent`).
-        // `OlderThan` has no `n` to bound by; its archive is left to retention
-        // policy or the Operator, exactly as the docs describe.
-        if let EvictionPolicy::KeepRecent { n } = policy {
-            self.prune_archive(id, n).await?;
-        }
+        // Bound the archive on every eviction path. `KeepRecent` prunes to its
+        // own `n`; `OlderThan` has no `n` to bound by, so it prunes to the
+        // retention limit — the same window the live set is held to, which is
+        // what keeps the tier "the eviction history nearest to the live
+        // window" and the archive read bounded for any policy.
+        let bound = match policy {
+            EvictionPolicy::KeepRecent { n } => n,
+            EvictionPolicy::OlderThan { .. } => TRACE_RETENTION_LIMIT,
+        };
+        self.prune_archive(id, bound).await?;
         Ok(evicted)
     }
 }
