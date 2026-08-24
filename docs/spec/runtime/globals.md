@@ -140,8 +140,9 @@ all, so a floor would silently re-grant authority a company withheld on purpose.
 What is global here is where the starting belt is authored.
 
 The belt is **wide**: `["*", "workspace.*", "workspace.write", "media",
-"composio", "search", "mcp:*"]` — every namespace a company can hold except
-`repo`, which an fs-storage host refuses to boot with. `workspace.write` is
+"composio", "search", "mcp:*"]` — every namespace a company can hold except the
+credential-gated `chargebee`, `hosting` and `paypal` integrations, and `repo`,
+which an fs-storage host refuses to boot with. `workspace.write` is
 listed explicitly because `workspace.*` is a *read* grant and a bare `*` does
 not confer writes; an operator narrowing this list must copy it verbatim or the
 company's teammates silently lose the write tier. Turning one off is a company-level edit
