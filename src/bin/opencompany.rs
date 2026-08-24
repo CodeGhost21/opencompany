@@ -986,7 +986,7 @@ async fn export_to_dir(
     // is writing is torn, and the refusal here names the running process
     // instead of silently racing it.
     let _home_lock = opencompany::store::lock::acquire(home)?;
-    let ((store, events, memory, context), facts, _) = live_ports(home, home_was_flagged).await?;
+    let ((store, events, memory, context), facts, scopes, _) = live_ports(home, home_was_flagged).await?;
     let opts = ExportOpts {
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
