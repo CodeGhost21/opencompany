@@ -7,6 +7,7 @@ import {
   mentionablesFor,
   mentionRegex,
   mentionsOutsideChannel,
+  mentionsOutsideRange,
   rankMentionables,
   reconcileMentions,
   reconcileWrap,
