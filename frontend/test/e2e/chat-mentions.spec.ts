@@ -125,8 +125,9 @@ test("Enter picks the highlighted row and does not send", async ({ page }) => {
   // Picked: the draft now holds the full handle, and the picker is shut.
   await expect(composer(page)).toHaveValue(/@engineer\s$/);
   await expect(picker(page)).toHaveCount(0);
-  // And crucially, nothing was sent.
-  expect(sent).toHaveLength(0);
+  // And crucially, nothing was sent. Poll briefly so an in-flight request
+  // cannot make this negative assertion pass by timing alone.
+  await expect.poll(() => sent.length, { timeout: 1_000, intervals: [100] }).toBe(0);
 });
 
 test("Enter with the picker shut sends, and carries the resolved mention", async ({ page }) => {
@@ -164,7 +165,7 @@ test("Escape closes the picker and leaves the draft alone", async ({ page }) => 
 
   await expect(picker(page)).toHaveCount(0);
   await expect(composer(page)).toHaveValue("hey @eng");
-  expect(sent).toHaveLength(0);
+  await expect.poll(() => sent.length, { timeout: 1_000, intervals: [100] }).toBe(0);
 });
 
 /** An email address is the case a naive `@` trigger gets wrong every time. */
