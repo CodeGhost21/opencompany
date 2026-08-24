@@ -148,6 +148,10 @@ pub async fn issue_password(
     };
 
     users.upsert_user(company, &user).await?;
+    if !created {
+        sessions.delete_for_user(company, &user.id).await?;
+        login_codes.delete_for_email(company, &user.email).await?;
+    }
     Ok(Issued {
         email,
         created,
