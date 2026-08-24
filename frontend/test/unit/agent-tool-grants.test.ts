@@ -104,6 +104,25 @@ describe("companyCovers", () => {
     expect(companyCovers(["*"], "mcp:notion")).toBe(false);
   });
 
+  it("treats the bare workspace grant as explicit-only, not a catch-all read", () => {
+    // `grants_workspace_write_explicit` accepts the bare `workspace` token as a
+    // write grant, so a request for it under a `["*"]` allow-list would hand the
+    // agent the exact token the wiring predicate accepts. The hint must refuse
+    // it the way it refuses `workspace.write` — reads still come from the
+    // catch-all, writes never do.
+    expect(companyCovers(["*"], "workspace")).toBe(false);
+    expect(companyCovers(["*"], "workspace.*")).toBe(false);
+    expect(companyCovers(["*"], "workspace.read")).toBe(true);
+    // An explicit `workspace` or `workspace.write` allow covers the write
+    // request in either spelling.
+    expect(companyCovers(["workspace"], "workspace")).toBe(true);
+    expect(companyCovers(["workspace"], "workspace.write")).toBe(true);
+    expect(companyCovers(["workspace.write"], "workspace")).toBe(true);
+    expect(companyCovers(["workspace.write"], "workspace.write")).toBe(true);
+    // A read-only grant does not cover the write-inclusive bare request.
+    expect(companyCovers(["workspace.read"], "workspace")).toBe(false);
+  });
+
   it("covers an explicit opt-in only from a grant that names it", () => {
     expect(companyCovers(["search"], "search")).toBe(true);
     expect(companyCovers(["search.*"], "search.web")).toBe(true);
