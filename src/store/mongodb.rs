@@ -4649,6 +4649,8 @@ mod test {
             task_id: None,
             agent_id: "engineer".to_string(),
             chat_id: None,
+            workflow_run_id: None,
+            node_id: None,
             attempt: 1,
             status: crate::ports::runs::RunStatus::Pending,
             trigger_event_seq: None,
