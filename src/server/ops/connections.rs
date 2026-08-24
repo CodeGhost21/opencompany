@@ -295,6 +295,7 @@ async fn do_disconnect_from(
 /// Requires authority over the company (issue #403). Disconnecting deletes the
 /// stored tokens and best-effort revokes them upstream — irreversible, and a
 /// decision about the company's access rather than the caller's.
+#[axum::debug_handler]
 async fn disconnect(
     company: AdminScopedCompany,
     Path(ProviderPath { provider }): Path<ProviderPath>,
