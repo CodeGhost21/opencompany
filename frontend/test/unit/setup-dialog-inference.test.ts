@@ -43,6 +43,16 @@ const HARNESS: InferenceStatus = {
 
 const ECHO: InferenceStatus = { ...HARNESS, cognition: "echo" } as InferenceStatus;
 
+/** One signed-in operator; the dialog asks the host which role theirs is. */
+const ME_ADMIN = {
+  id: "u1",
+  email: "owner@example.invalid",
+  role: "admin",
+  company: "acme",
+  hasPassword: false,
+  mustChangePassword: false,
+} as const;
+
 /** One proposed agent is enough: the build-out's reveal is paced per agent. */
 const AGENT = { name: "Ada", role: "Operations", description: "Runs the desk." };
 
@@ -52,12 +62,20 @@ function clientWith(
     source?: "model" | "fallback";
     reason?: string | null;
     roster?: TeamMemberDto[];
+    role?: "admin" | "member";
   } = {},
 ): OpenCompanyClient & { removed: string[] } {
   const removed: string[] = [];
+  const role = over.role ?? "admin";
   return {
     scopeFor: (company: string | null) => `/api/v1/companies/${company}`,
-    get: async () => (over.status ? await over.status() : ECHO),
+    get: async (path: string) => {
+      // The role read is a second `get` on a different route; a mock that
+      // answers every path with the inference status would report the operator
+      // as a non-admin and hide the very CTAs these tests exercise.
+      if (path.endsWith("/auth/me")) return { ...ME_ADMIN, role };
+      return over.status ? await over.status() : ECHO;
+    },
     post: async () => ({
       agents: [AGENT],
       template: "ecommerce",
