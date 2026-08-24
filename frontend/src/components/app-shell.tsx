@@ -81,6 +81,7 @@ import {
   hostMessageId,
   liveReplyIdentity,
   makeMessage,
+  mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
