@@ -1016,6 +1016,12 @@ function Tools({
       {!summary.standardGrant && (
         <p className="text-xs text-muted-foreground">
           Company tool list: {agent.tools.companyAllow.join(", ") || "nothing allowed"}
+          {deskCeilingActive && (
+            <>
+              {" · "}
+              Desk tool list: {agent.tools.deskAllow.join(", ") || "nothing allowed"}
+            </>
+          )}
         </p>
       )}
     </Section>
