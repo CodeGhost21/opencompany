@@ -17,7 +17,7 @@ import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
   toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
-  onNavDept, onBack, children,
+  onNavDept, onBack, covered = false, children,
 }: {
   deptList: DeptLite[];
   currentTeamId: string | null;
@@ -36,6 +36,9 @@ export function KnowledgeGraphFullscreen({
   legendSlot?: React.ReactNode;
   /** the snapshot line and its Refresh control, rendered top-right */
   statusSlot?: React.ReactNode;
+  /** an outage overlay covers the shell; the graph must not answer the
+      keyboard at all (issue #1314) */
+  covered?: boolean;
   onNavDept: (teamId: string) => void;
   onBack: () => void;
   children: React.ReactNode;
