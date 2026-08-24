@@ -1359,7 +1359,7 @@ export function AppShell({
         for (const [channelId, rows] of Object.entries(transcriptsRef.current)) {
           loadedByChannel[channelId] = new Set(rows.map((m) => m.id));
         }
-        const threadIds = threadsToReReadForMentions(
+        const { threadIds, subjects } = threadsToReReadForMentions(
           next,
           loadedByChannel,
           chatChannelByThreadRef.current,
@@ -1367,11 +1367,9 @@ export function AppShell({
           mentionReReadSubjectsRef.current,
         );
         if (threadIds.length > 0) {
-          const subjects = new Set(
-            next
-              .filter((n) => n.kind === "mention" && n.readAt === undefined)
-              .map((n) => hostMessageId(n.subjectId)),
-          );
+          // Guard first, then re-read: the fold `reReadSettledThread` runs is
+          // idempotent, but the poll that noticed the mention keeps firing, so
+          // without the guard every tick would re-read the same threads.
           subjects.forEach((s) => mentionReReadSubjectsRef.current.add(s));
           threadIds.forEach((threadId) => reReadSettledThread(threadId));
         }
