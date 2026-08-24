@@ -299,7 +299,7 @@ export function companyCovers(allow: string[], glob: string): boolean {
   // Likewise a bare `search` grant covers its sub-grant asks, matching
   // `grants_search_explicit`.
   if (literal === "workspace.write") {
-    return grantsExplicit(allow, "workspace");
+    return allow.some((grant) => grant === "workspace" || grant === "workspace.write");
   }
   if (literal === "media" || literal.startsWith("media.")) {
     return grantsExplicit(allow, "media");
