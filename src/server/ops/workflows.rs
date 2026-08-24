@@ -7135,7 +7135,7 @@ mod tests {
             // array, proving the four-segment static route won.
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            assert_eq!(body[0]["artifactId"], "art-a1", "{body}");
+            assert_eq!(body["files"][0]["artifactId"], "art-a1", "{body}");
         }
 
         /// A run that died outright reads back with its reason. This is the
