@@ -1383,6 +1383,7 @@ export function AppShell({
 
   useEffect(() => {
     mentionFeedRevision.current++;
+    mentionReReadSubjectsRef.current = new Set();
     setMentionFeed([]);
     refreshMentions();
     const onFocus = () => refreshMentions();
