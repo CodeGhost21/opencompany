@@ -687,12 +687,13 @@ async fn edit_agent(
             .unwrap_or_else(|| record.manifest.default_harness_id());
         let bound = record.manifest.harness_by_id(&resulting_harness_id);
         if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but this teammate's harness has no ACP \
-                 transport to forward it to. Bind it to an ACP harness first, or clear \
-                 the model."
-            )))
-            .into_response());
+            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
+                format!(
+                    "`{model_value}` names a model, but this teammate's harness has no ACP \
+                     transport to forward it to. Bind it to an ACP harness first, or clear \
+                     the model."
+                ),
+            ))));
         }
         // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
         // still cannot carry a model, because the runner wire protocol has no
