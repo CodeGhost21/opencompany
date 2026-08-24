@@ -2370,6 +2370,53 @@ async fn agent_runs_walks_a_workflow_run_to_its_reasoning() {
     );
 }
 
+/// The unredacted half is role-gated: a member sees the scrubbed trace and no
+/// `deep`, exactly as approval contents are gated (issue #618). Without this,
+/// any signed-in member could read raw tool arguments and output — which may
+/// carry credentials and file contents — through the Observatory.
+#[tokio::test]
+async fn a_member_gets_the_trace_but_not_the_deep_half() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                .header(
+                    "cookie",
+                    crate::server::test_support::member_cookie("acme"),
+                )
+                .body(Body::from(
+                    r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq deep { reasoning } } } } }"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "a member still lists the attempt: {value}");
+    let steps = runs[0]["steps"].as_array().unwrap();
+    // The scrubbed skeleton is the member's answer…
+    assert_eq!(steps[0]["kind"], "thinking");
+    // …and the unredacted half is withheld.
+    assert!(
+        steps.iter().all(|s| s["deep"].is_null()),
+        "a member must not receive deep bodies: {value}"
+    );
+}
+
 /// An unrelated workflow run selects nothing rather than everything — the
 /// failure mode of a filter that is silently dropped.
 #[tokio::test]
