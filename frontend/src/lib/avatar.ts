@@ -333,6 +333,11 @@ export function resolveAvatarSrc(
  * flight is handled the same way: the pending entry is dropped, and when its
  * fetch resolves the guard inside `resolveAvatarSrc` revokes the URL and
  * returns `null`.
+ *
+ * A tile that already drew the face keeps its pixels even after the URL is
+ * revoked, so the drop also fires the node's {@link subscribeAvatarNode}
+ * subscribers: a mounted tile re-resolves and draws the tone tile instead of
+ * holding the deleted face until it unmounts.
  */
 export function forgetAvatarNode(
   client: OpenCompanyClient,
@@ -345,6 +350,39 @@ export function forgetAvatarNode(
   blobUrlValues.delete(key);
   componentUrls.delete(key);
   blobUrls.delete(key);
+  forgetListeners.get(key)?.forEach((notify) => notify());
+  forgetListeners.delete(key);
+}
+
+/**
+ * Subscribes to a node's face being forgotten, for a tile that already drew it.
+ *
+ * Revoking an object URL does not unpaint an `<img>` that has decoded it, so a
+ * mounted avatar that resolved before the node was deleted has no reason to
+ * re-resolve — its reference is unchanged and its cache entry is gone. This is
+ * how such a tile learns to: when {@link forgetAvatarNode} drops the node, the
+ * callback fires and the tile re-resolves (the deleted bytes 404, so it draws
+ * the tone tile it was already drawing underneath). Returns an unsubscribe;
+ * call it on unmount, or the registry leaks one entry per mounted tile.
+ */
+export function subscribeAvatarNode(
+  client: OpenCompanyClient,
+  company: string | null,
+  nodeId: string,
+  notify: () => void,
+): () => void {
+  const key = avatarCacheKey(client, company, nodeId);
+  let listeners = forgetListeners.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    forgetListeners.set(key, listeners);
+  }
+  const set = listeners;
+  set.add(notify);
+  return () => {
+    set.delete(notify);
+    if (set.size === 0) forgetListeners.delete(key);
+  };
 }
 
 /** What `POST …/avatars` answers with. */
