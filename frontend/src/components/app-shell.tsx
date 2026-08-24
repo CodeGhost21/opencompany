@@ -900,7 +900,7 @@ export function AppShell({
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
-          if (cancelled) return;
+          if (cancelled || requestCompany !== company) return;
           if (entries.length === 0) {
             // An empty answer is still an answer, and the only thing that ever
             // makes the "start of your direct message" copy true.
