@@ -475,7 +475,10 @@ export function AppShell({
   const [setupForced, setSetupForced] = useState(false);
   // `#/setup` is an intentional, manual recovery path. It is a route rather
   // than a nav page: setup remains a dialog over the ordinary console, but the
-  // address works for staffed companies and after someone has skipped.
+  // address works for staffed companies and after someone has skipped. Entering
+  // it forces the dialog open; leaving it (Back, or an edit) hands the dialog
+  // back to `SetupController`'s `routeOpen` edge, which closes what the route
+  // opened.
   useEffect(() => {
     if (view === "setup") setSetupForced(true);
   }, [view]);
