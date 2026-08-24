@@ -466,7 +466,7 @@ export function LedgersView({
   // follow it any more — issue #1284 removed the in-page picker that used to
   // own that), so this keys on `sub` directly.
   useEffect(() => {
-    setStatusFilter("all");
+    setStatusFilter(EVERY_STATUS);
     setRendered(null);
   }, [sub]);
 
