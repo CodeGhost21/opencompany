@@ -41,6 +41,7 @@ use crate::ports::{
     ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompressedTrace, ContextChunk, ContextStore,
     EvictionPolicy, FactKind, FactRecord, FactStore, MemoryStore, TaskResult,
 };
+use crate::runtime::maintenance::TRACE_RETENTION_LIMIT;
 use crate::store::text::{ceil_boundary, slice_on_char_boundaries};
 use crate::{Result, store::content_address};
 
