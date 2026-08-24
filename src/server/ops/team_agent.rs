@@ -2441,7 +2441,10 @@ prompt = "Lead decisively."
 
     /// A real image uploaded through the generic workspace route is accepted
     /// as a face when its declared type matches what its bytes sniff as. This
-    /// is what keeps a face pickable from the Files tab.
+    /// is what keeps a face pickable from the Files tab — and the face is then
+    /// served from an **immutable copy** under `avatars/`, never from the
+    /// Files-tab node itself, whose bytes a later republish could rewrite
+    /// without ever passing the avatar checks again.
     #[tokio::test]
     async fn a_blob_reference_is_accepted_when_the_bytes_are_an_image() {
         let home_dir = home();
@@ -2455,7 +2458,31 @@ prompt = "Lead decisively."
         let (status, worn) =
             patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
         assert_eq!(status, StatusCode::OK, "{worn}");
-        assert_eq!(worn["avatar"], format!("blob:{id}"), "{worn}");
+        let reference = worn["avatar"].as_str().expect("a reference");
+        let copy_id = reference
+            .strip_prefix("blob:")
+            .expect("the stored face is a blob reference");
+        assert_ne!(
+            copy_id, id,
+            "a Files-tab node is mutable; the face must be an immutable copy"
+        );
+
+        // And the copy really holds the uploaded bytes, served from the
+        // workspace blob route the console draws faces through.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/company/workspace/blob/{copy_id}"))
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes, TINY_GIF, "the copy must serve the validated bytes");
     }
 
     /// The declared type is a claim, and the claim has to match the bytes: the
