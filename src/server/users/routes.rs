@@ -1252,8 +1252,8 @@ async fn edit_me(
         .users()
         .get_user(runtime.id(), &principal.user_id)
         .await
-        .map_err(|e| ApiError(e).into_response().into())?
-        .ok_or_else(|| no_session().into())?;
+        .map_err(crate::server::Rejection::from)?
+        .ok_or_else(no_session)?;
 
     // A blank name is not a name: an emptied field is the person asking for the
     // derived one back, which is the same intent `null` carries, so the two
