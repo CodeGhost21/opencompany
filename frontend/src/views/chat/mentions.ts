@@ -512,11 +512,12 @@ export function mentionsOutsideChannel(
   // report none, and warning about every mention there would be noise.
   if (!channelMemberIds) return [];
   const members = new Set(channelMemberIds);
-  const deskMembers = new Map(
-    (mentionables ?? [])
-      .filter((e) => e.target.kind === "desk")
-      .map((e) => [e.target.id, e.memberIds ?? []]),
-  );
+  const deskMembers = new Map<string, string[]>();
+  for (const entry of mentionables ?? []) {
+    if (entry.target.kind === "desk") {
+      deskMembers.set(entry.target.id, entry.memberIds ?? []);
+    }
+  }
   return mentions
     .flatMap((m) => {
       if (m.target.kind === "agent") {
