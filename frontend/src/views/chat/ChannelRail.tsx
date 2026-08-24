@@ -307,6 +307,15 @@ function ChannelRow({
     >
       <ChannelIcon channel={channel} />
       <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+      {hasMentions && (
+        <span
+          data-testid="channel-mentions"
+          title={mentions === 1 ? "1 mention of you here" : `${mentions} mentions of you here`}
+          className="shrink-0 rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
+        >
+          @{mentions > 99 ? "99+" : mentions}
+        </span>
+      )}
       {hasUnread && (
         <span
           data-testid="channel-unread"
