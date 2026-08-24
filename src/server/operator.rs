@@ -9759,14 +9759,18 @@ mode = "full"
         // A case-variant of the teammate's id, carrying the `dm:` prefix the
         // console mints.
         assert_eq!(
-            runtime.mention_context(&id, &[], "dm:BACKEND_ENGINEER").await,
+            runtime
+                .mention_context(&id, &[], "dm:BACKEND_ENGINEER")
+                .await,
             "dm:backend_engineer",
             "a `dm:`-prefixed noncanonical teammate key has to store dm:<agent-id>"
         );
         // The already-canonical shape stays unchanged — the resolution must
         // not move a key that was already right.
         assert_eq!(
-            runtime.mention_context(&id, &[], "dm:backend_engineer").await,
+            runtime
+                .mention_context(&id, &[], "dm:backend_engineer")
+                .await,
             "dm:backend_engineer",
             "a canonical dm:<teammate-id> key is kept as-is"
         );
@@ -9825,7 +9829,9 @@ mode = "full"
         );
         // A DM the human is actually a teammate of still badges as a DM.
         assert_eq!(
-            runtime.mention_context(&id, &[human], "dm:backend_engineer").await,
+            runtime
+                .mention_context(&id, &[human], "dm:backend_engineer")
+                .await,
             "dm:backend_engineer",
             "a real DM channel is unaffected by the collision guard"
         );
