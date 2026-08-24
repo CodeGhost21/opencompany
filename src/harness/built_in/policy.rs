@@ -2877,6 +2877,103 @@ mod tests {
         ));
     }
 
+    /// A rename that *moves* a node has the same landing-zone rule
+    /// `workspace_create` applies to minting one: an agent-owned note moved
+    /// into an operator-authored folder inside the agent's home must restore
+    /// the approval gate, or the operator-created folder becomes an unreviewed
+    /// collection point. The home root keeps the exception — it is the agent's
+    /// own space whatever its stored origin.
+    #[tokio::test]
+    async fn auto_rename_into_a_foreign_folder_inside_the_home_parks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let node = |id: &str,
+                    name: &str,
+                    parent: Option<&str>,
+                    origin: WorkspaceOrigin| {
+            WorkspaceNode {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind: if id.starts_with("n-") {
+                    NodeKind::File
+                } else {
+                    NodeKind::Folder
+                },
+                parent_id: parent.map(str::to_string),
+                updated_at_millis: 1,
+                created_by: origin.clone(),
+                updated_by: origin,
+                mime: None,
+                size: None,
+                sha256: None,
+            }
+        };
+        store
+            .create(&company, &node("agents", "agents", None, own.clone()), None)
+            .await
+            .unwrap();
+        store
+            .create(&company, &node("home", "ceo", Some("agents"), own.clone()), None)
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "inbox",
+                    "inbox",
+                    Some("home"),
+                    WorkspaceOrigin::Operator,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("n-own", "own.md", Some("home"), own.clone()),
+                Some("mine"),
+            )
+            .await
+            .unwrap();
+
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+
+        // Into the operator-authored folder: the approval gate comes back.
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({
+                        "path": "agents/ceo/own.md",
+                        "new_parent": "agents/ceo/inbox"
+                    })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        // Into the home root: the agent's own space, no approval needed.
+        assert_eq!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({
+                        "path": "agents/ceo/own.md",
+                        "new_parent": "agents/ceo"
+                    })
+                ))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+    }
+
     /// The operator's escape hatch: `always_approve` wins over every tier, so a
     /// company that *does* want to eyeball each paid search can have that —
     /// and the parked request is projected as a **spend**, not the catch-all
