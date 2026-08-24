@@ -991,7 +991,7 @@ async fn export_to_dir(
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
     };
-    export_bundle(id, dest, store, events, memory, context, facts, opts).await
+    export_bundle_with_scopes(id, dest, store, events, memory, context, facts, scopes, opts).await
 }
 
 /// Default build: export writes an unpacked bundle directory (no `.tar` support
