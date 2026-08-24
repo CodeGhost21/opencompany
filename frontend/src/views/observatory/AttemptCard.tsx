@@ -43,7 +43,9 @@ interface Props {
    * Fired when the card opens — including the cards that start open (a deep
    * link's turn, an auto-opened failure) — so the parent can fetch the
    * unredacted half only for attempts a reader actually opened. Fires once per
-   * open and again on each reopen; the parent keeps it as fresh as it wants.
+   * open, again on each reopen, and again whenever an already-open attempt's
+   * step trace grows, so a live attempt's new steps are not left with empty
+   * deep panes until the reader closes and reopens the card.
    */
   onOpen?: (runId: string) => void;
 }
