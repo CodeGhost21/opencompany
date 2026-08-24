@@ -28,6 +28,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  fromHistory,
   makeMessage,
   reconcileIds,
   toHostMessageId,
