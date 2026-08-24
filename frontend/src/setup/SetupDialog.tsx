@@ -368,11 +368,14 @@ export function SetupDialog({
       const boundary = replacing
         ? redesignRoster.current ?? new Set(createdIds.current)
         : null;
+      const boundaryIds = boundary ? Array.from(boundary) : [];
       // This run's creations are the boundary of the next redesign's
       // replacement; the previous run's are moot (replaced below, if this run
-      // is one).
+      // is one). Captured above, so a replacement that never fully lands can
+      // still name every row it was meant to replace.
       createdIds.current = [];
-      let createdAny = false;
+      let createdCount = 0;
+      const createdThisRun: string[] = [];
       for (let i = 0; i < agents.length; i++) {
         const agent = agents[i];
         try {
@@ -380,8 +383,11 @@ export function SetupDialog({
             { name: agent.name, role: agent.role, description: agent.description },
             company,
           );
-          createdAny = true;
-          if (created.id) createdIds.current.push(created.id);
+          createdCount += 1;
+          if (created.id) {
+            createdThisRun.push(created.id);
+            createdIds.current.push(created.id);
+          }
         } catch {
           // One refused write must not abandon the rest: a company with five of
           // six teammates is a working company, and the operator can add the
@@ -395,14 +401,19 @@ export function SetupDialog({
           if (cancelled) return;
         }
       }
-      // Clear the team a replacing run replaces only once its replacement is in
-      // place. Removing first would leave an unstaffed company if every add
-      // above was refused — the per-agent catch keeps going, so the done screen
-      // would claim success over a team that no longer exists. If no replacement
-      // at all was created, the old team stays and the redesign fails rather
-      // than reporting completion.
+      // Clear the team a replacing run replaces only once its FULL replacement
+      // is in place. Removing first would leave an unstaffed company if every
+      // add above was refused; sweeping on a partial landing would trade a
+      // complete fallback team for a handful of new rows — a company is worse
+      // off than before the redesign. If the replacement did not fully land,
+      // the old team stays and the redesign fails rather than reporting
+      // completion over a roster it never finished building.
       if (boundary) {
-        if (!createdAny) {
+        if (createdCount < agents.length) {
+          // Keep the old team, and keep the next retry's boundary covering both
+          // the rows this pass was meant to replace and the rows it did create,
+          // so a successful retry replaces the whole partial attempt.
+          createdIds.current = [...boundaryIds, ...createdThisRun];
           if (cancelled) return;
           building.current = false;
           setPhase({
