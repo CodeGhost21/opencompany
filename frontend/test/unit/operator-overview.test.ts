@@ -298,6 +298,9 @@ describe("the operator overview landing page (#1321)", () => {
     expect(
       container.querySelector('[aria-label="No task or conversation is attached to this attempt"]'),
     ).not.toBeNull();
-    expect(container.querySelector('a[href^="#/tasks/"], a[href^="#/chat"]')).toBeNull();
+    // The header's own `#/chat` CTA is excluded by requiring a segment after
+    // the slash — an unattributed run must mint no task or thread link of its
+    // own.
+    expect(container.querySelector('a[href^="#/tasks/"], a[href^="#/chat/"]')).toBeNull();
   });
 });
