@@ -251,4 +251,51 @@ describe("the finished build-out points at what would actually help", () => {
     expect(find("setup-add-model")).toBeNull();
     expect(find("setup-buildout-title")?.textContent).toContain("Your starting team is ready");
   });
+
+  it("offers a retry instead of a new key when a wired model was unreachable", async () => {
+    await show(clientWith({ source: "fallback", reason: "model_unreachable" }));
+    await runFlow();
+    // A credential is already wired; the CTA that fixes a *missing* model cannot
+    // help, and the copy must not promise that it can.
+    expect(find("setup-add-model")).toBeNull();
+    expect(find("setup-try-redesign")).toBeTruthy();
+    expect(find("setup-buildout-title")?.parentElement?.textContent).toContain(
+      "couldn't reach it just now",
+    );
+  });
+
+  it('"Try again" returns to the questions in replacing mode', async () => {
+    await show(clientWith({ source: "fallback", reason: "model_unreachable" }));
+    await runFlow();
+    await click(find("setup-try-redesign")!);
+    expect(find("setup-question")).toBeTruthy();
+    // The company now carries the standard team, so the next build-out must
+    // replace it — the notice makes that consequence visible before answering.
+    expect(find("setup-redesign-notice")).toBeTruthy();
+  });
+});
+
+describe("a replacing build-out clears the team it replaces", () => {
+  it("removes operator-staffed teammates before creating the new roster", async () => {
+    const client = clientWith({
+      source: "fallback",
+      reason: "model_unreachable",
+      roster: [
+        { id: "a1", name: "Old Ada", role: "Operations", global: false } as TeamMemberDto,
+        { id: "b2", name: "Baseline", role: "Founder", global: true } as TeamMemberDto,
+      ],
+    });
+    await show(client, { redesign: true });
+    await runFlow();
+    // The baseline survives — it is not on the operator's roster and cannot be
+    // deleted anyway. Only the fallback team the last pass created goes.
+    expect(client.removed).toEqual(["a1"]);
+  });
+
+  it("removes nothing on a first-run build-out", async () => {
+    const client = clientWith({ source: "fallback", reason: "model_unreachable" });
+    await show(client);
+    await runFlow();
+    expect(client.removed).toEqual([]);
+  });
 });
