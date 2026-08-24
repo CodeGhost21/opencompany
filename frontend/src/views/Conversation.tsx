@@ -35,6 +35,19 @@ interface Props {
   threads: Thread[];
   activeId: string;
   onSelect: (id: string) => void;
+  /**
+   * Reports the active thread as viewed, with the ids of its loaded messages.
+   *
+   * The mention badge is keyed to the Chat rail's channels, but the `main`
+   * thread (and every desk thread) renders here too — and a company's main
+   * conversation lives *only* here once it has real desks, never in a rail
+   * channel. So this surface has to report its own views, or a mention whose
+   * subject sits in the main thread could never be cleared: the rail's channel
+   * it badges never renders that thread. The loaded ids gate the clear exactly
+   * the way ChatView's do — the mention clears only once the message it names
+   * is actually on screen.
+   */
+  onThreadViewed?: (threadId: string, loadedMessageIds: ReadonlySet<string>) => void;
   setMessages: (threadId: string, updater: (m: ChatMessage[]) => ChatMessage[]) => void;
   /** Called after a reply lands, so the parent can refresh approvals/status. */
   onReply?: () => void;
