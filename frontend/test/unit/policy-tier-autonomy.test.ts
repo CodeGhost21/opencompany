@@ -540,7 +540,7 @@ describe("changing the spend cap", () => {
       await Promise.resolve();
     });
     expect(put).not.toHaveBeenCalled();
-    expect(input.disabled).toBe(false);
+    expect(input.disabled).toBe(true);
     expect(document.body.textContent).toContain("No cap");
   });
 
