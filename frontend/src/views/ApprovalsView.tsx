@@ -196,6 +196,12 @@ export function ApprovalsView({
     containerProps: queueHold,
     holding,
   } = useStableList(orderedVisible);
+  // Relative timestamps above the queue can wrap at a formatting boundary just
+  // like roster names or grant membership. Keep that clock stable for the whole
+  // interaction region, then let the next render use the current feed time.
+  const heldNow = useRef(now);
+  if (!holding) heldNow.current = now;
+  const permissionNow = holding ? heldNow.current : now;
   const askerNames = useAskerNames(client, company, approvals, holding);
   const threadLinks = useApprovalThreadLinks(client, company, rows);
   const { grants, granterNames, refreshGrants } = useStandingGrants(
