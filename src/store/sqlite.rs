@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS runs (
     -- does, and `task_id = ?` never matches it — which is what a per-card
     -- filter wants.
     task_id    TEXT,
+    -- Issue #1573: the desk the attempt was dispatched to, mirrored out of
+    -- `run_json` so the console's per-teammate history is an indexed read
+    -- rather than a scan. Nullable only so the additive `ALTER` on an existing
+    -- database has something to write before the backfill runs; every row the
+    -- store itself writes carries one.
+    agent_id   TEXT,
     status     TEXT NOT NULL,
     attempt    INTEGER NOT NULL,
     created_ms INTEGER NOT NULL,
@@ -187,6 +193,7 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
 CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
+-- `runs_by_agent` is deliberately NOT here; see `heal_runs_agent_id`.
 CREATE TABLE IF NOT EXISTS run_steps (
     company_id TEXT NOT NULL,
     run_id     TEXT NOT NULL,
@@ -373,6 +380,40 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
         .map_err(sql_err)
 }
 
+/// Gives `runs` its `agent_id` mirror column, backfills it, and indexes it
+/// (issue #1573).
+///
+/// Three steps that have to happen in this order and cannot be expressed in
+/// [`MIGRATIONS`]:
+///
+/// 1. **The column.** `CREATE TABLE IF NOT EXISTS` silently skips a table that
+///    already exists, so an additive column only reaches an existing database
+///    through an `ALTER` — [`add_column_if_missing`].
+/// 2. **The backfill.** Every run ever written already carries its desk inside
+///    `run_json`; this copies it into the column so a per-teammate read answers
+///    with the *whole* history rather than only the attempts written since the
+///    upgrade. Without it the new filter would silently under-report, which is
+///    worse than not offering it — an empty history reads as "this teammate has
+///    never run", not as "this database has not been migrated".
+/// 3. **The index.** It cannot sit in [`MIGRATIONS`], because that batch is
+///    executed *before* the `ALTER` above and would fail on a column the old
+///    table does not have yet.
+///
+/// Idempotent, and cheap on every open after the first: the `ALTER` is skipped
+/// once the column exists, the `UPDATE` matches nothing once no row is `NULL`
+/// (and the index makes that a lookup rather than a scan), and re-creating an
+/// existing index is a no-op.
+fn heal_runs_agent_id(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "runs", "agent_id", "TEXT")?;
+    conn.execute(
+        "UPDATE runs SET agent_id = json_extract(run_json, '$.agentId') WHERE agent_id IS NULL",
+        [],
+    )
+    .map_err(sql_err)?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id)")
+        .map_err(sql_err)
+}
+
 /// Drops the `NOT NULL` constraint on `runs.task_id` (issue #983).
 ///
 /// A column constraint cannot be altered in place in SQLite, so this is the
@@ -411,17 +452,25 @@ fn relax_runs_task_id_nullability(conn: &Connection) -> Result<()> {
              company_id TEXT NOT NULL,
              id         TEXT NOT NULL,
              task_id    TEXT,
+             agent_id   TEXT,
              status     TEXT NOT NULL,
              attempt    INTEGER NOT NULL,
              created_ms INTEGER NOT NULL,
              run_json   TEXT NOT NULL,
              PRIMARY KEY (company_id, id)
          );
+         -- `agent_id` is read straight out of the blob rather than copied from
+         -- a column, because this rebuild also runs on a database that predates
+         -- the column entirely — selecting it there would fail on a name the
+         -- old table does not have.
          INSERT INTO runs_rebuilt
-             SELECT company_id, id, task_id, status, attempt, created_ms, run_json FROM runs;
+             SELECT company_id, id, task_id,
+                    json_extract(run_json, '$.agentId'),
+                    status, attempt, created_ms, run_json FROM runs;
          DROP TABLE runs;
          ALTER TABLE runs_rebuilt RENAME TO runs;
          CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
+         CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id);
          CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
          COMMIT;",
     )
@@ -535,6 +584,10 @@ impl SqliteStore {
         // insert on a constraint the record no longer has. Idempotent: it reads
         // the live schema and does nothing once the constraint is gone.
         relax_runs_task_id_nullability(&conn)?;
+        // Issue #1573: the `agent_id` mirror column, its backfill and its index.
+        // After the rebuild above, which owns the table's shape on the one path
+        // that replaces it wholesale.
+        heal_runs_agent_id(&conn)?;
         // Issue #1300: the context index moved into `context_chunk_labels`
         // (one row per (addr, label) claim). Runs after the `stored_ms`
         // column heal above, whose column it reads.
@@ -2409,12 +2462,14 @@ impl crate::ports::runs::RunStore for SqliteStore {
             step_count: 0,
         };
         tx.execute(
-            "INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO runs \
+             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
                 run.created_at_millis as i64,
@@ -2456,15 +2511,18 @@ impl crate::ports::runs::RunStore for SqliteStore {
         // `status` and `task_id` are mirrored out of the blob so the indexes
         // can answer a filtered list without deserializing every row.
         conn.execute(
-            "INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+            "INSERT INTO runs \
+             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(company_id, id) DO UPDATE SET task_id = excluded.task_id, \
+             agent_id = excluded.agent_id, \
              status = excluded.status, attempt = excluded.attempt, \
              created_ms = excluded.created_ms, run_json = excluded.run_json",
             params![
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
                 run.created_at_millis as i64,
@@ -2480,7 +2538,7 @@ impl crate::ports::runs::RunStore for SqliteStore {
         company: &CompanyId,
         filter: &crate::ports::runs::RunFilter,
     ) -> Result<Vec<crate::ports::runs::RunRecord>> {
-        // Every predicate is pushed into SQL (both columns are indexed) so a
+        // Every predicate is pushed into SQL (all three columns are indexed) so a
         // long-lived company does not deserialize its whole run history to
         // answer one card's Attempts list.
         let mut sql = String::from("SELECT run_json FROM runs WHERE company_id = ?1");
@@ -2488,6 +2546,10 @@ impl crate::ports::runs::RunStore for SqliteStore {
         if let Some(task_id) = &filter.task_id {
             args.push(task_id.clone());
             sql.push_str(&format!(" AND task_id = ?{}", args.len()));
+        }
+        if let Some(agent_id) = &filter.agent_id {
+            args.push(agent_id.clone());
+            sql.push_str(&format!(" AND agent_id = ?{}", args.len()));
         }
         if !filter.statuses.is_empty() {
             let placeholders: Vec<String> = filter
@@ -4088,6 +4150,104 @@ mod test {
         );
     }
 
+    /// Issue #1573: a database created before the `agent_id` mirror column must
+    /// end up able to answer "what has this desk run" over its **whole**
+    /// history, not just the attempts written since the upgrade.
+    ///
+    /// The column reaches an existing deployment through an additive `ALTER`,
+    /// which leaves every stored row `NULL` — and a `NULL` never matches
+    /// `agent_id = ?`. So the rows that would silently disappear from the new
+    /// filter are precisely the ones an operator opening a teammate for the
+    /// first time most wants to see. That is a wrong answer rather than a
+    /// missing feature: an empty history reads as "this teammate has never
+    /// run".
+    ///
+    /// Seeded with the **post-#983** shape on purpose, so this exercises the
+    /// plain `ALTER` + backfill path rather than riding along on the table
+    /// rebuild that `a_legacy_runs_table_learns_to_hold_a_card_less_run`
+    /// already covers.
+    #[tokio::test]
+    async fn a_legacy_runs_table_learns_which_desk_ran_each_attempt() {
+        use crate::ports::runs::{NewRun, RunFilter, RunStore};
+
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE runs (
+                 company_id TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 task_id    TEXT,
+                 status     TEXT NOT NULL,
+                 attempt    INTEGER NOT NULL,
+                 created_ms INTEGER NOT NULL,
+                 run_json   TEXT NOT NULL,
+                 PRIMARY KEY (company_id, id)
+             );
+             INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json)
+             VALUES ('acme', 'old-run', 'card-7', 'succeeded', 1, 1700000000000,
+                     '{\"id\":\"old-run\",\"company\":\"acme\",\"taskId\":\"card-7\",\
+                       \"agentId\":\"engineer\",\"attempt\":1,\"status\":\"succeeded\",\
+                       \"createdAtMillis\":1700000000000}');",
+        )
+        .expect("seed a pre-#1573 database");
+
+        let store = SqliteStore::from_conn(conn).expect("migrations run on a legacy database");
+        let id = CompanyId::new("acme");
+
+        // The desk was only ever inside the blob; the backfill is what makes it
+        // a predicate.
+        assert_eq!(
+            store
+                .list_runs(&id, &RunFilter::for_agent("engineer"))
+                .await
+                .expect("list by desk")
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["old-run"],
+            "an attempt written before the column existed is still this desk's"
+        );
+        assert!(
+            store
+                .list_runs(&id, &RunFilter::for_agent("ceo"))
+                .await
+                .expect("list by desk")
+                .is_empty(),
+            "and it is not somebody else's"
+        );
+
+        // A run written after the upgrade is filed by the same predicate.
+        store
+            .create_run(&id, NewRun::for_chat("turn-1", "general", "engineer"))
+            .await
+            .expect("mint a run on the migrated table");
+        let mut ids = store
+            .list_runs(&id, &RunFilter::for_agent("engineer"))
+            .await
+            .expect("list by desk")
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["old-run", "turn-1"]);
+
+        // The heal is idempotent — it runs on every open, and must not rewrite
+        // the run history each time. Re-running it leaves the same answer, and
+        // nothing is left `NULL` for it to touch.
+        heal_runs_agent_id(&store.conn()).expect("the heal is idempotent");
+        assert_eq!(
+            store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE agent_id IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .expect("count"),
+            0,
+            "the backfill left nothing behind for a later open to find"
+        );
+    }
+
     /// **Issue #392 through the port**: the host-durable append really does
     /// commit under `synchronous=FULL`, and really does put it back.
     ///
@@ -4469,6 +4629,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "hi".into(),
                     by: None,
@@ -4522,6 +4683,7 @@ mod test {
         s.append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -4538,6 +4700,7 @@ mod test {
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -4625,6 +4788,7 @@ mod test {
             s.append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "persist".into(),
                     by: None,
@@ -4642,6 +4806,7 @@ mod test {
         assert_eq!(
             events[0].event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "persist".into(),
                 by: None,

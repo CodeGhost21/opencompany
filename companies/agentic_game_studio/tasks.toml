@@ -1,0 +1,54 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a game studio is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-playtest-loop"
+title = "Set up the playtest loop"
+priority = "high"
+note = """
+Decide how often the game is played by someone who did not build it, who \
+runs the session, and what gets written down. Open the first `playtests` \
+row for the next one.
+
+A studio that playtests when it remembers to ships what the team got used \
+to. The cadence is the whole mechanism.
+
+Done when `playtests` has a scheduled row naming a build and a question it \
+is meant to answer.\
+"""
+
+[[task]]
+id = "set-up-the-balance-change-record"
+title = "Set up the balance change record"
+priority = "high"
+note = """
+Write down what a `balance-changes` row must say before a number is \
+allowed to move: the value before and after, why, and what would say it \
+was wrong.
+
+Balance changes are indistinguishable from each other a month later, and a \
+regression nobody can attribute is one nobody can revert.
+
+Done when the rule is a `decisions` row and the first change is recorded.\
+"""
+
+[[task]]
+id = "set-up-the-feature-pipeline"
+title = "Set up the feature pipeline"
+priority = "medium"
+note = """
+Get the current slate onto `features` — one row per thing being built, \
+each with the state it is actually in rather than the state it was \
+announced in.
+
+Done when every in-flight feature has a row and nothing is being built \
+that does not.\
+"""

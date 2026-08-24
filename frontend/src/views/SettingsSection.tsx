@@ -3,11 +3,11 @@ import { lazy, Suspense } from "react";
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
-import { ConnectionsView } from "@/views/ConnectionsView";
-import { DevicesView } from "@/views/DevicesView";
+import { InferenceView } from "@/views/InferenceView";
 import { HostingView } from "@/views/HostingView";
 import { SearchView } from "@/views/SearchView";
 import { McpServersView } from "@/views/McpServersView";
+import { OAuthView } from "@/views/OAuthView";
 import { PeopleView } from "@/views/PeopleView";
 import { SkillsView } from "@/views/SkillsView";
 import { SettingsView } from "@/views/SettingsView";
@@ -53,15 +53,25 @@ export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
         aria-label="Settings"
         className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex"
       >
-        <h2 className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">Settings</h2>
+        {/* A visual caption for the rail, not a heading. The `nav` is already
+            named by its `aria-label`, so an `h2` here added nothing for a screen
+            reader and broke the document outline: the rail renders before the
+            sub-page, so heading navigation met a section-level heading ahead of
+            the page's own `h1` (issue #1392). */}
+        <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">
+          Settings
+        </div>
         {SETTINGS_PAGE_GROUPS.map((group) => (
           <section key={group.id} aria-labelledby={`settings-group-${group.id}`}>
-            <h3
+            {/* Named by `aria-labelledby`, which resolves against any element,
+                so the group keeps its accessible name without sitting in the
+                document outline ahead of the sub-page's `h1` (issue #1392). */}
+            <div
               id={`settings-group-${group.id}`}
               className="px-2 pb-1 pt-3 text-xs font-medium tracking-wide text-muted-foreground uppercase first:pt-1"
             >
               {group.label}
-            </h3>
+            </div>
             {SETTINGS_PAGES.filter((item) => item.group === group.id).map((item) => (
               <a
                 key={item.id}
@@ -114,9 +124,9 @@ export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
           <SettingsView client={client} company={company} feed={feed} onFlag={onFlag} />
         )}
         {page === "people" && <PeopleView client={client} company={company} />}
-        {page === "devices" && <DevicesView client={client} company={company} />}
-        {page === "connections" && <ConnectionsView client={client} company={company} />}
+        {page === "oauth" && <OAuthView client={client} company={company} />}
         {page === "mcp" && <McpServersView client={client} company={company} />}
+        {page === "inference" && <InferenceView client={client} company={company} />}
         {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
             (docs/spec/runtime/finance-console.md): a credential form belongs
             beside the data it unlocks, and "Billing" read as *what OpenCompany
