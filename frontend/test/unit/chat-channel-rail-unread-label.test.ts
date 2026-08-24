@@ -164,25 +164,25 @@ describe("section folds survive a rail collapse/expand (P2 review)", () => {
       const [folds, setFolds] = useState<Record<string, boolean>>({});
       const toggle = (id: string) =>
         setFolds((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
-      return (
-        <>
-          <ChannelRail
-            sections={SECTIONS}
-            activeId={null}
-            unread={{}}
-            onSelect={() => {}}
-            openSections={folds}
-            onToggleSection={toggle}
-          />
-          <ChannelRail
-            sections={SECTIONS}
-            activeId={null}
-            unread={{}}
-            onSelect={() => {}}
-            openSections={folds}
-            onToggleSection={toggle}
-          />
-        </>
+      return createElement(
+        Fragment,
+        null,
+        createElement(ChannelRail, {
+          sections: SECTIONS,
+          activeId: null,
+          unread: {},
+          onSelect: () => {},
+          openSections: folds,
+          onToggleSection: toggle,
+        }),
+        createElement(ChannelRail, {
+          sections: SECTIONS,
+          activeId: null,
+          unread: {},
+          onSelect: () => {},
+          openSections: folds,
+          onToggleSection: toggle,
+        }),
       );
     };
 
