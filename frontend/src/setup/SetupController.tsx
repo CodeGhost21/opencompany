@@ -43,6 +43,7 @@ export function SetupController({
   onForceHandled,
   onOpenChange,
   onCompleted,
+  onRouteDismiss,
 }: {
   client: OpenCompanyClient;
   company: string | null;
