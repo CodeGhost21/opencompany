@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, CircleAlert, Clock3, MessageSquare, ShieldCheck } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -13,6 +13,14 @@ interface Props {
   companyName: string;
   feed: Pick<CompanyFeed, "approvals" | "queue">;
   scope: LocalScope;
+  /**
+   * Bumped by the shell on every `run_status_changed` event — the same counter
+   * the task-detail screen re-reads on (issue #1015). The run panels below
+   * re-read when a live attempt parks or fails while this page stays open;
+   * without it they would keep saying nothing stopped until the view remounted
+   * or the page reloaded.
+   */
+  attemptEventTick?: number;
 }
 
 type RunLoad = "loading" | "ready" | "error";
