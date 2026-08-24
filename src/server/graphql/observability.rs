@@ -332,8 +332,9 @@ pub(crate) async fn resolve_runs(
         .await?;
     // The deep half degrades to "none" per run on any store failure, exactly as
     // the single-run read does. A caller who may not read the unredacted bodies
-    // is not given the store read at all — see `load`.
-    let details_by_run = if may_read_deep {
+    // is not given the store read at all, and a query that does not select
+    // `steps.deep` is not given it either — see `wants_deep` above.
+    let details_by_run = if may_read_deep && wants_deep {
         runtime
             .deep_trace()
             .list_step_details_for_runs(runtime.id(), &ids)
