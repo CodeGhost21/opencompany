@@ -42,7 +42,22 @@ export interface NamedPerson {
 export function guessName(identityKey: string): string | null {
   // A wallet key and the implicit local owner are identities, not names.
   // Capitalising either would produce something that *looks* like a name.
-  if (identityKey.startsWith("wallet:") || identityKey.startsWith("local:")) return null;
+  //
+  // The prefixes are judged the way the host parses them (`LoginIdentity::parse`
+  // in `src/ports/users.rs`), not by prefix alone: an address like
+  // `wallet:ada@example.com` is an *email* whose local part merely starts with
+  // the prefix, and so is `local:owner@example.com` — only a base58 string that
+  // actually decodes to a 32-byte Ed25519 key after `wallet:`, and the exact
+  // value `local:owner`, are identities with no name in them. Guessing less
+  // strictly than the host would render the same person differently on the two
+  // sides.
+  if (identityKey.startsWith("wallet:")) {
+    const address = identityKey.slice("wallet:".length).trim();
+    const bytes = base58ToBytes(address);
+    if (bytes && bytes.length === 32) return null;
+  } else if (identityKey === "local:owner") {
+    return null;
+  }
   const local = identityKey.split("@")[0].split("+")[0];
   const words = local
     .split(/[._-]+/)
