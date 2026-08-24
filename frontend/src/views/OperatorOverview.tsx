@@ -33,18 +33,47 @@ type RunLoad = "loading" | "ready" | "error";
  * last time *this browser* opened it. The boundary is browser-local because
  * the host has no persisted company-wide event read cursor yet.
  */
-export function OperatorOverview({ client, company, companyName, feed, scope }: Props) {
+export function OperatorOverview({
+  client,
+  company,
+  companyName,
+  feed,
+  scope,
+  attemptEventTick,
+}: Props) {
   const [previousVisit] = useState(() => readOverviewVisit(scope));
-  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [stoppedRuns, setStoppedRuns] = useState<RunSummary[]>([]);
+  const [failedRuns, setFailedRuns] = useState<RunSummary[]>([]);
   const [runLoad, setRunLoad] = useState<RunLoad>("loading");
+
+  /**
+   * The two run reads this page makes, kept separate on purpose.
+   *
+   * "Work that stopped" wants the newest parked-or-failed attempts of either
+   * kind; "Since you last opened" is a claim about *failures*. Mixing them in
+   * one capped page would let a run of newer paused attempts push an older
+   * failed attempt that finished after the previous visit out of the answer —
+   * and the since-visit panel's empty state would then print "No failed
+   * attempts were recorded" while one existed. Failures get a page of their
+   * own, read at the host's default cap so the boundary filter below is
+   * exhaustive over a real history rather than a sample of it.
+   */
+  const fetchRuns = useCallback(async () => {
+    const [stopped, failed] = await Promise.all([
+      listRuns(client, company, { status: ["failed", "paused"], limit: 12 }),
+      listRuns(client, company, { status: ["failed"], limit: 50 }),
+    ]);
+    return { stopped, failed };
+  }, [client, company]);
 
   useEffect(() => {
     let live = true;
     setRunLoad("loading");
-    listRuns(client, company, { status: ["failed", "paused"], limit: 12 })
-      .then((next) => {
+    fetchRuns()
+      .then(({ stopped, failed }) => {
         if (!live) return;
-        setRuns(next);
+        setStoppedRuns(stopped);
+        setFailedRuns(failed);
         setRunLoad("ready");
       })
       .catch(() => {
@@ -53,24 +82,50 @@ export function OperatorOverview({ client, company, companyName, feed, scope }: 
     return () => {
       live = false;
     };
-  }, [client, company]);
+  }, [fetchRuns]);
+
+  // Issue #1015: re-read (silently — no loading flash) when the shell reports a
+  // run status change while this page stays open. The initial-load effect above
+  // owns the "loading"/"error" states; a re-read that fails keeps the last good
+  // lists rather than dropping a settled page to the error state mid-view.
+  const seenRunTick = useRef(attemptEventTick);
+  useEffect(() => {
+    if (attemptEventTick === undefined || attemptEventTick === seenRunTick.current) return;
+    seenRunTick.current = attemptEventTick;
+    let live = true;
+    fetchRuns()
+      .then(({ stopped, failed }) => {
+        if (!live) return;
+        setStoppedRuns(stopped);
+        setFailedRuns(failed);
+      })
+      .catch(() => {
+        /* the current lists stay; the next event or reload re-reads */
+      });
+    return () => {
+      live = false;
+    };
+  }, [attemptEventTick, fetchRuns]);
 
   useEffect(() => {
     writeOverviewVisit(scope, Date.now());
   }, [scope]);
 
-  const stopped = useMemo(() => runs.filter((run) => run.status === "paused" || run.status === "failed"), [runs]);
+  const stopped = useMemo(
+    () => stoppedRuns.filter((run) => run.status === "paused" || run.status === "failed"),
+    [stoppedRuns],
+  );
   const failuresSinceVisit = useMemo(
     () =>
       previousVisit === null
         ? []
-        : runs.filter(
+        : failedRuns.filter(
             (run) =>
               run.status === "failed" &&
               run.finishedAtMillis !== undefined &&
               run.finishedAtMillis >= previousVisit,
           ),
-    [previousVisit, runs],
+    [previousVisit, failedRuns],
   );
 
   return (
