@@ -613,10 +613,13 @@ export function StandingPermissions({
                   /* The subject, not just the grant: two teammates holding the
                      same tool and scope read identically in grantHeadline — and
                      a workflow grant carries no agent at all — so button-only
-                     navigation would hear identical "Revoke" buttons and could
+                     navigation would hear identical "Remove" buttons and could
                      take back the wrong one (#1411). `grantSubject` resolves
-                     the workflow subject for that second kind. */
-                  aria-label={`Revoke ${grantSubject(g, askerNames)}'s permission: ${grantHeadline(g)} — ${
+                     the workflow subject for that second kind. The accessible
+                     name leads with the visible "Remove" verb so speech-input
+                     users can say the control's label (WCAG 2.5.3 label in
+                     name). */
+                  aria-label={`Remove ${grantSubject(g, askerNames)}'s permission: ${grantHeadline(g)} — ${
                     g.expires_at_millis <= now
                       ? "expired"
                       : `expires ${untilLabel(g.expires_at_millis, now)}`
