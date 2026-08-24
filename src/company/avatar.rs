@@ -1469,9 +1469,9 @@ mod test {
         let webp_err = check_image_dimensions(&webp).unwrap_err().to_string();
         assert!(webp_err.contains("truncated animation"), "WebP: {webp_err}");
 
-        let mut apng = apng_animated((4096, 4096), &[(4096, 4096); 9]);
-        apng.truncate(apng.len() - 1); // cut off the final chunk
-        let apng_err = check_image_dimensions(&apng).unwrap_err().to_string();
+        let mut apng_bytes = apng_animated((4096, 4096), &[(4096, 4096); 9]);
+        apng_bytes.truncate(apng_bytes.len() - 1); // cut off the final chunk
+        let apng_err = check_image_dimensions(&apng_bytes).unwrap_err().to_string();
         assert!(apng_err.contains("truncated animation"), "APNG: {apng_err}");
 
         // A header-only GIF has never reached a frame, so it remains the
