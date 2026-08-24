@@ -109,9 +109,12 @@ describe("companyCovers", () => {
     // write grant, so a request for it under a `["*"]` allow-list would hand the
     // agent the exact token the wiring predicate accepts. The hint must refuse
     // it the way it refuses `workspace.write` — reads still come from the
-    // catch-all, writes never do.
+    // catch-all, writes never do. (A `workspace.*` *request* is a different
+    // token: it strips to `workspace.` and survives as an effective `workspace.*`
+    // that the exact-token write predicate rejects, so the catch-all covering it
+    // confers nothing beyond reads.)
     expect(companyCovers(["*"], "workspace")).toBe(false);
-    expect(companyCovers(["*"], "workspace.*")).toBe(false);
+    expect(companyCovers(["*"], "workspace.*")).toBe(true);
     expect(companyCovers(["*"], "workspace.read")).toBe(true);
     // An explicit `workspace` or `workspace.write` allow covers the write
     // request in either spelling.
