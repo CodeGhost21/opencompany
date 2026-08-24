@@ -57,7 +57,7 @@ const REWRITE = (
   return null;
 };
 
-const VIEWS = ["overview", "ledgers", "tasks", "memory", "settings"] as const;
+const VIEWS = ["overview", "ledgers", "tasks", "settings"] as const;
 
 describe("the retired #/tasks address", () => {
   let container: HTMLDivElement;
