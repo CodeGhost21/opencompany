@@ -171,9 +171,35 @@ export function Markdown({
           ),
           // Chips are injected at the leaf elements that hold prose rather than
           // through a remark plugin, so the mention list stays a plain prop and
-          // no AST transform has to be kept in step with it.
+          // no AST transform has to be kept in step with it. Every Markdown
+          // block that can contain phrasing content uses the same transform;
+          // headings and GFM table cells must not lose resolved mentions.
+          h1: ({ children: content, ...rest }) => (
+            <h1 {...rest}>{chipMentions(content, spans, sourceText, seen)}</h1>
+          ),
+          h2: ({ children: content, ...rest }) => (
+            <h2 {...rest}>{chipMentions(content, spans, sourceText, seen)}</h2>
+          ),
+          h3: ({ children: content, ...rest }) => (
+            <h3 {...rest}>{chipMentions(content, spans, sourceText, seen)}</h3>
+          ),
+          h4: ({ children: content, ...rest }) => (
+            <h4 {...rest}>{chipMentions(content, spans, sourceText, seen)}</h4>
+          ),
+          h5: ({ children: content, ...rest }) => (
+            <h5 {...rest}>{chipMentions(content, spans, sourceText, seen)}</h5>
+          ),
+          h6: ({ children: content, ...rest }) => (
+            <h6 {...rest}>{chipMentions(content, spans, sourceText, seen)}</h6>
+          ),
           p: ({ children: content, ...rest }) => (
             <p {...rest}>{chipMentions(content, spans, sourceText, seen)}</p>
+          ),
+          td: ({ children: content, ...rest }) => (
+            <td {...rest}>{chipMentions(content, spans, sourceText, seen)}</td>
+          ),
+          th: ({ children: content, ...rest }) => (
+            <th {...rest}>{chipMentions(content, spans, sourceText, seen)}</th>
           ),
           li: ({ children: content, ...rest }) => {
             // Loose lists contain a nested paragraph. Leave that paragraph to
