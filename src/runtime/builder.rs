@@ -2118,7 +2118,14 @@ impl RuntimeBuilder {
         // manifest snapshot, and a persisted override silently reverts on every
         // restart (issue #1455). Parked approvals and the emergency switch are
         // untouched; only the evaluation policy and the derived deadline move.
-        gate.apply_effective_policy(effective_policy(&self.manifest.policy, overlay_policy.as_ref()));
+        // A test-injected gate is exempt: it carries its own policy/TTL on
+        // purpose (e.g. a zero-TTL gate for expiry tests).
+        if !gate_injected {
+            gate.apply_effective_policy(effective_policy(
+                &self.manifest.policy,
+                overlay_policy.as_ref(),
+            ));
+        }
         // The per-desk tool ceilings, carried across the rebuild under the same
         // seed-wins rule as the policy override above — see
         // `carry_desk_tool_overrides` for why a desk grant needs it even more
