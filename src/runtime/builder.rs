@@ -4179,7 +4179,8 @@ mod test {
         let home = tmp_home("opencompany-engine-fact-swap-");
         let mem_a = tempfile::tempdir().unwrap();
         let ctx_a = tempfile::tempdir().unwrap();
-        let facts_a: Arc<dyn FactStore> = Arc::new(FsOps::new(mem_a.path().to_path_buf()));
+        let facts_dir_a = tempfile::tempdir().unwrap();
+        let facts_a: Arc<dyn FactStore> = Arc::new(FsOps::new(facts_dir_a.path().to_path_buf()));
         let mut overlay_a = MemoryOverlay::test_with_ports(
             Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
             Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
@@ -4200,7 +4201,8 @@ mod test {
 
         let mem_b = tempfile::tempdir().unwrap();
         let ctx_b = tempfile::tempdir().unwrap();
-        let facts_b: Arc<dyn FactStore> = Arc::new(FsOps::new(mem_b.path().to_path_buf()));
+        let facts_dir_b = tempfile::tempdir().unwrap();
+        let facts_b: Arc<dyn FactStore> = Arc::new(FsOps::new(facts_dir_b.path().to_path_buf()));
         let mut overlay_b = MemoryOverlay::test_with_ports(
             Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
             Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
