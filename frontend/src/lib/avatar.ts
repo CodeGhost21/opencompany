@@ -148,6 +148,17 @@ const blobUrls = new Map<string, Promise<string | null>>();
 const blobUrlValues = new Map<string, string>();
 /** Mounted avatar consumers by cache key; pinned URLs cannot be evicted. */
 const blobUrlRefs = new Map<string, number>();
+/**
+ * URLs handed to a mounted tile when the cache is full of pinned entries.
+ *
+ * A cache-owned URL is released by eviction; these are the other kind — the
+ * cache could not make room, so the face is owned by the tile that drew it
+ * and [`releaseAvatar`] revokes it when the last such tile unmounts. Keeping
+ * them apart is what lets the bound ([`MAX_BLOB_URLS`]) stay honest: it counts
+ * cache-owned URLs, and an over-capacity screen's extra faces are released
+ * with their tiles instead of being hoarded past the cap.
+ */
+const componentUrls = new Map<string, string>();
 
 /**
  * The most distinct uploaded faces the cache keeps at once.
