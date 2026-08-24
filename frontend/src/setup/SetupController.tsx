@@ -303,9 +303,11 @@ export function SetupController({
       open={open}
       client={client}
       company={company}
+      redesign={redesigning}
       onSkip={skip}
       onLeave={leave}
       onDone={done}
+      onRedesign={redesign}
     />
   );
 }
