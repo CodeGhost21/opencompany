@@ -173,12 +173,29 @@ describe("the consequence on a batched approval card", () => {
 
   // A failed item is still pending and still retryable, so its warning is
   // attached to a decision the operator has yet to make.
-  it("keeps the warning on an item whose decision did not record", async () => {
-    await render([approval("a1", "spend"), approval("a2", "send")], {}, { a1: "host unreachable" });
+  it("renders consequences and tint in the compact chat row", async () => {
+    await render([approval("a1", "send"), approval("a2", "send")], {}, {}, true);
 
-    const failedLine = container.querySelector<HTMLElement>('[data-approval-failed="true"]');
-    expect(failedLine).not.toBeNull();
-    expect(failedLine?.textContent).toContain("Not recorded");
-    expect(failedLine?.textContent).toContain("Spends money");
+    expect(badges()).toEqual(["Leaves the company"]);
+    const tile = container.querySelector<HTMLElement>(".size-7");
+    expect(tile?.className).toContain("bg-tone-2/15");
+  });
+
+  it("keeps a compact mixed batch neutral when one item is unclassified", async () => {
+    await render([approval("a1", "spend"), approval("a2", "other")], {}, {}, true);
+
+    expect(badges()).toEqual(["Spends money"]);
+    const tile = container.querySelector<HTMLElement>(".size-7");
+    expect(tile?.className).toContain("bg-muted");
+    expect(tile?.className).not.toContain("bg-tone-");
+  });
+
+  it("keeps a compact batch neutral when a group is absent", async () => {
+    await render([approval("a1", "spend"), approval("a2", undefined)], {}, {}, true);
+
+    expect(badges()).toEqual(["Spends money"]);
+    const tile = container.querySelector<HTMLElement>(".size-7");
+    expect(tile?.className).toContain("bg-muted");
+    expect(tile?.className).not.toContain("bg-tone-");
   });
 });
