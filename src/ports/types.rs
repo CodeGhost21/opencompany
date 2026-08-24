@@ -6211,6 +6211,17 @@ mod test {
         }
     }
 
+    #[test]
+    fn explicit_no_cap_policy_override_survives_json_round_trip() {
+        let mut override_ = policy_entry(None, None);
+        override_.auto_approve_under_usd = Some(None);
+        let encoded = serde_json::to_value(&override_).expect("serialize override");
+        assert!(encoded["auto_approve_under_usd"].is_null());
+        let decoded: PolicyOverride =
+            serde_json::from_value(encoded).expect("deserialize override");
+        assert_eq!(decoded.auto_approve_under_usd, Some(None));
+    }
+
     /// With no override stored, `effective_policy` is the manifest verbatim —
     /// the pre-#562 behaviour, and the net that says adding this field changed
     /// nothing for a company that never uses it.
