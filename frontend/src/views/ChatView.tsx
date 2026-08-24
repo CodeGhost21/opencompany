@@ -638,6 +638,15 @@ export function ChatView({
    */
   const [directory, setDirectory] = useState<Mentionable[] | null>(null);
   /**
+   * One epoch token shared by the mount fetch and `reloadDirectory`. Every
+   * fetch bumps it and applies its response only while the token is still
+   * current, so a fetch superseded by a company switch (or by a second roster
+   * write) cannot land after the newer directory and hand the picker stale —
+   * possibly cross-company — rows. Selecting a row the server will demote is a
+   * bad row, so advertising it in the first place is what the guard prevents.
+   */
+  const directoryEpoch = useRef(0);
+  /**
    * Re-read the mention directory.
    *
    * Called on mount and after a roster write, so a teammate added here appears
@@ -646,24 +655,29 @@ export function ChatView({
    * can only fail is a bad row).
    */
   const reloadDirectory = useCallback(() => {
+    const epoch = ++directoryEpoch.current;
     void client
       .mentionables(company)
-      .then((d) => setDirectory(mentionablesFor(d)))
-      .catch(() => setDirectory(null));
+      .then((d) => {
+        if (epoch === directoryEpoch.current) setDirectory(mentionablesFor(d));
+      })
+      .catch(() => {
+        if (epoch === directoryEpoch.current) setDirectory(null);
+      });
   }, [client, company]);
   useEffect(() => {
-    let live = true;
+    const epoch = ++directoryEpoch.current;
     setDirectory(null);
     void client
       .mentionables(company)
       .then((d) => {
-        if (live) setDirectory(mentionablesFor(d));
+        if (epoch === directoryEpoch.current) setDirectory(mentionablesFor(d));
       })
       .catch(() => {
-        if (live) setDirectory(null);
+        if (epoch === directoryEpoch.current) setDirectory(null);
       });
     return () => {
-      live = false;
+      directoryEpoch.current += 1;
     };
   }, [client, company]);
 
