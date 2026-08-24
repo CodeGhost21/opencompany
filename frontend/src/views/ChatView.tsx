@@ -797,6 +797,13 @@ export function ChatView({
       append(target, ...replies);
       onReply?.();
     } catch (err) {
+      // A rejected request can be just as stale as a fulfilled one. Do not
+      // append the old company's error or notify the new company's shell.
+      if (companyRef.current !== company) {
+        outcome = "detached";
+        if (chatId) onSendStale?.(chatId);
+        return;
+      }
       outcome = "failed";
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
