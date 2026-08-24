@@ -410,8 +410,14 @@ impl StepTrace {
                 self.thinking_open = true;
                 let seq = self.claim();
                 if self.deep {
-                    self.thinking_pending_bytes = delta.len();
-                    self.thinking_buf = Some((seq, delta.clone()));
+                    // The first delta is emitted in its own detail below, so it
+                    // must NOT also enter `thinking_buf`: later threshold flushes
+                    // and `close_thinking` re-emit that buffer, and the sink
+                    // appends each emission to the stored prefix. Counting it
+                    // twice is what used to turn `"first second"` into
+                    // `"firstfirst second"`.
+                    self.thinking_pending_bytes = 0;
+                    self.thinking_buf = Some((seq, String::new()));
                 }
                 vec![(
                     seq,
