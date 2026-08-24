@@ -9720,4 +9720,32 @@ mode = "full"
             "a real desk keeps its canonical id even when its name looks general"
         );
     }
+
+    /// [`mention_context`] canonicalizes a **memberless** desk too. A desk that
+    /// exists but has nobody seated on it is still a real desk with a real rail
+    /// channel, so a key typed as its display name must file under its canonical
+    /// id: `"Sales"` has to badge `#sales`, and opening `#sales` has to clear it.
+    /// Pre-fix, `EmptyDesk` fell through the same wildcard as `Unknown` and
+    /// stored the raw key — a channel id no desk renders, so the badge was
+    /// invisible and could never clear.
+    #[tokio::test]
+    async fn mention_context_canonicalizes_a_memberless_desk() {
+        let home_dir = home();
+        let state = state_with_memberless_desk(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Sales").await,
+            "sales",
+            "a memberless desk named by its display name has to store the desk id, \
+             not the raw key — the rail's channel id is `sales`"
+        );
+        // The desk that does have a lead keeps behaving as before.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Engineering").await,
+            "engineering",
+            "a desk with a lead still stores its canonical id"
+        );
+    }
 }
