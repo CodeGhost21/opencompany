@@ -341,15 +341,19 @@ impl Probe for SystemProbe {
 
 /// The filenames one command can have on this platform, in preference order.
 ///
-/// On Unix a command is its own filename and this yields one candidate. On
-/// Windows it does not: `node` is installed as `node.exe`, `npm` as `npm.cmd`,
-/// and a lookup for the bare name finds neither — so every adapter install was
-/// refused with "node was not found" on a correctly configured machine. The
-/// extensions come from `PATHEXT`, which is where Windows itself keeps that
-/// list, with the usual default when it is unset.
+/// On Unix a command is its own filename and this yields one candidate.
 ///
-/// The bare name is tried first on both platforms, so an extensionless
-/// executable on `PATH` still wins where one exists.
+/// On Windows it yields the `PATHEXT` variants **first** and the bare name
+/// last. That order is the whole point: npm writes *both* `<command>.cmd`,
+/// which Windows can execute, and an extensionless POSIX shell shim beside it,
+/// which it cannot — and every caller stops at the first candidate that
+/// exists. Preferring the bare name (as this first did, reasoning that an
+/// extensionless executable should not be shadowed) picks the unusable half of
+/// that pair every time, for `npm` itself and for an installed adapter alike.
+/// The bare name stays as the final fallback, so a genuinely extensionless
+/// executable is still found where no variant exists.
+///
+/// A command that already carries an extension is never extended again.
 pub(crate) fn executable_names(command: &str) -> impl Iterator<Item = String> + '_ {
     let extensions: Vec<String> = if cfg!(windows) && !command.contains('.') {
         std::env::var("PATHEXT")
@@ -361,11 +365,10 @@ pub(crate) fn executable_names(command: &str) -> impl Iterator<Item = String> + 
     } else {
         Vec::new()
     };
-    std::iter::once(command.to_string()).chain(
-        extensions
-            .into_iter()
-            .map(move |ext| format!("{command}{ext}")),
-    )
+    extensions
+        .into_iter()
+        .map(move |ext| format!("{command}{ext}"))
+        .chain(std::iter::once(command.to_string()))
 }
 
 #[cfg(unix)]

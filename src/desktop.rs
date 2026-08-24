@@ -402,6 +402,66 @@ pub async fn seed_generated_company(
 }
 
 /// Builds one company over the instance home and puts it in the registry.
+/// The builder assembly every desktop company is built with.
+///
+/// Shared by [`register`] and [`DesktopRebuilder`] so a rebuilt company cannot
+/// be wired differently from the one it replaces — the same reason the binary's
+/// `BootRebuilder` reuses `company_builder`. A rebuild that quietly dropped the
+/// ACP factory would take every local harness down with it, and the symptom
+/// (turns falling back to the echo brain) points nowhere near the cause.
+fn desktop_builder(
+    state: &AppState,
+    id: crate::ports::types::CompanyId,
+    manifest: CompanyManifest,
+) -> RuntimeBuilder {
+    let mut builder =
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+            .with_id(id)
+            // The host-wide sign-in mode, which outranks the manifest's own.
+            .with_auth_mode_override(state.auth_mode_override());
+    if let Some(stores) = state.stores() {
+        builder = builder.with_stores(stores);
+    }
+    // Issue #1245: `with_acp_agents` only exists under `acp` — an
+    // `openhuman`-only build (or one with no `AcpAgentFactory` wired on
+    // `state`, e.g. every non-desktop embedder) leaves the builder's default
+    // `None`, so a `local` acp harness resolves `unavailable` exactly as it
+    // already does.
+    #[cfg(feature = "acp")]
+    if let Some(factory) = state.acp_agents() {
+        builder = builder.with_acp_agents(factory);
+    }
+    builder
+}
+
+/// Rebuilds a desktop company in place, with the wiring it booted with.
+///
+/// The desktop needs this more than `serve` does, not less: it is the only host
+/// that runs local ACP harnesses, so it is the only host where changing a
+/// teammate's harness or model has to take effect without a restart. Wiring it
+/// nowhere meant `rebuild_company` failed on exactly that host — the handler
+/// logged and returned 200, so the console reported success while turns kept
+/// using the old lane until the app was restarted.
+pub struct DesktopRebuilder;
+
+#[async_trait::async_trait]
+impl crate::runtime::RuntimeRebuilder for DesktopRebuilder {
+    async fn rebuild(
+        &self,
+        state: &AppState,
+        request: crate::runtime::RebuildRequest,
+    ) -> Result<crate::CompanyRuntime> {
+        desktop_builder(state, request.id.clone(), request.manifest)
+            // The successor adopts the live journal, approval gate, stores and
+            // harness pool rather than constructing a second copy of any of
+            // them. Not attaching this is a correctness bug, not a missed
+            // optimisation — see `RuntimeHandover`.
+            .with_handover(request.handover)
+            .build()
+            .await
+    }
+}
+
 async fn register(
     state: &AppState,
     id: crate::ports::types::CompanyId,
@@ -413,9 +473,7 @@ async fn register(
     // supplies. Without this a desktop company had no harness even in a build
     // that compiled one in, so every turn fell back to the echo brain and the
     // console reported that this build cannot reach a model.
-    let mut builder =
-        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
-            .with_id(id.clone())
+    let mut builder = desktop_builder(state, id.clone(), manifest)
             // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
             // `auth_mode`), which outranks this manifest's own `[users].mode`.
             //
@@ -427,21 +485,9 @@ async fn register(
             // without this the restart adopts the company and quietly ignores the
             // setting they were just told would take effect. `None` — the normal
             // case — leaves each manifest to name its own mode, as before.
-            .with_auth_mode_override(state.auth_mode_override());
-    if let Some(stores) = state.stores() {
-        builder = builder.with_stores(stores);
-    }
+        ;
     if let Some(provenance) = provenance {
         builder = builder.with_template_provenance(provenance);
-    }
-    // Issue #1245: `with_acp_agents` only exists under `acp` — an
-    // `openhuman`-only build (or one with no `AcpAgentFactory` wired on
-    // `state`, e.g. every non-desktop embedder) leaves the builder's default
-    // `None`, so a `local` acp harness resolves `unavailable` exactly as it
-    // already does.
-    #[cfg(feature = "acp")]
-    if let Some(factory) = state.acp_agents() {
-        builder = builder.with_acp_agents(factory);
     }
     let runtime = builder.build().await?;
     // The same refusal `serve` applies at boot and provisioning: a `none`-mode
