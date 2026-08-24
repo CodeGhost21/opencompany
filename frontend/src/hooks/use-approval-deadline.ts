@@ -37,23 +37,32 @@ export function useApprovalDeadline(
   const [hours, setHours] = useState(DEFAULT_TTL_HOURS);
   useEffect(() => {
     let live = true;
-    // A poll tick can be in flight when the next one starts, and the two GETs
-    // may resolve out of order (a PUT between them makes the older response the
-    // stale one). Only the newest request's value may land — otherwise a jittery
-    // response could repaint the header with a deadline the host no longer
-    // enforces until the next tick corrects it.
-    let latest = 0;
+    // Serialize refreshes: a slow request must not be invalidated by the next
+    // polling tick, otherwise a consistently slow host would never update the
+    // header. The next tick runs immediately after the current request settles.
+    let refreshing = false;
+    let queued = false;
     setHours(DEFAULT_TTL_HOURS);
     const refresh = () => {
-      const seq = ++latest;
+      if (refreshing) {
+        queued = true;
+        return;
+      }
+      refreshing = true;
       void getPolicy(client, company)
         .then((policy) => {
-          if (live && seq === latest)
-            setHours(policy.approvalTtlHours ?? DEFAULT_TTL_HOURS);
+          if (live) setHours(policy.approvalTtlHours ?? DEFAULT_TTL_HOURS);
         })
         .catch(() => {
           // A policy read is explanatory here. Keep the historical default if an
           // older or temporarily unreachable host cannot serve it.
+        })
+        .finally(() => {
+          refreshing = false;
+          if (queued && live) {
+            queued = false;
+            refresh();
+          }
         });
     };
     refresh();
