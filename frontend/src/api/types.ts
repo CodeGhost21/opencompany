@@ -645,8 +645,13 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  */
 export interface StandingGrant {
   id: string;
-  /** The teammate it was granted to. */
+  /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
+   * which names its subject in `workflow` instead. */
   agent: string;
+  /** The authored workflow allowed to redeem it, when the grant is to a
+   * workflow rather than a teammate (issue #1098) — `agent` is empty then.
+   * Absent on every teammate grant. */
+  workflow?: string;
   /** The tool it admits, with any arguments. */
   tool: string;
   verdict: Verdict;
