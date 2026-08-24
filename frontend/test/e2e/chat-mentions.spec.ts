@@ -217,37 +217,7 @@ test("backspacing through a chip un-mentions it", async ({ page }) => {
 });
 
 test("a host with no mention directory still sends, with no picker", async ({ page }) => {
-  await page.addInitScript(() => {
-    const real = Storage.prototype.getItem;
-    Storage.prototype.getItem = function getItem(key: string) {
-      return key.startsWith("oc-tour:") ? '{"skipped":true}' : real.call(this, key);
-    };
-  });
-  await page.route("**/api/v1/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    const json = (body: unknown, status = 200) =>
-      route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
-    const status = { id: COMPANY, name: "Acme", lifecycle: "running", pending_approvals: 0 };
-    if (path === "/api/v1/companies") return json([status]);
-    if (path === `/api/v1/companies/${COMPANY}`) return json(status);
-    if (path.endsWith("/desks")) return json(DESKS);
-    if (path.endsWith("/team")) return json(ROSTER);
-    // The pre-feature host.
-    if (path.endsWith("/chat/mentionables")) return json({ error: "not_found" }, 404);
-    if (path.endsWith("/chat/read-state")) return json({ markers: [] });
-    if (path.endsWith("/chat/history")) return json([]);
-    if (path.endsWith("/chat")) {
-      const body = route.request().postDataJSON() as SentChat;
-      sent.push(body);
-      return json({ responses: [{ text: `echo: ${body.text}`, channel: body.chat }] });
-    }
-    if (path.endsWith("/events")) {
-      return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
-    }
-    if (path.endsWith("/me")) return json({ id: "op", email: "op@example.com", role: "member" });
-    return json([]);
-  });
-
+  await mockApi(page, { mentionables: "missing" });
   await openChannel(page, "engineering");
   await composer(page).click();
   await composer(page).pressSequentially("hey @engineer");
