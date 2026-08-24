@@ -67,7 +67,12 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   // The address is the source of truth for the selection, but reading it on
   // every render would fight the poll; mirror it and let the writer update both.
   const [agent, setAgent] = useState<string | null>(() => readObservatoryHash().agent);
-  const focusStep = useRef(readObservatoryHash().step);
+  // The attempt a deep link names, and the step within it. Mirrored in state,
+  // like `agent`, so a link's `?turn=…&step=…` is honoured when the attempts
+  // load — and re-read on `runId` change so it cannot go stale following a link
+  // into another run.
+  const [turn, setTurn] = useState<string | null>(() => readObservatoryHash().turn);
+  const [focusStep, setFocusStep] = useState<number | null>(() => readObservatoryHash().step);
   // Bumped per `reload`; a response whose generation is stale (a company or
   // runId change happened while it was in flight) is discarded so a previous
   // route's attempts — including raw deep-trace bodies — cannot paint the
@@ -77,9 +82,13 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   // Navigating between runs (following an Observatory link to another run)
   // changes `runId` while this view stays mounted, and such links deliberately
   // omit the old `agent` query parameter. Re-read the address so the filter
-  // does not keep silently applying to the newly fetched attempts.
+  // and the turn/step selection do not keep silently applying to the newly
+  // fetched attempts.
   useEffect(() => {
-    setAgent(readObservatoryHash().agent);
+    const next = readObservatoryHash();
+    setAgent(next.agent);
+    setTurn(next.turn);
+    setFocusStep(next.step);
   }, [runId]);
 
   const reload = useCallback(async () => {
