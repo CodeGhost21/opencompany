@@ -99,6 +99,7 @@ impl RunTraceSink {
             trace: StdMutex::new(StepTrace::default()),
             usage: StdMutex::new(TokenUsage::default()),
             persisted: StdMutex::new(0),
+            deep_reasoning: StdMutex::new(std::collections::HashMap::new()),
             deep: None,
         }
     }
