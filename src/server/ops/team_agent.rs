@@ -710,8 +710,7 @@ async fn edit_agent(
                 "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
                  `transport = \"runner\"`. Model overrides aren't supported for a runner \
                  yet — the runner wire protocol doesn't carry them."
-            )))
-            .into_response());
+            ))));
         }
     }
 
