@@ -1457,6 +1457,7 @@ mod test {
         }
     }
 
+    #[async_trait::async_trait]
     impl crate::ports::WorkspaceStore for ScriptedStore {
         async fn tree(
             &self,
