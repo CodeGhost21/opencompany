@@ -333,12 +333,16 @@ hosted tenant with a read-only manifest snapshot, not at all.
 too, not accepted-and-downgraded, or the console would show a tier the gate was
 not running. Both writes are admin-only and attributed. `DELETE` restores the
 manifest's `[policy]` — its own verb, since a `PUT` of the manifest's current
-values would pin them. The change takes effect on the company's **next turn**
-(`ApprovalPolicy` is built per roster build, and this override is fingerprinted
-alongside the other freshness axes). It survives a rebuild unless the seed's
-`[policy]` itself changed: version control wins when it speaks, so tightening
-`company.toml` clears a looser tier set here, and a redeploy that changed
-nothing does not.
+values would pin them. Tier, cap, and always-ask changes take effect on the
+company's **next turn** (`ApprovalPolicy` is built per roster build, and these
+overrides are fingerprinted alongside the other freshness axes). A deadline
+change is enforced **immediately** by the live approval gate, including when
+parked approvals are swept against their new deadline. The daily budget and
+always-ask list still outrank a spend cap, and the strict cap comparison means
+a spend exactly equal to the cap still parks. The override survives a rebuild
+unless the seed's `[policy]` itself changed: version control wins when it
+speaks, so tightening `company.toml` clears a looser setting here, and a
+redeploy that changed nothing does not.
 
 ### Credential-bearing surfaces (feature-gated)
 
