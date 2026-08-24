@@ -428,7 +428,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            vec!["harness-member"],
+            vec!["Harness Member"],
             "the caller's own row is dropped and the other person's is offered: {labels:?}"
         );
     }
