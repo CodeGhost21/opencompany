@@ -54,8 +54,8 @@
 //! sweeping is still a queue that never empties.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use async_trait::async_trait;
 

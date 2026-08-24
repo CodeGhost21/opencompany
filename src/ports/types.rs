@@ -3202,9 +3202,7 @@ pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverr
         auto_approve_under_usd: override_
             .auto_approve_under_usd
             .unwrap_or(manifest.auto_approve_under_usd),
-        approval_ttl_hours: override_
-            .approval_ttl_hours
-            .or(manifest.approval_ttl_hours),
+        approval_ttl_hours: override_.approval_ttl_hours.or(manifest.approval_ttl_hours),
     }
 }
 

@@ -315,9 +315,7 @@ async fn set_policy(
     if let Some(Some(cap)) = body.auto_approve_under_usd
         && (!cap.is_finite() || cap < 0.0)
     {
-        return Err(refusal(
-            "`autoApproveUnderUsd` must be a non-negative number.",
-        ).into());
+        return Err(refusal("`autoApproveUnderUsd` must be a non-negative number.").into());
     }
 
     let write_lock = company_write_lock(company.id());
