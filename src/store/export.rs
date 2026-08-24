@@ -263,6 +263,7 @@ impl BundleContents {
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
         facts: Option<Arc<dyn FactStore>>,
+        scopes: Option<Arc<dyn MemoryScopes>>,
     ) -> Result<Self> {
         let record = store
             .load(id)
