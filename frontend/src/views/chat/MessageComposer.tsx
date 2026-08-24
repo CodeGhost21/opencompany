@@ -102,6 +102,9 @@ function activeMentionEnd(
   aliases: ReadonlySet<string>,
 ): number {
   let i = from;
+  // No aliases means no name can match, so the token cannot extend past its
+  // start: stop scanning rather than walk the loop with `prefix` never set.
+  if (aliases.size === 0) return nameStart;
   while (i < text.length) {
     const ch = text[i];
     const next =
