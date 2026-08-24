@@ -122,6 +122,14 @@ struct InferenceStatusDto {
     /// tells the second apart from `cognition` on its own, and this flag never
     /// promises a restart that would change nothing.
     restart_required: bool,
+    /// Whether the harness cognition path is reachable on this host at all (the
+    /// `openhuman` feature compiled in and a harness pool attached at boot).
+    ///
+    /// `false` means no model configuration can ever put this company on the
+    /// design path, so the console's "set up a model" call-to-action would be a
+    /// dead end — the setup dialog uses this to omit it rather than send the
+    /// operator round a redesign loop that cannot end.
+    harness_reachable: bool,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
