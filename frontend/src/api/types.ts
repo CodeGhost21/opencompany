@@ -248,6 +248,32 @@ export interface ChatHistoryMessageDto {
    * emoji. Absent when nobody has, and on a host that predates the field.
    */
   reactions?: ChatReactionDto[];
+  /**
+   * Files attached to this message (issue #1682), each a reference into the
+   * company workspace with the store-computed name / mime / size. Absent when
+   * the message carries none — which is every reply, every system pill, and
+   * every operator message journaled before the field existed — and on a host
+   * that predates it.
+   */
+  attachments?: AttachmentDto[];
+}
+
+/**
+ * One file attached to a message (issue #1682). Mirrors `ChatAttachmentDto` in
+ * `src/server/operator.rs`. Every field is store-authored metadata; the bytes
+ * are fetched separately through the hardened `…/workspace/blob/{nodeId}` route.
+ */
+export interface AttachmentDto {
+  /** The workspace node id the payload is stored under — handed to the blob
+   * route to download or preview it. */
+  nodeId: string;
+  /** The stored file's display name. */
+  name: string;
+  /** The stored payload's media type, so the console decides download-vs-
+   * preview without fetching the bytes. */
+  mime: string;
+  /** The stored payload's exact length in bytes. */
+  size: number;
 }
 
 /** One person's reaction. Mirrors `ChatReactionDto` in `src/server/operator.rs`. */

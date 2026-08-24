@@ -479,6 +479,17 @@ export class OpenCompanyClient {
      * is exactly why this returns a union rather than the detached type.
      */
     detach?: boolean,
+    /**
+     * Workspace node ids of files attached to this message (issue #1682).
+     *
+     * Ids only — each was returned by `uploadChatAttachment` after the file's
+     * bytes were uploaded. The host re-resolves every id within this company's
+     * own workspace and takes the name / mime / size from the store, so the
+     * client neither can nor needs to send those. Sent only when non-empty, so
+     * a message with no attachment keeps the exact pre-#1682 body shape — the
+     * same omitted-field rule `deliverable` and `detach` follow.
+     */
+    attachments?: string[],
   ): Promise<ChatPostResult> {
     const body: {
       text: string;
@@ -486,6 +497,7 @@ export class OpenCompanyClient {
       parent?: string;
       deliverable?: MessageIntent;
       detach?: boolean;
+      attachments?: string[];
     } = {
       text,
     };
@@ -495,6 +507,7 @@ export class OpenCompanyClient {
     // Sent only when asked for, so an ordinary post keeps the exact body shape
     // it had before #983 — the same omitted-field rule `deliverable` follows.
     if (detach) body.detach = detach;
+    if (attachments && attachments.length > 0) body.attachments = attachments;
     return this.request<ChatPostResult>("POST", `${this.scope(company)}/chat`, body);
   }
 
