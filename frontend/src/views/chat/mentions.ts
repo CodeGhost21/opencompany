@@ -320,6 +320,8 @@ function mentionableText(entry: Mentionable): string {
  * A mention that still exists verbatim but has shifted — because text was
  * inserted before it — is re-anchored rather than dropped, so typing at the
  * start of a draft does not silently unresolve everything after the caret.
+ * `editCaret`, when supplied by the textarea change handler, disambiguates a
+ * pure literal insertion whose contents duplicate an existing mention.
  *
  * Two mentions with the **same literal** are matched by their recorded order,
  * not greedily by text. When `@Sam @Sam` names two people and the first span
@@ -345,6 +347,7 @@ export function reconcileMentions(
   text: string,
   mentions: Mention[],
   previous?: string,
+  editCaret?: number,
 ): Mention[] {
   const used: Array<[number, number]> = [];
   const out: Mention[] = [];
@@ -381,6 +384,26 @@ export function reconcileMentions(
     }
     const deletedStart = prefix;
     const deletedEnd = previous.length - suffix;
+    // For a literal insertion, a common-prefix scan consumes the unchanged
+    // duplicate text and reports the insertion at the end. The textarea caret
+    // identifies the real boundary, so use it to shift mentions at/after that
+    // point and leave the inserted occurrence unclaimed by the old identity.
+    if (
+      editCaret !== undefined &&
+      deletedStart === deletedEnd &&
+      text.length > previous.length
+    ) {
+      const insertedLength = text.length - previous.length;
+      mentions = mentions.map((m) =>
+        m.offset >= editCaret - insertedLength
+          ? { ...m, offset: m.offset + insertedLength }
+          : m,
+      );
+    }
+    // The edit caret is in the post-edit string. For an insertion at the end
+    // of an old span, the old mention is before the caret and should remain at
+    // its original offset; for an insertion before or inside it, the mention
+    // has shifted and the ordinary re-anchor scan below finds its new span.
     mentions = mentions.filter((m) => {
       const end = m.offset + m.text.length;
       return !(m.offset < deletedEnd && end > deletedStart);

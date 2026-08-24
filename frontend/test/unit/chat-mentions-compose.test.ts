@@ -484,18 +484,23 @@ describe("reconcileMentions", () => {
       text: "@Sam",
       offset: 0,
     };
-    const newlyInserted: Mention = {
-      target: { kind: "user", id: "new" },
-      text: "@Sam",
-      offset: 0,
-    };
-    const out = reconcileMentions("@Sam @Sam", [selected, newlyInserted]);
+    const out = reconcileMentions("@Sam @Sam", [selected], "@Sam", 0);
     expect(out.map((m) => [m.target, m.offset])).toEqual([
-      [{ kind: "user", id: "new" }, 0],
       [{ kind: "user", id: "selected" }, 5],
     ]);
   });
 
+  it("preserves the selected identity after a literal duplicate is inserted", () => {
+    const selected: Mention = {
+      target: { kind: "user", id: "selected" },
+      text: "@Sam",
+      offset: 0,
+    };
+    const out = reconcileMentions("@Sam @Sam", [selected], "@Sam", 5);
+    expect(out.map((m) => [m.target, m.offset])).toEqual([
+      [{ kind: "user", id: "selected" }, 5],
+    ]);
+  });
   it("returns them in reading order", () => {
     const out = reconcileMentions("@engineer and @engineer", [
       { ...mention, offset: 14 },
