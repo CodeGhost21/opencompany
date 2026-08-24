@@ -2007,18 +2007,29 @@ impl CompanyRuntime {
         users: &[crate::ports::users::UserRecord],
         desk: &str,
     ) -> String {
-        if desk.starts_with(crate::runtime::assignee::DM_PREFIX) {
-            return desk.to_string();
-        }
-        if users.iter().any(|u| u.id == desk) {
-            return format!("dm:{desk}");
+        // A `dm:`-prefixed key is the console's channel-id space for a DM — but
+        // only when the key is *canonical*. An API client can address a DM with
+        // the teammate's display name or a case-variant of their id
+        // (`dm:BACKEND_ENGINEER`), and the routing resolves that
+        // case-insensitively, so the stored context has to carry the canonical
+        // agent id the rail's channel ids are keyed by. Storing the raw key
+        // files the badge under a channel that does not exist, and opening the
+        // actual DM can never clear it. Split the prefix off and run the bare
+        // key through the same resolution as an un-prefixed desk, re-applying
+        // the prefix only when it names a teammate.
+        let bare = crate::runtime::assignee::dm_key(desk).unwrap_or(desk);
+        // A roster id, tried before the store load so a store that will not
+        // answer still badges the DM. The console's own keys are
+        // `dm:<teammate-id>`.
+        if users.iter().any(|u| u.id == bare) {
+            return format!("dm:{bare}");
         }
         let Ok(Some(record)) = self.store().load(id).await else {
             // Best-effort, same as the callers: a store that will not answer
             // must not fail the message, and the bare id still renders a chip.
             return desk.to_string();
         };
-        match crate::runtime::assignee::resolve(&record, desk) {
+        match crate::runtime::assignee::resolve(&record, bare) {
             crate::runtime::assignee::AssigneeResolution::Agent(agent) => format!("dm:{agent}"),
             // A desk with no member to work it is still a real desk with a real
             // rail channel, so it files under the same canonical id as one with
@@ -2034,7 +2045,7 @@ impl CompanyRuntime {
             // ([`crate::server::chat_history::is_general_chat`], issue #65).
             // Anything else is honestly the string as written: it may badge
             // nowhere, but it is not a lie.
-            _ if crate::server::chat_history::is_general_chat(Some(desk)) => {
+            _ if crate::server::chat_history::is_general_chat(Some(bare)) => {
                 crate::server::chat_history::MAIN_THREAD_ID.to_string()
             }
             _ => desk.to_string(),
