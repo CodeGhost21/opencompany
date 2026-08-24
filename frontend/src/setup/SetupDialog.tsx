@@ -618,21 +618,31 @@ function BuildOut({
       {finished && (
         <DialogFooter>
           {/*
-            Only the one reason a credential would fix. A model that answered
-            and was not designable already had a working key, and sending that
-            operator to Settings is an instruction that cannot help them — what
-            they need is to say more about the business, which the description
-            above asks for instead.
+            Only the reasons a retry or a credential could actually fix. A model
+            that answered and was not designable already had a working key, and
+            sending that operator to Settings is an instruction that cannot help
+            them — what they need is to say more about the business, which the
+            description above asks for instead.
           */}
           {fallback === "no_model" && (
             <a
               href="#/settings/connections"
-              onClick={onDone}
+              onClick={onRedesign}
               data-testid="setup-add-model"
               className={buttonVariants({ variant: "outline" })}
             >
               Add a model in Settings
             </a>
+          )}
+          {fallback === "model_unreachable" && (
+            <Button
+              variant="outline"
+              onClick={onTryAgain}
+              data-testid="setup-try-redesign"
+            >
+              <RotateCcw className="size-4" />
+              Try again
+            </Button>
           )}
           <Button onClick={onDone} data-testid="setup-finish">
             <Sparkles className="size-4" />
