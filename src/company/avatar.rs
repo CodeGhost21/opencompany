@@ -109,6 +109,24 @@ pub fn is_supported_image(mime: &str) -> bool {
 /// ceiling is what an animation is actually held to.
 pub const MAX_AVATAR_BYTES: usize = 4 * 1024 * 1024;
 
+/// The largest edge an avatar image may have, in pixels.
+///
+/// Four thousand is far above anything a face is drawn at — the console shows
+/// these at tens of pixels — and still small enough that no decoder's per-image
+/// allocation is worth a second thought. Together with [`MAX_AVATAR_PIXELS`]
+/// this is what turns a decompression bomb (a header claiming 65535×65535 in a
+/// body of a few hundred compressed bytes) into a `400` on the upload instead
+/// of a gigabyte allocation for every operator who views the roster.
+pub const MAX_AVATAR_DIMENSION: u32 = 4096;
+
+/// The largest total area an avatar image may decode to, in pixels.
+///
+/// A square with both edges at [`MAX_AVATAR_DIMENSION`] is the largest shape
+/// the two caps accept; this is what refuses an extreme aspect ratio whose
+/// edges each happen to fit. `4096²` is 16 megapixels — an RGBA buffer of
+/// 64 MiB, the worst case any surface ever decodes for one face.
+pub const MAX_AVATAR_PIXELS: u64 = 4096 * 4096;
+
 /// The media type these bytes actually are, read from their signature.
 ///
 /// **Not** the type the upload declared. A declared type is a claim by whoever
