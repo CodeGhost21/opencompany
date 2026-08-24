@@ -2342,6 +2342,7 @@ async fn agent_runs_walks_a_workflow_run_to_its_reasoning() {
     assert_eq!(steps[0]["kind"], "thinking");
     assert_eq!(steps[1]["label"], "Shell");
     assert_eq!(steps[1]["result"], "1 line");
+    assert_eq!(steps[1]["failure"], "blocked_by_policy");
 
     // The deep half: reasoning the scrubbed step deliberately does not carry.
     assert_eq!(steps[0]["deep"]["reasoning"], "Collatz — memoise the chain");
