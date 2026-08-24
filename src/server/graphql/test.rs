@@ -2276,6 +2276,7 @@ async fn given_a_workflow_node_attempt(state: &AppState) {
                     kind,
                     status: TurnStepStatus::Ok,
                     label: label.to_string(),
+                    failure: (seq == 1).then_some(TurnStepFailure::BlockedByPolicy),
                     result: (seq == 1).then(|| "1 line".to_string()),
                     ..TurnStep::default()
                 },
