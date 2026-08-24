@@ -49,16 +49,20 @@ import { Switch } from "@/components/ui/switch";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import {
   agentEdits,
+  companyCovers,
   draftFrom,
   draftIsValid,
   emptyDraft,
+  grantCeiling,
   harnessEdit,
   harnessOptionLabel,
   isEditable,
   modelEdit,
+  parseToolGlobs,
   resolvedHarnessKind,
   summarizeGrants,
   tierLabel,
+  toolGlobsDiffer,
   type AgentDraft,
   type AgentFieldKey,
 } from "@/lib/agent";
@@ -496,6 +500,44 @@ export function AgentDetailView({
   }
 
   /**
+   * Write this teammate's own tool-grant list — the Tools card is a report
+   * AND an editor (the read-only report of a decision nobody could change was
+   * the dead end this card existed to end).
+   *
+   * Its own write rather than a field on the shared draft, because `tools` is
+   * not shaped like the others: the host gates it on admin where name, role and
+   * instructions are member-open, so folding it into `save()` would make every
+   * ordinary edit by a member 403 the moment a stale tools value rode along.
+   * Sent alone, a member never sends the key at all.
+   */
+  async function saveTools(globs: string[]) {
+    if (!agent) return;
+    setSaving(true);
+    try {
+      const updated = await client.updateAgent(agentId, { tools: globs }, company);
+      // A slow save must not clobber the active detail: only fold the response
+      // in when the agent on screen is still the one we saved (the same guard
+      // the ordinary save, reset, budget and inbox writes use).
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+      toast.success("Tool grants updated.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Couldn't save these tool grants.",
+      );
+      // Rethrow so the card keeps its editor open on a refusal — closing it
+      // would read as "saved" for a write the host rejected.
+      throw error;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /**
    * Save the harness binding, the model override, or both (issue #1245's
    * harness-picker follow-up) — one `PATCH`, so the host's cross-field check
    * (a model only means anything on the harness this same save leaves the
@@ -772,7 +814,7 @@ export function AgentDetailView({
               )}
             </Section>
 
-            <Tools agent={agent} />
+            <Tools agent={agent} saving={saving} onSave={(globs) => saveTools(globs)} />
             <HarnessAndModel
               agent={agent}
               harnesses={harnesses}
@@ -1012,25 +1054,144 @@ function OpenTasks({ tasks }: { tasks: Task[] | null }) {
 }
 
 /**
- * The tool grants, resolved.
+ * The tool grants, resolved — and, for an admin, editable.
  *
  * Three facts, because the difference between them is the whole reason this
  * section exists. What the agent holds. Whether it holds it because it asked or
  * because it asked for nothing and inherited the company's grant. And what it
  * asked for and did not get, which is the line an operator checking a tool
- * change is actually looking for and which no surface showed before.
+ * change is actually looking for and which no surface showed before — and
+ * which, as of this card becoming an editor, has a way to act on it.
+ *
+ * The edit surface is deliberately live: the preview of what will be stored is
+ * computed against the same ceilings the host applies when it re-derives
+ * `effective`, so a glob that would land struck-through is flagged while the
+ * operator types, not after the write.
  */
-function Tools({ agent }: { agent: AgentDetailDto }) {
+function Tools({
+  agent,
+  saving,
+  onSave,
+}: {
+  agent: AgentDetailDto;
+  saving: boolean;
+  onSave: (globs: string[]) => Promise<void>;
+}) {
   const summary = summarizeGrants(agent.tools);
+  const canEdit = isEditable(agent, "tools");
+  const [editing, setEditing] = useState(false);
+  const [field, setField] = useState(agent.tools.requested.join(", "));
+
+  // The teammate on screen can change under this card (a slow detail load, a
+  // sibling route swap), and a draft left over from the previous one would be
+  // saved onto the new teammate. Re-seed whenever the stored list changes.
+  useEffect(() => {
+    setField(agent.tools.requested.join(", "));
+    setEditing(false);
+  }, [agent.id, agent.tools.requested]);
+
+  const draft = parseToolGlobs(field);
+  const dirty = toolGlobsDiffer(agent.tools.requested, draft);
+  // Live, before the save rather than after it: the intersection is the thing
+  // operators get wrong, and a glob the desk-and-company ceiling does not allow
+  // is stored happily and then confers nothing. Saying so while they type is the
+  // whole reason this card knows the ceilings. The desk level is the gate when
+  // a desk states one — `grantCeiling` is `deskAllow` when a ceiling is active,
+  // else the company allow-list, matching the host's `agent_scoped_grants`
+  // two-level application — because a desk that omits a company-allowed
+  // namespace drops it immediately after saving. `deskCeilingActive` (not
+  // `deskAllow`'s emptiness) is the sentinel: a ceiling whose narrowed list is
+  // empty still narrows everything away.
+  const deskCeilingActive = agent.tools.deskCeilingActive;
+  const willNotApply = draft.filter((glob) => !companyCovers(grantCeiling(agent.tools), glob));
+
   return (
     <Section
       title="Tools"
       subtitle={
         summary.standardGrant
-          ? "This teammate lists no tools of its own, so it holds everything the company allows."
-          : "What this teammate asked for, narrowed by what the company allows."
+          ? deskCeilingActive
+            ? "This teammate lists no tools of its own, so it holds what its desk allows, narrowed by the company."
+            : "This teammate lists no tools of its own, so it holds everything the company allows."
+          : "What this teammate asked for, narrowed by what its desk and the company allow."
+      }
+      action={
+        canEdit && !editing ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setEditing(true)}
+            data-testid="agent-tools-edit"
+          >
+            <Pencil className="size-4" /> Edit
+          </Button>
+        ) : undefined
       }
     >
+      {editing && (
+        <div className="grid gap-2" data-testid="agent-tools-editor">
+          <Label htmlFor="agent-tools-field">Tool grants</Label>
+          <Input
+            id="agent-tools-field"
+            value={field}
+            onChange={(event) => setField(event.target.value)}
+            placeholder="workspace.read, docs.*, files.*"
+            className="font-mono text-xs"
+            data-testid="agent-tools-field"
+          />
+          <p className="text-xs text-muted-foreground">
+            One glob per grant, separated by commas or spaces. Each is narrowed by the
+            company tool list below
+            {deskCeilingActive ? " and by this teammate's desk ceiling" : ""}, so this
+            can only ever take capability away — never add to it.
+          </p>
+          {draft.length === 0 && (
+            // Not a warning about losing tools — the opposite, and the
+            // inversion is exactly what an operator clearing this field
+            // expects to be told.
+            <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
+              {deskCeilingActive
+                ? "An empty list means the standard grant, not \"no tools\" — this teammate would hold what its desk and the company allow."
+                : "An empty list means the company's standard grant, not \"no tools\" — this teammate would hold everything the company allows."}
+            </p>
+          )}
+          {willNotApply.length > 0 && (
+            <p className="text-xs text-status-blocked-text" data-testid="agent-tools-uncovered">
+              {deskCeilingActive
+                ? `The desk and company tool lists do not cover ${willNotApply.join(", ")}, so it will be stored and confer nothing.`
+                : `The company tool list does not cover ${willNotApply.join(", ")}, so it will be stored and confer nothing.`}
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setField(agent.tools.requested.join(", "));
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={saving || !dirty}
+              onClick={() => {
+                // The editor closes on success and stays open on a refusal;
+                // the toast is raised by the caller, so the rejection is
+                // swallowed here rather than left unhandled.
+                void onSave(draft).then(
+                  () => setEditing(false),
+                  () => undefined,
+                );
+              }}
+              data-testid="agent-tools-save"
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+      )}
       {summary.effective.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="agent-tools-empty">
           {/* Both ways of holding nothing land here, and they are not the same
@@ -1066,6 +1227,12 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
       {!summary.standardGrant && (
         <p className="text-xs text-muted-foreground">
           Company tool list: {agent.tools.companyAllow.join(", ") || "nothing allowed"}
+          {deskCeilingActive && (
+            <>
+              {" · "}
+              Desk tool list: {agent.tools.deskAllow.join(", ") || "nothing allowed"}
+            </>
+          )}
         </p>
       )}
     </Section>

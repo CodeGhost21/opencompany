@@ -372,7 +372,7 @@ wired. `email` is the only kind that can address an outsider, and it needs
 established inbound thread from that address — the same rule the agent send
 path applies; a cold recipient is skipped and reported, never mailed. Note the
 grant half is satisfied by default: since #230 an unset `[tools].allow` defaults
-to `["*", "media", "composio"]` and `*` covers `email`, so on a
+to the globals `default_allow` (which opens with `*`) and `*` covers `email`, so on a
 default-configured company the established-thread rule is the gate actually
 holding the line. Narrow `[tools].allow` explicitly to close the first one.
 

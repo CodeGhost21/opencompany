@@ -14,15 +14,19 @@ human_role = "Campaign review and sign-off"
 # only read one the agent already has.
 #
 # Every entry below is load-bearing. `allow` REPLACES the default
-# (`["*", "media", "composio"]`); it never extends it. `*` covers
-# files/docs/shell/code/web/subagent but deliberately excludes the opt-in
-# namespaces, so `media`, `composio` and `search` are each listed literally.
+# (`globals/globals.toml`'s `default_allow`); it never extends it. `*` covers
+# files/docs/shell/code/web/subagent but deliberately excludes the rest, so
+# `workspace.*` and `workspace.write` (the latter is explicit because the host
+# recognizes only the exact write grant), `media`, `composio`,
+# `search` and `mcp:*` are each listed literally. This line is the default belt
+# restated verbatim; keeping it written out is what makes a narrowing here a
+# visible edit rather than an inherited surprise.
 # Reducing this line to `["search"]` would silently strip the whole belt from
 # every agent in the company.
 #
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
-allow = ["*", "media", "composio", "search"]
+allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
 
 # Group chats — the desks the human talks to. Each pulls in a few agents.
 # Members must be ids declared under `agents/`.
@@ -54,10 +58,18 @@ members = ["creative_director", "copywriter", "landing_page_builder"]
 # this desk wants. The company grants `media`/`composio`/`search` above; none of
 # them reach these three agents.
 #
+# `workspace.write` is listed because workspace writes are another explicit
+# opt-in that `*` does not confer — the host recognizes only the exact
+# `workspace.write` grant (`grants_workspace_write_explicit`). The company
+# grants it above, but a desk ceiling of `["*"]` alone would strip it from the
+# whole desk: this desk's agents live in `agents/<id>/` folders their own
+# AGENTS.md documents as always writable, so the write token has to ride through
+# the ceiling or the desk's own charter silently stops holding.
+#
 # Members of this desk sit on no other desk. That matters: a teammate on two
 # desks takes the UNION of their ceilings, so seating one of these agents on an
 # unrestricted desk would hand the company grant straight back.
-tools = ["*"]
+tools = ["*", "workspace.write"]
 
 [[group_chat]]
 id = "growth"

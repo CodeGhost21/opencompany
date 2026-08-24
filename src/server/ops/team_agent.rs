@@ -11,13 +11,16 @@
 //!
 //! ## Effective, not declared
 //!
-//! [`AgentToolsDto`] carries three lists rather than one, because the
+//! [`AgentToolsDto`] carries the three levels rather than one, because the
 //! interesting number is the one nobody could see. `requested` is what the
 //! `[[agent]].tools` line asks for, `companyAllow` is the `[tools].allow`
 //! ceiling it is intersected with, and `effective` is what the agent actually
 //! ends up holding. An agent that requests `workspace.read` under a company
 //! that allows only `composio` requests one tool and holds none, and a surface
 //! that printed the request alone would report the opposite of the truth.
+//! A `deskCeilingActive` flag sits alongside the desk level so a reader can
+//! tell "no desk narrows anything" from "a desk narrows everything away" —
+//! the narrowed `deskAllow` list can be empty in both cases.
 //!
 //! `effective` is computed by
 //! [`agent_effective_grants`](crate::runtime::builder::agent_effective_grants)
@@ -77,11 +80,12 @@ use axum::routing::{self, MethodRouter};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::company::ACP_AGENTS;
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{AgentOverride, CompanyRecord};
 use crate::runtime::builder::agent_scoped_grants;
-use crate::server::error::{ApiError, Rejection};
+use crate::server::error::ApiError;
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::team::{AgentPath, daily_spend_samples, double_option};
 use crate::server::users::admin::require_admin;
@@ -228,11 +232,20 @@ pub(super) struct AgentToolsDto {
     /// The ceiling contributed by the desks this agent sits on — the union of
     /// their `tools`, already narrowed by `company_allow`.
     ///
-    /// **Empty means no desk narrows anything**, which is the same "empty is not
-    /// nothing" trap `requested` carries: a console rendering an empty list as
-    /// "this desk grants no tools" would invert the meaning. It is empty for
-    /// every company that has not set a desk ceiling, which is most of them.
+    /// **Empty means the narrowed ceiling grants nothing**, which is *not* the
+    /// same as "no desk narrows anything" — see `desk_ceiling_active`. A desk
+    /// ceiling can resolve to an empty list while still being active (its only
+    /// grant is an explicit opt-in the company's bare `*` does not confer), and
+    /// the console has to tell those apart or it substitutes `company_allow`
+    /// and promises grants the host drops. It is empty for every company that
+    /// has not set a desk ceiling, which is most of them.
     desk_allow: Vec<String>,
+    /// Whether any desk this agent sits on states a `tools` ceiling — distinct
+    /// from `desk_allow`, which is that ceiling *narrowed by the company grant*
+    /// and can legitimately resolve to empty. This is the sentinel the console
+    /// preview keys on: `true` means the desk level is in play even when the
+    /// narrowed list is empty.
+    desk_ceiling_active: bool,
     /// What the agent actually holds, after all three levels.
     effective: Vec<String>,
 }
@@ -419,10 +432,17 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
     // Reported already narrowed by the company grant, so the console can render
     // the three rows as a strictly shrinking chain. A raw union could show a
     // desk "granting" something the company never allowed.
-    let desk_allow = if desk_tools.iter().all(Vec::is_empty) {
-        Vec::new()
-    } else {
+    //
+    // `desk_ceiling_active` is a separate flag rather than `!desk_allow.is_empty()`:
+    // the narrowed list can resolve to empty while a ceiling is still in play
+    // (a desk whose only grant the company's `*` does not confer), and the
+    // console has to keep the desk level as the gate in that case instead of
+    // falling back to the company allow-list.
+    let desk_ceiling_active = !desk_tools.iter().all(Vec::is_empty);
+    let desk_allow = if desk_ceiling_active {
         agent_scoped_grants(company_allow, &desk_refs, &[])
+    } else {
+        Vec::new()
     };
 
     AgentToolsDto {
@@ -430,6 +450,7 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
         requested,
         company_allow: company_allow.to_vec(),
         desk_allow,
+        desk_ceiling_active,
     }
 }
 
@@ -656,17 +677,29 @@ async fn edit_agent(
         .harness
         .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
 
-    // Resolved through `harness_by_id`, not against the declared list: a
-    // coding CLI this build drives is bindable without any `[[harness]]`
+    // A coding CLI this build drives is bindable without any `[[harness]]`
     // naming it, and `GET {scope}/harnesses` offers exactly those ids in the
-    // picker. Checking the declared list here would refuse a binding the
-    // console had just offered.
-    if let Some(Some(id)) = &harness
-        && record.manifest.harness_by_id(id).is_none()
-    {
-        return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
-            format!("no harness named `{id}` is available for this company."),
-        ))));
+    // picker. But `harness_by_id` resolves an `ACP_AGENTS` id on *any* build
+    // via the implicit-local fallback, which would let a hosted admin bind a
+    // teammate to a CLI the server has nothing to launch — accepted by `PATCH`,
+    // then dead on the next rebuild. So gate that fallback the same way the
+    // picker does: declared harnesses (and the built-in when a manifest
+    // declares none) are always bindable, an undeclared coding CLI only when
+    // this host wires an `AcpAgentFactory`, and anything else is refused.
+    if let Some(Some(id)) = &harness {
+        let declared = record
+            .manifest
+            .effective_harnesses()
+            .iter()
+            .any(|h| h.id == *id);
+        let bindable =
+            declared || (ACP_AGENTS.contains(&id.as_str()) && state.acp_agents().is_some());
+        if !bindable {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "no harness named `{id}` is available for this company."
+            )))
+            .into());
+        }
     }
 
     // A model override only means anything on an `acp` harness — the same
@@ -687,13 +720,12 @@ async fn edit_agent(
             .unwrap_or_else(|| record.manifest.default_harness_id());
         let bound = record.manifest.harness_by_id(&resulting_harness_id);
         if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
-            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
-                format!(
-                    "`{model_value}` names a model, but this teammate's harness has no ACP \
-                     transport to forward it to. Bind it to an ACP harness first, or clear \
-                     the model."
-                ),
-            ))));
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{model_value}` names a model, but this teammate's harness has no ACP \
+                 transport to forward it to. Bind it to an ACP harness first, or clear \
+                 the model."
+            )))
+            .into());
         }
         // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
         // still cannot carry a model, because the runner wire protocol has no
@@ -708,13 +740,12 @@ async fn edit_agent(
             .map(|acp| acp.transport.as_str())
             == Some("runner")
         {
-            return Err(Rejection::from(ApiError(OpenCompanyError::InvalidRequest(
-                format!(
-                    "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
-                     `transport = \"runner\"`. Model overrides aren't supported for a runner \
-                     yet — the runner wire protocol doesn't carry them."
-                ),
-            ))));
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                 `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                 yet — the runner wire protocol doesn't carry them."
+            )))
+            .into());
         }
     }
 
@@ -1450,6 +1481,10 @@ agent = "claude"
                 strings(&body["tools"]["deskAllow"]).is_empty(),
                 "{agent}: {body}"
             );
+            assert_eq!(
+                body["tools"]["deskCeilingActive"], false,
+                "no desk states a ceiling, so the desk level is not in play: {agent}: {body}"
+            );
         }
     }
 
@@ -1473,6 +1508,10 @@ agent = "claude"
             "{writer}"
         );
         assert_eq!(
+            writer["tools"]["deskCeilingActive"], true,
+            "a desk ceiling is in play for a member of the desk: {writer}"
+        );
+        assert_eq!(
             strings(&writer["tools"]["effective"]),
             vec!["workspace.read"],
             "the desk ceiling must bite on a member that requested nothing: {writer}"
@@ -1485,6 +1524,10 @@ agent = "claude"
         assert!(
             strings(&hermit["tools"]["deskAllow"]).is_empty(),
             "{hermit}"
+        );
+        assert_eq!(
+            hermit["tools"]["deskCeilingActive"], false,
+            "no desk states a ceiling for hermit: {hermit}"
         );
         assert_eq!(
             strings(&hermit["tools"]["effective"]),
@@ -1513,6 +1556,50 @@ agent = "claude"
         assert!(
             !strings(&writer["tools"]["effective"]).contains(&"shell".to_string()),
             "{writer}"
+        );
+    }
+
+    /// A desk ceiling can resolve to an **empty** narrowed list while still
+    /// being active: `media` is an explicit opt-in that a bare `*` does not
+    /// confer, so a desk naming only `media` under a company that allows `*`
+    /// narrows everything away. The DTO must report the ceiling active with an
+    /// empty `deskAllow` — a console keying on `deskAllow`'s emptiness would
+    /// substitute `companyAllow` and promise grants the host drops.
+    #[tokio::test]
+    async fn an_active_desk_ceiling_that_resolves_empty_is_reported_active() {
+        let manifest = r#"
+[company]
+name = "Acme"
+[policy]
+mode = "full"
+[tools]
+allow = ["*"]
+
+[[agent]]
+id = "writer"
+role = "Writer"
+
+[[group_chat]]
+id = "creative"
+name = "Creative desk"
+members = ["writer"]
+tools = ["media"]
+"#;
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), manifest).await;
+
+        let (_, writer) = get_agent(&state, "writer").await;
+        assert!(
+            strings(&writer["tools"]["deskAllow"]).is_empty(),
+            "media under a bare * is an explicit opt-in that narrows to nothing: {writer}"
+        );
+        assert_eq!(
+            writer["tools"]["deskCeilingActive"], true,
+            "the desk states a ceiling even though the narrowed list is empty: {writer}"
+        );
+        assert!(
+            strings(&writer["tools"]["effective"]).is_empty(),
+            "with an empty ceiling the standard grant holds nothing: {writer}"
         );
     }
 
@@ -2294,6 +2381,55 @@ prompt = "Lead decisively."
         let (status, cleared) = patch_agent(&state, &jamie, json!({"harness": null})).await;
         assert_eq!(status, StatusCode::OK, "{cleared}");
         assert!(cleared["harness"].is_null(), "{cleared}");
+    }
+
+    /// A coding CLI this build drives is bindable without any `[[harness]]`
+    /// naming it — but only where this host can actually run one (issue
+    /// #1245's detected-harness follow-up).
+    ///
+    /// `harness_by_id` resolves an `ACP_AGENTS` id on any build through the
+    /// implicit-local fallback, so without this gate a hosted admin could bind
+    /// a teammate to a CLI the server has nothing to launch — accepted by
+    /// `PATCH`, then dead on the next rebuild. The picker (`GET
+    /// {scope}/harnesses`) already refuses to offer detected CLIs without an
+    /// `AcpAgentFactory`; the write path must agree.
+    #[tokio::test]
+    async fn an_undeclared_coding_cli_is_bindable_only_where_this_host_can_run_one() {
+        struct StubFactory;
+        impl crate::ports::acp::AcpAgentFactory for StubFactory {
+            fn build(
+                &self,
+                _agent: &str,
+                _model: Option<&str>,
+                _agent_models: &std::collections::HashMap<String, String>,
+                _workspace_root: &std::path::Path,
+            ) -> crate::Result<std::sync::Arc<dyn crate::ports::acp::AcpAgent>> {
+                unreachable!("this route never builds an agent")
+            }
+        }
+
+        // Hosted shape (no factory): an undeclared coding CLI is refused, just
+        // as the picker that does not offer it.
+        let hosted_home = home();
+        let hosted = state_with_manifest(hosted_home.path(), ACP_ROSTER).await;
+        let jamie = add_overlay(&hosted, "Jamie", "Growth").await;
+        let (status, refusal) = patch_agent(&hosted, &jamie, json!({"harness": "claude"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        // Desktop shape (factory wired): the same id is bindable.
+        let desktop_home = home();
+        let desktop = state_with_manifest(desktop_home.path(), ACP_ROSTER)
+            .await
+            .with_acp_agents(std::sync::Arc::new(StubFactory));
+        let jamie = add_overlay(&desktop, "Jamie", "Growth").await;
+        let (status, set) = patch_agent(&desktop, &jamie, json!({"harness": "claude"})).await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["harness"], "claude");
+
+        // A factory must not widen the vocabulary beyond the coding CLIs.
+        let (status, refusal) =
+            patch_agent(&desktop, &jamie, json!({"harness": "not-a-cli"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
     }
 
     /// Issue #1245's harness-picker follow-up: switching a teammate onto an

@@ -222,7 +222,8 @@ lists, because only the last is the answer:
 |---|---|
 | `requested` | the agent's own `tools` globs. **Empty means the company's standard grant**, not "no tools" |
 | `companyAllow` | the `[tools].allow` ceiling |
-| `deskAllow` | the union of the `tools` ceilings of the desks this agent sits on, already narrowed by `companyAllow`. **Empty means no desk narrows anything** |
+| `deskAllow` | the union of the `tools` ceilings of the desks this agent sits on, already narrowed by `companyAllow`. **Empty means the narrowed ceiling grants nothing** — which is *not* "no desk narrows anything"; `deskCeilingActive` tells those apart |
+| `deskCeilingActive` | whether any desk this agent sits on states a `tools` ceiling. Distinct from `deskAllow`, which can resolve to an empty list while a ceiling is still in play — a console keying on `deskAllow`'s emptiness would substitute `companyAllow` and promise grants the host drops |
 | `effective` | what the agent actually holds, after all three levels |
 
 The three ceilings shrink monotonically, so a console can render them as a

@@ -34,7 +34,7 @@ function agent(over: Partial<AgentDetailDto> = {}): AgentDetailDto {
     source: "overlay",
     editable: ["name", "role", "description"],
     isOrchestrator: false,
-    tools: { requested: [], companyAllow: ["workspace.*"], effective: ["workspace.*"] },
+    tools: { requested: [], companyAllow: ["workspace.*"], deskAllow: [], deskCeilingActive: false, effective: ["workspace.*"] },
     desks: [],
     inboxEnabled: false,
     ...over,
@@ -113,6 +113,8 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: [],
       companyAllow: ["workspace", "composio"],
+      deskAllow: [],
+      deskCeilingActive: false,
       effective: ["workspace", "composio"],
     });
     expect(summary.standardGrant).toBe(true);
@@ -124,6 +126,8 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: ["workspace.read", "email.send"],
       companyAllow: ["workspace.*"],
+      deskAllow: [],
+      deskCeilingActive: false,
       effective: ["workspace.read"],
     });
     expect(summary.standardGrant).toBe(false);
@@ -134,6 +138,8 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: ["email.send"],
       companyAllow: ["workspace"],
+      deskAllow: [],
+      deskCeilingActive: false,
       effective: [],
     });
     expect(summary.effective).toEqual([]);
