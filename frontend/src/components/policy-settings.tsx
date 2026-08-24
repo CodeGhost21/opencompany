@@ -768,17 +768,22 @@ export function PolicySettings({ client, company }: Props) {
                 // group's next arrow key computes from the right radio. The
                 // reset flow returns focus to the button that opened it — this
                 // controlled dialog has no trigger of its own, so without an
-                // explicit target Base UI would leave focus nowhere.
+                // explicit target Base UI would leave focus nowhere. A reset
+                // that succeeds clears the override, so that button unmounts
+                // before the dialog closes; the checked tier radio is the
+                // fallback then, instead of letting focus fall out.
                 finalFocus={() => {
-                  if (confirmSource.current === "reset") {
-                    return resetButtonRef.current;
-                  }
-                  const index = status.tiers.findIndex(
+                  const checkedIndex = status.tiers.findIndex(
                     (tier) => tier.value === status.mode,
                   );
-                  return index === -1
-                    ? null
-                    : tierButtons.current[index] ?? null;
+                  const checked =
+                    checkedIndex === -1
+                      ? null
+                      : tierButtons.current[checkedIndex] ?? null;
+                  if (confirmSource.current === "reset") {
+                    return resetButtonRef.current ?? checked;
+                  }
+                  return checked;
                 }}
               >
                 <AlertDialogHeader>
