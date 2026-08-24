@@ -329,6 +329,46 @@ impl WorkflowSpawn {
     }
 }
 
+async fn settle_cancelled_workflow_attempts(
+    runs: &dyn RunStore,
+    company: &CompanyId,
+    workflow_run_id: &str,
+) {
+    let active = match runs.list_runs(company, &crate::ports::RunFilter::active()).await {
+        Ok(active) => active,
+        Err(err) => {
+            tracing::error!(
+                %company,
+                %workflow_run_id,
+                %err,
+                "cancelled workflow: could not list active agent attempts"
+            );
+            return;
+        }
+    };
+    for attempt in active.into_iter().filter(|attempt| {
+        attempt.workflow_run_id.as_deref() == Some(workflow_run_id)
+    }) {
+        if let Err(err) = runs
+            .finish_run(
+                company,
+                &attempt.id,
+                crate::ports::RunOutcome::new(crate::ports::RunStatus::Cancelled)
+                    .with_error("the workflow run was cancelled before this attempt settled"),
+            )
+            .await
+        {
+            tracing::error!(
+                %company,
+                attempt = %attempt.id,
+                %workflow_run_id,
+                %err,
+                "cancelled workflow: could not settle agent attempt"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
