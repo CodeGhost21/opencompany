@@ -26,7 +26,18 @@ human_role = "Campaign review and sign-off"
 #
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
-allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+#
+# `chargebee` (#788) is a CEILING, not a grant. Every desk below narrows it
+# away, so no teammate this file ships holds billing tools. An agency that
+# bills its clients names the teammate who does from the console, and that
+# edit is an overlay this manifest never sees.
+#
+# Listing it here is what makes that possible at all: an agent's own `tools`
+# line and an operator's per-teammate override are both INTERSECTED with this
+# line, so a grant absent here can never be handed out by anyone. The ceiling
+# says what this kind of company may do; who actually does it is the
+# operator's call.
+allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]
 
 # Group chats — the desks the human talks to. Each pulls in a few agents.
 # Members must be ids declared under `agents/`.
@@ -35,12 +46,20 @@ allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "
 # `[tools].allow ∩ desk.tools ∩ agent.tools`. Stating a ceiling here restricts
 # every member at once, so a teammate seated on the desk later inherits the
 # restriction instead of quietly arriving with the company's full belt. Omitting
-# it (as `strategy` and `growth` do below) narrows nothing.
+# it narrows nothing — which is why `strategy` and `growth` now state one:
+# the company ceiling carries `chargebee`, and an unstated ceiling would hand
+# billing tools to every member.
 [[group_chat]]
 id = "strategy"
 name = "Strategy desk"
 description = "Plans, priorities, and direction."
 members = ["brand_strategist", "seo_specialist", "analytics_analyst"]
+# The company belt minus `chargebee`: this desk plans and measures, it does not
+# raise invoices. Stated as a ceiling rather than per teammate so someone seated
+# here later inherits the exclusion instead of arriving with billing tools —
+# what an unstated ceiling would do, since a teammate with no `tools` line of
+# its own takes the whole company grant.
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
 
 [[group_chat]]
 id = "creative"
@@ -76,6 +95,10 @@ id = "growth"
 name = "Growth desk"
 description = "Acquisition and lifecycle."
 members = ["paid_ads_manager", "email_marketer"]
+# The company belt minus `chargebee`, for the reason the strategy desk states.
+# Growth buys attention and runs lifecycle email; billing a client for it is
+# somebody else's job.
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
 
 # Integrations to prioritize wiring. Intent only — scopes and why, never
 # secrets. Nothing here provisions a credential: the manager injects no

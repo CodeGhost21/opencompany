@@ -174,13 +174,20 @@ const SEARCH_UNGRANTED_COMPANIES: [&str; 0] = [];
 /// are opt-in spend. `agentic_product_team` is excluded on that same
 /// research-lab argument: it produces documents and ledger rows, so it drops
 /// both opt-in namespaces too.
-const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
+const FULL_BELT_PLUS_SEARCH: [&str; 8] = [
+    // Both restate the belt verbatim and append `chargebee` (#788) rather than
+    // `search`, which is already inherited. They belong here for the property
+    // this list actually guards — that an extended `allow` did not silently
+    // drop an inherited entry — which is independent of *which* namespace the
+    // template extended it with.
+    "agentic_accounting_firm",
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
     "agentic_software_company",
+    "agentic_venture_studio",
 ];
 
 fn load_company(name: &str) -> CompanyManifest {
