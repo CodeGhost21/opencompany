@@ -24,6 +24,7 @@ pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
 pub mod domain;
+pub mod deep_trace;
 pub mod finance;
 pub mod finances;
 pub mod hosting;
