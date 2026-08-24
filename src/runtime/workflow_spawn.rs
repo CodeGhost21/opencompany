@@ -430,6 +430,7 @@ mod tests {
             events: events.clone(),
             supervisor: RunSupervisor::new(),
             runner: Arc::new(PanickingRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
         };
 
         let (run_id, handle) = spawn
@@ -478,6 +479,7 @@ mod tests {
             events: events.clone(),
             supervisor: RunSupervisor::new(),
             runner: Arc::new(PanickingRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
         };
 
         let (_run_id, handle) = spawn
