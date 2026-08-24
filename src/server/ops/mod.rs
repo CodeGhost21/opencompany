@@ -22,6 +22,7 @@ pub mod company_key;
 pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
+pub mod deep_trace;
 pub mod domain;
 pub mod finance;
 pub mod finances;
@@ -194,6 +195,7 @@ pub fn router() -> Router<AppState> {
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
+        .merge(deep_trace::router())
         .merge(finance::router())
         .merge(finances::router())
         .merge(usage::router())

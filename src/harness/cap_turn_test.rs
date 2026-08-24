@@ -348,6 +348,8 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
         workspace: None,
         search: None,
         tenant_search: None,
+        workflow_runs: None,
+        deep_trace: None,
     };
     (deps, ops)
 }

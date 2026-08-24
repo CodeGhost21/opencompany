@@ -165,3 +165,31 @@ conversational surface) and the `/events` work feed
 - **`/events`** is the work feed's backend: each frame is a plain-language
   rendering of an event or executed effect plus the raw payload for
   programmatic consumers. Resumable via `since` (event sequence number).
+
+## Run observability
+
+`Company.agentRuns(taskId:, workflowRunId:, limit:)` and `Company.agentRun(id:)`
+return attempts with their step traces, and each step's `deep` half when the host
+keeps one.
+
+REST is unchanged and keeps its job: `GET {scope}/runs/{id}` is shipping, tested,
+and its shape is deliberately the console's `TimelineEntry` contract. This
+surface exists for the **joined** read — run → attempts → steps → detail in one
+request — which over REST would be a round trip per node plus client-side
+assembly.
+
+Deep-trace bodies are deliberately a separate operator write surface. An
+ authenticated administrator (or the hosting platform principal) can destroy
+ them with `DELETE /api/v1/company/deep-trace` (all runs) or
+`DELETE /api/v1/company/deep-trace/{runId}` (one run); the platform-scoped forms
+replace `company` with `companies/{id}`. These routes return `204` and leave
+the redacted run/step skeleton intact. Ordinary members are refused by the
+admin scope guard.
+
+Two shape decisions worth keeping:
+
+- `AgentRun.stepCount` is **nullable on purpose**. `step_count` is written by the
+  settle, so returning the stored `0` for a running attempt would be a lie a
+  client cannot detect. Null is what tells a live reader to count `steps`.
+- `deep` is a field *on* `RunStep`, not a parallel query, so the redacted and
+  unredacted views of one step can never misalign.

@@ -157,7 +157,7 @@ describe("the autonomy direction", () => {
     expect(container.querySelector("[data-testid=policy-tier-full]")?.className).toContain(
       "status-blocked",
     );
-    expect(container.textContent).toContain("More freedom to act");
+    expect(container.textContent).toContain("More autonomy");
   });
 });
 
@@ -192,6 +192,54 @@ describe("changing the autonomy tier", () => {
       await Promise.resolve();
     });
     expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { mode: "supervised" });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+  });
+
+  it("keeps the dialog up when Escape is pressed while the save is in flight", async () => {
+    // The PUT stays unresolved, so `saving` is true while the dialog is open —
+    // exactly the window where Base UI forwards an Escape close request.
+    let resolvePut: (saved: PolicyStatus) => void = () => {};
+    const put = vi.fn(
+      async (_path: string) =>
+        new Promise<PolicyStatus>((resolve) => {
+          resolvePut = resolve;
+        }),
+    );
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async (path: string) =>
+        path.endsWith("/policy") ? status("supervised") : { slugs: [], unwired: [] },
+      put,
+      del: async () => status("supervised"),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+    });
+    expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { mode: "full" });
+
+    // Escape while the PUT is still in flight must not dismiss the dialog:
+    // the request is still running and its outcome owns this screen.
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).not.toBeNull();
+
+    // The request resolving (here: succeeding) is what closes the dialog.
+    await act(async () => {
+      resolvePut(status("full"));
+      await Promise.resolve();
+    });
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
 
@@ -245,7 +293,7 @@ describe("resetting to the manifest's policy", () => {
     });
     expect(del).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      "Let teammates do more on their own?",
+      "Give teammates more autonomy?",
     );
     expect(document.body.textContent).toContain(
       "The agents act without asking",
@@ -264,6 +312,48 @@ describe("resetting to the manifest's policy", () => {
       await Promise.resolve();
     });
     expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+  });
+
+  it("restores focus to the checked tier after a successful reset", async () => {
+    // The DELETE resolves to the manifest state — overridden=false — so the
+    // reset button unmounts before the dialog closes, the exact moment the
+    // `finalFocus` reset branch must fall back to the checked tier radio.
+    const del = vi.fn(async () => status("full"));
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async (path: string) =>
+        path.endsWith("/policy")
+          ? overridden("readonly", "full")
+          : { slugs: [], unwired: [] },
+      put: vi.fn(async () => status("full")),
+      del,
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    await act(async () => {
+      const button = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("manifest's policy"),
+      )!;
+      button.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+    // The override cleared, so the reset button is gone; focus must land on
+    // the checked tier radio rather than falling out of the interface.
+    expect(
+      [...container.querySelectorAll("button")].some((b) =>
+        b.textContent?.includes("manifest's policy"),
+      ),
+    ).toBe(false);
+    expect(document.activeElement).toBe(
+      document.querySelector("[data-testid=policy-tier-full]"),
+    );
   });
 
   it("confirms a reset that drops an always-ask gate the manifest does not carry", async () => {
@@ -288,7 +378,7 @@ describe("resetting to the manifest's policy", () => {
     });
     expect(del).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      "Let teammates do more on their own?",
+      "Give teammates more autonomy?",
     );
     expect(document.body.textContent).not.toContain("Instead of:");
     expect(document.body.textContent).toContain(

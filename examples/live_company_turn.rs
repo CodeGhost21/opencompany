@@ -156,6 +156,8 @@ async fn main() -> anyhow::Result<()> {
         search: None,
         tenant_search: None,
         workspace: None,
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let pool = HarnessPool::new();

@@ -8,6 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
   type ApprovalSummary,
+  GRANT_DURATIONS,
   type GrantScope,
   type StandingGrant,
   type Verdict,
@@ -31,7 +32,15 @@ import {
   batchPositions,
   staleDecisionLine,
 } from "@/lib/approval-wording";
-import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
+import {
+  approvalSummary,
+  decisionLabel,
+  grantHeadline,
+  grantSubject,
+  timeAgo,
+  toolAction,
+  untilLabel,
+} from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
@@ -132,7 +141,9 @@ export function ApprovalsView({
   // A map rather than a set of ids because the verdict has to survive the wait:
   // an approve and a decline are different promises to the operator ("the agent
   // is doing it" vs "recorded"), and the card says which one it is waiting on.
-  const [inFlight, setInFlight] = useState<ReadonlyMap<string, Verdict>>(() => new Map());
+  const [inFlight, setInFlight] = useState<ReadonlyMap<string, Verdict>>(
+    () => new Map(),
+  );
   const { approvals, now, queue } = feed;
   /**
    * The card the queue is narrowed to, or `null` for the whole queue (#883).
@@ -157,7 +168,10 @@ export function ApprovalsView({
    * tell the operator the opposite of the truth.
    */
   const visible = useMemo(
-    () => (focusTaskId === null ? approvals : approvalsForTask(approvals, focusTaskId)),
+    () =>
+      focusTaskId === null
+        ? approvals
+        : approvalsForTask(approvals, focusTaskId),
     [approvals, focusTaskId],
   );
   /**
@@ -175,7 +189,10 @@ export function ApprovalsView({
   const { items: rows, containerProps: queueHold } = useStableList(visible);
   const askerNames = useAskerNames(client, company, approvals);
   const threadLinks = useApprovalThreadLinks(client, company, rows);
-  const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
+  const { grants, granterNames, refreshGrants } = useStandingGrants(
+    client,
+    company,
+  );
   /**
    * How many rows each turn's batch still has waiting (#842).
    *
@@ -207,7 +224,11 @@ export function ApprovalsView({
       return next;
     });
 
-  async function decide(a: ApprovalSummary, verdict: Verdict, scope: GrantScope) {
+  async function decide(
+    a: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+  ) {
     // Per-row guard: only a double-press on THIS card is ignored. The global
     // early return that used to live here made every other card inert too.
     if (inFlight.has(a.id)) return;
@@ -215,7 +236,13 @@ export function ApprovalsView({
     markInFlight(a.id, verdict);
     const startedAt = Date.now();
     try {
-      const answer = await client.resolveApproval(a.id, verdict, undefined, company, { scope });
+      const answer = await client.resolveApproval(
+        a.id,
+        verdict,
+        undefined,
+        company,
+        { scope },
+      );
       // Issue #243: approving no longer just records a verdict — it hands the
       // agent a single-use grant and re-dispatches it to make the call. The old
       // "Approved: …" read as "done", which was the exact lie that made the
@@ -235,7 +262,8 @@ export function ApprovalsView({
       // guess. A turn continues once, when the last decision it parked lands,
       // so approving one of several releases nothing — and saying otherwise is
       // the one part of this flow that actively misleads.
-      const stillAwaiting = "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
+      const stillAwaiting =
+        "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
       // Issue #1449, and it comes FIRST because everything below it is written
       // for a decision that actually happened. The host answers `200` to a click
       // on a card whose deadline has passed — it has to, nothing failed — and
@@ -304,7 +332,8 @@ export function ApprovalsView({
         // making. The queue is the answer the response body never delivered.
         void feed.refresh();
       } else {
-        const msg = err instanceof ApiError ? err.message : "something went wrong";
+        const msg =
+          err instanceof ApiError ? err.message : "something went wrong";
         onResolved(`Couldn't record your decision — ${msg}`);
         toast.error(`Couldn't record your decision — ${msg}`);
       }
@@ -315,6 +344,41 @@ export function ApprovalsView({
       // whether or not the row it belongs to still exists. Deleting a key that
       // is already gone is a no-op, which is the point.
       markInFlight(a.id, null);
+    }
+  }
+
+  // Bulk decisions for the whole visible queue.
+  //
+  // Client-side and sequential on purpose, rather than a new batch route: each
+  // call goes through the existing, validated resolve path, and the host already
+  // serialises decisions behind its per-company lock. Sending them one at a time
+  // respects that lock, reuses the per-row drop-safety, and keeps the view honest
+  // if one fails partway - the rows that landed drop out, the rest stay.
+  //
+  // Scope is always `once`: a bulk action never mints a standing grant - that
+  // stays a deliberate per-tool choice.
+  //
+  // Approve is not terminal: each approval resumes the agent, so approving many
+  // at once starts several follow-up turns. Hence the confirm copy. Decline is
+  // terminal and lighter.
+  const [bulkInFlight, setBulkInFlight] = useState(false);
+
+  async function decideAll(verdict: Verdict) {
+    if (bulkInFlight || rows.length === 0) return;
+    const n = rows.length;
+    const question =
+      verdict === "approve"
+        ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the teammate, so this may start several tasks at once.`
+        : `Decline ${n} ${n === 1 ? "request" : "requests"}? This is final; the work behind them moves on without them.`;
+    if (!window.confirm(question)) return;
+    setBulkInFlight(true);
+    try {
+      for (const a of [...rows]) {
+        if (inFlight.has(a.id)) continue;
+        await decide(a, verdict, { kind: "once" });
+      }
+    } finally {
+      setBulkInFlight(false);
     }
   }
 
@@ -361,12 +425,41 @@ export function ApprovalsView({
           )
         ) : (
           <>
-            <div className="mb-4 flex items-baseline justify-between">
+            <div className="mb-4 flex items-baseline justify-between gap-3">
               <h2 className="text-sm font-medium text-muted-foreground">
                 {rows.length === 1
                   ? "1 thing needs your approval"
                   : `${rows.length} things need your approval`}
               </h2>
+              {rows.length > 1 && (
+                <div className="flex shrink-0 items-center gap-2 self-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={bulkInFlight || inFlight.size > 0}
+                    onClick={() => void decideAll("deny")}
+                  >
+                    {bulkInFlight ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <X className="size-4" />
+                    )}
+                    Decline all
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={bulkInFlight || inFlight.size > 0}
+                    onClick={() => void decideAll("approve")}
+                  >
+                    {bulkInFlight ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Check className="size-4" />
+                    )}
+                    Approve all
+                  </Button>
+                </div>
+              )}
             </div>
             {/* #971: nothing may vanish unannounced. Requests now age out on
                 their own, so the queue says so once, up front — mirroring the
@@ -407,7 +500,9 @@ export function ApprovalsView({
           onRevoke={async (id) => {
             try {
               await client.revokeGrant(id, company);
-              toast.success("Permission revoked — this tool will ask again from its next call.");
+              toast.success(
+                "Permission revoked — this tool will ask again from its next call.",
+              );
             } catch (err) {
               // A 404 means it was already gone (revoked elsewhere, or expired).
               // The operator's intent is satisfied either way, so this is not an
@@ -415,7 +510,10 @@ export function ApprovalsView({
               if (err instanceof ApiError && err.status === 404) {
                 toast.info("That permission was already gone.");
               } else {
-                const msg = err instanceof ApiError ? err.message : "something went wrong";
+                const msg =
+                  err instanceof ApiError
+                    ? err.message
+                    : "something went wrong";
                 toast.error(`Couldn't revoke it — ${msg}`);
                 throw err;
               }
@@ -442,17 +540,23 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
   // Actor id → what to call them. Without this the row reads "granted by
   // 019fd3d1bddf-000000000005", which is a runtime identifier in front of an
   // operator — the thing the glossary rule forbids, and useless besides.
-  const [granterNames, setGranterNames] = useState<Map<string, string>>(new Map());
+  const [granterNames, setGranterNames] = useState<Map<string, string>>(
+    new Map(),
+  );
 
   const refreshGrants = useCallback(async () => {
-    const next = await client.listGrants(company).catch(() => [] as StandingGrant[]);
+    const next = await client
+      .listGrants(company)
+      .catch(() => [] as StandingGrant[]);
     setGrants(next);
   }, [client, company]);
 
   useEffect(() => {
     let live = true;
     void (async () => {
-      const next = await client.listGrants(company).catch(() => [] as StandingGrant[]);
+      const next = await client
+        .listGrants(company)
+        .catch(() => [] as StandingGrant[]);
       if (live) setGrants(next);
     })();
     // Who the granter ids belong to. Two reads, both allowed to fail: the
@@ -506,7 +610,7 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
  * that has no grants route at all, which reads back as an empty list. The
  * section appearing is itself the signal that something is open.
  */
-function StandingPermissions({
+export function StandingPermissions({
   grants,
   now,
   askerNames,
@@ -522,7 +626,9 @@ function StandingPermissions({
 }) {
   // Per row, not one flag for the section — #373's lesson: a single in-flight
   // slot makes deciding one row freeze every other row on the screen.
-  const [revoking, setRevoking] = useState<ReadonlySet<string>>(() => new Set());
+  const [revoking, setRevoking] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   if (grants.length === 0) return null;
 
   const mark = (id: string, busy: boolean) =>
@@ -535,13 +641,15 @@ function StandingPermissions({
 
   return (
     <section className="mt-8">
-      <h2 className="mb-1 text-sm font-medium text-muted-foreground">Standing permissions</h2>
+      <h2 className="mb-1 text-sm font-medium text-muted-foreground">
+        Standing permissions
+      </h2>
       <p className="mb-3 text-xs text-muted-foreground">
-        Tools you've allowed or blocked without asking each time. Each one expires on its own;
-        you can end it sooner.
+        Tools you've allowed or blocked without asking each time. Each one
+        expires on its own; you can end it sooner.
       </p>
       <div className="flex flex-col gap-2">
-        {grants.map((g) => {
+        {grants.map((g, index) => {
           const busy = revoking.has(g.id);
           const expired = g.expires_at_millis <= now;
           return (
@@ -549,16 +657,37 @@ function StandingPermissions({
               <CardContent className="flex flex-wrap items-center gap-3 py-3">
                 <div className="min-w-0 flex-1">
                   {/* Phrased, never the raw identifier — the glossary rule. */}
-                  <p className="truncate text-sm font-medium">{grantHeadline(g)}</p>
+                  <p className="truncate text-sm font-medium">
+                    {grantHeadline(g)}
+                  </p>
                   <p className="text-xs text-muted-foreground">
-                    {askerNames.get(g.agent) ?? g.agent} ·{" "}
-                    {expired ? "expired" : `expires ${untilLabel(g.expires_at_millis, now)}`} ·
-                    {g.verdict === "deny" ? "declined" : "granted"} {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
+                    {grantSubject(g, askerNames)} ·{" "}
+                    {expired
+                      ? "expired"
+                      : `expires ${untilLabel(g.expires_at_millis, now)}`}{" "}
+                    · grant {index + 1} of {grants.length}{" "}
+                    ·{g.verdict === "deny" ? "declined" : "granted"}{" "}
+                    {timeAgo(g.at_millis, now)} by{" "}
+                    {granterLabel(g, granterNames)}
                   </p>
                 </div>
                 <Button
                   variant="outline"
                   size="sm"
+                  /* The subject, not just the grant: two teammates holding the
+                     same tool and scope read identically in grantHeadline — and
+                     a workflow grant carries no agent at all — so button-only
+                     navigation would hear identical "Remove" buttons and could
+                     take back the wrong one (#1411). `grantSubject` resolves
+                     the workflow subject for that second kind. The accessible
+                     name leads with the visible "Remove" verb so speech-input
+                     users can say the control's label (WCAG 2.5.3 label in
+                     name). */
+                  aria-label={`Remove ${grantSubject(g, askerNames)}'s permission: ${grantHeadline(g)} — ${
+                    g.expires_at_millis <= now
+                      ? "expired"
+                      : `expires ${untilLabel(g.expires_at_millis, now)}`
+                  } — grant ${index + 1} of ${grants.length}`}
                   disabled={busy}
                   onClick={() => {
                     mark(g.id, true);
@@ -567,7 +696,11 @@ function StandingPermissions({
                       .finally(() => mark(g.id, false));
                   }}
                 >
-                  {busy ? <Loader2 className="size-4 animate-spin" /> : <X className="size-4" />}{" "}
+                  {busy ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <X className="size-4" />
+                  )}{" "}
                   Remove
                 </Button>
               </CardContent>
@@ -587,7 +720,10 @@ function StandingPermissions({
  * uuid. When the roster cannot be read (a member, not an admin) the row says
  * "someone with admin access", which is less information but not misleading.
  */
-function granterLabel(g: StandingGrant, granterNames: Map<string, string>): string {
+function granterLabel(
+  g: StandingGrant,
+  granterNames: Map<string, string>,
+): string {
   if (g.granted_by.kind !== "user") return "an automation";
   return granterNames.get(g.granted_by.id) ?? "someone with admin access";
 }
@@ -612,6 +748,13 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
  * leaving its generic headline alone would not distinguish one request from
  * another.
  */
+function grantDurationLabel(expiresInMillis: number): string {
+  return (
+    GRANT_DURATIONS.find((duration) => duration.millis === expiresInMillis)?.label ??
+    `${Math.round(expiresInMillis / 86_400_000)} days`
+  );
+}
+
 export function ApprovalCard({
   approval: a,
   now,
@@ -648,7 +791,9 @@ export function ApprovalCard({
   // card decided without touching the control behaves exactly as it did before
   // #374 — the scope is opt-in at every level, including this one.
   const [scope, setScope] = useState<GrantScope>({ kind: "once" });
-  const [declineScope, setDeclineScope] = useState<GrantScope>({ kind: "once" });
+  const [declineScope, setDeclineScope] = useState<GrantScope>({
+    kind: "once",
+  });
 
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
@@ -681,7 +826,12 @@ export function ApprovalCard({
           onChange={setScope}
           disabled={deciding !== null}
         />
-        <DeclineScopeControl approval={a} scope={declineScope} onChange={setDeclineScope} disabled={deciding !== null} />
+        <DeclineScopeControl
+          approval={a}
+          scope={declineScope}
+          onChange={setDeclineScope}
+          disabled={deciding !== null}
+        />
 
         <ApprovalMeta
           approval={a}
@@ -718,6 +868,22 @@ export function ApprovalCard({
           <Button
             variant="outline"
             size="sm"
+            /* `decisionLabel`, not `approvalAction`: two same-kind cards read
+               identically from the kind alone, and button-only screen-reader
+               navigation never hears the card body (#1411). */
+            aria-label={`Decline: ${decisionLabel(a, askerNames, now)} — ${
+              declineScope.kind === "tool"
+                ? `don't ask again for this tool for ${grantDurationLabel(declineScope.expiresInMillis)}`
+                : "just this once"
+            }${
+              // Redacted cards already carry the exact timestamp in
+              // `decisionLabel`'s "composed … (…)"; appending the usual
+              // `request <timestamp>` suffix here too would announce the opaque
+              // epoch twice on every hidden card.
+              a.contents_hidden ? "" : ` — request ${a.at_millis}`
+            }${
+              batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
+            }`}
             disabled={deciding !== null}
             /* A decline never carries a scope — there is nothing to grant,
                and the host refuses the pairing anyway. */
@@ -732,6 +898,17 @@ export function ApprovalCard({
           </Button>
           <Button
             size="sm"
+            aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — ${
+              scope.kind === "tool"
+                ? `let this ${
+                    a.workflow_id ? "workflow" : "teammate"
+                  } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
+                : "just this once"
+            }${
+              a.contents_hidden ? "" : ` — request ${a.at_millis}`
+            }${
+              batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
+            }`}
             disabled={deciding !== null}
             onClick={() => onDecide("approve", scope)}
           >
@@ -803,7 +980,9 @@ function WorkflowContentReview({ approval }: { approval: ApprovalSummary }) {
               <div key={i} className={i > 0 ? "border-t pt-1" : undefined}>
                 {m.text ? (
                   <div className="prose prose-sm max-w-none dark:prose-invert">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {m.text}
+                    </ReactMarkdown>
                   </div>
                 ) : (
                   <p className="whitespace-pre-wrap text-sm text-muted-foreground">
@@ -844,7 +1023,8 @@ function ClearedForTask() {
         <p className="font-medium">This card is clear</p>
         <p className="max-w-sm text-sm text-muted-foreground">
           Nothing it parked is still waiting on you. Other cards may still have
-          approvals of their own — use <span className="font-medium">Show all</span> to see them.
+          approvals of their own — use{" "}
+          <span className="font-medium">Show all</span> to see them.
         </p>
       </div>
     </div>
@@ -862,7 +1042,10 @@ function LoadingApprovals() {
   return (
     <div className="space-y-3" aria-busy="true" aria-label="Loading approvals">
       {Array.from({ length: 3 }).map((_, i) => (
-        <div key={i} className="h-28 animate-pulse rounded-xl border bg-muted/40" />
+        <div
+          key={i}
+          className="h-28 animate-pulse rounded-xl border bg-muted/40"
+        />
       ))}
     </div>
   );
@@ -906,7 +1089,11 @@ function UnreadableApprovals({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-function EmptyApprovals({ onGoToConversation }: { onGoToConversation: () => void }) {
+function EmptyApprovals({
+  onGoToConversation,
+}: {
+  onGoToConversation: () => void;
+}) {
   return (
     <div className="mt-16 flex flex-col items-center gap-3 text-center">
       <div className="flex size-12 items-center justify-center rounded-2xl bg-status-done-soft text-status-done-text">
@@ -915,7 +1102,8 @@ function EmptyApprovals({ onGoToConversation }: { onGoToConversation: () => void
       <div className="space-y-1">
         <p className="font-medium">All clear</p>
         <p className="max-w-sm text-sm text-muted-foreground">
-          Nothing is waiting on you. Your company will park anything that needs a sign-off here.
+          Nothing is waiting on you. Your company will park anything that needs
+          a sign-off here.
         </p>
       </div>
       <Button variant="outline" size="sm" onClick={onGoToConversation}>
