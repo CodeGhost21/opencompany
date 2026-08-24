@@ -982,6 +982,82 @@ mod test {
         )
     }
 
+    struct ArchiveScopes {
+        archived: Vec<CompressedTrace>,
+        restored: Arc<std::sync::Mutex<Vec<CompressedTrace>>>,
+        context: Arc<FsContextStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryScopes for ArchiveScopes {
+        fn agent_context(&self, _agent_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        fn desk_context(&self, _desk_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        async fn archived_traces(&self, _company: &CompanyId) -> Result<Vec<CompressedTrace>> {
+            Ok(self.archived.clone())
+        }
+
+        async fn restore_archived_traces(
+            &self,
+            _company: &CompanyId,
+            traces: &[CompressedTrace],
+        ) -> Result<()> {
+            self.restored.lock().unwrap().extend_from_slice(traces);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_traces_survive_bundle_roundtrip_in_the_archive_tier() {
+        let home1 = tmp_root("archive-src");
+        let home2 = tmp_root("archive-dst");
+        let dest = tmp_root("archive-bundle");
+        let id = CompanyId::new("archive-co");
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&company_record(&id)).await.unwrap();
+        let archived = vec![CompressedTrace {
+            cycle_id: "evicted-cycle".into(),
+            summary: "retained recovery trace".into(),
+            at_millis: 7,
+        }];
+        let source_scopes = Arc::new(ArchiveScopes {
+            archived: archived.clone(),
+            restored: Arc::new(std::sync::Mutex::new(Vec::new())),
+            context: Arc::new(FsContextStore::new(home1.clone())),
+        });
+        export_bundle_with_scopes(
+            &id,
+            &dest,
+            s1,
+            e1,
+            m1,
+            c1,
+            None,
+            Some(source_scopes),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        assert!(dest.join(MEMORY_DIR).join(ARCHIVES_JSONL).is_file());
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let restored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_scopes = Arc::new(ArchiveScopes {
+            archived: Vec::new(),
+            restored: restored.clone(),
+            context: Arc::new(FsContextStore::new(home2)),
+        });
+        import_bundle_with_scopes(&dest, s2, e2, m2, c2, None, Some(target_scopes))
+            .await
+            .unwrap();
+        assert_eq!(*restored.lock().unwrap(), archived);
+    }
+
     /// The mandatory end-to-end round-trip: build a company, run a cycle to
     /// populate events/traces/ledger, seed a ledger entry and context chunk,
     /// export to a bundle directory, import into a *fresh* home through the fs
