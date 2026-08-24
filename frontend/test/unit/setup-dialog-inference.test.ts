@@ -210,8 +210,13 @@ describe("readiness is the addressed company's, not the host's", () => {
       clientWith({ status: async () => ({ ...ECHO, harnessReachable: false }) }),
     );
     // A credential cannot put a harness-less binary on the design path, so the
-    // CTA that promises otherwise would be a dead end — say so instead.
-    expect(find("setup-inference-notice")?.textContent).toContain("can't run a model");
+    // CTA that promises otherwise would be a dead end — say so instead. The
+    // copy says the roster cannot be *designed* with a model, not that no model
+    // can run: a `hosted`/`sidecar`/`custom` deployment runs one while still
+    // lacking the local roster builder.
+    expect(find("setup-inference-notice")?.textContent).toContain(
+      "can't design your team with a model",
+    );
     expect(linkNamed("Set up a model")).toBeUndefined();
   });
 
