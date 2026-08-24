@@ -5,7 +5,7 @@
 // further out again, to `run-health.ts`, because the workflow cards need the
 // same reading — see that file's header.
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -828,8 +828,9 @@ function RunFilesSection({
   // and a collapse-then-reopen does not re-hit the route. Cleared on failure so
   // a reopen can retry.
   const requested = useRef(false);
+  const detailsRef = useRef<HTMLDetailsElement>(null);
 
-  function load() {
+  const load = useCallback(() => {
     if (requested.current) return;
     requested.current = true;
     setLoading(true);
@@ -841,10 +842,30 @@ function RunFilesSection({
         setError(true);
       })
       .finally(() => setLoading(false));
-  }
+  }, [client, company, runId]);
+
+  // `RunHistoryPanel` keys each row only by `run.seq` (not by company), and
+  // journal sequences commonly repeat across companies and workflows. When an
+  // operator switches company or workflow while a row stays expanded, React
+  // can reuse THIS component instance for an unrelated run — the one-shot
+  // latch above then never re-fires, and the old scope's files (titles,
+  // paths) stay on screen under the new run. Reset on every scope change, and
+  // re-fetch immediately if the disclosure is already open — the `onToggle`
+  // handler below only fires on an open/close transition, not on a prop
+  // change while already open.
+  useEffect(() => {
+    requested.current = false;
+    setFiles(null);
+    setError(false);
+    setLoading(false);
+    if (detailsRef.current?.open) {
+      load();
+    }
+  }, [company, runId, load]);
 
   return (
     <details
+      ref={detailsRef}
       className="mt-1.5"
       data-testid="workflow-run-files"
       onToggle={(e) => {

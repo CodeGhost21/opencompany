@@ -190,4 +190,57 @@ describe("run row — files associated (issue #1684)", () => {
     ).toBeNull();
     expect(sink.calls).toEqual([]);
   });
+
+  it("re-fetches instead of showing the old company's files when a company switch reuses the row (issue #1693)", async () => {
+    // `RunHistoryPanel` keys rows only by `run.seq` (not by company), and
+    // journal sequences commonly repeat across companies. Re-render the SAME
+    // root with the same seq (1) but a different company/runId — exactly what
+    // React does when an operator switches company with the row left
+    // expanded — and prove the stale-company file does not leak through.
+    const sink = { calls: [] as string[] };
+    const acmeFile: RunArtifactRow = { ...FILE, title: "Acme launch spec" };
+    const globexFile: RunArtifactRow = {
+      ...FILE,
+      taskId: "t-b",
+      artifactId: "art-b1",
+      title: "Globex launch spec",
+    };
+
+    await renderPanel(completedRun("acme-run-1"), filesClient([acmeFile], sink));
+    await expandFiles();
+    expect(
+      container.querySelector('[data-testid="workflow-run-file"]')
+        ?.textContent,
+    ).toContain("Acme launch spec");
+
+    // Same seq (1, from `completedRun`), different company + runId — the
+    // reuse case. Re-render without unmounting, the way `WorkflowsView`
+    // re-renders `RunHistoryPanel` in place on a company switch.
+    await act(async () => {
+      root.render(
+        createElement(RunHistoryPanel, {
+          client: filesClient([globexFile], sink),
+          company: "globex",
+          runs: [completedRun("globex-run-1")],
+          graph: null,
+          workflowName: "Launch",
+          onClose: () => {},
+          selectedRunSeq: null,
+          onSelectRun: () => {},
+        }),
+      );
+    });
+    await act(async () => {});
+
+    expect(sink.calls).toEqual([
+      "/api/v1/acme/workflows/runs/acme-run-1/artifacts",
+      "/api/v1/globex/workflows/runs/globex-run-1/artifacts",
+    ]);
+    const entries = container.querySelectorAll(
+      '[data-testid="workflow-run-file"]',
+    );
+    expect(entries.length).toBe(1);
+    expect(entries[0]?.textContent).toContain("Globex launch spec");
+    expect(entries[0]?.textContent).not.toContain("Acme");
+  });
 });
