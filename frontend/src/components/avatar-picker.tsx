@@ -73,10 +73,6 @@ export function AvatarPicker({
   // change the teammate's icon after the dialog was gone.
   const mounted = useRef(true);
   useEffect(() => {
-    // StrictMode replays setup → cleanup → setup in development while keeping
-    // refs alive. Re-arm the guard in setup so the replayed mounted instance
-    // can still commit a successful upload.
-    mounted.current = true;
     return () => {
       mounted.current = false;
     };
@@ -94,9 +90,7 @@ export function AvatarPicker({
       // format, or an image over the ceiling. A generic "upload failed" here
       // would replace a useful message with a useless one.
       toast.error(
-        err instanceof ApiError
-          ? err.message
-          : "That image couldn't be uploaded.",
+        err instanceof ApiError ? err.message : "That image couldn't be uploaded.",
       );
     } finally {
       setUploading(false);
@@ -162,8 +156,7 @@ export function AvatarPicker({
       {/* GIFs are named on purpose: an animated face is the case people ask for
           and the one nobody expects to be allowed. */}
       <p className="text-xs text-muted-foreground">
-        PNG, JPEG, WebP or GIF, up to {MAX_AVATAR_MB}&nbsp;MB. Animated GIFs
-        keep moving.
+        PNG, JPEG, WebP or GIF, up to {MAX_AVATAR_MB}&nbsp;MB. Animated GIFs keep moving.
       </p>
       <div
         className="flex flex-wrap gap-2"
@@ -190,9 +183,7 @@ export function AvatarPicker({
                 // being drawn over eleven different colours: `ring-primary` on
                 // the chosen one, and transparent — not absent — on the rest, so
                 // nothing shifts by two pixels as the selection moves.
-                selected
-                  ? "ring-primary"
-                  : "ring-transparent hover:ring-border",
+                selected ? "ring-primary" : "ring-transparent hover:ring-border",
               )}
             >
               <TeammateAvatar

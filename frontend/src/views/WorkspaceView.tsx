@@ -90,24 +90,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  rosterDisplayName,
-  rosterNameMap,
-  type RosterNames,
-} from "@/lib/roster-names";
+import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster-names";
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import {
-  createSaveBuffer,
-  createUnloadGuard,
-  type SaveBuffer,
-} from "@/lib/workspace-save-buffer";
+import { createSaveBuffer, createUnloadGuard, type SaveBuffer } from "@/lib/workspace-save-buffer";
 import {
   ancestorFolderIds,
   applyRepair,
@@ -384,10 +372,7 @@ export function planOpenNote({
  * merely *opened* for editing and then deleted elsewhere has nothing to rescue
  * and should close quietly instead of pushing a banner at the operator.
  */
-function unsavedDraft(
-  draft: string | null,
-  saved: string | null | undefined,
-): string | null {
+function unsavedDraft(draft: string | null, saved: string | null | undefined): string | null {
   if (draft === null) return null;
   return draft === (saved ?? "") ? null : draft;
 }
@@ -433,21 +418,10 @@ function message(e: unknown, fallback: string): string {
  * (#326), and there is no live push, so a write that lands while the tab is open
  * appears on refresh/refocus rather than instantly (#327).
  */
-export function WorkspaceView({
-  client,
-  company,
-  event,
-  refreshTick = 0,
-  initialNodeId,
-}: Props) {
+export function WorkspaceView({ client, company, event, refreshTick = 0, initialNodeId }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [nodes, setNodes] = useState<FsNode[]>([]);
-  // Ref mirror used by async tree refreshes: comparing the last authoritative
-  // tree with the new one must not make `loadTree` depend on state and replay
-  // every live-write effect. It also lets remote deletions invalidate cached
-  // uploaded faces, not only deletes initiated by this view.
-  const nodesRef = useRef<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -501,9 +475,7 @@ export function WorkspaceView({
   // Which of the two irreversible "Discard" buttons is waiting on a confirm
   // (issue #1472). Both destroy the last copy of something an operator typed,
   // so neither fires from its own click any more.
-  const [confirmDiscard, setConfirmDiscard] = useState<DiscardTarget | null>(
-    null,
-  );
+  const [confirmDiscard, setConfirmDiscard] = useState<DiscardTarget | null>(null);
   // The empty-agent-folder tidy (issue #700), in its two stages: `preview` is
   // what the host says *would* go, `done` is what actually went. Both name every
   // folder — a count is not something an operator who disagrees can check.
@@ -524,14 +496,8 @@ export function WorkspaceView({
   // receipt. #500 partitioned inside `importLegacy` so the loops and the
   // receipt could not disagree; the banner counted the flat list separately
   // and drifted anyway (#507). One partition is what makes them agree.
-  const legacyFolders = useMemo(
-    () => legacy.filter((n) => n.kind === "folder"),
-    [legacy],
-  );
-  const legacyFiles = useMemo(
-    () => legacy.filter((n) => n.kind === "file"),
-    [legacy],
-  );
+  const legacyFolders = useMemo(() => legacy.filter((n) => n.kind === "folder"), [legacy]);
+  const legacyFiles = useMemo(() => legacy.filter((n) => n.kind === "file"), [legacy]);
   const uploadRef = useRef<HTMLInputElement>(null);
 
   // Generation tokens so a response from a previous company scope (or from a
@@ -560,12 +526,6 @@ export function WorkspaceView({
       try {
         const tree = await fetchTree(client, company);
         if (mine !== treeGen.current) return null;
-        const nextIds = new Set(tree.map((node) => node.id));
-        for (const previous of nodesRef.current) {
-          if (!nextIds.has(previous.id))
-            forgetAvatarNode(client, company, previous.id);
-        }
-        nodesRef.current = tree;
         setNodes(tree);
         setError(null);
         if (!expandedSeeded.current) {
@@ -763,9 +723,7 @@ export function WorkspaceView({
         );
         setNodes((all) =>
           all.map((n) =>
-            n.id === job.id
-              ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
-              : n,
+            n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
           ),
         );
       },
@@ -777,8 +735,7 @@ export function WorkspaceView({
         setSaveState("error");
         if (isNotFound(e)) {
           toast.error("This note no longer exists on the host.", {
-            description:
-              "Someone deleted it. Your text is still here — save it as a new note.",
+            description: "Someone deleted it. Your text is still here — save it as a new note.",
           });
         } else {
           toast.error(message(e, "could not save this note"));
@@ -825,10 +782,7 @@ export function WorkspaceView({
     // this keystroke has just superseded, so it no longer gets to set the state.
     buffer.stage({ id, content });
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(
-      () => void flushRef.current(),
-      AUTOSAVE_DELAY_MS,
-    );
+    timer.current = setTimeout(() => void flushRef.current(), AUTOSAVE_DELAY_MS);
   }
 
   /* ---- refresh on refocus ---- */
@@ -956,8 +910,7 @@ export function WorkspaceView({
     if (!rescued) return;
     // Cleared only on success: a failed create toasts and leaves the banner
     // standing, because dismissing it would destroy the last copy of the text.
-    if (await createAndOpen(`${rescued.name} (recovered)`, rescued.content))
-      setRescued(null);
+    if (await createAndOpen(`${rescued.name} (recovered)`, rescued.content)) setRescued(null);
   }
 
   async function copyRescued() {
@@ -968,9 +921,7 @@ export function WorkspaceView({
     } catch {
       // No clipboard permission, or an insecure origin. The text is rendered in
       // the banner either way, so say so rather than leaving a dead button.
-      toast.error(
-        "Couldn't copy — select the text above and copy it yourself.",
-      );
+      toast.error("Couldn't copy — select the text above and copy it yourself.");
     }
   }
 
@@ -1139,10 +1090,7 @@ export function WorkspaceView({
   async function openHit(hit: SearchHit) {
     if (hit.kind === "folder") {
       setSearchInput("");
-      setExpanded(
-        (prev) =>
-          new Set([...prev, ...ancestorFolderIds(nodes, hit.id), hit.id]),
-      );
+      setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, hit.id), hit.id]));
       setRevealId(hit.id);
       return;
     }
@@ -1158,9 +1106,7 @@ export function WorkspaceView({
    */
   function revealFolder(id: string) {
     setSearchInput("");
-    setExpanded(
-      (prev) => new Set([...prev, ...ancestorFolderIds(nodes, id), id]),
-    );
+    setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, id), id]));
     setRevealId(id);
   }
 
@@ -1250,17 +1196,13 @@ export function WorkspaceView({
   }
 
   async function rename(node: FsNode, name: string) {
-    const next =
-      (node.kind === "file" ? ensureMdExt(name.trim()) : name.trim()) ||
-      node.name;
+    const next = (node.kind === "file" ? ensureMdExt(name.trim()) : name.trim()) || node.name;
     try {
       const updated = await renameMoveNode(client, company, node.id, {
         name: next,
       });
       setNodes((all) => all.map((n) => (n.id === updated.id ? updated : n)));
-      setOpenFile((f) =>
-        f && f.id === updated.id ? { ...f, name: updated.name } : f,
-      );
+      setOpenFile((f) => (f && f.id === updated.id ? { ...f, name: updated.name } : f));
     } catch (e) {
       toast.error(message(e, "could not rename this item"));
     }
@@ -1280,9 +1222,7 @@ export function WorkspaceView({
       // the confirmation either.
       toast.success(
         `Moved “${titleOf(node)}” to ${
-          destId
-            ? folderPathLabel(nodes, destId, rosterNames)
-            : "the workspace root"
+          destId ? folderPathLabel(nodes, destId, rosterNames) : "the workspace root"
         }.`,
       );
     } catch (e) {
@@ -1295,7 +1235,6 @@ export function WorkspaceView({
     try {
       await deleteNodeApi(client, company, node.id);
       setNodes((all) => all.filter((n) => !removed.has(n.id)));
-      nodesRef.current = nodesRef.current.filter((n) => !removed.has(n.id));
       // A deleted node may be somebody's chosen face (`blob:<nodeId>`); drop
       // it from the avatar cache so the next render degrades to the tone
       // tile rather than keeping a face whose file just ceased to exist.
@@ -1429,12 +1368,7 @@ export function WorkspaceView({
     if (!files?.length) return;
     for (const file of Array.from(files)) {
       try {
-        const created = await uploadFile(
-          client,
-          company,
-          file,
-          defaultParentId,
-        );
+        const created = await uploadFile(client, company, file, defaultParentId);
         setNodes((all) => [...all, created]);
       } catch (e) {
         toast.error(`${file.name}: ${message(e, "upload failed")}`);
@@ -1508,10 +1442,7 @@ export function WorkspaceView({
           <IconBtn label="New file" onClick={() => setPrompt({ mode: "file" })}>
             <FilePlus2 className="size-4" />
           </IconBtn>
-          <IconBtn
-            label="New folder"
-            onClick={() => setPrompt({ mode: "folder" })}
-          >
+          <IconBtn label="New folder" onClick={() => setPrompt({ mode: "folder" })}>
             <FolderPlus className="size-4" />
           </IconBtn>
           <IconBtn label="Upload" onClick={() => uploadRef.current?.click()}>
@@ -1533,10 +1464,7 @@ export function WorkspaceView({
               to it, and both can remove folders. Kept visually apart from the
               make-something group so the row is not six identical glyphs with
               two mines in it (issue #1378). */}
-          <span
-            aria-hidden
-            className="mx-0.5 h-4 w-px shrink-0 self-center bg-border"
-          />
+          <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 self-center bg-border" />
           {/* Issue #700. A company provisioned before the tree went lazy carries
               one empty folder per teammate, and nothing else will ever remove
               them. Deliberately a button rather than something boot does: the
@@ -1614,10 +1542,7 @@ export function WorkspaceView({
             </button>
           )}
         </div>
-        <div
-          className="flex-1 overflow-y-auto py-1"
-          data-testid="workspace-tree"
-        >
+        <div className="flex-1 overflow-y-auto py-1" data-testid="workspace-tree">
           {/* An active search replaces the tree rather than sitting beside it —
               showing both would leave the operator reading a tree that is not
               what they just asked for. */}
@@ -1639,9 +1564,7 @@ export function WorkspaceView({
           ) : error ? (
             <div className="px-2 py-2">
               <Alert variant="destructive">
-                <AlertDescription data-testid="workspace-error">
-                  {error}
-                </AlertDescription>
+                <AlertDescription data-testid="workspace-error">{error}</AlertDescription>
               </Alert>
               <Button
                 variant="outline"
@@ -1672,9 +1595,7 @@ export function WorkspaceView({
               onRename={(node) => setPrompt({ mode: "rename", node })}
               onMove={(node) => setMoving(node)}
               onDelete={(node) => setConfirmDelete(node)}
-              onNewHere={(folder, mode) =>
-                setPrompt({ mode, parentId: folder.id })
-              }
+              onNewHere={(folder, mode) => setPrompt({ mode, parentId: folder.id })}
             />
           )}
         </div>
@@ -1682,28 +1603,17 @@ export function WorkspaceView({
 
       {/* Note pane */}
       <section
-        className={cn(
-          "flex-1 flex-col overflow-hidden",
-          showExplorer ? "hidden md:flex" : "flex",
-        )}
+        className={cn("flex-1 flex-col overflow-hidden", showExplorer ? "hidden md:flex" : "flex")}
       >
         {legacy.length > 0 && !importDeclined && (
-          <Alert
-            className="m-3 mb-0 w-auto"
-            data-testid="workspace-migration-banner"
-          >
+          <Alert className="m-3 mb-0 w-auto" data-testid="workspace-migration-banner">
             <AlertDescription className="flex flex-wrap items-center gap-3">
               <span className="flex-1 space-y-1">
                 <span className="block">
-                  {migrationBannerText(
-                    legacyFiles.length,
-                    legacyFolders.length,
-                  )}
+                  {migrationBannerText(legacyFiles.length, legacyFolders.length)}
                 </span>
                 {/* What Import does, before it is clicked (issue #1472). */}
-                <span className="block text-xs text-muted-foreground">
-                  {MIGRATION_CONSEQUENCE}
-                </span>
+                <span className="block text-xs text-muted-foreground">{MIGRATION_CONSEQUENCE}</span>
               </span>
               <Button
                 size="sm"
@@ -1711,8 +1621,7 @@ export function WorkspaceView({
                 onClick={() => void importLegacy()}
                 data-testid="workspace-migration-import"
               >
-                {importing && <Loader2 className="size-3.5 animate-spin" />}{" "}
-                Import
+                {importing && <Loader2 className="size-3.5 animate-spin" />} Import
               </Button>
               {/* The non-destructive exit (issue #1472). Without it the only
                   way to stop being asked was the button that deletes the
@@ -1746,14 +1655,11 @@ export function WorkspaceView({
             something with it, since dismissing it on the next click is how the
             last copy of a paragraph gets thrown away. */}
         {rescued && (
-          <Alert
-            className="m-3 mb-0 w-auto"
-            data-testid="workspace-rescued-banner"
-          >
+          <Alert className="m-3 mb-0 w-auto" data-testid="workspace-rescued-banner">
             <AlertDescription className="flex flex-col items-stretch gap-2">
               <span>
-                “{rescued.name}” was deleted while you were writing in it. Your
-                unsaved text is below — save it as a new note, or copy it out.
+                “{rescued.name}” was deleted while you were writing in it. Your unsaved text is
+                below — save it as a new note, or copy it out.
               </span>
               <Textarea
                 readOnly
@@ -1766,11 +1672,7 @@ export function WorkspaceView({
                 <Button size="sm" onClick={() => void saveRescued()}>
                   Save as new note
                 </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => void copyRescued()}
-                >
+                <Button size="sm" variant="ghost" onClick={() => void copyRescued()}>
                   Copy
                 </Button>
                 <Button
@@ -1788,10 +1690,7 @@ export function WorkspaceView({
         {openNode && openNode.kind === "file" ? (
           <>
             <div className="flex items-center gap-2 border-b px-3 py-2">
-              <IconBtn
-                label="Toggle explorer"
-                onClick={() => setShowExplorer((s) => !s)}
-              >
+              <IconBtn label="Toggle explorer" onClick={() => setShowExplorer((s) => !s)}>
                 <PanelLeft className="size-4" />
               </IconBtn>
               <span className="flex min-w-0 items-baseline gap-1.5">
@@ -1801,14 +1700,8 @@ export function WorkspaceView({
                     this?" nor "what sits beside it?". Search already knew — it
                     returns a `path` on every hit — and threw the answer away at
                     exactly the moment it became useful. */}
-                <Breadcrumb
-                  nodes={nodes}
-                  nodeId={openNode.id}
-                  onOpenFolder={revealFolder}
-                />
-                <span className="truncate text-sm font-medium">
-                  {titleOf(openNode)}
-                </span>
+                <Breadcrumb nodes={nodes} nodeId={openNode.id} onOpenFolder={revealFolder} />
+                <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
               </span>
               {/* Said in the header and not only in the tree, because this is
                   the pane the typing happens in — and unlike the tree, it is
@@ -1913,11 +1806,7 @@ export function WorkspaceView({
                   // payload is never fetched through the text route at all, so
                   // neither of those states is reachable for one and both would
                   // be wrong answers here.
-                  <BinaryNodeView
-                    client={client}
-                    company={company}
-                    node={openNode}
-                  />
+                  <BinaryNodeView client={client} company={company} node={openNode} />
                 ) : fileError ? (
                   <div className="p-6">
                     <Alert variant="destructive">
@@ -1940,10 +1829,7 @@ export function WorkspaceView({
                     className="h-full min-h-0 resize-none rounded-none border-0 p-6 font-mono text-sm shadow-none focus-visible:ring-0"
                   />
                 ) : (
-                  <div
-                    className="mx-auto max-w-3xl px-6 py-6"
-                    data-testid="workspace-note"
-                  >
+                  <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-note">
                     {/* The reason, said in the console's own voice and in plain
                         sight (issue #1377). It used to live in a native `title`
                         on the chip — a tooltip that waits a second, never
@@ -1962,11 +1848,7 @@ export function WorkspaceView({
                         <span>{DERIVED_REASON}</span>
                       </p>
                     )}
-                    <NoteMarkdown
-                      source={body}
-                      nodes={nodes}
-                      onWiki={(t) => void onWiki(t)}
-                    />
+                    <NoteMarkdown source={body} nodes={nodes} onWiki={(t) => void onWiki(t)} />
                   </div>
                 )}
               </div>
@@ -1978,9 +1860,7 @@ export function WorkspaceView({
                 </div>
                 <div className="flex-1 overflow-y-auto p-2">
                   {!openFile || openFile.backlinks.length === 0 ? (
-                    <p className="px-1 py-2 text-xs text-muted-foreground">
-                      No backlinks yet.
-                    </p>
+                    <p className="px-1 py-2 text-xs text-muted-foreground">No backlinks yet.</p>
                   ) : (
                     openFile.backlinks.map((b) => (
                       <button
@@ -2033,12 +1913,9 @@ export function WorkspaceView({
         defaultParentId={defaultParentId}
         onClose={() => setPrompt(null)}
         onSubmit={(name) => {
-          if (prompt?.mode === "folder")
-            void createFolder(name, prompt.parentId);
-          else if (prompt?.mode === "file")
-            void createAndOpen(name, undefined, prompt.parentId);
-          else if (prompt?.mode === "rename" && prompt.node)
-            void rename(prompt.node, name);
+          if (prompt?.mode === "folder") void createFolder(name, prompt.parentId);
+          else if (prompt?.mode === "file") void createAndOpen(name, undefined, prompt.parentId);
+          else if (prompt?.mode === "rename" && prompt.node) void rename(prompt.node, name);
           setPrompt(null);
         }}
       />
@@ -2079,9 +1956,7 @@ export function WorkspaceView({
           // the operator never asked for (#1498 review). Expand its ancestors
           // and scroll to it, exactly like a folder — opening it is a
           // separate, explicit click.
-          setExpanded(
-            (prev) => new Set([...prev, ...ancestorFolderIds(nodes, id)]),
-          );
+          setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, id)]));
           setRevealId(id);
         }}
       />
@@ -2090,9 +1965,7 @@ export function WorkspaceView({
         legacyCount={legacy.length}
         rescuedName={rescued?.name ?? ""}
         onClose={() => setConfirmDiscard(null)}
-        onConfirm={
-          confirmDiscard === "rescued" ? discardRescued : discardLegacy
-        }
+        onConfirm={confirmDiscard === "rescued" ? discardRescued : discardLegacy}
       />
       <DeleteDialog
         nodes={nodes}
@@ -2182,9 +2055,7 @@ function SaveStatus({ state }: { state: SaveState }) {
         state === "dirty" && "text-foreground",
       )}
     >
-      {state === "dirty" && (
-        <span aria-hidden="true" className="size-1.5 rounded-full bg-tone-2" />
-      )}
+      {state === "dirty" && <span aria-hidden="true" className="size-1.5 rounded-full bg-tone-2" />}
       {label}
     </span>
   );
@@ -2227,9 +2098,7 @@ function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
     // coincidentally collide with a roster id — that must not reorder it by
     // a display name it was never given one for.
     return a.kind === "folder"
-      ? rosterDisplayName(a.name, names).localeCompare(
-          rosterDisplayName(b.name, names),
-        )
+      ? rosterDisplayName(a.name, names).localeCompare(rosterDisplayName(b.name, names))
       : a.name.localeCompare(b.name);
   });
 }
@@ -2274,27 +2143,17 @@ function Authorship({
   updatedBy: WorkspaceOrigin;
 }) {
   const created = originLabel(createdBy);
-  const edited = sameOrigin(createdBy, updatedBy)
-    ? null
-    : originLabel(updatedBy);
+  const edited = sameOrigin(createdBy, updatedBy) ? null : originLabel(updatedBy);
   if (!created && !edited) return null;
   return (
-    <span
-      className="flex shrink-0 items-center gap-1.5"
-      data-testid="workspace-authorship"
-    >
+    <span className="flex shrink-0 items-center gap-1.5" data-testid="workspace-authorship">
       {created && (
-        <Badge
-          variant="outline"
-          className={cn("text-3xs", ORIGIN_STYLES[createdBy.kind])}
-        >
+        <Badge variant="outline" className={cn("text-3xs", ORIGIN_STYLES[createdBy.kind])}>
           {created}
         </Badge>
       )}
       {edited && (
-        <span className="hidden text-xs text-muted-foreground sm:inline">
-          edited by {edited}
-        </span>
+        <span className="hidden text-xs text-muted-foreground sm:inline">edited by {edited}</span>
       )}
     </span>
   );
@@ -2306,17 +2165,8 @@ function sameOrigin(a: WorkspaceOrigin, b: WorkspaceOrigin): boolean {
 }
 
 function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
-  const {
-    depth,
-    expanded,
-    openId,
-    onToggle,
-    onOpen,
-    nodes,
-    rosterNames,
-    revealId,
-    onRevealed,
-  } = props;
+  const { depth, expanded, openId, onToggle, onOpen, nodes, rosterNames, revealId, onRevealed } =
+    props;
   const rowRef = useRef<HTMLDivElement | null>(null);
   // Scrolling belongs to the row rather than to the pane because only the row
   // knows when it exists: the ancestors expand first, and the row this reveal
@@ -2336,11 +2186,8 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // — but an operator recognizes the teammate by name, not by that id (issue
   // #973). The id stays the label everywhere else in the tree: it is only ever
   // a roster id one level below one of those two roots.
-  const isRosterFolder =
-    isFolder && isRosterRoot(nodeById(nodes, node.parentId));
-  const displayName = isRosterFolder
-    ? rosterDisplayName(node.name, rosterNames)
-    : node.name;
+  const isRosterFolder = isFolder && isRosterRoot(nodeById(nodes, node.parentId));
+  const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
   /** What this row is actually called on screen. */
   const label = isFolder ? displayName : titleOf(node);
   /**
@@ -2456,9 +2303,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
             </TooltipTrigger>
             <TooltipContent>
               {label}
-              {isRosterFolder && (
-                <span className="block text-3xs opacity-70">{node.name}</span>
-              )}
+              {isRosterFolder && <span className="block text-3xs opacity-70">{node.name}</span>}
             </TooltipContent>
           </Tooltip>
           {/* The glyph is the whole of the tree-side signal: an icon, not a
@@ -2523,10 +2368,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
               `w-(--anchor-width)` — the width of the tiny `…` button — with a
               128px floor, and the heading below is wider than that. Every other
               menu in the tree fits the floor. */}
-          <DropdownMenuContent
-            align="end"
-            className={derived ? "w-auto" : undefined}
-          >
+          <DropdownMenuContent align="end" className={derived ? "w-auto" : undefined}>
             {/* Exactly the actions the host will accept, which is not the same
                 set the issue asked for (#1377 said drop all three).
                 `DerivedGuardWorkspace::rename_move` refuses both ends — moving a
@@ -2550,10 +2392,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
                   {DERIVED_LABEL}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  onClick={() => props.onDelete(node)}
-                >
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
                   Delete
                 </DropdownMenuItem>
               </DropdownMenuGroup>
@@ -2565,30 +2404,19 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
                     folder is on screen; this does. */}
                 {isFolder && (
                   <>
-                    <DropdownMenuItem
-                      onClick={() => props.onNewHere(node, "file")}
-                    >
+                    <DropdownMenuItem onClick={() => props.onNewHere(node, "file")}>
                       New note here
                     </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={() => props.onNewHere(node, "folder")}
-                    >
+                    <DropdownMenuItem onClick={() => props.onNewHere(node, "folder")}>
                       New folder here
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                   </>
                 )}
-                <DropdownMenuItem onClick={() => props.onRename(node)}>
-                  Rename
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => props.onMove(node)}>
-                  Move to…
-                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  onClick={() => props.onDelete(node)}
-                >
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
                   Delete
                 </DropdownMenuItem>
               </>
@@ -2596,9 +2424,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      {isFolder && isOpen && (
-        <Tree {...props} parentId={node.id} depth={depth + 1} />
-      )}
+      {isFolder && isOpen && <Tree {...props} parentId={node.id} depth={depth + 1} />}
     </>
   );
 }
@@ -2687,10 +2513,7 @@ function BinaryNodeView({
           <Skeleton className="h-64 w-full" />
         )
       ) : null}
-      <div
-        className="mt-4 rounded-md border bg-card/40 p-4"
-        data-testid="workspace-binary-meta"
-      >
+      <div className="mt-4 rounded-md border bg-card/40 p-4" data-testid="workspace-binary-meta">
         <p className="text-sm font-medium">{node.name}</p>
         <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <dt>Type</dt>
@@ -2740,9 +2563,7 @@ function NoteMarkdown({
 }) {
   if (!source.trim()) {
     return (
-      <p className="text-sm text-muted-foreground">
-        This note is empty. Switch to Edit to write.
-      </p>
+      <p className="text-sm text-muted-foreground">This note is empty. Switch to Edit to write.</p>
     );
   }
   // Rewrite [[target]] / [[target|alias]] into links the renderer can style —
@@ -2750,9 +2571,7 @@ function NoteMarkdown({
   const rewritten = source.replace(
     /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)|\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
     (_m, code: string | undefined, target: string, alias?: string) =>
-      code
-        ? code
-        : `[${(alias ?? target).trim()}](#wiki:${encodeURIComponent(target.trim())})`,
+      code ? code : `[${(alias ?? target).trim()}](#wiki:${encodeURIComponent(target.trim())})`,
   );
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert">
@@ -2842,9 +2661,7 @@ function MissingNote({
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
           <FileX className="size-8 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="font-medium">
-              That note is no longer in this workspace
-            </p>
+            <p className="font-medium">That note is no longer in this workspace</p>
             <p className="max-w-md text-sm text-muted-foreground">
               The link you followed points at a note this company does not have.
             </p>
@@ -3047,10 +2864,9 @@ function NamePrompt({
 }) {
   const [name, setName] = useState("");
   /** The typed name, held back until the audience warning is acknowledged. */
-  const [pending, setPending] = useState<{
-    name: string;
-    warning: MoveAudienceWarning;
-  } | null>(null);
+  const [pending, setPending] = useState<{ name: string; warning: MoveAudienceWarning } | null>(
+    null,
+  );
 
   useEffect(() => {
     setName(state?.mode === "rename" ? (state.node?.name ?? "") : "");
@@ -3078,11 +2894,7 @@ function NamePrompt({
   }
 
   const title =
-    state?.mode === "folder"
-      ? "New folder"
-      : state?.mode === "file"
-        ? "New note"
-        : "Rename";
+    state?.mode === "folder" ? "New folder" : state?.mode === "file" ? "New note" : "Rename";
 
   return (
     <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
@@ -3100,17 +2912,11 @@ function NamePrompt({
               used to go to the root regardless of what the operator had open,
               and said so nowhere — the note simply appeared somewhere else. */}
           {state && state.mode !== "rename" && (
-            <p
-              className="text-xs text-muted-foreground"
-              data-testid="workspace-prompt-dest"
-            >
+            <p className="text-xs text-muted-foreground" data-testid="workspace-prompt-dest">
               Goes in{" "}
               <span className="font-medium text-foreground">
                 {(() => {
-                  const parent =
-                    state.parentId === undefined
-                      ? defaultParentId
-                      : state.parentId;
+                  const parent = state.parentId === undefined ? defaultParentId : state.parentId;
                   return parent
                     ? folderPathLabel(nodes, parent, rosterNames)
                     : "the workspace root";
@@ -3141,9 +2947,7 @@ function NamePrompt({
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && name.trim()) submit(name);
                 }}
-                placeholder={
-                  state?.mode === "folder" ? "e.g. Campaigns" : "e.g. Notes"
-                }
+                placeholder={state?.mode === "folder" ? "e.g. Campaigns" : "e.g. Notes"}
               />
             </div>
             <DialogFooter>
@@ -3218,17 +3022,14 @@ function MoveDialog({
   }, [moving]);
 
   const blocked = new Set<string>(moving ? subtreeIds(nodes, moving.id) : []);
-  for (const node of nodes)
-    if (isDerivedNode(nodes, node.id)) blocked.add(node.id);
+  for (const node of nodes) if (isDerivedNode(nodes, node.id)) blocked.add(node.id);
 
   const needle = filter.trim().toLowerCase();
   const destinations = sortedFolders(nodes, blocked)
     .map((folder) => ({
       folder,
       label: folderPathLabel(nodes, folder.id, rosterNames),
-      audience: moving
-        ? moveAudienceWarning(nodes, moving, folder.id)?.change
-        : undefined,
+      audience: moving ? moveAudienceWarning(nodes, moving, folder.id)?.change : undefined,
     }))
     .filter(({ label }) => !needle || label.toLowerCase().includes(needle));
 
@@ -3275,10 +3076,7 @@ function MoveDialog({
               data-testid="workspace-move-filter"
               className="h-8 text-sm"
             />
-            <div
-              className="max-h-72 space-y-1 overflow-y-auto"
-              data-testid="workspace-move-list"
-            >
+            <div className="max-h-72 space-y-1 overflow-y-auto" data-testid="workspace-move-list">
               {!needle && (
                 <DestRow
                   label="Workspace root"
@@ -3288,11 +3086,7 @@ function MoveDialog({
                   // the consequence is legible before the pick as well as
                   // after it. The root is never `secrets/`, so this row only
                   // ever marks the way out.
-                  audience={
-                    moving
-                      ? moveAudienceWarning(nodes, moving, null)?.change
-                      : undefined
-                  }
+                  audience={moving ? moveAudienceWarning(nodes, moving, null)?.change : undefined}
                   onClick={() => setPicked(null)}
                 />
               )}
@@ -3412,9 +3206,7 @@ function DeleteDialog({
   onClose: () => void;
   onConfirm: (node: FsNode) => void;
 }) {
-  const counts = node
-    ? subtreeCounts(nodes, node.id)
-    : { files: 0, folders: 0 };
+  const counts = node ? subtreeCounts(nodes, node.id) : { files: 0, folders: 0 };
   const description =
     node?.kind === "file"
       ? "This permanently deletes this note. There is no undo."
@@ -3426,9 +3218,7 @@ function DeleteDialog({
     <AlertDialog open={Boolean(node)} onOpenChange={(o) => !o && onClose()}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>
-            Delete “{node ? titleOf(node) : ""}”?
-          </AlertDialogTitle>
+          <AlertDialogTitle>Delete “{node ? titleOf(node) : ""}”?</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -3449,10 +3239,8 @@ function DeleteDialog({
 /** "3 notes and 1 folder" / "2 notes" / "1 folder" — for {@link DeleteDialog}. */
 function describeCounts(counts: { files: number; folders: number }): string {
   const parts: string[] = [];
-  if (counts.files > 0)
-    parts.push(`${counts.files} note${counts.files === 1 ? "" : "s"}`);
-  if (counts.folders > 0)
-    parts.push(`${counts.folders} folder${counts.folders === 1 ? "" : "s"}`);
+  if (counts.files > 0) parts.push(`${counts.files} note${counts.files === 1 ? "" : "s"}`);
+  if (counts.folders > 0) parts.push(`${counts.folders} folder${counts.folders === 1 ? "" : "s"}`);
   return parts.join(" and ");
 }
 
@@ -3507,9 +3295,7 @@ function SweepDialog({
     <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>
-            {done ? "Tidied" : "Tidy empty agent folders"}
-          </DialogTitle>
+          <DialogTitle>{done ? "Tidied" : "Tidy empty agent folders"}</DialogTitle>
           <DialogDescription>
             {done
               ? count === 0
@@ -3518,10 +3304,7 @@ function SweepDialog({
               : `${count} folder${count === 1 ? "" : "s"} under agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
           </DialogDescription>
         </DialogHeader>
-        <ul
-          className="max-h-64 space-y-1 overflow-y-auto"
-          data-testid="workspace-sweep-folders"
-        >
+        <ul className="max-h-64 space-y-1 overflow-y-auto" data-testid="workspace-sweep-folders">
           {rows.map((folder) => (
             <li
               key={folder.id}
@@ -3639,10 +3422,7 @@ function RepairDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <ul
-          className="max-h-64 space-y-1 overflow-y-auto"
-          data-testid="workspace-repair-folders"
-        >
+        <ul className="max-h-64 space-y-1 overflow-y-auto" data-testid="workspace-repair-folders">
           {folds.map((folder) => (
             <li key={folder.id} className="rounded-lg px-2.5 py-1.5 text-sm">
               <div className="flex items-center gap-2">
@@ -3771,9 +3551,7 @@ function DestRow({
     >
       <Folder className="size-4 text-tone-2" />
       <span className="truncate">{label}</span>
-      {disabled && (
-        <span className="ml-auto text-xs text-muted-foreground">Here</span>
-      )}
+      {disabled && <span className="ml-auto text-xs text-muted-foreground">Here</span>}
       {/* Two words, not the sentence: the row is a choice, and the sentence is
           on the panel that follows the click. `Shares it` wears the destructive
           colour because that is the direction there is no undoing — a note the
@@ -3782,9 +3560,7 @@ function DestRow({
         <span
           className={cn(
             "ml-auto flex shrink-0 items-center gap-1 text-xs",
-            audience === "exposed"
-              ? "text-destructive"
-              : "text-muted-foreground",
+            audience === "exposed" ? "text-destructive" : "text-muted-foreground",
           )}
           data-testid="workspace-move-dest-audience"
         >
