@@ -908,6 +908,14 @@ export function AppShell({
         });
     };
 
+    const rehydrateAll = (
+      threadIds: readonly string[],
+      channels: readonly { channelId: string; threadId: string }[],
+    ) => {
+      threadIds.forEach(hydrate);
+      channels.forEach(({ channelId, threadId }) => hydrateChannel(channelId, threadId));
+    };
+
     client
       .listDesks(company)
       .then(async (desks) => {
@@ -932,15 +940,18 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        resolved.forEach((t) => hydrate(t.id));
-
         const chatDesks = desks.length ? desks.map(deskFromDto) : defaultDesks();
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
         setFirstDeskChannelId(chatDesks[0]?.id ?? null);
-        chatDesks.forEach((d) => hydrateChannel(d.id, d.id));
-        roster.forEach((m) => hydrateChannel(dmChannelId(m), m.id));
+        rehydrateAll(
+          resolved.map((t) => t.id),
+          [
+            ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+            ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+          ],
+        );
         // Every channel this pass will hydrate now has a status, so a channel
         // with none is one nothing is coming for.
         setHydration((h) => ({ ...h, discovered: true }));
@@ -950,10 +961,12 @@ export function AppShell({
         // threads, but the operator/General line still deserves a
         // rehydration attempt (it's the one every deployment has).
         const fallbackDesks = defaultDesks();
-        defaultThreads().forEach((t) => hydrate(t.id));
         setChatChannelByThread(channelMap(fallbackDesks, []));
         setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
-        fallbackDesks.forEach((d) => hydrateChannel(d.id, d.id));
+        rehydrateAll(
+          defaultThreads().map((t) => t.id),
+          fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+        );
         if (!cancelled) setHydration((h) => ({ ...h, discovered: true }));
       });
 
