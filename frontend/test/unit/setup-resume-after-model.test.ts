@@ -255,3 +255,36 @@ describe("the skip still suppresses the unprompted offer", () => {
     expect(dialog()).toBeNull();
   });
 });
+
+describe("leaving the completion screen to wire a model", () => {
+  it("records a redesign debt, and the return reopens in redesign mode", async () => {
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      listTeam: async () => [...BASELINE],
+      get: async () => ({ cognition: "echo" }),
+      post: async () => ({
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        template: "ecommerce",
+        source: "fallback",
+        reason: "no_model",
+      }),
+      addTeamMember: async () => ({}),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+    await runFlow();
+
+    await act(async () => {
+      (addModelLink() as HTMLElement).click();
+    });
+
+    // The completion CTA is a *navigation*, not a finish: the shipped team is
+    // to be redesigned on the return, and the run must not be treated as done.
+    expect(dialog(), "should close for the navigation").toBeNull();
+    expect(setupRedesign(SCOPE), "no redesign debt recorded").toBe(true);
+
+    await goTo("#/overview");
+
+    expect(dialog(), "the redesign they were owed never reopened").toBeTruthy();
+    expect(find("setup-redesign-notice"), "not reopened in replacing mode").toBeTruthy();
+  });
+});
