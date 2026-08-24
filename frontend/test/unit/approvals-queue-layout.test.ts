@@ -26,6 +26,7 @@ const GRANT: StandingGrant = {
   agent: "ops",
   tool: "shell",
   granted_by: { kind: "user", id: "operator" },
+  verdict: "approve",
   at_millis: NOW,
   expires_at_millis: NOW + 60 * 60 * 1000,
 };
