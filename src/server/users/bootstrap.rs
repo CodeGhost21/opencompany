@@ -602,7 +602,11 @@ mod test {
         async fn delete(&self, company: &CompanyId, id: &str) -> crate::Result<bool> {
             self.0.delete(company, id).await
         }
-        async fn delete_for_user(&self, _company: &CompanyId, _user_id: &str) -> crate::Result<u64> {
+        async fn delete_for_user(
+            &self,
+            _company: &CompanyId,
+            _user_id: &str,
+        ) -> crate::Result<u64> {
             Err(OpenCompanyError::Config(
                 "injected session revocation failure".into(),
             ))
@@ -664,7 +668,14 @@ mod test {
         let company = CompanyId::new("acme");
 
         issue_password(
-            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+            ),
             "ada@acme.test",
             GOOD,
             false,
@@ -673,7 +684,14 @@ mod test {
         .expect("first issue");
 
         let error = issue_password(
-            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+            ),
             "ada@acme.test",
             "a replacement long password",
             false,
@@ -693,7 +711,10 @@ mod test {
             .expect("read")
             .expect("still there");
         let hash = user.password_hash.expect("hash");
-        assert!(password::verify(GOOD, &hash), "the old password still works");
+        assert!(
+            password::verify(GOOD, &hash),
+            "the old password still works"
+        );
         assert!(
             !password::verify("a replacement long password", &hash),
             "the new password must not have been committed"
@@ -715,7 +736,14 @@ mod test {
         // for the address must not outlive the issued password), so create the
         // account with the real store first.
         issue_password(
-            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+            ),
             "ada@acme.test",
             GOOD,
             false,
@@ -728,7 +756,14 @@ mod test {
         let failing: Arc<dyn crate::ports::login_codes::LoginCodeStore> =
             Arc::new(LoginCodeRevocationFailure(ops.clone()));
         let error = issue_password(
-            context(&users, &sessions, &failing, &company, &[], Some("ada@acme.test")),
+            context(
+                &users,
+                &sessions,
+                &failing,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+            ),
             "ada@acme.test",
             "a replacement long password",
             false,
@@ -748,7 +783,10 @@ mod test {
             .expect("read")
             .expect("still there");
         let hash = user.password_hash.expect("hash");
-        assert!(password::verify(GOOD, &hash), "the old password still works");
+        assert!(
+            password::verify(GOOD, &hash),
+            "the old password still works"
+        );
         assert!(
             !password::verify("a replacement long password", &hash),
             "the new password must not have been committed"
