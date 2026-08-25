@@ -6037,6 +6037,68 @@ description = "Builds the product."
         );
     }
 
+    /// The workflow-runner regression (issue #1455): a plain `ensure` while a
+    /// cycle snapshot is pinned cannot adopt a mid-turn console override a turn
+    /// early.
+    ///
+    /// A cycle pins the roster to the policy snapshot the native gate was
+    /// re-applied from. The workflow runner drives turns from a spawned task
+    /// outside the cycle serial lock and calls plain `ensure`, so without the
+    /// pool remembering the pin it would re-resolve the live store, see the
+    /// mid-window `full` override, and rebuild the roster against it — running
+    /// one turn with the harness gate auto-approving what the native gate still
+    /// parks. The pin is what keeps the plain ensure on the cycle's cadence.
+    #[tokio::test]
+    async fn a_live_ensure_cannot_clobber_a_pinned_cycle_snapshot() {
+        let live_store = Arc::new(LiveStore::default());
+        let mut rec = record();
+        rec.overlay_policy = Some(fp_entry_full(Some("supervised"), None, None, None));
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        let snapshot = rec.effective_policy();
+
+        // Cycle 1: the roster pins the strict snapshot.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("cycle ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // Mid-window PUT: the store now holds a `full` override, still unseen
+        // by the cycle's snapshot.
+        let mut edited = rec.clone();
+        edited.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
+        live_store.save(&edited).await.unwrap();
+
+        // The workflow runner's plain ensure fires while the pin is active. It
+        // must rebuild against the pin, not the live `full` override.
+        pool.ensure(&rec, &fx.deps).await.expect("workflow ensure");
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "a plain ensure must not adopt a mid-cycle override a turn early"
+        );
+
+        // The NEXT cycle captures the new policy: the fingerprint moves, the
+        // roster rebuilds — the change lands, just at the native gate's own
+        // boundary.
+        let next = edited.effective_policy();
+        pool.ensure_with_policy(&rec, &fx.deps, &next)
+            .await
+            .expect("next cycle");
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "the new policy must reach the roster on the next cycle"
+        );
+    }
+
     // --- Capability-budget freshness (issue #108) ---------------------------
 
     /// A manifest that grants every tool namespace, so the roster actually builds
