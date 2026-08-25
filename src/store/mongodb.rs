@@ -3916,7 +3916,11 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         if let Some(key) = node_path_key(&node) {
             document.insert("file_path_key", key);
         }
-        if let Err(err) = self.collection("workspace_nodes").insert_one(document).await {
+        if let Err(err) = self
+            .collection("workspace_nodes")
+            .insert_one(document)
+            .await
+        {
             if !is_duplicate_key(&err) {
                 return Err(mongo_err(err));
             }
@@ -5167,10 +5171,11 @@ mod test {
             id: "loser".to_string(),
             ..first.clone()
         };
-        let err =
-            crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &loser, b"second")
-                .await
-                .unwrap_err();
+        let err = crate::ports::workspace::WorkspaceStore::create_binary(
+            &*s, &company, &loser, b"second",
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, crate::error::OpenCompanyError::Conflict(_)),
             "a taken sibling name is a Conflict, not a storage fault: {err:?}"
