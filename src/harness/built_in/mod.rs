@@ -6120,7 +6120,9 @@ description = "Builds the product."
         // between cycles rebuilds against the live override the store already
         // holds instead of a snapshot that would otherwise outlive its cycle.
         pool.end_cycle(&rec.id).await;
-        pool.ensure(&rec, &fx.deps).await.expect("post-cycle ensure");
+        pool.ensure(&rec, &fx.deps)
+            .await
+            .expect("post-cycle ensure");
         assert_eq!(
             pool.policy_fingerprint_of(&rec.id).await,
             Some(effective_policy_fingerprint(&edited.effective_policy())),
