@@ -4319,6 +4319,90 @@ mod test {
         );
     }
 
+    /// Issue #1113 wiring: a live engine swap must move the selection marker on
+    /// the inherited harness pool, so the pool can drop the cached roster on
+    /// the next rebuild and `ensure` can fold the replacement ports into new
+    /// agents.
+    ///
+    /// The pool-level contract (roster dropped, replacement store read) is
+    /// covered in `harness::built_in`; this pins the builder half — every build
+    /// re-records the selection, an unchanged one is a no-op, and a swap moves
+    /// the marker.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_rebuild_over_a_swapped_engine_rebinds_the_harness_pool() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-engine-pool-");
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let pool = Arc::new(crate::harness::HarnessPool::new());
+
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .with_harness(pool.clone())
+            .build()
+            .await
+            .unwrap();
+        let id = first.id().clone();
+        let fp_a = pool.memory_engine(&id).await;
+        assert!(
+            fp_a.is_some(),
+            "boot records the engine selection on the pool"
+        );
+
+        // A rebuild that re-applies the same engine is a no-op: same marker,
+        // so the pool keeps the roster (conversation history intact).
+        let again = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .with_harness(pool.clone())
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            pool.memory_engine(&id).await,
+            fp_a,
+            "re-applying the same engine keeps the same marker"
+        );
+        drop(again);
+
+        // A live swap to engine B moves the marker, so the pool can tell the
+        // cached roster is stale and drop it on the next build.
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay_b)
+            .with_harness(pool.clone())
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        let fp_b = pool.memory_engine(&id).await;
+        assert!(
+            fp_b.is_some(),
+            "the swap re-records the engine selection on the pool"
+        );
+        assert_ne!(
+            fp_b,
+            fp_a,
+            "a different engine must move the marker, or the pool cannot tell a swap from a no-op"
+        );
+        drop(swapped);
+    }
+
     mod scoped_grants {
         use super::*;
 
