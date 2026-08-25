@@ -143,6 +143,18 @@ pub async fn issue_password(
         )));
     }
 
+    // A suspended account cannot sign in at all — the password login path
+    // refuses every non-active user — so committing a new password here would
+    // only claim a success that can never be used. Refuse it outright instead
+    // of persisting an unusable credential.
+    if let Some(existing) = existing.as_ref()
+        && existing.status != UserStatus::Active
+    {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "{email} is suspended and cannot receive a host password reset"
+        )));
+    }
+
     // Eligibility is only consulted when there is no account yet. An address
     // that already holds one keeps it even if the manifest later stops naming
     // them: removing someone is `status`, not a silent inability to reset.
