@@ -473,7 +473,7 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
  * unrelated repeated messages collapse together.
  */
 function messageFingerprint(message: ChatMessage): string {
-  return JSON.stringify([message.from, message.text, message.parentId ?? null, message.at]);
+  return JSON.stringify([message.from, message.text, message.parentId ?? null]);
 }
 /**
  * Fold one `chat/history` response into a live transcript (issue #1690).
