@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: in the stuck case, did the .catch run at all?
-// Reopen after a miss: if requested.current was reset, a 2nd fetch fires.
+// Temporary diagnostic: compare miss rates across reject-sync strategies.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -79,10 +78,13 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("diag: reopen-after-miss -> did the latch reset?", async () => {
-  let latchReset = 0;
-  let latchStuck = 0;
-  for (let i = 0; i < 20; i++) {
+type Variant = "plain" | "ticks" | "macrotask";
+const VARIANTS: Variant[] = ["plain", "ticks", "macrotask"];
+const ITERATIONS = 20;
+
+async function runVariant(variant: Variant): Promise<number> {
+  let misses = 0;
+  for (let i = 0; i < ITERATIONS; i++) {
     await act(async () => root.unmount());
     container.remove();
     container = document.createElement("div");
@@ -96,35 +98,33 @@ it("diag: reopen-after-miss -> did the latch reset?", async () => {
     const client = deferredFilesClient(deferred);
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
+    if (deferred.length !== 1) continue;
 
     await act(async () => {
       deferred[0].reject(new Error("boom"));
+      if (variant === "ticks") {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      } else if (variant === "macrotask") {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     });
 
-    const errorEl = container.querySelector(
-      '[data-testid="workflow-run-files-error"]',
-    );
-    if (errorEl) continue; // rendered, not the flake case
-
-    // Miss. Reopen: does a 2nd fetch fire (latch reset) or not (catch never ran)?
-    const details = container.querySelector<HTMLDetailsElement>(
-      '[data-testid="workflow-run-files"]',
-    )!;
-    await act(async () => {
-      details.open = false;
-      details.dispatchEvent(new Event("toggle", { bubbles: true }));
-    });
-    await expandFiles();
-    if (deferred.length === 2) {
-      latchReset++;
-      console.log(`iter ${i}: latch RESET (catch ran) but render stuck`);
-    } else {
-      latchStuck++;
-      console.log(
-        `iter ${i}: latch NOT reset (deferred.length=${deferred.length})`,
-      );
+    if (
+      !container.querySelector('[data-testid="workflow-run-files-error"]')
+    ) {
+      misses++;
     }
   }
-  console.log(`latchReset=${latchReset} latchStuck=${latchStuck}`);
+  return misses;
+}
+
+it("diag: miss rates per strategy", async () => {
+  for (const v of VARIANTS) {
+    const misses = await runVariant(v);
+    console.log(`variant=${v} misses=${misses}/${ITERATIONS}`);
+  }
   expect(true).toBe(true);
 });
