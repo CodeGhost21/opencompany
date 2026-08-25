@@ -616,6 +616,7 @@ mod test {
     /// the second revocation in the reset flow.
     struct LoginCodeRevocationFailure(Arc<FsOps>);
 
+    #[async_trait]
     impl crate::ports::login_codes::LoginCodeStore for LoginCodeRevocationFailure {
         async fn create(
             &self,
