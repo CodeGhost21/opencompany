@@ -13,8 +13,12 @@ interface Props {
    * carry, so both the inline preview and the download go through this. Absent
    * when the surface cannot reach the client — the chips then render without a
    * working download rather than crashing.
+   *
+   * An optional `signal` cancels the transfer: the preview aborts its fetch
+   * when the image scrolls out of view, instead of letting a multi-megabyte
+   * download run to completion only to be discarded (codex review finding).
    */
-  resolveUrl?: (nodeId: string) => Promise<string>;
+  resolveUrl?: (nodeId: string, signal?: AbortSignal) => Promise<string>;
 }
 
 /** Whether a stored mime renders as an inline image preview (issue #1682).
