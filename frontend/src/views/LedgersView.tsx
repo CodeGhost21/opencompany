@@ -44,6 +44,7 @@
 // plan, discussion and attempts this screen does not try to reproduce.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import { useLedgerViewMode, type LedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { withHostParam } from "@/hooks/use-host-route";
@@ -286,6 +287,11 @@ export function LedgersView({
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // Issue #1696: the read effect keys on `refreshRead`, whose identity turns
+  // over on every `query` change. Feeding the raw box to it fired one network
+  // read per keystroke; feeding this settled copy fires one per typing pause.
+  // The <Input> stays bound to raw `query` so typing still echoes instantly.
+  const debouncedQuery = useDebouncedValue(query, 300);
   const [statusFilter, setStatusFilter] = useState(EVERY_STATUS);
   const [composing, setComposing] = useState<Composing | null>(null);
   const [saving, setSaving] = useState(false);
@@ -397,7 +403,7 @@ export function LedgersView({
       if (!quiet) setReading(true);
       try {
         const next = await readLedger(client, company, sub, {
-          q: query.trim() || undefined,
+          q: debouncedQuery.trim() || undefined,
           status: statusFilter === EVERY_STATUS ? undefined : statusFilter,
           limit: 100,
         });
@@ -409,7 +415,7 @@ export function LedgersView({
         if (!quiet) setReading(false);
       }
     },
-    [client, company, sub, query, statusFilter],
+    [client, company, sub, debouncedQuery, statusFilter],
   );
 
   useEffect(() => {
@@ -464,7 +470,7 @@ export function LedgersView({
   // follow it any more — issue #1284 removed the in-page picker that used to
   // own that), so this keys on `sub` directly.
   useEffect(() => {
-    setStatusFilter("all");
+    setStatusFilter(EVERY_STATUS);
     setRendered(null);
   }, [sub]);
 
