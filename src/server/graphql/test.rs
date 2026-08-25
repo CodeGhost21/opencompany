@@ -276,6 +276,8 @@ async fn policy_field_reports_the_override_not_the_manifest() {
     record.overlay_policy = Some(crate::ports::types::PolicyOverride {
         mode: Some("readonly".to_string()),
         always_approve: Some(vec!["deploy.production".to_string()]),
+        auto_approve_under_usd: Some(Some(4.0)),
+        approval_ttl_hours: Some(48),
         set_by: crate::ports::types::Actor {
             kind: crate::ports::types::ActorKind::Operator,
             id: "ada@example.com".to_string(),
@@ -286,7 +288,7 @@ async fn policy_field_reports_the_override_not_the_manifest() {
 
     let value = query(
         router(state),
-        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove manifestMode manifestAlwaysApprove overridden setBy setAtMillis } } }"}"#,
+        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove autoApproveUnderUsd approvalTtlHours manifestMode manifestAlwaysApprove manifestAutoApproveUnderUsd manifestApprovalTtlHours overridden setBy setAtMillis } } }"}"#,
     )
     .await;
     let policy = &value["data"]["company"]["policy"];
@@ -313,6 +315,10 @@ async fn policy_field_reports_the_override_not_the_manifest() {
          either from the other being returned twice: {value}"
     );
     assert_eq!(policy["overridden"], true, "{value}");
+    assert_eq!(policy["autoApproveUnderUsd"], 4.0, "{value}");
+    assert_eq!(policy["approvalTtlHours"], 48.0, "{value}");
+    assert!(policy["manifestAutoApproveUnderUsd"].is_null(), "{value}");
+    assert!(policy["manifestApprovalTtlHours"].is_null(), "{value}");
     assert_eq!(policy["setBy"], "ada@example.com", "{value}");
     assert_eq!(
         policy["setAtMillis"], 1_700_000_000_000_f64,

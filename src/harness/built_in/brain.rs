@@ -2702,7 +2702,27 @@ impl Brain for HarnessBrain {
         // returned early used to leave its entries for the *next* cycle to
         // park; now the window is the claim's lifetime and nothing outlives it.
         let claim = self.deps.approval_requests.claim(ApprovalScope::Cycle);
-        claim.scoped(self.run_cycle_scoped(req, host)).await
+        let company_id = req.company_id.clone();
+        // Issue #1455: the cycle's policy pin must not outlive the cycle even
+        // if the cycle body is cancelled or unwinds through a panic after
+        // `ensure_with_policy` installed it — the `await` that would have
+        // released it is exactly where a dropped future stops. The guard holds
+        // the same `run_turn` the body warms through and releases every lane's
+        // pin synchronously from `Drop`, so the release covers success, error,
+        // cancellation and panic alike. The explicit `end_cycle` below keeps
+        // the happy path visible; both are idempotent map removals.
+        let _pin_guard = PolicyPinGuard::new(self.run_turn(), company_id.clone());
+        let result = claim.scoped(self.run_cycle_scoped(req, host)).await;
+        // Issue #1455: release the cycle's policy pin now that the cycle body is
+        // over — success or error. The pin's whole job was to keep the in-flight
+        // roster on the snapshot the native gate was re-applied from for the
+        // cycle's own turns; a standalone workflow turn between cycles must
+        // instead rebuild against the live store overlay, and a pin left behind
+        // would keep the roster on a snapshot that only an unrelated cycle could
+        // refresh. Dispatched through `run_turn` so a router releases every
+        // lane's pool, not just the default one.
+        self.run_turn().end_cycle(&company_id).await;
+        result
     }
 
     /// The harness meters itself per turn in [`HarnessPool::run`], against the
@@ -2714,6 +2734,42 @@ impl Brain for HarnessBrain {
             provider: "per-turn",
             metering: UsageMetering::PerTurn,
         }
+    }
+}
+
+/// RAII release for a cycle's policy pins, the analogue of
+/// [`ApprovalClaim`](crate::harness::policy::ApprovalClaim)'s `Drop` half.
+///
+/// A cycle pins its policy snapshot to every lane's pool through
+/// [`RunTurn::ensure_with_policy`]; the pin must be released when the cycle is
+/// over so a standalone workflow turn between cycles rebuilds against the live
+/// store overlay. The async [`RunTurn::end_cycle`] covers the normal end, but
+/// a cycle whose future is cancelled or unwinds through a panic after the pin
+/// was installed never reaches it — the `await` that would have called it is
+/// exactly where the future is dropped. This guard releases from `Drop`, so
+/// the pin cannot outlive the cycle no matter how it ends (issue #1455).
+struct PolicyPinGuard {
+    run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    company_id: crate::ports::types::CompanyId,
+}
+
+impl PolicyPinGuard {
+    fn new(
+        run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+        company_id: crate::ports::types::CompanyId,
+    ) -> Self {
+        Self {
+            run_turn,
+            company_id,
+        }
+    }
+}
+
+impl Drop for PolicyPinGuard {
+    fn drop(&mut self) {
+        // Synchronous, so it runs even when the cycle future is dropped or
+        // unwound mid-await. Idempotent with `end_cycle`.
+        self.run_turn.release_policy_pin_sync(&self.company_id);
     }
 }
 
@@ -2734,7 +2790,21 @@ impl HarnessBrain {
         // harnesses has one pool per `built_in` harness, and each named lane's
         // own pool must be populated before its first turn, or a bound agent
         // fails with "company not found" while the default lane looks fine.
-        self.run_turn().ensure(&self.record()).await?;
+        //
+        // Issue #1455: when the runtime captured the policy at the top of this
+        // cycle — the same snapshot the native gate was re-applied from — the
+        // roster rebuilds against *that*, not the store. A console override that
+        // landed mid-turn (after the runtime's load, before this refresh) must
+        // not reach the harness gate a turn early, or one turn would run with
+        // the harness auto-approving what the native gate still parks.
+        match &req.policy {
+            Some(policy) => {
+                self.run_turn()
+                    .ensure_with_policy(&self.record(), policy)
+                    .await?
+            }
+            None => self.run_turn().ensure(&self.record()).await?,
+        }
 
         let mut channel_responses = Vec::new();
         for event in &req.events {
@@ -3341,6 +3411,7 @@ description = "Runs Acme."
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
+            policy: None,
         }
     }
 
@@ -7266,6 +7337,7 @@ members = ["eng1", "eng2"]
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
+            policy: None,
         }
     }
 

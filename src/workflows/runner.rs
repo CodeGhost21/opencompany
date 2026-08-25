@@ -1836,6 +1836,10 @@ fn map_engine_error(err: tinyflows::error::EngineError) -> OpenCompanyError {
 pub struct HarnessWorkflowRunner {
     turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
+    /// The company record as of this runner's construction (runtime build /
+    /// rebuild). The run re-reads the live record from the store so a console
+    /// policy PUT since then reaches the run's gate; this snapshot is the
+    /// fallback when the store is unwired or the row is gone.
     record: CompanyRecord,
 }
 
@@ -1849,6 +1853,26 @@ impl HarnessWorkflowRunner {
     ) -> Self {
         Self { turn, deps, record }
     }
+
+    /// The effective record for a run: the store's current one when it can be
+    /// read, the build-time snapshot otherwise.
+    ///
+    /// Issue #1455: the snapshot this runner was built with carries the policy
+    /// as of runtime build / rebuild. The cycle refreshes its record at the top
+    /// of every cycle, but a workflow run is dispatched outside that cadence —
+    /// an operator who tightens the spend cap and then starts an authored
+    /// workflow without rebuilding the runtime would otherwise have the run's
+    /// tool-call gate classified under the *old* cap, auto-approving what the
+    /// new cap would park. Re-reading here keeps the graph-level gate on the
+    /// same policy the roster rebuilds against. A store fault falls back to the
+    /// snapshot rather than failing the run, preserving the pre-#1455
+    /// behaviour of never touching the store on this path.
+    async fn effective_record(&self) -> Result<CompanyRecord> {
+        Ok(match self.deps.store.load(&self.record.id).await {
+            Ok(Some(record)) => record,
+            Ok(None) | Err(_) => self.record.clone(),
+        })
+    }
 }
 
 #[async_trait]
@@ -1860,16 +1884,20 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         input: Value,
         ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun> {
+        // Issue #1455: a console policy PUT/DELETE since this runner was built
+        // must reach this run's gate and the roster it warms. The store's live
+        // record carries the current overlay; the snapshot is only the fallback.
+        let record = self.effective_record().await?;
         // Idempotent: builds the roster on first use, a no-op after. Warmed
         // through the router so every lane's pool — not just the default's — is
         // populated before a node addresses it. The run addresses the record's
         // own company; `_company` is the routed scope, which the runtime
         // resolves to this same record.
-        self.turn.ensure(&self.record).await?;
+        self.turn.ensure(&record).await?;
         run_workflow_lane_aware(
             self.turn.clone(),
             self.deps.clone(),
-            &self.record,
+            &record,
             workflow,
             input,
             ctx,
@@ -2830,6 +2858,51 @@ to = "done"
         .await
         .expect("workflow runs");
         assert!(run.output.to_string().contains("hello-marker"));
+    }
+
+    /// Issue #1455 — a workflow run classifies its tool-call gate under the
+    /// store's *current* policy, not the build-time snapshot. An operator who
+    /// moves a policy axis on the console and then starts an authored workflow
+    /// without rebuilding the runtime must have the run honour the new value.
+    #[tokio::test]
+    async fn workflow_run_gate_reads_live_policy_not_the_build_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let deps = deps(dir.path());
+        let snapshot = record(); // build-time view: overlay_policy: None
+
+        // The console wrote a policy override since the runtime was built:
+        // every spend now parks (`auto_approve_under_usd` lowered to 0), a
+        // change the run's gate must classify under.
+        let live = CompanyRecord {
+            overlay_policy: Some(crate::ports::PolicyOverride {
+                mode: None,
+                always_approve: None,
+                auto_approve_under_usd: Some(Some(0.0)),
+                approval_ttl_hours: None,
+                set_by: crate::ports::Actor {
+                    kind: crate::ports::ActorKind::User,
+                    id: "console-operator".to_string(),
+                },
+                at_millis: 1_700_000_000_000,
+            }),
+            ..snapshot.clone()
+        };
+        deps.store
+            .save(&live)
+            .await
+            .expect("store accepts the live record");
+
+        let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            Arc::new(HarnessPool::new()),
+            Arc::new(deps.clone()),
+        ));
+        let runner = HarnessWorkflowRunner::new(turn, deps, snapshot.clone());
+
+        let effective = runner.effective_record().await.expect("effective record");
+        assert_eq!(
+            effective.overlay_policy, live.overlay_policy,
+            "the run must gate against the store's policy, not the snapshot's"
+        );
     }
 
     /// The workflow port keeps the lane-aware router intact: an agent bound to

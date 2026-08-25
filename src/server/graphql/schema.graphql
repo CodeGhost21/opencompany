@@ -844,6 +844,16 @@ type Policy {
 	"""
 	alwaysApprove: [String!]!
 	"""
+	The spend cap actually in force — console override where one sets it,
+	the committed manifest otherwise. A higher cap is looser; `null` is the
+	strictest setting — no spend is auto-approved, so every spend parks.
+	"""
+	autoApproveUnderUsd: Float
+	"""
+	How long an undecided approval remains actionable, in hours.
+	"""
+	approvalTtlHours: Float!
+	"""
 	The manifest's tier, so a client can see what a reset would restore.
 	"""
 	manifestMode: String!
@@ -851,6 +861,17 @@ type Policy {
 	The manifest's always-ask list, for the same reason.
 	"""
 	manifestAlwaysApprove: [String!]!
+	"""
+	The manifest's spend cap, for the same reason — what a reset would
+	restore (a higher cap is looser; `null` is the strictest setting — no
+	spend is auto-approved, so every spend parks).
+	"""
+	manifestAutoApproveUnderUsd: Float
+	"""
+	The manifest's approval deadline, for the same reason — what a reset
+	would restore.
+	"""
+	manifestApprovalTtlHours: Float
 	"""
 	Whether an operator override is in force.
 	

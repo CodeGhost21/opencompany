@@ -214,6 +214,14 @@ pub struct CompanyRuntime {
     /// the amend and expiry-sweep methods that live outside the trait without a
     /// downcast.
     pub(crate) approval_gate: Arc<ManifestApprovalGate>,
+    /// Whether `approval_gate` came from [`RuntimeBuilder::with_approvals`]
+    /// (crate::runtime::RuntimeBuilder::with_approvals) — a test seam that
+    /// carries its own policy/TTL on purpose — rather than from the manifest and
+    /// the persisted record. Issue #1455 refreshes the live gate from the
+    /// record's effective policy at safe turn boundaries; an injected gate must
+    /// be exempt, or the refresh would clobber the fixture (e.g. a zero-TTL gate
+    /// for expiry tests).
+    pub(crate) gate_injected: bool,
     pub(crate) journal: Arc<RuntimeJournal>,
     /// Per-company secrets, read by the feedback scrubber (and webhook HMAC
     /// verification, later).
@@ -476,6 +484,7 @@ impl CompanyRuntime {
             economy,
             approvals,
             approval_gate,
+            gate_injected: false,
             journal,
             secrets,
             inbox,

@@ -511,6 +511,25 @@ impl<'a> CycleRunner<'a> {
         // still written below — only the read was dead.
         let record = self.rt.store.load(&company).await?;
 
+        // Issue #1455: a console policy PUT/DELETE persisted the override but
+        // must not reach the live native gate mid-turn — an in-flight turn
+        // finishes under the snapshot it started with. The start of a cycle,
+        // holding the serial lock with the freshly-loaded record in hand, is
+        // that safe boundary: re-apply the effective policy (mode, always-ask
+        // list, spend cap) so this turn's native effects evaluate against what
+        // the console reports, even on a company that has not been rebuilt. The
+        // deadline half is immediate already (the ops handler writes the TTL
+        // right after save); re-applying it here costs nothing and keeps a
+        // boot/rebuild-created runtime consistent. A test-injected gate carries
+        // its own policy on purpose and is exempt.
+        if !self.rt.gate_injected
+            && let Some(record) = &record
+        {
+            self.rt
+                .approval_gate
+                .apply_effective_policy(record.effective_policy());
+        }
+
         // Issue #176 (handed-task awareness): when an operator message is
         // addressed to a desk/agent that already has open work handed to it,
         // fold a briefing of that work into the message the brain sees — so a
@@ -542,6 +561,21 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
+            // The same snapshot the native gate was re-applied from above: the
+            // harness rebuilds its roster against it, so a console override
+            // that lands mid-turn (between this load and the harness's own
+            // refresh) reaches neither gate until the next cycle boundary.
+            //
+            // A test-injected gate carries its own policy on purpose — the
+            // reason the re-apply above is exempted — so the roster must pin
+            // THAT policy, not the persisted record's effective one, or the
+            // harness gate and the native gate would disagree about which tier
+            // is live (issue #1455).
+            policy: if self.rt.gate_injected {
+                Some(self.rt.approval_gate.policy())
+            } else {
+                record.as_ref().map(|record| record.effective_policy())
+            },
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
