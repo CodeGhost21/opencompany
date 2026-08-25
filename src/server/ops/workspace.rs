@@ -1055,8 +1055,7 @@ fn disambiguate_name(name: &str, id: &str) -> String {
         Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
         _ => (name, None),
     };
-    let with_extension =
-        extension.is_some_and(|ext| 8 + ext.len() <= MAX_NAME_BYTES); // `-<tag>.<ext>`
+    let with_extension = extension.is_some_and(|ext| 8 + ext.len() <= MAX_NAME_BYTES); // `-<tag>.<ext>`
     let suffix = if with_extension {
         format!("-{tag}.{}", extension.unwrap())
     } else {
@@ -1440,10 +1439,7 @@ mod disambiguate_name_test {
     /// carried.
     #[test]
     fn inserts_the_tag_before_the_extension() {
-        assert_eq!(
-            disambiguate_name("image.png", "01j8ab"),
-            "image-01j8ab.png"
-        );
+        assert_eq!(disambiguate_name("image.png", "01j8ab"), "image-01j8ab.png");
         assert_eq!(disambiguate_name("notes", "01j8ab"), "notes-01j8ab");
         assert_eq!(
             disambiguate_name("page.compiled.mjs", "01j8ab"),
@@ -1481,9 +1477,6 @@ mod disambiguate_name_test {
     /// A near-full name with a short stem survives whole; the tag still fits.
     #[test]
     fn a_short_stem_is_never_truncated() {
-        assert_eq!(
-            disambiguate_name("image.png", "01j8ab"),
-            "image-01j8ab.png"
-        );
+        assert_eq!(disambiguate_name("image.png", "01j8ab"), "image-01j8ab.png");
     }
 }
