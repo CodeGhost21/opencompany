@@ -2089,17 +2089,23 @@ export function AppShell({
     [typing.typers, companyPeople],
   );
   const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
+    // Workflow agent-node frames carry `workflowRunId`/`nodeId` instead of a
+    // `chatId` (issue #1702) and belong to the run-trace sheet's own
+    // subscription, not to any chat timeline. Route them out BEFORE the legacy
+    // no-`chatId` fallback below, which would otherwise fold them into
+    // whichever chat turn is currently in flight.
+    if ("workflowRunId" in event && event.workflowRunId) return;
     // Route by the frame's own thread id so concurrent turns (even from the same
     // desk member) never cross-attribute; fall back to the in-flight ref only
     // when a frame carries no chatId (older host / background turn).
     const threadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
     if (!threadId) {
-      // No chat bubble to fold the frame into. Background turns (workflow
-      // nodes, dispatched cards) stream nothing at all — `run_background` runs
-      // with `LiveStream::Off` — so a chat-less frame here is a host emitting a
-      // shape this console does not render, and the Observatory's live re-read
-      // is instead driven by the workflow node events in `onWorkflowRunEvent`.
+      // No chat bubble to fold the frame into. A dispatched card streams
+      // nothing at all — `run_steered_background` runs with `LiveStream::Off` —
+      // so a chat-less frame here is a host emitting a shape this console does
+      // not render, and the Observatory's live re-read is instead driven by the
+      // workflow node events in `onWorkflowRunEvent`.
       return;
     }
     setLiveStepsByThread((prev) => {
