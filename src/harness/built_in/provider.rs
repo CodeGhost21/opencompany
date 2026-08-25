@@ -30,7 +30,7 @@
 //! (openhuman's own `merge_openhuman_usage_meta` helper is `pub(crate)`, hence
 //! the local re-expression in [`inject_usage_meta`].)
 
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use async_trait::async_trait;
 
@@ -444,6 +444,122 @@ fn attach_tools(
     body["tools"] = serde_json::Value::Array(tools);
 }
 
+// ## Guarding intra-turn history growth
+//
+// Turn limits bound how long a turn can run, but not how large its history can
+// grow. Each model call includes the preceding history again, so a turn that
+// runs many tool iterations can repeatedly resend an increasingly large input.
+//
+// openhuman already provides `ContextCompressionMiddleware` (summarization at
+// 90% of the window) and `ImageAwareMessageTrimMiddleware` (deterministic
+// trimming as a fallback), but installs them only behind this gate in
+// `vendor/openhuman/.../tinyagents/mod.rs:2216`:
+//
+// ```text
+// if let Some(window) = context_window.filter(|w| *w > 0) { … }
+// ```
+//
+// On this `direct_model` path, `effective_context_window` obtains that value as
+// `direct.profile().and_then(|p| p.max_input_tokens)`. `MANAGED_PROFILE` did not
+// set the field, so it returned `None` and neither middleware was installed.
+//
+// ### Failure mode observed at the provider boundary
+//
+// A large-context provider was measured on 2026-08-15, using one request per
+// measurement:
+//
+// ```text
+//  18,281 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// 245,781 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// 280,781 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// 350,781 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// ~438,000 input tokens → HTTP 200, finish_reason "failed", response "",
+//                         usage {prompt_tokens: 0, completion_tokens: 0}
+// ```
+//
+// This is silent failure rather than a provider error: HTTP remains successful,
+// the response is empty, and usage is zero. A generic empty-response path then
+// handles the failure, while a token budget cannot observe the oversized call.
+//
+// ### Default derivation
+//
+// The 240,000-token default is intended for large-context models and remains
+// configurable. A 272,000-token advertised window provides a representative
+// lower bound for a 272k-class combined model, rather than relying on whichever
+// backing model happens to accept a larger request.
+//
+// Two margins apply:
+//
+// 1. `estimate_text_tokens` estimates tokens as `bytes / 4`. In the measured
+//    sample, 61,299 bytes represented 18,281 tokens, or 3.35 bytes per token.
+//    `bytes / 4` estimates 15,325 tokens, 16% below the actual count; the actual
+//    count is therefore approximately 1.19 times the estimate.
+// 2. Compression and deterministic trimming activate at 90% of the configured
+//    window (`SUMMARIZE_THRESHOLD_FRACTION` and `window - window / 10`).
+//
+// 272,000 / 1.19 ≈ 228,000 tokens of safe estimated budget; dividing by 0.9
+// gives approximately 253,000. Rounding down to 240,000 starts compression at
+// approximately 216,000 estimated tokens, or approximately 258,000 actual
+// tokens under the measured ratio, about 5% below the advertised 272,000-token
+// window.
+
+/// Configurable context-window default, in tokens, for managed inference.
+///
+/// This default suits large-context models. Set `OPENCOMPANY_CONTEXT_WINDOW` to
+/// the provider's advertised window with an appropriate estimation margin when
+/// using a smaller model. Set it to `off` or `0` to restore the previous
+/// unbounded behavior.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 240_000;
+
+/// Read and trim an environment variable.
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+/// Return the context window advertised by the managed model profile, or
+/// `None` when context compression and trimming are disabled.
+///
+/// `MANAGED_PROFILE` is shared by `HostedProvider` and `TenantProvider`, so this
+/// is currently one value for every configured model. Per-model values would
+/// require `profile()` to know the asynchronously resolved `InferenceDecl` and
+/// are outside the scope of this fix.
+pub fn context_window() -> Option<u64> {
+    static VALUE: OnceLock<Option<u64>> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        let selected = match env_string("OPENCOMPANY_CONTEXT_WINDOW") {
+            None => Some(DEFAULT_CONTEXT_WINDOW),
+            Some(raw) if raw.eq_ignore_ascii_case("off") || raw == "0" => None,
+            Some(raw) => match raw.parse::<u64>() {
+                Ok(value) if value > 0 => Some(value),
+                _ => {
+                    eprintln!(
+                        "context window: OPENCOMPANY_CONTEXT_WINDOW='{raw}' is not a positive \
+                         integer; using the default of {DEFAULT_CONTEXT_WINDOW} tokens"
+                    );
+                    Some(DEFAULT_CONTEXT_WINDOW)
+                }
+            },
+        };
+        match selected {
+            // Compression starts at 90% of the advertised window. Reporting
+            // both values distinguishes the activation threshold from the hard
+            // model limit.
+            Some(value) => eprintln!(
+                "context window: {value} tokens; compression starts at approximately {} \
+                 estimated tokens",
+                value / 10 * 9
+            ),
+            None => eprintln!(
+                "context window: disabled; no compression or trimming, so a long turn may \
+                 grow until the provider rejects or silently fails it"
+            ),
+        }
+        selected
+    })
+}
+
 /// The capability profile the hosted / tenant managed inference surface
 /// advertises. `tool_calling: true` is the load-bearing bit: openhuman's turn
 /// loop derives `native_tools` from the injected model's profile
@@ -460,6 +576,18 @@ static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
     },
     tool_calling: true,
     parallel_tool_calls: true,
+    // This field activates both `ContextCompressionMiddleware` and
+    // `ImageAwareMessageTrimMiddleware`. `TurnModels::effective_context_window`
+    // reads `direct.profile().and_then(|p| p.max_input_tokens)`, and the turn
+    // harness installs those middlewares only for a positive value.
+    //
+    // Leaving this as `None` permits unbounded history growth during a turn that
+    // runs many tool iterations. The observed failure at approximately 438k
+    // input tokens was HTTP 200 with `finish_reason: "failed"`, an empty message,
+    // and zero usage rather than a diagnosable provider error. The configurable
+    // 240,000-token default and its 272,000/1.19/0.9 rationale are documented
+    // above; `OPENCOMPANY_CONTEXT_WINDOW=off` restores the previous behavior.
+    max_input_tokens: context_window(),
     ..ModelProfile::default()
 });
 
@@ -1716,6 +1844,40 @@ mod tests {
             "native tool calling must be advertised"
         );
     }
+
+    /// The profile must advertise a context window because it activates
+    /// `ContextCompressionMiddleware` and `ImageAwareMessageTrimMiddleware`.
+    /// A missing value leaves intra-turn history unbounded and can end in the
+    /// observed silent provider failure: HTTP 200, `finish_reason: "failed"`, an
+    /// empty response, and zero usage.
+    #[test]
+    fn both_providers_advertise_the_same_context_window() {
+        let expected = super::context_window();
+        assert!(
+            expected.is_some(),
+            "the default profile must advertise a context window"
+        );
+        let hosted = HostedProvider::new(HostedProviderConfig {
+            base_url: "https://example.test/v1".to_string(),
+            credential: Credential::None,
+            extra_headers: Vec::new(),
+        });
+        assert_eq!(
+            hosted
+                .profile()
+                .expect("hosted profile is advertised")
+                .max_input_tokens,
+            expected
+        );
+        // TenantProvider returns the same `MANAGED_PROFILE`, so tenant-provided
+        // credentials receive the same history protection as the hosted route.
+        assert_eq!(*MANAGED_PROFILE_WINDOW, expected);
+    }
+
+    /// Read the static profile directly to verify that both `profile()`
+    /// implementations draw from the same source.
+    static MANAGED_PROFILE_WINDOW: std::sync::LazyLock<Option<u64>> =
+        std::sync::LazyLock::new(|| super::MANAGED_PROFILE.max_input_tokens);
 
     /// A stub that records the `Authorization` header of every request it
     /// answers, so a test can prove which bearer actually went out.
