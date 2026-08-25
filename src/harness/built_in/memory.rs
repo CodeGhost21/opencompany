@@ -57,6 +57,7 @@ use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};
 /// for its own experience records; this is the opencompany-side of that rule,
 /// because every [`Memory::store`] passes through here, not just the experience
 /// capture.
+///
 /// A character that can appear inside a credential value. Beyond base64url's
 /// `-` and `_`, a JWT joins its `header.payload.signature` segments with `.`,
 /// and opaque keys use the base64 punctuation `+`, `/`, `~`, `=`. Stopping at
