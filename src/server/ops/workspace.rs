@@ -1440,11 +1440,14 @@ mod disambiguate_name_test {
     /// carried.
     #[test]
     fn inserts_the_tag_before_the_extension() {
-        assert_eq!(disambiguate_name("image.png", "01j8abc"), "image-01j8a.png");
-        assert_eq!(disambiguate_name("notes", "01j8abc"), "notes-01j8a");
         assert_eq!(
-            disambiguate_name("page.compiled.mjs", "01j8abc"),
-            "page.compiled-01j8a.mjs"
+            disambiguate_name("image.png", "01j8ab"),
+            "image-01j8ab.png"
+        );
+        assert_eq!(disambiguate_name("notes", "01j8ab"), "notes-01j8ab");
+        assert_eq!(
+            disambiguate_name("page.compiled.mjs", "01j8ab"),
+            "page.compiled-01j8ab.mjs"
         );
     }
 
