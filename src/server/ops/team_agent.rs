@@ -81,6 +81,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::ACP_AGENTS;
+use crate::company::profile_draft::{
+    DraftRefusal, ProfileDraft, ProfileField, ProfileSubject, Sibling,
+};
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{AgentOverride, CompanyRecord};
@@ -1218,6 +1221,371 @@ pub(super) fn desks_for(record: &CompanyRecord, agent_id: &str) -> Vec<AgentDesk
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Drafting a mandate or a persona (issue #1776)
+// ---------------------------------------------------------------------------
+
+/// What the console asks for when it wants a draft.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DraftRequest {
+    /// Which field to draft: `description` or `instructions`.
+    ///
+    /// Named on the wire rather than inferred, and validated against a closed
+    /// set: a request for a field this pass does not draft is refused, not
+    /// quietly answered about a different one.
+    field: String,
+    /// What the operator typed into the note box, when they typed anything.
+    ///
+    /// Free text from a stranger, and treated as such all the way down — it is
+    /// framed to the model as a description of what they want rather than as
+    /// instructions to it, and it reaches nothing else.
+    #[serde(default)]
+    hint: Option<String>,
+}
+
+/// What the console asks for when it wants a draft for a teammate that does
+/// **not exist yet** — the Add-teammate form.
+///
+/// The teammate's own fields ride the request because there is nowhere else to
+/// get them: nothing has been created, so the record holds nothing to ground a
+/// draft in. That is not the widening the id-bearing route refuses. These are
+/// the very fields being authored on screen right now, and the part that stays
+/// host-side is the part that matters — the rest of the company. A caller can
+/// describe the teammate it is about to add; it still cannot ask a draft to
+/// read anything else.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct NewDraftRequest {
+    /// Which field to draft: `description` or `instructions`.
+    field: String,
+    /// The operator's note, when they typed one.
+    #[serde(default)]
+    hint: Option<String>,
+    /// The role as typed on the form.
+    ///
+    /// Required, and the one field a draft cannot proceed without: the role is
+    /// what both prompts lean on, and drafting from a blank one would have the
+    /// model invent the job before describing it.
+    role: String,
+    /// The name as typed, when the form has one.
+    #[serde(default)]
+    name: Option<String>,
+    /// The mandate as typed so far, so a persona fits the job the form claims.
+    #[serde(default)]
+    description: Option<String>,
+    /// The persona as typed so far, so a redraft improves on it.
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+/// One drafted field, for the operator to keep or throw away.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DraftDto {
+    /// The field this draft is for, echoed so a late response landing on a form
+    /// that has moved on can be matched to the box it was asked for.
+    field: &'static str,
+    /// The drafted text, already clamped to the field's own bound. Absent when
+    /// the pass refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    /// `model` when a model wrote this, `unavailable` when none could.
+    ///
+    /// The console says which. Rendering a refusal and a draft identically is
+    /// the failure the roster review screen already avoids: someone shown
+    /// nothing with no reason assumes the feature is broken, and someone shown
+    /// canned text assumes a model read their company.
+    source: &'static str,
+    /// Why there is no draft. Present only when `source` is `unavailable`, and
+    /// distinct per cause because the operator's next move differs: wire up a
+    /// model, retry the provider, or say more.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+impl DraftDto {
+    fn from_draft(field: ProfileField, draft: ProfileDraft) -> Self {
+        match draft {
+            ProfileDraft::Drafted(text) => Self {
+                field: field.as_str(),
+                text: Some(text),
+                source: "model",
+                reason: None,
+            },
+            ProfileDraft::Refused(reason) => Self {
+                field: field.as_str(),
+                text: None,
+                source: "unavailable",
+                reason: Some(reason.as_str()),
+            },
+        }
+    }
+}
+
+/// `POST {scope}/team/{agent_id}/draft` — draft this teammate's mandate or
+/// persona (issue #1776).
+///
+/// # This route never writes
+///
+/// It loads the record, composes a prompt from it, and returns text. Nothing is
+/// stored: not the draft, not the hint, not the fact that one was asked for.
+/// The company record is byte-identical afterwards, which is why it takes no
+/// write lock and why a draft cannot lose a concurrent edit.
+///
+/// That is the whole reason a model may write into these two fields at all.
+/// [`crate::company::setup`] keeps the roster designer out of a teammate's
+/// standing instructions because there the text reaches a system prompt with
+/// nobody having read it; here the operator reads it, chooses to keep it, and
+/// then saves it through [`edit_agent`] like any other edit they typed. Two
+/// deliberate human actions stand between this response and a running persona,
+/// and if either is ever removed this route has to be reconsidered with it.
+///
+/// # Who may ask
+///
+/// Any signed-in member, matching the `PATCH` for the fields it drafts:
+/// `description` and `instructions` are member-open there, so a draft of them
+/// cannot sensibly be admin-only. It is deliberately *not* wider than the
+/// write it feeds — a caller who could draft a persona but not save one would
+/// only be able to spend the company's tokens.
+///
+/// # Refusals
+///
+/// An unknown id is a `404`, exactly as the `GET` and `PATCH` on this path.
+/// An unknown field is a `400`. Everything else — no model wired, a provider
+/// that did not answer, an answer that could not be read — is a `200` carrying
+/// a reason, because none of those is a failure of the *request*: the operator
+/// asked a reasonable thing and the honest answer is "not right now, here's
+/// why". An error status would put a red banner over a form that is working
+/// fine, and would tell them nothing about which of the three happened.
+pub(super) async fn draft_profile(
+    company: ScopedCompany,
+    State(_state): State<AppState>,
+    Path(AgentPath { agent_id }): Path<AgentPath>,
+    Json(body): Json<DraftRequest>,
+) -> Result<Json<DraftDto>, ApiError> {
+    let Some(field) = ProfileField::parse(&body.field) else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "`{}` is not a draftable field; expected `description` or `instructions`",
+            body.field
+        ))));
+    };
+
+    let record = company
+        .runtime
+        .store()
+        .load(company.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
+
+    let subject = subject_for(&record, &agent_id, body.hint).ok_or_else(|| {
+        ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "teammate {agent_id}"
+        )))
+    })?;
+
+    let draft = build_draft(&company, field, &subject).await;
+    tracing::info!(
+        company = %company.id(),
+        agent = %agent_id,
+        field = field.as_str(),
+        source = if draft.text().is_some() { "model" } else { "unavailable" },
+        "[draft] drafted a teammate profile field"
+    );
+    Ok(Json(DraftDto::from_draft(field, draft)))
+}
+
+/// `POST {scope}/team/draft` — draft a field for a teammate the operator is
+/// still filling in (issue #1776).
+///
+/// The Add-teammate form's entry point. Same contract as
+/// [`draft_profile`] in every way that matters — it writes nothing, it is open
+/// to the same members, and its refusals are the same three reasons — and
+/// differs only in where the teammate's own fields come from, because there is
+/// no teammate yet to read them off.
+///
+/// `/team/draft` is a static segment, so it cannot be confused with a teammate
+/// whose id happens to be `draft`: nothing serves `POST` on
+/// `/team/{agent_id}`, and that teammate's own drafting path would be
+/// `/team/draft/draft`.
+///
+/// A blank `role` is a `400`. It is the one field both prompts lean on, and a
+/// draft written from an empty role is a model inventing the job before
+/// describing it — the console disables the control for the same reason, so
+/// this is the host stating the rule rather than trusting it to.
+pub(super) async fn draft_new_profile(
+    company: ScopedCompany,
+    State(_state): State<AppState>,
+    Json(body): Json<NewDraftRequest>,
+) -> Result<Json<DraftDto>, ApiError> {
+    let Some(field) = ProfileField::parse(&body.field) else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "`{}` is not a draftable field; expected `description` or `instructions`",
+            body.field
+        ))));
+    };
+    let role = body.role.trim();
+    if role.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "give the teammate a role before drafting — a draft is written from it".to_string(),
+        )));
+    }
+
+    let record = company
+        .runtime
+        .store()
+        .load(company.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
+
+    let subject = ProfileSubject {
+        company_name: record.manifest.company.name.clone(),
+        company_output: record.manifest.company.output.clone(),
+        // No id yet, and none invented. The subject carries it only so a draft
+        // can be told which teammate it is about, and "the one being added" is
+        // what an empty id means here.
+        agent_id: String::new(),
+        name: body.name,
+        role: role.to_string(),
+        description: body.description,
+        instructions: body.instructions,
+        // Every teammate on the roster is a sibling of one that is not on it
+        // yet, so nothing is filtered out — and this is exactly when the list
+        // earns its keep: a mandate written for a teammate about to be added is
+        // the one most likely to restate a job the company already has.
+        siblings: siblings_of(&record, ""),
+        hint: body.hint,
+    };
+
+    let draft = build_draft(&company, field, &subject).await;
+    tracing::info!(
+        company = %company.id(),
+        field = field.as_str(),
+        source = if draft.text().is_some() { "model" } else { "unavailable" },
+        "[draft] drafted a field for a teammate being added"
+    );
+    Ok(Json(DraftDto::from_draft(field, draft)))
+}
+
+/// Everything a draft is allowed to see about the teammate it is for.
+///
+/// Assembled here, from the record, rather than accepted from the caller. The
+/// console holds all of this already and could have sent it, and that is
+/// exactly why it must not: a grounding the caller composes is a grounding the
+/// caller can widen, and this one is deliberately narrow — this teammate, its
+/// neighbours' ids and roles, and nothing else about the company.
+///
+/// `None` when the id names nobody on the roster.
+fn subject_for(
+    record: &CompanyRecord,
+    agent_id: &str,
+    hint: Option<String>,
+) -> Option<ProfileSubject> {
+    // The same two halves `detail` resolves, in the same order: a manifest row
+    // with the operator's edits applied wins an id collision, exactly as
+    // `build_roster` resolves one.
+    let manifest_agent = record.effective_agent(agent_id);
+    let overlay_agent = record.overlay_agents.iter().find(|a| a.id == agent_id);
+    let (name, role, description) = match (manifest_agent.as_deref(), overlay_agent) {
+        (Some(agent), _) => (
+            agent.name.clone(),
+            agent.role.clone(),
+            agent.description.clone(),
+        ),
+        (None, Some(agent)) => (
+            Some(agent.name.clone()),
+            agent.role.clone(),
+            agent.description.clone(),
+        ),
+        (None, None) => return None,
+    };
+
+    Some(ProfileSubject {
+        company_name: record.manifest.company.name.clone(),
+        company_output: record.manifest.company.output.clone(),
+        agent_id: agent_id.to_string(),
+        name,
+        role,
+        description,
+        // The persona in force — the override where one is set, else the
+        // blueprint seed — so a redraft improves on what the teammate actually
+        // runs on rather than on what its manifest row happened to say.
+        instructions: record.effective_instructions(agent_id),
+        siblings: siblings_of(record, agent_id),
+        hint,
+    })
+}
+
+/// Every other teammate on the roster, id and role only.
+///
+/// Manifest teammates first and then overlay ones, the order
+/// [`super::team`]'s list read uses, so the roster a draft is told about is the
+/// roster an operator sees.
+///
+/// Id **and** role, because both are load-bearing and for different reasons:
+/// the role is what a mandate must not restate, and the id is what the
+/// delegation surface actually prints beside it (issue #1162) — two teammates
+/// the company cannot tell apart is the failure this list exists to prevent.
+fn siblings_of(record: &CompanyRecord, agent_id: &str) -> Vec<Sibling> {
+    record
+        .effective_agents()
+        .into_iter()
+        .map(|agent| Sibling {
+            id: agent.id,
+            role: agent.role,
+        })
+        .chain(record.overlay_agents.iter().map(|agent| Sibling {
+            id: agent.id.clone(),
+            role: agent.role.clone(),
+        }))
+        .filter(|sibling| sibling.id != agent_id)
+        .collect()
+}
+
+/// The draft itself: written by a model when one is wired, refused with a
+/// reason when none is.
+///
+/// The two arms are not a happy path and a degraded one — a company with no
+/// inference credential is a supported configuration. What it is *not* is a
+/// company that should be handed canned text: there is no curated fallback for
+/// "what does this particular teammate own", the way there is for a starting
+/// roster, so the honest answer is the refusal and the operator writes the
+/// field themselves.
+#[cfg(feature = "openhuman")]
+async fn build_draft(
+    company: &ScopedCompany,
+    field: ProfileField,
+    subject: &ProfileSubject,
+) -> ProfileDraft {
+    let Some(drafter) = company.runtime.profile_drafter() else {
+        return ProfileDraft::Refused(DraftRefusal::NoModel);
+    };
+    let provider = drafter.provider_slug();
+    let (draft, usage) = drafter.draft(field, subject).await;
+    // Metered whatever came back: an unreadable answer was still billed, and a
+    // refusal that never reached a provider moved no tokens and writes no row.
+    crate::metering::record_profile_draft_usage(
+        &usage,
+        &provider,
+        company.id(),
+        company.runtime.store().as_ref(),
+        company.runtime.usage().as_ref(),
+    )
+    .await;
+    draft
+}
+
+/// The default build links no harness, so there is no model to draft with and
+/// saying so is the whole answer.
+#[cfg(not(feature = "openhuman"))]
+async fn build_draft(
+    _company: &ScopedCompany,
+    _field: ProfileField,
+    _subject: &ProfileSubject,
+) -> ProfileDraft {
+    ProfileDraft::Refused(DraftRefusal::NoModel)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::{Body, to_bytes};
@@ -1435,6 +1803,16 @@ agent = "claude"
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value)
+    }
+
+    async fn draft_for(state: &AppState, agent: &str, body: Value) -> (StatusCode, Value) {
+        send(
+            state,
+            "POST",
+            &format!("/api/v1/company/team/{agent}/draft"),
+            Some(body),
+        )
+        .await
     }
 
     async fn get_agent(state: &AppState, agent: &str) -> (StatusCode, Value) {
@@ -3452,5 +3830,184 @@ agent = "claude"
 
         let (status, _) = patch_agent(&state, "nobody", json!({"role": "Ghost"})).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------------
+    // Drafting a mandate or a persona (issue #1776)
+    // -----------------------------------------------------------------------
+
+    /// The one property everything else about this route rests on: it does not
+    /// write. The whole reason a model is allowed near a persona at all is that
+    /// the operator reads the draft and then saves it themselves, so a route
+    /// that quietly applied its own output would invalidate the argument rather
+    /// than merely being surprising.
+    #[tokio::test]
+    async fn drafting_leaves_the_teammate_exactly_as_it_was() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (_, before) = get_agent(&state, "ceo").await;
+        for field in ["description", "instructions"] {
+            let (status, drafted) = draft_for(&state, "ceo", json!({"field": field})).await;
+            assert_eq!(status, StatusCode::OK, "{drafted}");
+        }
+        let (_, after) = get_agent(&state, "ceo").await;
+        assert_eq!(before, after, "a draft changed the teammate");
+    }
+
+    /// The default build links no harness, so there is no model to draft with.
+    /// That is a `200` with a reason rather than an error: the operator asked a
+    /// reasonable thing, and the honest answer names what to do about it.
+    ///
+    /// There is deliberately no curated fallback text here, unlike the roster
+    /// pass — "what does this particular teammate own" has no canned answer,
+    /// and inventing one would put words in the company's mouth.
+    #[tokio::test]
+    async fn a_company_with_no_model_is_told_which_of_the_three_happened() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, drafted) = draft_for(&state, "ceo", json!({"field": "instructions"})).await;
+        assert_eq!(status, StatusCode::OK, "{drafted}");
+        assert_eq!(drafted["source"], "unavailable", "{drafted}");
+        assert_eq!(drafted["reason"], "no_model", "{drafted}");
+        assert!(drafted["text"].is_null(), "no text was invented: {drafted}");
+        assert_eq!(
+            drafted["field"], "instructions",
+            "the field is echoed so a late response can be matched: {drafted}"
+        );
+    }
+
+    /// An id that names nobody is a `404`, exactly as the `GET` and `PATCH` on
+    /// this teammate's path — not a draft about a teammate that does not exist.
+    #[tokio::test]
+    async fn an_unknown_teammate_cannot_be_drafted_for() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, body) = draft_for(&state, "nobody", json!({"field": "description"})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+
+    /// Only the two prose fields draft. A request naming another field is
+    /// refused rather than quietly answered about one of these two — a caller
+    /// asking for a drafted `role` must not get a mandate back and store it.
+    #[tokio::test]
+    async fn only_the_two_prose_fields_can_be_asked_for() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        for field in ["role", "name", "tools", "model", ""] {
+            let (status, body) = draft_for(&state, "ceo", json!({"field": field})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {body}");
+        }
+    }
+
+    /// The Add-teammate form has no id, so it drafts through the static path.
+    #[tokio::test]
+    async fn a_teammate_being_added_drafts_without_an_id() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, drafted) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team/draft",
+            Some(json!({"field": "description", "role": "Growth Marketer"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{drafted}");
+        assert_eq!(drafted["source"], "unavailable", "{drafted}");
+        assert_eq!(drafted["reason"], "no_model", "{drafted}");
+    }
+
+    /// A draft is written FROM the role, so a blank one is refused rather than
+    /// answered by a model inventing the job first.
+    #[tokio::test]
+    async fn a_teammate_being_added_needs_a_role_to_draft_from() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        for role in ["", "   "] {
+            let (status, body) = send(
+                &state,
+                "POST",
+                "/api/v1/company/team/draft",
+                Some(json!({"field": "description", "role": role})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "role {role:?}: {body}");
+        }
+    }
+
+    /// Adding a teammate does not shadow the drafting path, and the drafting
+    /// path does not shadow a teammate: `draft` is a legal id, and its own
+    /// route is one segment further down.
+    #[tokio::test]
+    async fn a_teammate_called_draft_keeps_its_own_route() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, drafted) = draft_for(&state, "draft", json!({"field": "description"})).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "no teammate is called draft here, so its path 404s rather than \
+             colliding with /team/draft: {drafted}"
+        );
+    }
+
+    /// The grounding is assembled host-side, so a caller cannot widen it. The
+    /// subject a draft is built from carries this teammate and its neighbours'
+    /// ids and roles — and nothing else about the company.
+    #[test]
+    fn the_grounding_is_this_teammate_and_its_neighbours() {
+        let mut record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest: toml::from_str(ROSTER).unwrap(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        };
+        record.overlay_agents.push(crate::ports::OverlayAgent {
+            id: "growth".to_string(),
+            name: "Growth".to_string(),
+            role: "Growth Marketer".to_string(),
+            description: None,
+            tools: Vec::new(),
+            model: None,
+            harness: None,
+        });
+
+        let subject = super::subject_for(&record, "ceo", Some("keep it short".to_string()))
+            .expect("the ceo is on the roster");
+        assert_eq!(subject.role, "Chief Executive");
+        assert_eq!(subject.company_name, "Acme");
+        assert_eq!(subject.hint.as_deref(), Some("keep it short"));
+
+        let sibling_ids: Vec<&str> = subject.siblings.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            !sibling_ids.contains(&"ceo"),
+            "a teammate is not its own neighbour: {sibling_ids:?}"
+        );
+        assert!(sibling_ids.contains(&"writer"), "{sibling_ids:?}");
+        assert!(
+            sibling_ids.contains(&"growth"),
+            "an overlay teammate is a neighbour too: {sibling_ids:?}"
+        );
+
+        assert!(super::subject_for(&record, "nobody", None).is_none());
     }
 }

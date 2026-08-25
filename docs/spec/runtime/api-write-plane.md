@@ -50,6 +50,8 @@ DELETE …/team/{agentId}                      remove a teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
+POST   …/team/{agentId}/draft                draft this teammate's mandate or persona (writes nothing)
+POST   …/team/draft                          the same, for a teammate being added
 POST   …/avatars                            upload an image → an avatar reference (avatars.md)
 POST   …/setup/roster                       propose a starting team from three answers (company-setup/overview.md)
 GET    …/policy                              the autonomy tier + spend cap + deadline + always-ask list
@@ -282,6 +284,51 @@ re-deriving the rule. `tools` is admin-only for both kinds — an empty list mea
 "the company's standard grant", so a `tools` edit is a potential *widening* —
 and `tier` is read-only for both: it has no override layer, and adding one is a
 policy decision rather than a form field.
+
+### Drafting a mandate or a persona
+
+`POST …/team/{agentId}/draft` asks a model to write one of two fields —
+`description` (the mandate on the roster card) or `instructions` (the persona
+appended to the teammate's system prompt) — and returns the text. `POST
+…/team/draft` does the same for a teammate the operator is still filling in on
+the Add form, which has no id yet; it takes the `role` being typed (blank is a
+`400`) and the other authored fields alongside.
+
+**Neither route writes.** No record is touched, no draft is stored, and no lock
+is taken — the response is text, and it becomes a teammate's persona only if the
+operator takes it and then saves through `PATCH …/team/{agentId}` like any edit
+they typed themselves.
+
+That is the whole reason a model is allowed near these two fields. First-run
+setup deliberately keeps the design pass **out** of a teammate's standing
+instructions ([company-setup/overview.md](company-setup/overview.md)): the pass
+names a work *shape* from a closed enum and the host owns every word, because
+there the text would reach a system prompt with nobody having read it, through a
+member-open route. Here two deliberate human actions stand in between. If either
+is ever removed, this route has to be reconsidered with it.
+
+Grounding is assembled host-side from the company record — this teammate, and
+the rest of the roster's ids and roles so a drafted mandate does not restate a
+neighbour's. The console holds all of that already and could have sent it; it
+must not, because a grounding the caller composes is one the caller can widen.
+The only caller-supplied text is the operator's optional note, which is framed to
+the model as data rather than as instructions.
+
+The answer is clamped to the field's own bound before it is returned —
+`MAX_DESCRIPTION` for a mandate (a card has one line), the persona prompt budget
+for instructions — so the console is not the only thing holding the limit.
+Drafting is metered as a `SampleKind::AuthoringCall` charged to the **company**,
+never to the teammate being described: it ran no turn, and billing it would
+otherwise eat that teammate's daily cap.
+
+Refusals are deliberately not errors. An unknown id is `404` and an unknown
+field is `400`, but "no model is wired", "the provider did not answer" and "the
+answer could not be read" all come back `200` with `source: "unavailable"` and a
+distinct `reason` (`no_model` / `model_unreachable` / `unreadable`), because each
+implies a different next move for the operator and none of them is a failure of
+the request. There is no curated fallback text, unlike the roster proposal:
+"what does this particular teammate own" has no canned answer, and inventing one
+would put words in the company's mouth.
 
 `DELETE …/team/{agentId}` removes a teammate. An overlay teammate is deleted
 outright — the record is the only thing that declares it. A **manifest**

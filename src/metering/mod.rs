@@ -58,6 +58,9 @@ pub mod planning;
 /// First-run company setup's usage sample and its company-bucket attribution
 /// rule (a sibling of [`planning`], not of an agent turn — the pass runs before
 /// the roster it is building exists). See [`roster_build`].
+/// Issue #1776: what one drafted teammate mandate or persona costs, charged to
+/// the company rather than to the teammate it describes. See [`profile_draft`].
+pub mod profile_draft;
 pub mod roster_build;
 pub mod search;
 pub mod triage;
@@ -80,6 +83,7 @@ pub use oauth::{
     MCP_PROVIDER_PREFIX, UNKNOWN_PROVIDER, mcp_provider, oauth_call_sample, record_oauth_call,
 };
 pub use planning::{planning_sample, record_planning_usage};
+pub use profile_draft::{profile_draft_sample, record_profile_draft_usage};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };
