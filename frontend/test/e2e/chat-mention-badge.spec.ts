@@ -210,8 +210,13 @@ test("opening a channel clears only its own mentions", async ({ page }) => {
   // PUT means "mark all" to the host, so sending one here would clear Design
   // server-side even though the badge above still renders — the badge would
   // come back wrong on the next reload rather than immediately.
+  // The PUT is fire-and-forget on the app side (the optimistic clear already
+  // took the badge off the rail), so wait for it to actually land rather than
+  // racing the network against the DOM assertions above.
+  await expect
+    .poll(() => marked.filter((m) => m.ids && m.ids.length > 0).length)
+    .toBeGreaterThan(0);
   const clearing = marked.filter((m) => m.ids && m.ids.length > 0);
-  expect(clearing.length).toBeGreaterThan(0);
   for (const call of clearing) {
     expect(call.ids).not.toContain("design-1");
   }
