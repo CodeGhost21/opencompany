@@ -143,6 +143,16 @@ struct DeskDto {
     /// (defaults false) for manifest desks.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     overlay_created: bool,
+    /// Whether this is a built-in **system** desk rather than a real,
+    /// mutable desk (issue #1757). The only one is the always-present Operator
+    /// channel: it aggregates workflow-run reports and the owner/no-mailbox
+    /// fallback into a read-only "what happened" feed. It is not backed by a
+    /// `[[group_chat]]` or an overlay desk (`desk_exists` is false for it), so
+    /// the console must not offer member-management, reorder, or delete for it,
+    /// and it is a read-only surface (no send box) in v1. Omitted (defaults
+    /// false) for real desks.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    system: bool,
 }
 
 /// `GET {scope}/desks` — the company's desks, built from its manifest group
@@ -171,6 +181,7 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     members,
                     overlay_members,
                     overlay_created: false,
+                    system: false,
                 }
             });
             let overlay_desks = record.overlay_desks.iter().map(|desk| {
@@ -189,12 +200,43 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     members,
                     overlay_members,
                     overlay_created: true,
+                    system: false,
                 }
             });
-            manifest_desks.chain(overlay_desks).collect()
+            // The always-present Operator channel (issue #1757) — a system desk,
+            // not a `[[group_chat]]`. It is the aggregating "what happened" feed
+            // where workflow-run reports and the owner/no-mailbox fallback land,
+            // journaled on the `operator` chat line the durable delivery adapter
+            // writes to. Listed last, after the real desks.
+            manifest_desks
+                .chain(overlay_desks)
+                .chain(std::iter::once(operator_system_desk()))
+                .collect()
         })
-        .unwrap_or_default();
+        // Even a company that failed to load still surfaces the Operator channel,
+        // so the console always has the standing system surface.
+        .unwrap_or_else(|| vec![operator_system_desk()]);
     Ok(Json(desks))
+}
+
+/// The always-present Operator channel as a [`DeskDto`] (issue #1757).
+///
+/// A read-only system desk keyed by [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL):
+/// it is not a `[[group_chat]]` or an overlay desk, so it has no members and no
+/// mutation routes, and its history is read through the ordinary
+/// `chat/history?desk=operator` path (the `operator` chat id `owns` matches).
+fn operator_system_desk() -> DeskDto {
+    DeskDto {
+        id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+        name: "Operator".to_string(),
+        description: Some(
+            "Workflow reports and notifications — what happened and what needs you".to_string(),
+        ),
+        members: Vec::new(),
+        overlay_members: Vec::new(),
+        overlay_created: false,
+        system: true,
+    }
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -537,6 +579,7 @@ async fn create_desk(
             members: effective,
             overlay_members: Vec::new(),
             overlay_created: true,
+            system: false,
         }),
     ))
 }
@@ -2278,6 +2321,18 @@ async fn chat_and_emit(
         .chat
         .clone()
         .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+    // Issue #1757: the Operator channel is a **read-only** aggregation surface —
+    // a "what happened" feed of workflow reports, not a conversation. Refuse a
+    // send addressed to it rather than journaling an `OperatorMessage` under the
+    // `operator` line (which would both make it writable and mix chatter into the
+    // report feed). The frontend hides its send box; this is the safety net.
+    if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "the Operator channel is a read-only feed of workflow reports and notifications — \
+             it cannot be posted to"
+                .to_string(),
+        )));
+    }
     // Issue #364: a thread reply names its parent by id. Rejected here rather
     // than dropped, so a console sending a malformed parent learns that its
     // reply would have landed in the channel instead of quietly finding it
@@ -5085,13 +5140,16 @@ mode = "full"
         assert_eq!(body["members"][0], "eng");
         assert_eq!(body["members"][1], "ceo");
 
-        // The list now carries the manifest desk and the created overlay desk.
+        // The list now carries the manifest desk, the created overlay desk, and
+        // the always-present Operator system channel last (issue #1757).
         let desks = get_desks(&app, &cookie).await;
         let arr = desks.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 3, "{arr:?}");
         assert_eq!(arr[0]["id"], "studio"); // manifest desk first
         assert_eq!(arr[1]["id"], "growth_desk");
         assert_eq!(arr[1]["overlayCreated"], true);
+        assert_eq!(arr[2]["id"], "operator"); // system channel last
+        assert_eq!(arr[2]["system"], true);
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
@@ -5185,8 +5243,13 @@ mode = "full"
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 
         let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1);
-        assert_eq!(desks[0]["id"], "studio");
+        // The manifest desk remains, plus the always-present Operator system
+        // channel (issue #1757).
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "{arr:?}");
+        assert_eq!(arr[0]["id"], "studio");
+        assert_eq!(arr[1]["id"], "operator");
+        assert_eq!(arr[1]["system"], true);
 
         // Deleting it again is a 404.
         let gone = app
@@ -5464,7 +5527,9 @@ mode = "full"
     #[tokio::test]
     async fn desks_route_returns_the_company_desks() {
         // The default test manifest defines no group chats, so the route answers
-        // 200 with an empty list (the console then falls back to its defaults).
+        // 200 with just the always-present Operator system channel (issue #1757)
+        // — the console renders it and, having no real desks, still falls back to
+        // its defaults for the rest.
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
@@ -5483,7 +5548,61 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value.as_array().unwrap().len(), 0);
+        let desks = value.as_array().unwrap();
+        assert_eq!(desks.len(), 1, "{desks:?}");
+        assert_eq!(desks[0]["id"], "operator");
+        assert_eq!(desks[0]["name"], "Operator");
+        assert_eq!(desks[0]["system"], true);
+    }
+
+    /// Issue #1757: the always-present Operator system channel is listed **after**
+    /// the company's real desks, flagged `system`, and posting to it is refused
+    /// (it is a read-only report feed).
+    #[tokio::test]
+    async fn the_operator_system_channel_is_listed_last_and_read_only() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        let ids: Vec<&str> = desks.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.first().copied(), Some("studio"), "{ids:?}");
+        assert_eq!(
+            ids.last().copied(),
+            Some("operator"),
+            "the Operator channel is listed after the real desks: {ids:?}"
+        );
+        let operator = desks.iter().find(|d| d["id"] == "operator").unwrap();
+        assert_eq!(operator["system"], true);
+        assert_eq!(operator["name"], "Operator");
+        // Members / overlay affordances are absent for the system desk.
+        assert_eq!(operator["members"].as_array().unwrap().len(), 0);
+
+        // A send addressed to it is refused (read-only), never journaled.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi","chat":"operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_client_error(),
+            "posting to the operator channel must be refused, got {}",
+            response.status()
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(body.contains("read-only"), "{body}");
     }
 
     /// Issue #65: the console's default thread addresses sends with
