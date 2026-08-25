@@ -1078,6 +1078,9 @@ async fn run_issue_password(
     };
 
     let home = resolve_home_migrated(home)?;
+    // Serialize all filesystem mutations with serve/import/export. The guard
+    // must outlive storage opening and the complete password operation.
+    let _home_lock = opencompany::store::lock::acquire(&home)?;
     let settings = opencompany::store::StorageSettings::from_env()?;
     let config_root = opencompany::app::config::data_dir_from_env();
     let config_file = ConfigFile::load(&config_root)?;
