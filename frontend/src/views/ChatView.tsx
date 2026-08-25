@@ -927,9 +927,11 @@ export function ChatView({
   // (issue #1682). The blob route needs the client's bearer, which an `<img>`
   // or a bare link cannot carry — so the row resolves through this and the
   // caller revokes the URL when done. Reuses the hardened `/workspace/blob`
-  // serve untouched.
+  // serve untouched. The optional `signal` lets a preview that scrolls out of
+  // view cancel its in-flight download (codex review finding).
   const resolveAttachmentUrl = useCallback(
-    (nodeId: string) => fetchBlobUrl(client, company, nodeId),
+    (nodeId: string, signal?: AbortSignal) =>
+      fetchBlobUrl(client, company, nodeId, signal),
     [client, company],
   );
 
