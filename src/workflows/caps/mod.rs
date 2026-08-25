@@ -2069,6 +2069,169 @@ mod tests {
         ))
     }
 
+    /// A [`RunTurn`] that records the workflow-route ids each
+    /// `run_background_workflow` call receives, standing in for the harness pool
+    /// so the #1702 dispatch test can assert the run and node ids actually reach
+    /// the turn rather than being silently dropped by a fallback to the
+    /// un-streamed `run_background`.
+    struct RecordingWorkflowTurn {
+        /// `(agent_ref, workflow_run_id, node_id)` per call, in order.
+        calls: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl RecordingWorkflowTurn {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    /// The shape every recorded turn answers with — the dispatch under test only
+    /// cares about the ids it is handed, not what the (absent) agent did.
+    fn ok_outcome() -> crate::harness::TurnOutcome {
+        crate::harness::TurnOutcome {
+            reply: "ok".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            halted_for_spend: None,
+        }
+    }
+
+    #[async_trait]
+    impl RunTurn for RecordingWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(ok_outcome())
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(ok_outcome())
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(ok_outcome())
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            workflow_run_id: &str,
+            node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            self.calls.lock().expect("calls").push((
+                agent_id.to_string(),
+                workflow_run_id.to_string(),
+                node_id.to_string(),
+            ));
+            Ok(ok_outcome())
+        }
+    }
+
+    /// Issue #1702: the workflow agent-node dispatch routes through
+    /// `run_background_workflow`, not the un-streamed `run_background`, so the
+    /// node's live tool frames stream tagged with the run and node ids. This
+    /// pins the forward: a regression that swapped the arguments or fell back
+    /// to `run_background` would leave the node functional but its live
+    /// activity silently gone.
+    #[tokio::test]
+    async fn an_agent_node_dispatches_through_run_background_workflow_with_run_and_node_ids() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1702-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1702"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1702"));
+        let runner = HarnessAgentRunner::new(
+            turn.clone(),
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1702".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // A node resolved from the graph: `node_id` present, so the resolved
+        // `lineage_node` is that id, and the turn must receive the runner's OWN
+        // run id.
+        let (_, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({ "node_id": "gather", "prompt": "collect the numbers" }),
+            )
+            .await
+            .expect("agent node turn");
+        assert_eq!(outcome.reply, "ok");
+        assert_eq!(
+            turn.calls.lock().expect("calls").as_slice(),
+            &[(
+                "researcher".to_string(),
+                "run-1702".to_string(),
+                "gather".to_string(),
+            )],
+            "the node's live frames must be tagged with the runner's run id and the resolved node id"
+        );
+
+        // A node with no graph id (a hand-built request, or a graph compiled
+        // before #881) resolves lineage to the agent ref — and the ids still
+        // route through, tagged with that fallback.
+        runner
+            .run_turn("researcher", json!({ "prompt": "no node id" }))
+            .await
+            .expect("agent node turn without a node id");
+        assert_eq!(
+            turn.calls.lock().expect("calls").as_slice(),
+            &[
+                (
+                    "researcher".to_string(),
+                    "run-1702".to_string(),
+                    "gather".to_string(),
+                ),
+                (
+                    "researcher".to_string(),
+                    "run-1702".to_string(),
+                    "researcher".to_string(),
+                ),
+            ],
+            "a node with no graph id resolves lineage to the agent ref"
+        );
+    }
+
     /// Issue #638: a node that gates more calls than the cap allows leaves the
     /// operator a **notice**, not only a log line.
     ///
