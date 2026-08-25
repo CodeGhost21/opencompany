@@ -33,8 +33,9 @@ use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, OutboundMessage,
-    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
+    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq,
+    OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep,
+    Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -197,6 +198,27 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
     Ok(Json(desks))
 }
 
+/// Whether `desk_id` names the built-in `#general` channel rather than a desk
+/// (issue #1743).
+///
+/// `#general` is the company-wide conversation this host has always folded
+/// every General spelling into — `general`, `General`, `main`, and the empty
+/// string all name it, which is exactly what
+/// [`is_general_chat`](crate::server::chat_history::is_general_chat) decides.
+/// It is deliberately **not** a desk: it has no lead, no hierarchy, and its
+/// membership is the whole roster derived at read time, so there is nothing for
+/// a desk mutation to change. Every one of them is therefore refused with a
+/// reason rather than answered with a bare `404`, which is a different fact —
+/// an id the host reserves is not an id nobody created.
+///
+/// Guarded on `!desk_exists` on purpose: a company whose blueprint really does
+/// declare a `[[group_chat]]` with one of those ids keeps behaving exactly as
+/// it did. This only ever replaces the "no such desk" answer; it never takes a
+/// desk away from a manifest that has one.
+fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
+    !record.desk_exists(desk_id) && crate::server::chat_history::is_general_chat(Some(desk_id))
+}
+
 /// The path of a desk sub-resource (`desk_id`).
 #[derive(Debug, Deserialize)]
 struct DeskPath {
@@ -247,6 +269,14 @@ async fn add_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). A manifest-only check meant a desk
     // created in the console could be reordered and deleted but never staffed
@@ -304,6 +334,14 @@ async fn set_desk_order(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). `desk_exists` covers both (the same
     // check `effective_desk_members` uses), so an operator-created desk can be
@@ -360,6 +398,14 @@ async fn remove_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // First validate that the desk exists at all — otherwise a caller supplying
     // an unknown desk_id gets a desk-scoped 404 rather than a confusing
     // member-scoped one (Greptile feedback). Existence spans both blueprint and
@@ -496,6 +542,17 @@ async fn create_desk(
             "invalid desk id {id:?} — use lowercase letters, digits, and underscores"
         ))));
     }
+    // A desk that claimed one of the General spellings would shadow the
+    // built-in `#general` channel: the console would show two `#general` rows
+    // and the host would route messages addressed to it at this desk's lead
+    // instead of the orchestrator (issue #1743). Refused at creation, which
+    // costs nothing — no manifest can reach this path, so no existing company
+    // loses a desk.
+    if crate::server::chat_history::is_general_chat(Some(&id)) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_RESERVED.to_string(),
+        )));
+    }
     if record.desk_exists(&id) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
             "a desk with id {id:?} already exists"
@@ -558,6 +615,14 @@ async fn delete_desk(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
 
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // A manifest desk belongs to the blueprint — never deletable at runtime.
     if record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
@@ -3619,7 +3684,6 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
-    use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
     use crate::store::FsCompanyStore;
@@ -5092,6 +5156,210 @@ mode = "full"
         assert_eq!(arr[0]["id"], "studio"); // manifest desk first
         assert_eq!(arr[1]["id"], "growth_desk");
         assert_eq!(arr[1]["overlayCreated"], true);
+    }
+
+    /// Every desk mutation aimed at the built-in `#general` channel is refused
+    /// with a reason, under **every** spelling the host folds into the General
+    /// conversation (issue #1743).
+    ///
+    /// The point of the assertion is the pair: a `409` **and** the sentence.
+    /// Before this, each of these was a bare `404`/`CompanyNotFound` — "there
+    /// is no such desk" — which is a different and wrong claim. `#general` is
+    /// not missing; it is reserved, and the caller needs to be told which.
+    ///
+    /// There is no `PATCH …/desks/{id}` route on this host at all, so this is
+    /// the complete desk mutation surface: delete, staff, unstaff, reorder.
+    #[tokio::test]
+    async fn every_desk_mutation_aimed_at_general_is_refused_with_a_reason() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for spelling in ["general", "General", "GENERAL", "main", "Main"] {
+            let cases: [(&str, String, &str); 4] = [
+                ("DELETE", format!("/api/v1/company/desks/{spelling}"), ""),
+                (
+                    "POST",
+                    format!("/api/v1/company/desks/{spelling}/members"),
+                    r#"{"agent_id":"eng"}"#,
+                ),
+                (
+                    "DELETE",
+                    format!("/api/v1/company/desks/{spelling}/members/ceo"),
+                    "",
+                ),
+                (
+                    "PUT",
+                    format!("/api/v1/company/desks/{spelling}/order"),
+                    r#"{"ordered_member_ids":["ceo"]}"#,
+                ),
+            ];
+            for (method, uri, body) in cases {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("cookie", &cookie)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::CONFLICT,
+                    "{method} {uri} must be refused, not answered 404"
+                );
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(
+                    text.contains("company-wide channel"),
+                    "{method} {uri} must say why: got {text}"
+                );
+            }
+        }
+    }
+
+    /// A desk create that would shadow the built-in channel is refused (409),
+    /// whichever spelling it asks for and whether the id is given explicitly or
+    /// derived from the name (issue #1743).
+    ///
+    /// Shadowing is not a cosmetic collision: a desk named `general` would take
+    /// over routing for the company-wide line, so a message meant for the
+    /// orchestrator would be answered by that desk's lead instead.
+    #[tokio::test]
+    async fn a_desk_cannot_be_created_that_would_shadow_the_general_channel() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for body in [
+            r#"{"name":"Anything","id":"general"}"#,
+            r#"{"name":"Anything","id":"main"}"#,
+            r#"{"name":"General"}"#,
+            r#"{"name":"Main"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("reserved"),
+                "body {body} must be told the id is reserved"
+            );
+        }
+
+        // Nothing was created: the desk list still holds only the manifest desk.
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1);
+        assert_eq!(desks[0]["id"], "studio");
+    }
+
+    /// `#general` is **not** a desk, and `GET …/desks` says so by not listing it
+    /// (issue #1743).
+    ///
+    /// This is the guarantee that keeps every desk-shaped surface honest
+    /// without any of them needing a special case: the org chart, the assignee
+    /// picker and the desk counts all read this route, so a channel that is
+    /// absent here can never be offered a rename, a delete, a lead or a seat.
+    /// The console's own no-affordance requirement falls out of it rather than
+    /// being enforced by hiding buttons.
+    #[tokio::test]
+    async fn the_general_channel_is_not_a_desk_and_is_not_listed_as_one() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        for desk in desks.as_array().unwrap() {
+            let id = desk["id"].as_str().unwrap();
+            assert!(
+                !crate::server::chat_history::is_general_chat(Some(id)),
+                "the desk list must not carry the built-in channel, found {id}"
+            );
+        }
+    }
+
+    /// A company whose **blueprint** really declares a desk with one of those
+    /// ids keeps it, and keeps every write that has always worked on it
+    /// (issue #1743).
+    ///
+    /// The reservation replaces the "no such desk" answer and nothing else. A
+    /// guard that refused on the id alone would have taken a desk away from
+    /// every company that authored one, which is a migration, not a feature.
+    #[tokio::test]
+    async fn a_manifest_desk_named_general_is_left_exactly_as_it_was() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
+             [[group_chat]]\nid = \"general\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // It is listed as the desk it is.
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1);
+        assert_eq!(desks[0]["id"], "general");
+
+        // Staffing it still works — the pre-#1743 behaviour, unchanged.
+        let add = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks/general/members")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"eng"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(add.status(), StatusCode::NO_CONTENT);
+
+        // And deleting it is still refused as a *blueprint* desk, with the
+        // blueprint's reason rather than the reserved-channel one.
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/general")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(delete.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("blueprint"));
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
