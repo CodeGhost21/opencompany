@@ -42,8 +42,8 @@ use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, OverlayAgent, OverlayWorkflow, PolicyOverride, SecretValue,
-    TemplateProvenance, effective_policy,
+    AgentOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayWorkflow, PolicyOverride,
+    SecretValue, TemplateProvenance, effective_policy,
 };
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
