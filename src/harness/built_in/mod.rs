@@ -6115,6 +6115,22 @@ description = "Builds the product."
             Some(pinned),
             "the new policy must reach the roster on the next cycle"
         );
+
+        // Cycle 2 ends: the pin is released, so a standalone workflow turn
+        // between cycles rebuilds against the live override the store already
+        // holds instead of a snapshot that would otherwise outlive its cycle.
+        pool.end_cycle(&rec.id).await;
+        pool.ensure(&rec, &fx.deps).await.expect("post-cycle ensure");
+        let live_fp = {
+            let mut live = rec.clone();
+            live.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
+            effective_policy_fingerprint(&live.effective_policy())
+        };
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(live_fp),
+            "after end_cycle a plain ensure must adopt the live override"
+        );
     }
 
     // --- Capability-budget freshness (issue #108) ---------------------------
