@@ -228,6 +228,7 @@ pub async fn issue_password(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::users::InviteRecord;
     use crate::store::FsOps;
     use async_trait::async_trait;
 
