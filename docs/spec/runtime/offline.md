@@ -30,6 +30,13 @@ Specifically, with the manifest below: no `composio` grant means Composio-backed
 tools are never wired onto an agent's belt; no managed credential means the
 cognition brain is not the hosted one; and nothing contacts the hub.
 
+**Product analytics is not a fourth entry**, and the reason is worth recording
+here rather than only in [analytics.md](analytics.md). It reports only from
+hosted tenants, and its network client sits behind the `analytics` cargo feature
+that the default build — the one this lane compiles — does not enable. So there
+is no analytics code in the binary that runs inside the namespace, and this lane
+stays a proof rather than becoming a thing to work around.
+
 ## The configuration
 
 ```toml

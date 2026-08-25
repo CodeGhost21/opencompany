@@ -67,6 +67,7 @@ smtp           | partial      | imap,smtp                       | send_then_rece
 chargebee      | partial      | openhuman,chargebee,paypal,composio | chargebee server::ops::finance
 paypal         | partial      | openhuman,chargebee,paypal,composio | paypal server::ops::finance
 sidecar        | partial      | sidecar                         | brain::sidecar
+analytics      | partial      | analytics                       | analytics
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------
 #

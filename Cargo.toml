@@ -510,6 +510,22 @@ smtp = ["dep:lettre"]
 # offline `RecordingMailReceiver` compile without this; only `AsyncImapReceiver`
 # and the RFC822 parser are gated here.
 imap = ["dep:async-imap", "dep:mail-parser", "dep:tokio-rustls", "dep:webpki-roots"]
+# Product analytics: the real Mixpanel HTTP transport (issue #1739). The
+# `Tracker` port, the `NullTracker` / `RecordingTracker` mocks, the whole
+# enable/disable decision, the payload vocabulary and the JSON body builder all
+# compile and test WITHOUT this; only `HttpMixpanelTracker` is gated here.
+#
+# That split is the acceptance criterion of #1739 expressed as a dependency
+# graph rather than as a rule. This crate is GPL-3.0 and self-hostable, so a
+# default build must be incapable of reporting — not merely configured not to.
+# With the feature off there is no type in the tree that owns an HTTP client for
+# analytics, which is also what keeps `tests/offline_e2e.rs` honest: that lane
+# runs inside a network namespace with no routes, and
+# `docs/spec/runtime/offline.md` forbids widening it.
+#
+# `reqwest` is the only dependency, and it is already in the DEFAULT set via
+# `oauth`, so enabling this adds nothing to any lane's graph or to Cargo.lock.
+analytics = ["dep:reqwest"]
 # OAuth connection lifecycle (authorize-url + server-side token exchange). The
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).

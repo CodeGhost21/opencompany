@@ -4,6 +4,7 @@
 //! TinyHumans Rust modules. The default build stays small; enable the `tiny`
 //! feature to compile against the sibling `tiny*` crates.
 
+pub mod analytics;
 pub mod app;
 pub mod brain;
 /// Chargebee billing (issue #788): the REST client and the billing operations

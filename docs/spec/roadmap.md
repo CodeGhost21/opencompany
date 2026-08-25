@@ -132,8 +132,17 @@ locally:
   model; x402 USDC only.
 - **Not a legal-entity service.** Incorporation, tax, and compliance stay
   with the human.
-- **No private feedback backend.** Feedback goes to public GitHub issues or
-  stays local; there is no telemetry side channel.
+- **No private feedback backend, and no telemetry from an install that did not
+  ask for it.** Feedback goes to public GitHub issues or stays local, and never
+  rides any other channel. Product analytics
+  ([runtime/analytics.md](runtime/analytics.md)) is a separate and deliberately
+  narrow thing: **shape and outcome only** — counts, durations, enum-valued
+  fields — never message text, prompts, file names, ledger values, tool
+  arguments or addresses, under an opaque id rather than a company name, and
+  **only** for tenants the hosting platform provisions and operates. A desktop
+  or self-hosted build sends nothing and *cannot*: the network client is behind
+  a cargo feature the default build does not compile, which is also what keeps
+  the offline lane ([runtime/offline.md](runtime/offline.md)) honest.
 - **No prosumer-visible runtime internals.** UI or product text exposing
   "agent graph", tiers, or dispatch is a spec violation
   ([glossary](glossary.md), translation table).

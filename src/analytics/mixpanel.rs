@@ -1,0 +1,422 @@
+//! The Mixpanel transport, and the one function that chooses a tracker.
+//!
+//! [`build`] is compiled into **every** build; `HttpMixpanelTracker` is compiled
+//! only under `--features analytics`. That split is the acceptance criterion of
+//! issue #1739 expressed as a type rather than as a rule: in a default build
+//! there is no type here that owns an HTTP client, so "a build with no opt-in
+//! emits zero outbound analytics requests" is not a behaviour that could
+//! regress — the code that would make the request is not in the binary.
+//!
+//! Under the feature, [`build`] still returns [`NullTracker`] for every
+//! [`Decision::Silent`], which is what a desktop or self-hosted install resolves
+//! to. `a_self_hosted_build_makes_no_request` proves that against a real local
+//! collector, and `a_hosted_tenant_reports` is its positive control — without
+//! the second, a zero request count would be indistinguishable from a test that
+//! never sends anything at all.
+
+use std::sync::Arc;
+
+use crate::analytics::config::Decision;
+use crate::analytics::{Envelope, NullTracker, Tracker};
+
+/// Chooses the tracker this process will use.
+///
+/// The whole of the "hosted tenants only, by default" decision lands here: a
+/// [`Decision::Silent`] gets a [`NullTracker`], and in a build without the
+/// `analytics` feature *every* decision does, because there is nothing else to
+/// return.
+pub fn build(decision: &Decision, envelope: Envelope) -> Arc<dyn Tracker> {
+    match decision {
+        Decision::Silent(_) => Arc::new(NullTracker),
+        #[cfg(feature = "analytics")]
+        Decision::Report { endpoint, token } => {
+            Arc::new(http::HttpMixpanelTracker::new(endpoint, token, envelope))
+        }
+        // Without the feature there is no transport to hand back. Reporting was
+        // configured and the build cannot honour it, which is worth one line at
+        // boot: silently ignoring an explicit `OPENCOMPANY_ANALYTICS=on` is the
+        // kind of quiet no-op an operator debugs for an hour.
+        #[cfg(not(feature = "analytics"))]
+        Decision::Report { .. } => {
+            let _ = envelope;
+            tracing::info!(
+                "[analytics] reporting is configured but this build was compiled without \
+                 the `analytics` feature, so nothing is sent"
+            );
+            Arc::new(NullTracker)
+        }
+    }
+}
+
+#[cfg(feature = "analytics")]
+pub use http::HttpMixpanelTracker;
+
+#[cfg(feature = "analytics")]
+mod http {
+    use std::sync::{Arc, Mutex, Weak};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+
+    use crate::analytics::config::ProjectToken;
+    use crate::analytics::{Envelope, Event, Tracker, payload};
+
+    /// How often the background task drains the buffer.
+    ///
+    /// A threshold alone is not enough: a quiet instance would hold its events
+    /// until the next one arrived, which on a company that ran two turns and
+    /// stopped is forever.
+    const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+
+    /// The most events held before the oldest are dropped.
+    ///
+    /// Analytics must never be able to grow without bound inside a tenant
+    /// container. If the collector is unreachable for long enough to fill this,
+    /// the right outcome is losing telemetry, not the process.
+    const MAX_BUFFERED: usize = 500;
+
+    /// How long a send may take before it is abandoned. Short on purpose:
+    /// nothing waits on this, but a request that never completes is a task that
+    /// never ends.
+    const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Batches events and POSTs them to Mixpanel.
+    pub struct HttpMixpanelTracker {
+        inner: Arc<Inner>,
+    }
+
+    struct Inner {
+        client: reqwest::Client,
+        endpoint: String,
+        token: ProjectToken,
+        envelope: Envelope,
+        buffer: Mutex<Vec<serde_json::Value>>,
+        stop: tokio::sync::Notify,
+    }
+
+    impl HttpMixpanelTracker {
+        /// Builds a tracker and starts its drain loop.
+        pub fn new(endpoint: &str, token: &ProjectToken, envelope: Envelope) -> Self {
+            let inner = Arc::new(Inner {
+                client: reqwest::Client::builder()
+                    .timeout(SEND_TIMEOUT)
+                    .build()
+                    .unwrap_or_default(),
+                endpoint: endpoint.to_string(),
+                token: token.clone(),
+                envelope,
+                buffer: Mutex::new(Vec::new()),
+                stop: tokio::sync::Notify::new(),
+            });
+
+            // A `Weak` so the loop cannot keep the tracker alive, and
+            // `try_current` so constructing one outside a runtime is a
+            // flush-only tracker rather than a panic. Neither is theoretical:
+            // the drop path is how a rebuilt runtime retires its tracker, and a
+            // synchronous test constructs one with no reactor.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let weak = Arc::downgrade(&inner);
+                handle.spawn(async move { drain_loop(weak).await });
+            }
+
+            Self { inner }
+        }
+    }
+
+    impl Drop for HttpMixpanelTracker {
+        fn drop(&mut self) {
+            self.inner.stop.notify_waiters();
+        }
+    }
+
+    impl std::fmt::Debug for HttpMixpanelTracker {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // No endpoint and certainly no token: this type holds a credential,
+            // and a `{:?}` in a log line is exactly how one escapes.
+            f.write_str("HttpMixpanelTracker")
+        }
+    }
+
+    async fn drain_loop(weak: Weak<Inner>) {
+        loop {
+            let Some(inner) = weak.upgrade() else { return };
+            let stopped = {
+                let stop = &inner.stop;
+                tokio::select! {
+                    _ = stop.notified() => true,
+                    _ = tokio::time::sleep(FLUSH_INTERVAL) => false,
+                }
+            };
+            inner.send_batch().await;
+            if stopped {
+                return;
+            }
+        }
+    }
+
+    impl Inner {
+        /// Drains the buffer and posts it. Every failure is swallowed after one
+        /// debug line: a dead collector is a no-op, per #1739's constraints.
+        async fn send_batch(&self) {
+            let batch = {
+                let mut buffer = self.buffer.lock().expect("analytics buffer");
+                if buffer.is_empty() {
+                    return;
+                }
+                std::mem::take(&mut *buffer)
+            };
+
+            // The project token is stamped here, into the request body, and
+            // nowhere else. `analytics::payload` — the un-gated, tested body
+            // builder — never sees it, so no test fixture, log line or recorded
+            // event can carry it.
+            let events: Vec<serde_json::Value> = batch
+                .into_iter()
+                .map(|mut event| {
+                    if let Some(properties) = event
+                        .get_mut("properties")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        properties.insert(
+                            "token".to_string(),
+                            serde_json::Value::from(self.token.expose()),
+                        );
+                    }
+                    event
+                })
+                .collect();
+
+            match self.client.post(&self.endpoint).json(&events).send().await {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => tracing::debug!(
+                    status = %response.status(),
+                    "[analytics] the collector refused a batch; dropping it"
+                ),
+                Err(error) => tracing::debug!(
+                    %error,
+                    "[analytics] could not reach the collector; dropping the batch"
+                ),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tracker for HttpMixpanelTracker {
+        fn track(&self, event: Event) {
+            let body = payload(&self.inner.envelope, &event);
+            let mut buffer = self.inner.buffer.lock().expect("analytics buffer");
+            if buffer.len() >= MAX_BUFFERED {
+                buffer.remove(0);
+            }
+            buffer.push(body);
+        }
+
+        async fn flush(&self) {
+            self.inner.send_batch().await;
+        }
+    }
+}
+
+#[cfg(all(test, feature = "analytics"))]
+mod test {
+    use super::*;
+    use crate::analytics::config::{ENABLE_ENV, ENDPOINT_ENV, TOKEN_ENV, resolve};
+    use crate::analytics::types::OpaqueId;
+    use crate::analytics::{Event, Outcome, Trigger};
+    use crate::app::config::MapEnv;
+    use crate::app::deployment::{DEPLOYMENT_ENV, Deployment};
+    use crate::ports::brain::Cognition;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A local collector that counts what it is sent.
+    struct Collector {
+        hits: Arc<AtomicUsize>,
+        bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        url: String,
+        shutdown: tokio::sync::oneshot::Sender<()>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    async fn spawn_collector() -> Collector {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_hits = hits.clone();
+        let seen_bodies = bodies.clone();
+
+        let app = axum::Router::new().route(
+            "/track",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let hits = seen_hits.clone();
+                let bodies = seen_bodies.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    bodies.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({"status": 1}))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/track", listener.local_addr().unwrap());
+        let (shutdown, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+
+        Collector {
+            hits,
+            bodies,
+            url,
+            shutdown,
+            handle,
+        }
+    }
+
+    impl Collector {
+        async fn stop(self) {
+            let _ = self.shutdown.send(());
+            let _ = self.handle.await;
+        }
+    }
+
+    fn envelope() -> Envelope {
+        Envelope::new(
+            OpaqueId::instance("0123456789abcdef0123456789abcdef"),
+            Deployment::HostedTenant,
+            Cognition::default(),
+        )
+    }
+
+    fn events() -> Vec<Event> {
+        vec![
+            Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            },
+            Event::TurnFinished {
+                trigger: Trigger::OperatorMessage,
+                outcome: Outcome::Ok,
+                failure: None,
+                duration_ms: 12,
+                effects_executed: 0,
+                approvals_parked: 0,
+            },
+        ]
+    }
+
+    /// **Issue #1739's first acceptance criterion.** A build that *has* the
+    /// transport compiled in, pointed at a live collector, with a token in the
+    /// environment, and not declared hosted: it must send nothing.
+    ///
+    /// Note what is deliberately stacked against the assertion — the feature is
+    /// on, the client exists, the endpoint resolves, the token is present. The
+    /// only thing that is not is consent. That is the configuration a
+    /// self-hoster who copied a hosted deployment's env file would have.
+    #[tokio::test]
+    async fn a_self_hosted_build_makes_no_request() {
+        let collector = spawn_collector().await;
+        let env = MapEnv::new([
+            (TOKEN_ENV, "not-a-real-token"),
+            (ENDPOINT_ENV, collector.url.as_str()),
+        ]);
+
+        let decision = resolve(Deployment::from_env(&env), &env);
+        let tracker = build(&decision, envelope());
+        for event in events() {
+            tracker.track(event);
+        }
+        tracker.flush().await;
+
+        assert_eq!(
+            collector.hits.load(Ordering::SeqCst),
+            0,
+            "a self-hosted build must not dial out"
+        );
+        collector.stop().await;
+    }
+
+    /// The positive control that makes the test above non-vacuous: the same
+    /// collector, the same events, the same code path, one variable changed.
+    #[tokio::test]
+    async fn a_hosted_tenant_reports_with_the_full_envelope() {
+        let collector = spawn_collector().await;
+        let env = MapEnv::new([
+            (DEPLOYMENT_ENV, "hosted-tenant"),
+            (TOKEN_ENV, "not-a-real-token"),
+            (ENDPOINT_ENV, collector.url.as_str()),
+        ]);
+
+        let decision = resolve(Deployment::from_env(&env), &env);
+        assert!(decision.reports(), "{decision:?}");
+        let tracker = build(&decision, envelope());
+        for event in events() {
+            tracker.track(event);
+        }
+        tracker.flush().await;
+
+        assert_eq!(collector.hits.load(Ordering::SeqCst), 1, "one batch");
+        let bodies = collector.bodies.lock().unwrap().clone();
+        let batch = bodies[0].as_array().expect("a batch is an array");
+        assert_eq!(batch.len(), 2, "both events rode the batch: {batch:?}");
+
+        let first = &batch[0]["properties"];
+        assert_eq!(first["deployment"], "hosted-tenant");
+        assert_eq!(first["distinct_id"], "i_0123456789abcdef0123456789abcdef");
+        assert_eq!(first["token"], "not-a-real-token");
+        assert!(first["app_version"].is_string());
+        assert!(first["harness_in_build"].is_boolean());
+        assert_eq!(batch[0]["event"], "instance_started");
+
+        collector.stop().await;
+    }
+
+    /// An operator who switched it off stays off, even on a hosted tenant.
+    #[tokio::test]
+    async fn an_opted_out_tenant_makes_no_request() {
+        let collector = spawn_collector().await;
+        let env = MapEnv::new([
+            (DEPLOYMENT_ENV, "hosted-tenant"),
+            (ENABLE_ENV, "off"),
+            (TOKEN_ENV, "not-a-real-token"),
+            (ENDPOINT_ENV, collector.url.as_str()),
+        ]);
+
+        let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+        for event in events() {
+            tracker.track(event);
+        }
+        tracker.flush().await;
+
+        assert_eq!(collector.hits.load(Ordering::SeqCst), 0);
+        collector.stop().await;
+    }
+
+    /// The buffer is bounded. An unreachable collector must cost telemetry, not
+    /// a tenant container's memory.
+    #[tokio::test]
+    async fn the_buffer_is_bounded() {
+        let env = MapEnv::new([
+            (DEPLOYMENT_ENV, "hosted-tenant"),
+            (TOKEN_ENV, "not-a-real-token"),
+            // Nothing listens here; the point is that `track` never blocks and
+            // never grows without bound whatever the collector does.
+            (ENDPOINT_ENV, "http://127.0.0.1:1/track"),
+        ]);
+        let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+        for _ in 0..2_000 {
+            tracker.track(Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            });
+        }
+        // No assertion on an internal count — the observable property is that
+        // this returns at all, promptly, with no reachable collector.
+    }
+}

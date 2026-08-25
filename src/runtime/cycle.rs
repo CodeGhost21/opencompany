@@ -350,6 +350,15 @@ impl<'a> CycleRunner<'a> {
     ) -> Result<CycleReport> {
         let cycle_id = crate::ports::generate_id();
         let trigger = cycle_trigger_of(&events);
+        // Issue #1739. Nothing in this tree measures how long a cycle takes —
+        // the journal records that one started and that one finished, never the
+        // span between — so this is new instrumentation rather than a read of
+        // something already kept. `Instant` because the only question is a
+        // duration, and a wall clock that steps backwards mid-cycle would
+        // report a negative one.
+        let started_at = std::time::Instant::now();
+        let analytics_trigger =
+            crate::analytics::Trigger::of(events.first().map(|(_, event)| event));
 
         // Best-effort, and it must stay that way: record-keeping does not get to
         // refuse a cycle. A failed open simply means this cycle is unbracketed,
@@ -399,6 +408,39 @@ impl<'a> CycleRunner<'a> {
             None => self.rt.serial.clone().lock_owned().await,
         };
         let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
+        // Issue #1739: the product's unit of work, reported as shape and outcome.
+        //
+        // Emitted here rather than inside `run_locked` for the same reason the
+        // bracket is opened here: this is where a cycle's whole span is
+        // observable, including the wait on the serial lock, which is the part
+        // an operator experiences as "nothing is happening". Nothing is awaited
+        // — `Tracker::track` is synchronous and infallible — so a turn is never
+        // delayed by, and can never fail because of, analytics.
+        self.rt
+            .tracker
+            .track(crate::analytics::Event::TurnFinished {
+                trigger: analytics_trigger,
+                outcome: match &outcome {
+                    Ok(_) => crate::analytics::Outcome::Ok,
+                    Err(_) => crate::analytics::Outcome::Failed,
+                },
+                // The coarse class only. `err.to_string()` is the single richest
+                // source of user content in this crate — absolute paths, company
+                // ids, MCP server names, tool names, ledger slugs, agent text — and
+                // is exactly what the journal line below carries and a payload must
+                // not.
+                failure: outcome
+                    .as_ref()
+                    .err()
+                    .map(crate::analytics::FailureCode::of),
+                duration_ms: started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                effects_executed: outcome
+                    .as_ref()
+                    .map_or(0, |report| report.executed_effects.len() as u64),
+                approvals_parked: outcome
+                    .as_ref()
+                    .map_or(0, |report| report.parked.len() as u64),
+            });
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
         let error = outcome.as_ref().err().map(|err| err.to_string());
@@ -8481,6 +8523,63 @@ mod test {
             row.trigger_event_seq,
             Some(seq),
             "the row is stamped with the seq the caller supplied"
+        );
+    }
+
+    /// **Issue #1739.** A cycle reports one `turn_finished`, and the operator's
+    /// own words are not in it.
+    ///
+    /// The message text here is the thing the payload must never carry, so it is
+    /// deliberately distinctive: the assertion is a substring search over the
+    /// whole rendered event, which fails if any field ever starts holding
+    /// free-form text.
+    #[tokio::test]
+    async fn a_cycle_reports_its_shape_and_not_the_operators_words() {
+        let home_dir = tmp_home();
+        let recorder = Arc::new(crate::analytics::RecordingTracker::new());
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .with_analytics(recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            text: "acquire Northwind Traders for 4.2 million".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+        let turns: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .filter(|event| matches!(event, crate::analytics::Event::TurnFinished { .. }))
+            .collect();
+        assert_eq!(turns.len(), 1, "one cycle, one event: {turns:?}");
+
+        match turns[0] {
+            crate::analytics::Event::TurnFinished {
+                trigger,
+                outcome,
+                failure,
+                ..
+            } => {
+                assert_eq!(trigger, crate::analytics::Trigger::OperatorMessage);
+                assert_eq!(outcome, crate::analytics::Outcome::Ok);
+                assert_eq!(failure, None);
+            }
+            ref other => panic!("{other:?}"),
+        }
+
+        let rendered = format!("{:?}", turns[0]);
+        assert!(
+            !rendered.contains("Northwind"),
+            "the operator's message reached the payload: {rendered}"
         );
     }
 }

@@ -250,6 +250,11 @@ async fn provision(
     // defaults when none is configured).
     let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
         .with_id(id.clone())
+        // Issue #1739: a company provisioned after boot reports like one boot
+        // registered. The host's tracker is process-wide and lives on the state
+        // for exactly this reason — a second wiring path is a second place to
+        // forget.
+        .with_analytics(state.analytics())
         .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
         .with_host_base_url(state.config().host_base_url())
         // Issue #752: a provisioned tenant is a company like any other, so it
