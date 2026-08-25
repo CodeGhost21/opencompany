@@ -2903,6 +2903,23 @@ pub struct AgentOverride {
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload, validated by
+    /// [`crate::company::avatar`] before it is stored.
+    ///
+    /// `None` means **nobody has chosen**, which is not the same as "no face":
+    /// the console hashes the teammate's stable id into one of the shipped
+    /// mascots, so an untouched roster still reads as a set of individuals.
+    /// Keeping the two apart is what makes "reset to the default face"
+    /// expressible — it is [`CompanyRecord::clear_agent_avatar`], not a second
+    /// stored value.
+    ///
+    /// Carried here rather than on [`OverlayAgent`] so **one** field answers for
+    /// both kinds of teammate: an override row may name a manifest agent or an
+    /// overlay one (`effective_instructions` already works this way), and a
+    /// choice of face is the same act whichever kind was clicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     /// The model this teammate runs, as an overlay on the blueprint.
     ///
     /// `Some("")` is the stored form of "cleared", matching `description`:
@@ -3142,6 +3159,9 @@ impl AgentOverride {
             && self.description.is_none()
             && self.tools.is_none()
             && self.instructions.is_none()
+            && self.avatar.is_none()
+            && self.model.is_none()
+            && self.harness.is_none()
     }
 }
 
@@ -4036,6 +4056,9 @@ impl CompanyRecord {
             if entry.instructions.is_some() {
                 held.instructions = entry.instructions;
             }
+            if entry.avatar.is_some() {
+                held.avatar = entry.avatar;
+            }
             if entry.model.is_some() {
                 held.model = entry.model;
             }
@@ -4240,6 +4263,47 @@ impl CompanyRecord {
         {
             entry.instructions = None;
         }
+        self.retain_nonempty_agent_edits();
+    }
+
+    /// The face in force for `agent_id`: the chosen one, or `None` for "nobody
+    /// has chosen" — which the console renders as the mascot it hashes from the
+    /// teammate's id (`docs/spec/runtime/avatars.md`).
+    ///
+    /// Reads through the override for **either** kind of teammate, which is why
+    /// there is no manifest arm here as there is in
+    /// [`Self::effective_instructions`]: `company.toml` declares no face, so an
+    /// unset avatar has nothing to fall back to but the default, and inventing a
+    /// stored value for it would make "reset" unexpressible.
+    pub fn effective_avatar(&self, agent_id: &str) -> Option<String> {
+        self.agent_override(agent_id).and_then(|o| o.avatar.clone())
+    }
+
+    /// Drops `agent_id`'s chosen face so the hashed default applies again.
+    ///
+    /// Clears the one field rather than the row, for the reason
+    /// [`Self::upsert_agent_override`] merges field-wise: an operator resetting a
+    /// face has said nothing about the persona, the name or the tool scope, and
+    /// dropping their row would silently reset those too. A no-op when nothing
+    /// is stored — the caller's intent is already satisfied.
+    pub fn clear_agent_avatar(&mut self, agent_id: &str) {
+        if let Some(entry) = self
+            .overlay_agent_edits
+            .iter_mut()
+            .find(|entry| entry.agent_id == agent_id)
+        {
+            entry.avatar = None;
+        }
+        self.retain_nonempty_agent_edits();
+    }
+
+    /// Drops any override row left carrying no edits at all.
+    ///
+    /// Shared by the two clear paths so neither can forget a field: a row that
+    /// held only the thing just cleared is not "an empty override", it is a row
+    /// whose continued existence would move the harness's overlay fingerprint
+    /// for no change.
+    fn retain_nonempty_agent_edits(&mut self) {
         // Every field the override can carry, not just the ones it carried
         // when this was written. A predicate that names a subset deletes rows
         // that are still holding the fields it forgot — here, resetting a
@@ -4251,6 +4315,7 @@ impl CompanyRecord {
                 || entry.description.is_some()
                 || entry.tools.is_some()
                 || entry.instructions.is_some()
+                || entry.avatar.is_some()
                 || entry.model.is_some()
                 || entry.harness.is_some()
         });
@@ -6786,6 +6851,95 @@ mod test {
         assert!(record.overlay_agent_edits.is_empty());
     }
 
+    // ---- per-agent avatar override --------------------------------------
+
+    /// Nobody has chosen until somebody does: an untouched roster resolves to
+    /// `None`, which the console renders as the mascot it hashes from the id.
+    #[test]
+    fn effective_avatar_is_none_until_chosen() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        assert_eq!(record.effective_avatar("ceo"), None);
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:teal".into()),
+            ..Default::default()
+        });
+        assert_eq!(record.effective_avatar("ceo"), Some("tiny:teal".into()));
+    }
+
+    /// An overlay teammate has no manifest row, and picks a face through the
+    /// same field — one override answers for both kinds of teammate.
+    #[test]
+    fn effective_avatar_answers_for_an_overlay_teammate() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "alex".into(),
+            name: "Alex".into(),
+            role: "Writer".into(),
+            description: None,
+            tools: Vec::new(),
+            model: None,
+            harness: None,
+        });
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "alex".into(),
+            avatar: Some("blob:01J8Z5Q9YQ".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            record.effective_avatar("alex"),
+            Some("blob:01J8Z5Q9YQ".into())
+        );
+    }
+
+    /// Resetting a face says nothing about the persona. The two clear paths
+    /// touch one field each, so neither can quietly undo the other's edit —
+    /// this is the regression the shared retain helper exists to prevent.
+    #[test]
+    fn clearing_one_override_field_leaves_the_others() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            instructions: Some("Be terse.".into()),
+            ..Default::default()
+        });
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:rose".into()),
+            ..Default::default()
+        });
+
+        record.clear_agent_avatar("ceo");
+        assert_eq!(record.effective_avatar("ceo"), None);
+        assert_eq!(
+            record.effective_instructions("ceo"),
+            Some("Be terse.".to_string()),
+            "resetting a face must not reset the persona"
+        );
+
+        record.clear_agent_override("ceo");
+        assert!(
+            record.overlay_agent_edits.is_empty(),
+            "the row goes once it carries nothing"
+        );
+    }
+
+    /// The mirror of the above, and the sharper half: an avatar-only override
+    /// must survive a persona reset. Before the shared retain helper, the
+    /// persona path's `retain` did not know the field existed and dropped the
+    /// whole row — resetting a persona silently reset the face too.
+    #[test]
+    fn clearing_the_persona_keeps_an_avatar_only_override() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:rose".into()),
+            ..Default::default()
+        });
+        record.clear_agent_override("ceo");
+        assert_eq!(record.effective_avatar("ceo"), Some("tiny:rose".into()));
+    }
+
     /// Duplicates are detectable, so a caller holding overrides it did not write
     /// (a bundle import) can refuse them rather than apply whichever sorts first.
     #[test]
@@ -6806,11 +6960,56 @@ mod test {
         );
     }
 
-    /// An override carrying no instructions is empty; one carrying text is not.
+    /// An override carrying nothing is empty — and an override carrying only
+    /// `avatar`, `model` or `harness` is not, so a face-only edit or a
+    /// model-only edit is persisted rather than dropped as a no-op.
     #[test]
     fn agent_override_is_empty_only_when_nothing_is_set() {
         assert!(override_entry("ceo", None).is_empty());
         assert!(!override_entry("ceo", Some("x")).is_empty());
+
+        for (field, fill) in [
+            (
+                "name",
+                Box::new(|e: &mut AgentOverride| e.name = Some("Ada".to_string()))
+                    as Box<dyn Fn(&mut AgentOverride)>,
+            ),
+            (
+                "role",
+                Box::new(|e: &mut AgentOverride| e.role = Some("CEO".to_string())),
+            ),
+            (
+                "description",
+                Box::new(|e: &mut AgentOverride| e.description = Some("desc".to_string())),
+            ),
+            (
+                "tools",
+                Box::new(|e: &mut AgentOverride| e.tools = Some(vec!["docs.*".to_string()])),
+            ),
+            (
+                "instructions",
+                Box::new(|e: &mut AgentOverride| e.instructions = Some("Be terse.".to_string())),
+            ),
+            (
+                "avatar",
+                Box::new(|e: &mut AgentOverride| e.avatar = Some("tiny:teal".to_string())),
+            ),
+            (
+                "model",
+                Box::new(|e: &mut AgentOverride| e.model = Some("gpt-5".to_string())),
+            ),
+            (
+                "harness",
+                Box::new(|e: &mut AgentOverride| e.harness = Some("laptop".to_string())),
+            ),
+        ] {
+            let mut edit = override_entry("ceo", None);
+            fill(&mut edit);
+            assert!(
+                !edit.is_empty(),
+                "{field} alone must make the override non-empty"
+            );
+        }
     }
 
     /// The persona overrides round-trip through the `OverlayBlob` the

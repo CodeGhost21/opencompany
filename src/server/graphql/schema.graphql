@@ -1183,6 +1183,14 @@ type TeamMember {
 	range that would overflow GraphQL's `Int`, matching `Approval.atMillis`.
 	"""
 	budgetSetAtMillis: Float
+	"""
+	The face this teammate wears, when somebody has chosen one — a
+	`tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+	(`docs/spec/runtime/avatars.md`). Absent means **nobody has chosen**, and
+	the console draws the mascot it hashes from the id. Mirrors the REST
+	team DTO's `avatar`; both arms of the roster read answer the same way.
+	"""
+	avatar: String
 }
 
 """

@@ -26,6 +26,7 @@ no roster beyond its single implicit local owner.
 | Bootstrap | The manifest's `[users] admins` list |
 | Mode | `[users] mode` — `email` (default), `wallet`, or `none`. See [Sign-in modes](auth-modes.md) |
 | Roles | `admin` (may invite and administer) / `member` |
+| Profile | Name and icon, self-served through `PATCH …/auth/me` — see [avatars.md](avatars.md) |
 
 An `admin` is also what the write plane means by authority over the company: the
 routes that decide what the company reaches the world as — its Composio and
@@ -171,6 +172,7 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 | `POST …/auth/wallet/challenge` | Mint a nonce for a wallet to sign (`wallet` mode) |
 | `POST …/auth/wallet/verify` | Answer a challenge → session cookie (`wallet` mode) |
 | `GET …/auth/me` | Who this session belongs to |
+| `PATCH …/auth/me` | Your own name and icon — see [avatars.md](avatars.md). No user id in the path, so it can only ever be you |
 | `POST …/auth/logout` | Revoke this session |
 | `GET …/users` | The roster (admin) |
 | `GET …/users/invites` | List outstanding invites (admin) |
