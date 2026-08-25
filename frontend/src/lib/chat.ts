@@ -534,9 +534,16 @@ export function mergeHistoryInOrder(
     const matches = durableEchoes.get(messageFingerprint(message));
     const echo = matches?.find((candidate) => {
       if (consumedEchoes.has(candidate)) return false;
+      // A durable row already present in the live transcript is an older
+      // identical send, even when it is the newest (or only) row in the page.
+      // Only an id that was not on screen when this fold began can reconcile
+      // this local bubble; otherwise a send made after the snapshot would be
+      // consumed by the page-boundary row it duplicated.
+      if (existingById.has(candidate.id)) return false;
       // A matching row before the snapshot may be an older identical message,
       // not this send. A row at/after the snapshot is fresh evidence; for a
-      // single-row response there is no older page boundary to consult.
+      // single-row response there is no older page boundary to consult, but
+      // the id check above still protects that boundary when it was live.
       return snapshotAt === null || hydrated.length === 1 || candidate.at >= snapshotAt;
     });
     if (!echo) return true;
