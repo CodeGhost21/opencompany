@@ -400,6 +400,67 @@ mod test {
         );
     }
 
+    /// The host path is not a way to reset a non-admin account. An existing
+    /// member account must not become a password the operator controls, even
+    /// though the address appears in the manifest admins.
+    #[tokio::test]
+    async fn refuses_to_reset_an_existing_non_admin_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (users, sessions, login_codes) = stores(&dir);
+        let company = CompanyId::new("acme");
+
+        // A member already exists for the address.
+        users
+            .upsert_user(
+                &company,
+                &UserRecord {
+                    id: generate_id(),
+                    email: "worker@acme.test".into(),
+                    display_name: None,
+                    avatar: None,
+                    role: UserRole::Member,
+                    status: UserStatus::Active,
+                    password_hash: None,
+                    must_change_password: false,
+                    created_at_millis: 1,
+                    last_seen_at_millis: None,
+                    updated_at_millis: 1,
+                },
+            )
+            .await
+            .expect("upsert");
+
+        let error = issue_password(
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &["worker@acme.test".into()],
+                None,
+            ),
+            "worker@acme.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect_err("a non-admin account cannot receive a host reset");
+        assert!(
+            error.to_string().contains("not an admin account"),
+            "{error}"
+        );
+
+        let user = users
+            .find_user_by_email(&company, "worker@acme.test")
+            .await
+            .expect("read")
+            .expect("the account remains");
+        assert!(
+            user.password_hash.is_none(),
+            "a refused reset must not persist a password"
+        );
+    }
+
     /// Re-issuing must not mint a second account for the same address, which
     /// would leave two rows racing to answer a login.
     #[tokio::test]
