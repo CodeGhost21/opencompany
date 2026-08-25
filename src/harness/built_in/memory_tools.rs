@@ -525,7 +525,11 @@ mod test {
             "success echo must carry the redacted title: {}",
             stored.text()
         );
-        assert!(!stored.text().contains("sk-longsecret"), "{}", stored.text());
+        assert!(
+            !stored.text().contains("sk-longsecret"),
+            "{}",
+            stored.text()
+        );
 
         let addr = addr_from(&stored.text());
         let peeked = context
