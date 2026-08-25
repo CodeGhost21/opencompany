@@ -1685,8 +1685,12 @@ impl HarnessPool {
     /// The pool only ever compares selections recorded on a previous `build`;
     /// it cannot itself know whether an engine swap happened, because the new
     /// engine's ports arrive on the builder, not here. The builder is therefore
-    /// the only caller, and it calls this on every build — boot included, so the
-    /// first rebuild has a recorded selection to differ from.
+    /// the only caller: it records the selection on every build that
+    /// re-applies the engine (`with_memory_overlay` / `with_memory_overlay_cleared`),
+    /// boot included, so the first rebuild has a recorded selection to differ
+    /// from. A rebuild about something else inherits the handover's ports
+    /// unchanged (issue #290) and does not call this — its selection is the
+    /// recorded one by construction.
     pub async fn rebind_memory_engine(&self, company: &CompanyId, engine: Option<u64>) -> bool {
         let recorded = self.memory_engine.write().await;
         if recorded.get(company).copied().flatten() == engine {
