@@ -276,6 +276,13 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
     // without this an operator's explicit pause/archive would still pay for
     // provider and tool work driven here.
     runtime.ensure_running().await.map_err(|e| e.to_string())?;
+    // A runtime being replaced refuses *before* the prompt is journaled. The
+    // append below persists the message and its mention rows, and
+    // `run_journaled_cycle` then re-checks this gate — a refusal ordered after
+    // the append would leave an answered-nothing message and a durable badge
+    // in the transcript. Same ordering the REST chat path holds in
+    // `accept_chat_turn` (codex P2).
+    runtime.ensure_accepting().map_err(|e| e.to_string())?;
     // Keep the person, drop the credential, exactly as `ScopedCompany` does: a
     // human-authored ACP prompt is attributed to that user in the journal and
     // the audit trail. Only platform credentials stay anonymous.
@@ -293,15 +300,37 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
     // is; no synthetic `@`-mention is needed, and one would only be dropped by
     // revalidation against a body that does not contain it.
     let mentions = runtime.resolve_mentions(&text, None, by.as_ref()).await;
+    // Journal the prompt up front so the transcript is right from acceptance
+    // and the durable mention rows share its sequence — the same shape as the
+    // operator `/chat` route (issue #983). `run_journaled_cycle` then runs the
+    // turn on the already-recorded message instead of appending it again.
+    let chat = session.chat.clone();
+    let event = CompanyEvent::OperatorMessage {
+        text,
+        by: by.clone(),
+        chat: Some(chat.clone()),
+        parent: None,
+        deliverable: None,
+        mentions,
+    };
+    let message_seq = runtime
+        .events()
+        .append(&session.company, event.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    // The durable half of a mention, exactly as the REST chat path files it.
+    // The ACP surface is just another operator ingress: an `@user` an ACP
+    // client types must badge that person the same way a console message
+    // does, or the reply renders as a chip and nothing else.
+    if let CompanyEvent::OperatorMessage { mentions, .. } = &event
+        && !mentions.is_empty()
+    {
+        runtime
+            .notify_mentions(&session.company, mentions, &message_seq, by.as_ref(), &chat)
+            .await;
+    }
     let report = runtime
-        .run_cycle(vec![CompanyEvent::OperatorMessage {
-            text,
-            by,
-            chat: Some(session.chat.clone()),
-            parent: None,
-            deliverable: None,
-            mentions,
-        }])
+        .run_journaled_cycle(vec![(message_seq, event)], None)
         .await
         .map_err(|e| e.to_string())?;
     let updates = report
@@ -360,6 +389,17 @@ fn prompt_text(params: &Value) -> Result<String, String> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use crate::company::CompanyManifest;
+    use crate::ports::EventSeq;
+    use crate::ports::types::{CompressedTrace, CycleRequest, CycleResult, TokenUsage};
+    use crate::ports::users::{UserRecord, UserRole, UserStatus};
+    use crate::ports::{Brain, CompanyStore, CycleHost};
+    use crate::server::graphql::auth::UserPrincipal;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, ports::types::CompanyRecord};
 
     #[test]
     fn target_requires_an_explicit_company() {
@@ -425,5 +465,243 @@ mod test {
     #[test]
     fn an_empty_prompt_is_refused() {
         assert!(prompt_text(&json!({ "prompt": [] })).is_err());
+    }
+
+    /// A brain that answers a cycle with nothing, so the ACP `prompt` turn
+    /// completes without an inference credential. The notification this suite
+    /// asserts on is filed before the turn runs, so the empty answer is fine.
+    struct SilentBrain;
+
+    #[async_trait]
+    impl Brain for SilentBrain {
+        async fn run_cycle(
+            &self,
+            req: CycleRequest,
+            _host: &dyn CycleHost,
+        ) -> crate::Result<CycleResult> {
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(req.cycle_id, "silent test brain")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    async fn seed_user(state: &AppState, company: &CompanyId, id: &str, display: &str) -> String {
+        let runtime = state.registry().get(company).expect("company");
+        let now = crate::ports::now_millis();
+        runtime
+            .users()
+            .upsert_user(
+                company,
+                &UserRecord {
+                    id: id.to_string(),
+                    email: format!("{id}@example.test"),
+                    display_name: Some(display.to_string()),
+                    avatar: None,
+                    role: UserRole::Member,
+                    status: UserStatus::Active,
+                    password_hash: None,
+                    must_change_password: false,
+                    created_at_millis: now,
+                    last_seen_at_millis: None,
+                    updated_at_millis: now,
+                },
+            )
+            .await
+            .expect("seed_user: upsert");
+        id.to_string()
+    }
+
+    /// A host whose registry runtime answers cycles with [`SilentBrain`], on
+    /// the `acp,runner,tinymemory` lane — the one that executes `server::acp`.
+    async fn acp_state(home: &std::path::Path) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = []
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_brain(std::sync::Arc::new(SilentBrain))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        state
+    }
+
+    /// An `@alice-smith` ACP prompt must badge alice exactly as a console
+    /// message would: the ACP surface is just another operator ingress, and the
+    /// durable notification is what lets an offline person see the mention at
+    /// all.
+    #[tokio::test]
+    async fn a_prompt_mention_files_the_durable_notification() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-mention-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).expect("company");
+
+        // Two people: the operator driving the prompt, and the person it names.
+        let admin = seed_user(&state, &company, "u-admin", "Admin Person").await;
+        let alice = seed_user(&state, &company, "u-alice", "Alice Smith").await;
+        let auth = GqlAuth::User(UserPrincipal {
+            company: company.clone(),
+            user_id: admin,
+            email: "admin@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
+        });
+
+        state.acp_sessions().insert(
+            "conn-1",
+            crate::server::acp::AcpSession {
+                id: "s-1".to_string(),
+                company: company.clone(),
+                chat: "engineering".to_string(),
+                agent_id: None,
+            },
+        );
+
+        let result = prompt(
+            &state,
+            &auth,
+            &json!({
+                "sessionId": "s-1",
+                "prompt": [
+                    { "type": "text", "text": "@alice-smith please review the invoice" },
+                ],
+                "_meta": { "opencompany/connectionId": "conn-1" },
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "prompt failed: {result:?}");
+
+        // The durable half of the mention: the person named gets a row they can
+        // badge, placed in the channel the prompt ran in.
+        let rows = runtime
+            .notifications()
+            .list(&company, &alice)
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 1, "an @alice prompt must badge alice");
+        assert_eq!(rows[0].notification.kind, "mention");
+        assert_eq!(rows[0].notification.context.as_deref(), Some("engineering"));
+        // And the author is not badged for their own prompt.
+        let admin_rows = runtime
+            .notifications()
+            .list(&company, "u-admin")
+            .await
+            .expect("list");
+        assert!(admin_rows.is_empty(), "{admin_rows:?}");
+    }
+
+    /// A runtime being replaced refuses the prompt *before* it is journaled
+    /// (codex P2): a message appended and then rejected would stay in the
+    /// transcript with nothing that will ever answer it — the ordering the
+    /// REST chat path holds via `accept_chat_turn`.
+    #[tokio::test]
+    async fn a_quiesced_runtime_refuses_prompt_before_journaling() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-quiesce-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).expect("company");
+        let admin = seed_user(&state, &company, "u-admin", "Admin Person").await;
+        let auth = GqlAuth::User(UserPrincipal {
+            company: company.clone(),
+            user_id: admin,
+            email: "admin@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
+        });
+
+        state.acp_sessions().insert(
+            "conn-1",
+            crate::server::acp::AcpSession {
+                id: "s-1".to_string(),
+                company: company.clone(),
+                chat: "engineering".to_string(),
+                agent_id: None,
+            },
+        );
+
+        runtime.quiesce().await;
+
+        let result = prompt(
+            &state,
+            &auth,
+            &json!({
+                "sessionId": "s-1",
+                "prompt": [
+                    { "type": "text", "text": "please review the invoice" },
+                ],
+                "_meta": { "opencompany/connectionId": "conn-1" },
+            }),
+        )
+        .await;
+        assert!(result.is_err(), "a quiesced runtime must refuse the prompt");
+
+        // And nothing was journaled: the refusal happened before the append.
+        let events = runtime
+            .events()
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        assert!(
+            events
+                .iter()
+                .all(|stored| !matches!(&stored.event, CompanyEvent::OperatorMessage { .. })),
+            "a refused prompt must not leave a message in the journal: {events:?}"
+        );
     }
 }

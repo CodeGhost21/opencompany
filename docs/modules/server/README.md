@@ -315,6 +315,14 @@ by `(atMillis, seq)`, why the cursor is server-issued rather than derived from
 the last row, and what a console must do when an older host omits it
 (issue #1012) — likewise: [run-history-paging.md](run-history-paging.md).
 
+The **authoring** surfaces — building a graph from a task card (`#580`),
+drafting one from a free-text description (`#753`), and grounding either on the
+tools a company can actually reach (`#783`, `#874`) — have their own focused
+page: [workflow-authoring-routes.md](workflow-authoring-routes.md). The files a
+past run produced, deep-linked into each card's Artifacts tab (issue #1684), are
+documented with the run routes in
+[workflow-routes.md](workflow-routes.md).
+
 ### Pausing a workflow, and the disarm rule (issue #276)
 
 The pause switch, what it does **not** stop, why it lives in

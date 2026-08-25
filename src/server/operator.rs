@@ -1914,6 +1914,26 @@ async fn accept_chat_turn(
         .await
         .map_err(ApiError)?;
 
+    // The durable half of a mention (issue: mentions).
+    //
+    // The SSE feed only reaches a browser that is open, so without this a
+    // mention is invisible to everyone who was not watching when it landed —
+    // which is most of the point of mentioning somebody. Filed here, right
+    // after the journal write, so the notification and the message share a
+    // sequence and a turn that later fails still leaves the mention recorded.
+    //
+    // Deliberately not fatal: a notification store that will not answer must
+    // not fail somebody's message. The mention still renders as a chip and is
+    // still in the transcript; only the badge is missing, and the warning says
+    // so.
+    if let CompanyEvent::OperatorMessage { mentions, .. } = &message_event
+        && !mentions.is_empty()
+    {
+        runtime
+            .notify_mentions(id, mentions, &message_seq, by, desk)
+            .await;
+    }
+
     let turn_id = crate::ports::generate_id();
     let turn_id = match runtime
         .runs()
@@ -2292,7 +2312,7 @@ async fn journal_chat_replies(
                     // Who this reply names. Rendered as chips and — unlike an
                     // operator message's — never consulted by dispatch, which
                     // is the mention-loop fuse.
-                    mentions: reply_mentions,
+                    mentions: reply_mentions.clone(),
                     // Zero, and stays zero while that edge does not exist.
                     mention_depth: 0,
                     // The answer joins the thread its question was asked in,
@@ -2330,7 +2350,20 @@ async fn journal_chat_replies(
         // its durable id, which the console reads as "not saved" and refuses to
         // thread or react on — the honest degradation.
         match journaled {
-            Ok(seq) => response.message_id = Some(seq.value().to_string()),
+            Ok(seq) => {
+                response.message_id = Some(seq.value().to_string());
+                // The durable half of a reply's mention, same as an operator
+                // message's (issue: mentions). Without this an `@user` an agent
+                // types back renders as a chip and nothing else — the badge and
+                // the notification both silently missing for whoever it named,
+                // which is worst for exactly the person it is meant to reach:
+                // offline when the reply lands.
+                if !reply_mentions.is_empty() {
+                    runtime
+                        .notify_mentions(id, &reply_mentions, &seq, None, desk)
+                        .await;
+                }
+            }
             Err(err) => tracing::warn!(
                 error = %err,
                 "failed to journal a chat reply; the bubble has no durable id"
@@ -3653,6 +3686,150 @@ mode = "full"
             .await
             .unwrap();
         let runtime = RuntimeBuilder::new(home.to_path_buf(), roster_manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// [`roster_manifest`] plus a **memberless** desk — one that exists on the
+    /// roster but has nobody seated on it, the `EmptyDesk` shape `mention_context`
+    /// still has to canonicalize.
+    fn memberless_desk_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend_engineer"]
+
+[[group_chat]]
+id = "sales"
+name = "Sales"
+members = []
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap()
+    }
+
+    /// [`roster_manifest`] plus a desk **literally named** `dm:engineering`,
+    /// beside the ordinary `engineering` desk — the shape `mention_context`
+    /// must resolve **as sent** instead of stripping the `dm:` prefix away.
+    fn dm_prefixed_desk_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend_engineer"]
+
+[[group_chat]]
+id = "dm:engineering"
+name = "Dm Engineering"
+members = ["backend_engineer"]
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap()
+    }
+
+    /// [`state_with_roster`] over [`memberless_desk_manifest`].
+    async fn state_with_memberless_desk(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: memberless_desk_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), memberless_desk_manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// [`state_with_roster`] over [`dm_prefixed_desk_manifest`].
+    async fn state_with_dm_prefixed_desk(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: dm_prefixed_desk_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), dm_prefixed_desk_manifest())
             .with_id(id.clone())
             .build()
             .await
@@ -8944,6 +9121,10 @@ mode = "full"
         /// the park records the shape a workflow node's gated tool call has:
         /// explicitly unlinked from any card, and carrying a run.
         run_id: Option<String>,
+        /// An `@mention` to append to every continuation reply. Exercises the
+        /// durable half of a reply's mention: the re-issue's reply journaling
+        /// must badge the person it names, same as the `/chat` path.
+        continuation_mention: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -8985,12 +9166,17 @@ mode = "full"
                             continue;
                         };
                         rt.grants.consume(&grant.agent, &grant.tool, &grant.args);
+                        let mut text = format!("re-issued {approval_id}");
+                        if let Some(mention) = &self.continuation_mention {
+                            text.push(' ');
+                            text.push_str(mention);
+                        }
                         responses.push(crate::ports::types::OutboundMessage {
                             message_id: None,
                             task_id: None,
                             channel: grant.agent.clone(),
                             agent: None,
-                            text: format!("re-issued {approval_id}"),
+                            text,
                             steps: Vec::new(),
                             reply_to: None,
                             mentions: Vec::new(),
@@ -9026,7 +9212,7 @@ mode = "full"
         chat: Option<&str>,
         fail_continuation: bool,
     ) -> MultiParkCompany {
-        multi_park_company_run(home, parks, chat, fail_continuation, None).await
+        multi_park_company_run(home, parks, chat, fail_continuation, None, None).await
     }
 
     /// [`multi_park_company`], with the parked effects stamped as a workflow
@@ -9037,6 +9223,7 @@ mode = "full"
         chat: Option<&str>,
         fail_continuation: bool,
         run_id: Option<&str>,
+        continuation_mention: Option<&str>,
     ) -> MultiParkCompany {
         let decisions = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -9053,6 +9240,7 @@ mode = "full"
                 rt: rt_slot.clone(),
                 fail_continuation,
                 run_id: run_id.map(str::to_string),
+                continuation_mention: continuation_mention.map(str::to_string),
             })),
         )
         .await;
@@ -9308,7 +9496,8 @@ mode = "full"
     #[tokio::test]
     async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
         let home_dir = home();
-        let c = multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092")).await;
+        let c =
+            multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None).await;
 
         let response = c
             .app
@@ -9331,6 +9520,102 @@ mode = "full"
         assert_ne!(
             chat_id, "ceo",
             "the re-issue must not be journaled as a DM from the teammate that ran it"
+        );
+    }
+
+    /// **Codex P1 (pass 2).** A continuation's reply is journaled through
+    /// `publish_continuation`, not the `/chat` turn — so a mention an agent
+    /// types back in an approval follow-up used to render as a chip and
+    /// nothing else: no badge, no durable row, exactly the person it is meant
+    /// to reach (offline when the reply lands) getting neither.
+    ///
+    /// Both paths file through the same writer now; this pins that an `@user`
+    /// in a continuation reply lands as a mention notification whose audience
+    /// carries the person named, under the chat the continuation answered in.
+    #[tokio::test]
+    async fn a_continuation_reply_that_mentions_a_user_files_a_notification() {
+        let home_dir = home();
+        let c = multi_park_company_run(
+            home_dir.path(),
+            1,
+            Some("sales"),
+            false,
+            None,
+            Some("@harness-admin"),
+        )
+        .await;
+
+        let users = c
+            .runtime
+            .users()
+            .list_users(&CompanyId::new("acme"))
+            .await
+            .unwrap();
+        let admin = users
+            .iter()
+            .find(|u| u.email == "harness-admin@example.test")
+            .expect("the fixed admin is seeded");
+        assert_eq!(
+            admin.status,
+            crate::ports::users::UserStatus::Active,
+            "the admin must be an active, mentionable target"
+        );
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(approve_detached(&c.approvals[0]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        settle(&c.runtime, 1).await;
+        // The notification is filed inside `publish_continuation`, after the
+        // reply is journaled — `settle` only waits for the reply. A loaded CI
+        // runner can reach this point before the notification append finishes,
+        // so poll for it (issue #1665, Codex P1 regression).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = c
+                    .runtime
+                    .notifications()
+                    .list(&CompanyId::new("acme"), &admin.id)
+                    .await
+                    .unwrap();
+                if notes.iter().any(|n| n.notification.kind == "mention") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the mention notification never appeared");
+
+        let notes = c
+            .runtime
+            .notifications()
+            .list(&CompanyId::new("acme"), &admin.id)
+            .await
+            .unwrap();
+        let mentions: Vec<_> = notes
+            .into_iter()
+            .filter(|n| n.notification.kind == "mention")
+            .collect();
+        assert_eq!(
+            mentions.len(),
+            1,
+            "the continuation's mention must badge the person it names"
+        );
+        let note = &mentions[0].notification;
+        assert_eq!(note.context.as_deref(), Some("sales"));
+        assert_eq!(
+            note.title, "Someone mentioned you in sales",
+            "a continuation has no author, so the generic label is the honest one"
+        );
+        assert!(
+            note.audience
+                .as_ref()
+                .is_some_and(|a| a.contains(&admin.id)),
+            "the named user must be in the notification's audience"
         );
     }
 
@@ -9456,6 +9741,399 @@ mode = "full"
             authors,
             vec![crate::ports::SYSTEM_AUTHOR.to_string()],
             "the runtime authored this notice, so it must not be stored under its destination"
+        );
+    }
+
+    /// A brain whose every reply names `@everyone` — the fixed shape for
+    /// proving an agent reply's mentions file a notification, same as an
+    /// operator message's already does.
+    struct MentioningReplyBrain;
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for MentioningReplyBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            let mut channel_responses = Vec::new();
+            for event in &req.events {
+                if matches!(event, CompanyEvent::OperatorMessage { .. }) {
+                    channel_responses.push(crate::ports::types::OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: None,
+                        text: "cc @everyone on this".into(),
+                        steps: Vec::new(),
+                        reply_to: None,
+                        mentions: Vec::new(),
+                    });
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "mentioning reply",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// **The Codex P1 finding:** `journal_chat_replies` resolved an agent
+    /// reply's mentions and stored them on `CompanyEvent::AgentReply`, but never
+    /// called `notify_mentions` — so an `@user` an agent typed *back* rendered
+    /// as a chip and left the named person with no durable notification and no
+    /// rail badge, unlike the operator's own message a few lines above it in
+    /// the very same function. Missing it worst for exactly the person it is
+    /// meant to reach: offline when the reply lands.
+    #[tokio::test]
+    async fn a_mention_in_an_agent_reply_notifies_the_person_it_names() {
+        let home_dir = home();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(MentioningReplyBrain)),
+        )
+        .await;
+        // A second person for `@everyone` to reach — the sender is always
+        // excluded from their own broadcast, so proving this needs somebody
+        // else on the roster.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state.clone());
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        let member_id = runtime
+            .users()
+            .list_users(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.email == "harness-member@example.test")
+            .expect("seeded member")
+            .id;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"status?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = runtime.notifications().list(&id, &member_id).await.unwrap();
+                if !notes.is_empty() {
+                    return notes;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the mentioned member was notified");
+
+        assert_eq!(notified.len(), 1);
+        assert_eq!(
+            notified[0].notification.kind, "mention",
+            "the reply's @everyone mention has to file the same kind of row an \
+             operator message's does"
+        );
+    }
+
+    /// **The Codex P1 finding:** the context a DM mention stores was decided by
+    /// the human user directory, but a DM's thread id is a roster teammate's
+    /// agent id — which no user record has — so a mention in a normal DM stored
+    /// the bare id. The console's rail keys a DM by `dm:<teammate-id>` (and the
+    /// console sends that bare id as the `chat` for a DM), so no rail row
+    /// displayed the badge and opening the DM could neither match nor clear it.
+    #[tokio::test]
+    async fn a_mention_in_a_dm_stores_the_console_dm_channel_id() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        // A second person for the broadcast to reach — the author is always
+        // excluded from their own `@everyone`.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state.clone());
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        let member_id = runtime
+            .users()
+            .list_users(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.email == "harness-member@example.test")
+            .expect("seeded member")
+            .id;
+
+        // A message addressed to the `designer` DM thread — the bare roster
+        // teammate id, exactly what the console sends for a DM.
+        let response = app
+            .clone()
+            .oneshot(chat_to("cc @everyone on this", Some("designer")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = runtime.notifications().list(&id, &member_id).await.unwrap();
+                if !notes.is_empty() {
+                    return notes;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the mentioned member was notified");
+
+        // The offline echo brain answers the same text, so `@everyone` may land
+        // twice — once for the operator's message, once for the echoed reply.
+        // The count is incidental; the invariant is that *every* mention filed
+        // out of this exchange is keyed to the console's `dm:designer` channel,
+        // not the bare roster thread id.
+        assert!(!notified.is_empty(), "the mentioned member was notified");
+        let contexts: Vec<_> = notified
+            .iter()
+            .map(|n| n.notification.context.as_deref())
+            .collect();
+        assert!(
+            contexts.iter().all(|c| *c == Some("dm:designer")),
+            "every mention in a DM has to store the console's DM channel id, \
+             not the bare roster thread id — got {contexts:?}"
+        );
+    }
+
+    /// [`mention_context`] canonicalizes a **`dm:`-prefixed** noncanonical key
+    /// too. An API client can address a DM with the console's channel shape but
+    /// a noncanonical payload — `dm:BACKEND_ENGINEER` for the teammate whose id
+    /// is `backend_engineer`. The routing resolves that case-insensitively, so
+    /// the stored context has to carry the canonical agent id: filing the raw
+    /// key under `dm:BACKEND_ENGINEER` badges a rail channel that does not
+    /// exist, and opening the actual DM can never clear it. Pre-fix, the
+    /// `dm:`-prefixed branch returned the key verbatim and bypassed
+    /// `assignee::resolve` entirely.
+    #[tokio::test]
+    async fn mention_context_canonicalizes_prefixed_dm_keys() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A case-variant of the teammate's id, carrying the `dm:` prefix the
+        // console mints.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[], "dm:BACKEND_ENGINEER")
+                .await,
+            "dm:backend_engineer",
+            "a `dm:`-prefixed noncanonical teammate key has to store dm:<agent-id>"
+        );
+        // The already-canonical shape stays unchanged — the resolution must
+        // not move a key that was already right.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[], "dm:backend_engineer")
+                .await,
+            "dm:backend_engineer",
+            "a canonical dm:<teammate-id> key is kept as-is"
+        );
+        // A `dm:` key whose bare half names a desk (the desk-first ordering the
+        // routing uses) files under the desk id, not a nonexistent `dm:<desk>`.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:Engineering").await,
+            "engineering",
+            "a `dm:` key that resolves to a desk has to store the desk id"
+        );
+    }
+
+    /// A desk id that collides with a **human user id** still files under the
+    /// desk. `assignee::resolve`'s desk-first ordering — the same one
+    /// `responder_for` uses — outranks the user directory, and the directory
+    /// must not get a say ahead of it. Pre-fix, a `users` pre-check ran before
+    /// the resolution and returned `dm:<id>` for any bare key matching a human,
+    /// so a mention aimed at a desk whose id happened to match a human id would
+    /// badge a nonexistent DM channel and could never be cleared from the desk
+    /// it was meant for.
+    #[tokio::test]
+    async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A human whose id collides with the `engineering` desk's id. The human
+        // directory must not win: the message is aimed at the desk.
+        let human = crate::ports::users::UserRecord {
+            id: "engineering".to_string(),
+            email: "human@example.test".to_string(),
+            display_name: None,
+            avatar: None,
+            role: crate::ports::users::UserRole::Member,
+            status: crate::ports::users::UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: crate::ports::now_millis(),
+            last_seen_at_millis: None,
+            updated_at_millis: crate::ports::now_millis(),
+        };
+
+        assert_eq!(
+            runtime
+                .mention_context(&id, std::slice::from_ref(&human), "engineering")
+                .await,
+            "engineering",
+            "a desk id that matches a human id files under the desk, not dm:<id>"
+        );
+        assert_eq!(
+            runtime
+                .mention_context(&id, std::slice::from_ref(&human), "dm:engineering")
+                .await,
+            "engineering",
+            "the same collision through a dm:-prefixed key still files under the desk"
+        );
+        // A DM the human is actually a teammate of still badges as a DM.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[human], "dm:backend_engineer")
+                .await,
+            "dm:backend_engineer",
+            "a real DM channel is unaffected by the collision guard"
+        );
+    }
+
+    /// [`mention_context`] resolves a `dm:`-prefixed key **as sent** before
+    /// stripping the prefix, so a desk literally named `dm:engineering` keeps
+    /// that id. Pre-fix, the unconditional strip resolved `engineering` instead
+    /// and filed the badge under the wrong transcript — the exact claim
+    /// [`assignee::dm_key`]'s contract warns about.
+    #[tokio::test]
+    async fn mention_context_a_desk_literally_named_dm_prefix_keeps_its_id() {
+        let home_dir = home();
+        let state = state_with_dm_prefixed_desk(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // The literal `dm:engineering` desk resolves as sent; stripping would
+        // misroute to the plain `engineering` desk.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:engineering").await,
+            "dm:engineering",
+            "a desk literally named dm:<…> keeps its id — the raw key resolves first"
+        );
+        // The un-prefixed desk is untouched by the collision.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "engineering").await,
+            "engineering",
+            "the un-prefixed desk still resolves to its own id"
+        );
+        // A genuine DM still re-keys onto the rail's DM channel.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[], "dm:backend_engineer")
+                .await,
+            "dm:backend_engineer",
+            "a real DM channel is unaffected by the literal dm: desk"
+        );
+    }
+
+    /// [`mention_context`] stores the **canonical** id for a key typed in a
+    /// noncanonical shape — a desk by its display name, a teammate by a
+    /// case-variant of their id. `assignee::resolve` already returns canonical
+    /// ids (issue #214); storing the raw key instead would file the badge under
+    /// a channel id the rail never has, so it could neither render nor clear.
+    #[tokio::test]
+    async fn mention_context_stores_canonical_ids_for_noncanonical_keys() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A desk addressed by its display name files under the desk's id —
+        // `"Engineering"` names the desk whose id is `engineering`.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Engineering").await,
+            "engineering",
+            "a desk named by its display name has to store the desk id, not the raw key"
+        );
+        // A teammate addressed by a case-variant of their id files under the
+        // canonical agent id, re-keyed into the console's DM channel space.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "BACKEND_ENGINEER").await,
+            "dm:backend_engineer",
+            "a teammate named by a noncanonical key has to store dm:<agent-id>"
+        );
+    }
+
+    /// [`mention_context`] files a mention in the General desk — the default an
+    /// unaddressed message lands in — under the console's canonical main-thread
+    /// id even when this company has no desk named/id `General`. This fixture's
+    /// only desk is `engineering`, so every general-chat spelling would
+    /// otherwise fall through to the raw string and badge a rail row that does
+    /// not exist (issue #1665 follow-up).
+    #[tokio::test]
+    async fn mention_context_maps_unresolvable_general_spellings_to_main() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        for general in ["General", "general", "main", ""] {
+            assert_eq!(
+                runtime.mention_context(&id, &[], general).await,
+                crate::server::chat_history::MAIN_THREAD_ID,
+                "a mention in the General desk ({general:?}) has to store the console's \
+                 main-thread id, which the rail aliases onto its first rendered desk \
+                 channel"
+            );
+        }
+        // A desk that does resolve keeps its canonical id — the general-chat
+        // mapping must not swallow a real desk.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Engineering").await,
+            "engineering",
+            "a real desk keeps its canonical id even when its name looks general"
+        );
+    }
+
+    /// [`mention_context`] canonicalizes a **memberless** desk too. A desk that
+    /// exists but has nobody seated on it is still a real desk with a real rail
+    /// channel, so a key typed as its display name must file under its canonical
+    /// id: `"Sales"` has to badge `#sales`, and opening `#sales` has to clear it.
+    /// Pre-fix, `EmptyDesk` fell through the same wildcard as `Unknown` and
+    /// stored the raw key — a channel id no desk renders, so the badge was
+    /// invisible and could never clear.
+    #[tokio::test]
+    async fn mention_context_canonicalizes_a_memberless_desk() {
+        let home_dir = home();
+        let state = state_with_memberless_desk(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Sales").await,
+            "sales",
+            "a memberless desk named by its display name has to store the desk id, \
+             not the raw key — the rail's channel id is `sales`"
+        );
+        // The desk that does have a lead keeps behaving as before.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Engineering").await,
+            "engineering",
+            "a desk with a lead still stores its canonical id"
         );
     }
 }

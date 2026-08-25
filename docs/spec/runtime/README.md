@@ -104,7 +104,7 @@ Supporting docs:
   hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — the map of the API surface: which planes exist and where
   each is documented
-  - [api-write-plane.md](api-write-plane.md) — every write the console makes,
+  - [Console write plane](api-write-plane.md) — every write the console makes,
     route by route
   - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
 - [credentials.md](credentials.md) — the company's own TinyHumans key: the one
@@ -134,9 +134,10 @@ Supporting docs:
 - [connectors.md](connectors.md) — where the runtime runs: the four connectors
   (this computer, TinyHumans Cloud, a remote gateway, over SSH), why the choice
   is per host rather than per application, and what each one costs
-- [company-setup.md](company-setup.md) — first-run **company** setup: three
-  questions asked once, turned into a real roster of agents. Distinct from
-  [setup.md](setup.md), which configures the *instance*
+- [company-setup/overview.md](company-setup/overview.md) — first-run **company**
+  setup: three questions asked once, turned into a real roster of agents, with
+  fallback and resume flows. Distinct from [setup.md](setup.md), which
+  configures the *instance*
   - [company-setup-guarantees.md](company-setup-guarantees.md) — the four things
     the host *enforces* rather than asks a prompt for: job coverage checked
     against its own list, a tool belt asked for rather than inherited, a copy of

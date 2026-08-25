@@ -2960,6 +2960,8 @@ export function WorkflowsView({
           leftRail={
             historyOpen && historySupported ? (
               <RunHistoryPanel
+                client={client}
+                company={company}
                 runs={historyRows}
                 graph={graph}
                 workflowName={selected?.name ?? selectedId ?? ""}

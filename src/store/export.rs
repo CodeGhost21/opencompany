@@ -1731,6 +1731,8 @@ mod test {
             overlay_policy: Some(PolicyOverride {
                 mode: Some("auto".to_string()),
                 always_approve: Some(vec!["payment.send".to_string()]),
+                auto_approve_under_usd: Some(Some(25.0)),
+                approval_ttl_hours: Some(48),
                 set_by: admin_actor(),
                 at_millis: 1_700_000_000_002,
             }),
@@ -1826,6 +1828,8 @@ mod test {
             policy.always_approve.as_deref(),
             Some(["payment.send".to_string()].as_slice())
         );
+        assert_eq!(policy.auto_approve_under_usd, Some(Some(25.0)));
+        assert_eq!(policy.approval_ttl_hours, Some(48));
         assert_eq!(policy.set_by, admin_actor());
         assert_eq!(policy.at_millis, 1_700_000_000_002);
         assert_eq!(

@@ -2267,8 +2267,14 @@ impl TokenUsage {
 /// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
 /// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
 /// the `openhuman` feature). Traces are still *written* every cycle and kept
-/// in a bounded inspection window; nothing reads them back. Do not re-add a
-/// field here until something consumes it.
+/// in a bounded inspection window; nothing reads them back.
+///
+/// The one field added back since #1175 is [`Self::policy`], and it is added
+/// deliberately: it is the cycle-start approval policy, consumed by
+/// [`HarnessBrain`](crate::harness::built_in::brain::HarnessBrain) so the
+/// harness roster rebuilds against the same snapshot the native gate was
+/// re-applied from. Do not re-add any other field here until something consumes
+/// it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
@@ -2284,6 +2290,15 @@ pub struct CycleRequest {
     /// idempotent `POST /events` on the durable log seq.
     #[serde(default)]
     pub event_seqs: Vec<EventSeq>,
+    /// The effective approval policy this cycle's runtime snapshot enforces,
+    /// captured at the same store load the native gate is re-applied from
+    /// (issue #1455). The harness rebuilds its roster against this boundary so
+    /// both gates judge one turn on one policy: a console override that lands
+    /// after the load is invisible to both, and one that landed before is in
+    /// both. `None` for callers building a request without a company record
+    /// (a brain then falls back to its own store read).
+    #[serde(default)]
+    pub policy: Option<Policy>,
 }
 
 /// The brain's output from one cycle.
@@ -3237,6 +3252,24 @@ pub struct PolicyOverride {
     /// over every tier including `full`, so the two must stay distinguishable.
     #[serde(default)]
     pub always_approve: Option<Vec<String>>,
+    /// The spend threshold, including an explicit `None` for "no cap".
+    ///
+    /// The outer option says whether the operator set this field; the inner
+    /// option is the threshold itself. `Some(None)` is therefore a real,
+    /// stricter choice: every spend parks for approval. The custom serde hooks
+    /// preserve the distinction between a persisted JSON `null` and an absent
+    /// key — plain nested `Option` deserialization collapses both to `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_policy_cap",
+        deserialize_with = "deserialize_policy_cap"
+    )]
+    pub auto_approve_under_usd: Option<Option<f64>>,
+    /// The approval deadline in hours, or `None` to leave the manifest's value
+    /// in force.
+    #[serde(default)]
+    pub approval_ttl_hours: Option<u64>,
     /// Who set it. A tier that can be loosened anonymously is not much of a gate.
     pub set_by: Actor,
     /// When it was set (epoch millis).
@@ -3251,7 +3284,63 @@ impl PolicyOverride {
     /// persisting a row that says nothing but whose presence the console renders
     /// as "overridden".
     pub fn is_empty(&self) -> bool {
-        self.mode.is_none() && self.always_approve.is_none()
+        self.mode.is_none()
+            && self.always_approve.is_none()
+            && self.auto_approve_under_usd.is_none()
+            && self.approval_ttl_hours.is_none()
+    }
+}
+
+/// Serializes an operator spend-cap override as a number or explicit `null`.
+fn serialize_policy_cap<S>(value: &Option<Option<f64>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    value.serialize(serializer)
+}
+
+/// Deserializes a present spend-cap key, retaining `null` as an explicit
+/// no-cap override. An omitted key is handled by `#[serde(default)]` and never
+/// calls this function.
+fn deserialize_policy_cap<'de, D>(deserializer: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<f64>::deserialize(deserializer).map(Some)
+}
+
+/// Resolves a manifest `[policy]` against an operator override — the merge
+/// [`CompanyRecord::effective_policy`] applies, factored out so the runtime
+/// builder can build the approval gate from the same resolution without
+/// constructing a whole record.
+///
+/// `None` override means the manifest's policy is in force byte for byte.
+/// The merge is per field and `None` means "not overridden", so an operator
+/// who moved the tier has not thereby silently reset the always-ask list to
+/// the manifest's. An explicitly emptied list (`Some(vec![])`) survives as
+/// empty; only an absent field falls through. An unknown stored mode also
+/// falls through to the manifest: it can arise under version skew, and
+/// allowing the policy parser to downgrade it to `supervised` would loosen
+/// a `readonly` manifest.
+pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverride>) -> Policy {
+    let Some(override_) = override_ else {
+        return manifest.clone();
+    };
+    Policy {
+        mode: override_
+            .mode
+            .as_deref()
+            .filter(|mode| POLICY_MODES.contains(mode))
+            .map(str::to_owned)
+            .unwrap_or_else(|| manifest.mode.clone()),
+        always_approve: override_
+            .always_approve
+            .clone()
+            .unwrap_or_else(|| manifest.always_approve.clone()),
+        auto_approve_under_usd: override_
+            .auto_approve_under_usd
+            .unwrap_or(manifest.auto_approve_under_usd),
+        approval_ttl_hours: override_.approval_ttl_hours.or(manifest.approval_ttl_hours),
     }
 }
 
@@ -4184,32 +4273,7 @@ impl CompanyRecord {
     /// allowing the policy parser to downgrade it to `supervised` would loosen
     /// a `readonly` manifest.
     pub fn effective_policy(&self) -> Policy {
-        let manifest = &self.manifest.policy;
-        let Some(override_) = &self.overlay_policy else {
-            return manifest.clone();
-        };
-        Policy {
-            mode: override_
-                .mode
-                .as_deref()
-                .filter(|mode| POLICY_MODES.contains(mode))
-                .map(str::to_owned)
-                .unwrap_or_else(|| manifest.mode.clone()),
-            always_approve: override_
-                .always_approve
-                .clone()
-                .unwrap_or_else(|| manifest.always_approve.clone()),
-            // Not overridable from the console today. Left reading the manifest
-            // rather than added to `PolicyOverride` speculatively: the issue asks
-            // for the tier and the always-ask list, and a spend threshold whose
-            // console control does not exist would be a field nothing can write.
-            auto_approve_under_usd: manifest.auto_approve_under_usd,
-            // Same reasoning for the approval deadline (issue #971): the knob is
-            // a manifest one, so the override carries the manifest's answer
-            // through unchanged rather than gaining a field no console control
-            // writes.
-            approval_ttl_hours: manifest.approval_ttl_hours,
-        }
+        effective_policy(&self.manifest.policy, self.overlay_policy.as_ref())
     }
 
     /// The first `agent_id` on this record carrying more than one override, if
@@ -6334,12 +6398,25 @@ mod test {
         PolicyOverride {
             mode: mode.map(str::to_string),
             always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
             set_by: Actor {
                 kind: ActorKind::User,
                 id: "user-1".to_string(),
             },
             at_millis: 1_700_000_000_000,
         }
+    }
+
+    #[test]
+    fn explicit_no_cap_policy_override_survives_json_round_trip() {
+        let mut override_ = policy_entry(None, None);
+        override_.auto_approve_under_usd = Some(None);
+        let encoded = serde_json::to_value(&override_).expect("serialize override");
+        assert!(encoded["auto_approve_under_usd"].is_null());
+        let decoded: PolicyOverride =
+            serde_json::from_value(encoded).expect("deserialize override");
+        assert_eq!(decoded.auto_approve_under_usd, Some(None));
     }
 
     /// With no override stored, `effective_policy` is the manifest verbatim —
@@ -6437,16 +6514,24 @@ mod test {
         );
     }
 
-    /// `auto_approve_under_usd` is not overridable and keeps reading the
-    /// manifest, so the merge cannot silently drop a threshold it does not carry.
+    /// The spend threshold and deadline are overridden independently of the
+    /// tier and list, including an explicit no-cap choice.
     #[test]
-    fn the_spend_threshold_is_untouched_by_a_policy_override() {
+    fn spend_threshold_and_deadline_can_be_overridden_independently() {
         let manifest = "[company]\nname = \"Acme\"\n\
              [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
              [policy]\nmode = \"supervised\"\nauto_approve_under_usd = 2.5\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_policy = Some(policy_entry(Some("full"), Some(vec![])));
         assert_eq!(record.effective_policy().auto_approve_under_usd, Some(2.5));
+        assert_eq!(record.effective_policy().approval_ttl_hours, None);
+
+        let override_ = record.overlay_policy.as_mut().unwrap();
+        override_.auto_approve_under_usd = Some(None);
+        override_.approval_ttl_hours = Some(72);
+        let effective = record.effective_policy();
+        assert_eq!(effective.auto_approve_under_usd, None);
+        assert_eq!(effective.approval_ttl_hours, Some(72));
     }
 
     /// The roster a company was launched with is still the roster it runs, until

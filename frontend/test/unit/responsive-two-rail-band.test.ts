@@ -101,3 +101,23 @@ describe("composer keeps Send in-flow in a narrow pane (issue #1383)", () => {
     expect(sendButton).not.toMatch(/\babsolute\b|\bfixed\b/);
   });
 });
+
+describe("mention clearing is gated on the transcript being visible (codex P1)", () => {
+  const chatView = read("views/ChatView.tsx");
+
+  it("only reports a channel viewed while the chat pane is actually on screen", () => {
+    // The view-report effect that clears mentions must not fire while a sub-`lg`
+    // pane shows only the rail — a mention landing then would be marked read
+    // behind the operator's back. A jsdom render cannot prove it (the whole
+    // failure is the `lg` media query), so this pins the gate to the same
+    // `mobilePane` toggle and `lg` breakpoint the pane's class contract above
+    // uses: a future move of the rail off `lg` trips that class test too.
+    expect(chatView).toMatch(/if \(channel && chatPaneVisible\)/);
+    expect(chatView).toContain(
+      'const chatPaneVisible = mobilePane === "chat" || isDesktop;',
+    );
+    // The visibility flag is a dependency, so re-opening the pane from the rail
+    // re-runs the report and clears whatever is newly visible.
+    expect(chatView).toContain("chatPaneVisible,\n  ]);");
+  });
+});

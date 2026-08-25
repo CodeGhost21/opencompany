@@ -54,8 +54,8 @@
 //! sweeping is still a queue that never empties.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use async_trait::async_trait;
 
@@ -169,8 +169,8 @@ pub enum ResolveOutcome {
 /// The default [`ApprovalGate`]: evaluates effects against a company's
 /// `[policy]` and holds the in-memory approval queue.
 pub struct ManifestApprovalGate {
-    policy: Policy,
-    ttl_millis: u64,
+    policy: RwLock<Policy>,
+    ttl_millis: AtomicU64,
     parked: Mutex<HashMap<ApprovalId, ParkedEffect>>,
     /// The governance kill switch (issue #86).
     ///
@@ -209,8 +209,8 @@ impl ManifestApprovalGate {
             .map(|hours| hours.saturating_mul(60 * 60 * 1000))
             .unwrap_or(DEFAULT_TTL_MILLIS);
         Self {
-            policy,
-            ttl_millis,
+            policy: RwLock::new(policy),
+            ttl_millis: AtomicU64::new(ttl_millis),
             parked: Mutex::new(HashMap::new()),
             emergency: AtomicBool::new(false),
         }
@@ -241,7 +241,7 @@ impl ManifestApprovalGate {
 
     /// Overrides the parked-approval TTL (default [`DEFAULT_TTL_MILLIS`]).
     pub fn with_ttl_millis(mut self, ttl_millis: u64) -> Self {
-        self.ttl_millis = ttl_millis;
+        self.ttl_millis = AtomicU64::new(ttl_millis);
         self
     }
 
@@ -254,7 +254,70 @@ impl ManifestApprovalGate {
     /// second thing that can disagree — the console would then show a deadline
     /// the gate does not enforce.
     pub fn ttl_millis(&self) -> u64 {
-        self.ttl_millis
+        self.ttl_millis.load(Ordering::Relaxed)
+    }
+
+    /// The policy snapshot the gate currently evaluates against.
+    ///
+    /// What [`apply_effective_policy`](Self::apply_effective_policy) last
+    /// installed, or the `[policy]` block [`new`](Self::new) was built from when
+    /// nothing has overridden it. The cycle reads this for a test-injected gate
+    /// so the harness roster is pinned to the SAME policy the native gate keeps
+    /// (issue #1455) — an injected gate carries its own policy on purpose, which
+    /// may differ from the persisted record's effective one.
+    pub fn policy(&self) -> Policy {
+        self.policy.read().expect("policy lock poisoned").clone()
+    }
+
+    /// Updates the deadline used for new and already parked approvals.
+    ///
+    /// The policy overlay is an operator control, so waiting for a process
+    /// restart would make the Settings panel report a deadline the live queue
+    /// does not use. A parked card remains the same request, but its deadline
+    /// is evaluated from the current company policy each time it is displayed
+    /// or resolved.
+    pub fn set_ttl_millis(&self, ttl_millis: u64) {
+        self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
+    }
+
+    /// Replaces the policy snapshot the gate evaluates against, keeping the
+    /// parked queue and the emergency switch.
+    ///
+    /// Used at boot/rebuild time and at the start of every cycle (issue #1455):
+    /// the gate is constructed from the seed's `[policy]` alone and the
+    /// operator's console override resolves only after the persisted record is
+    /// read — see
+    /// [`CompanyRecord::effective_policy`](crate::ports::types::CompanyRecord::effective_policy).
+    /// Applying the effective policy keeps native evaluation (mode,
+    /// `always_approve`, spend cap) and the derived deadline enforcing what the
+    /// console reports; without it a persisted override would still be returned
+    /// by `GET` while the live gate silently reverted to the manifest snapshot,
+    /// which is especially unsafe after an operator *shortened* a deadline.
+    pub fn apply_effective_policy(&self, policy: Policy) {
+        self.apply_effective_ttl(&policy);
+        self.policy
+            .write()
+            .expect("policy lock poisoned")
+            .clone_from(&policy);
+    }
+
+    /// Moves only the deadline derived from `policy`, leaving the evaluation
+    /// snapshot (mode, `always_approve`, spend cap) untouched.
+    ///
+    /// The TTL is *immediate* by contract while the rest of the policy moves at
+    /// the next safe turn boundary: a parked card remains the same request, but
+    /// its deadline is re-evaluated against the current TTL each time it is
+    /// displayed, swept or resolved, so delaying the deadline until the next
+    /// cycle would let approvals parked under a longer TTL outlive the one the
+    /// console just reported. The ops handler applies this right after a policy
+    /// PUT/DELETE persists, and [`apply_effective_policy`](Self::apply_effective_policy)
+    /// applies it alongside the snapshot at boot and per-cycle.
+    pub fn apply_effective_ttl(&self, policy: &Policy) {
+        let ttl_millis = policy
+            .approval_ttl_hours
+            .map(|hours| hours.saturating_mul(60 * 60 * 1000))
+            .unwrap_or(DEFAULT_TTL_MILLIS);
+        self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
     }
 
     /// The ids of every currently-parked approval.
@@ -308,7 +371,7 @@ impl ManifestApprovalGate {
         let mut map = self.parked.lock().expect("parked map poisoned");
         let mut expired: Vec<(u64, ApprovalId)> = map
             .iter()
-            .filter(|(_, pe)| now_millis.saturating_sub(pe.parked_at_millis) >= self.ttl_millis)
+            .filter(|(_, pe)| now_millis.saturating_sub(pe.parked_at_millis) >= self.ttl_millis())
             .map(|(id, pe)| (pe.parked_at_millis, id.clone()))
             .collect();
         expired.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_ref().cmp(b.1.as_ref())));
@@ -380,7 +443,7 @@ impl ManifestApprovalGate {
         let Some(parked) = self.parked.lock().expect("parked map poisoned").remove(id) else {
             return ResolveOutcome::NotParked;
         };
-        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
+        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
             return ResolveOutcome::Expired;
         }
         ResolveOutcome::Approved(amended)
@@ -406,7 +469,7 @@ impl ManifestApprovalGate {
         let Some(parked) = self.parked.lock().expect("parked map poisoned").remove(id) else {
             return ResolveOutcome::NotParked;
         };
-        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
+        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
             return ResolveOutcome::Expired;
         }
         match verdict {
@@ -433,7 +496,7 @@ impl ManifestApprovalGate {
             .lock()
             .expect("parked map poisoned")
             .remove(id)?;
-        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
+        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
             return None;
         }
         match verdict {
@@ -482,15 +545,17 @@ impl ManifestApprovalGate {
     /// [`POLICY_MODES`](crate::company::POLICY_MODES) and fails on the day a
     /// fifth tier is added to that list and forgotten here.
     ///
-    /// Deliberately takes `mode` as an argument rather than reading
-    /// `self.policy.mode`, so the test can ask about a word without building a
-    /// whole [`Policy`] for it — and so the fail-safe arm stays reachable.
-    fn mode_decision(&self, mode: &str, effect: &Effect) -> Option<PolicyDecision> {
+    /// Takes the evaluated `Policy` snapshot as an argument — not `&self` — so a
+    /// caller already holding the policy read guard can dispatch without a
+    /// recursive read of the non-reentrant `RwLock`, and `mode` as a separate
+    /// argument so the test can ask about a word without building a whole
+    /// [`Policy`] whose mode it is, keeping the fail-safe arm reachable.
+    fn mode_decision(policy: &Policy, mode: &str, effect: &Effect) -> Option<PolicyDecision> {
         match mode {
             "full" => Some(PolicyDecision::Allow),
             "readonly" => Some(PolicyDecision::RequireApproval),
-            "supervised" => Some(self.evaluate_supervised(effect)),
-            "auto" => Some(self.evaluate_auto(effect)),
+            "supervised" => Some(Self::evaluate_supervised_with_policy(policy, effect)),
+            "auto" => Some(Self::evaluate_auto(policy, effect)),
             _ => None,
         }
     }
@@ -541,13 +606,25 @@ impl ManifestApprovalGate {
     /// here. The invariant that must survive that edit is the one direction:
     /// whatever this parks must stay a **subset** of what
     /// [`evaluate_supervised`](Self::evaluate_supervised) parks.
-    fn evaluate_auto(&self, effect: &Effect) -> PolicyDecision {
-        self.evaluate_supervised(effect)
+    fn evaluate_auto(policy: &Policy, effect: &Effect) -> PolicyDecision {
+        Self::evaluate_supervised_with_policy(policy, effect)
     }
 
-    /// The supervised-mode checkpoint taxonomy.
+    /// Evaluates the supervised taxonomy using a captured policy snapshot.
+    ///
+    /// Keeping the cap as an argument prevents a caller that already holds the
+    /// policy read guard from attempting a recursive read of the non-reentrant
+    /// `RwLock`.
+    fn evaluate_supervised_with_policy(policy: &Policy, effect: &Effect) -> PolicyDecision {
+        Self::evaluate_supervised_with_cap(effect, policy.auto_approve_under_usd)
+    }
+
     fn evaluate_supervised(&self, effect: &Effect) -> PolicyDecision {
-        let cap = self.policy.auto_approve_under_usd;
+        let policy = self.policy.read().expect("policy lock poisoned");
+        Self::evaluate_supervised_with_policy(&policy, effect)
+    }
+
+    fn evaluate_supervised_with_cap(effect: &Effect, cap: Option<f64>) -> PolicyDecision {
         match effect.group() {
             // Spend under the cap (strict `<`) is auto-allowed; at/over the cap,
             // with no cap, or with an unknown amount, it parks.
@@ -617,18 +694,17 @@ impl ApprovalGate for ManifestApprovalGate {
         //    like `payment` now parks `payment.send` natively, where before it
         //    parked nothing. That direction is the fail-safe one — an operator
         //    who named a family meant the family.
-        if crate::policy::always_approve::matches(&self.policy.always_approve, effect.kind()) {
+        let policy = self.policy.read().expect("policy lock poisoned");
+        if crate::policy::always_approve::matches(&policy.always_approve, effect.kind()) {
             return Ok(PolicyDecision::RequireApproval);
         }
 
-        // 3. mode dispatch. A word with no arm is not a tier — the manifest
-        //    validator rejects anything outside `POLICY_MODES` before a company
-        //    loads — so `None` here means a path that reached a `Policy` without
-        //    validation. It fails safe: require approval.
-        let decision = self
-            .mode_decision(self.policy.mode.as_str(), effect)
-            .unwrap_or(PolicyDecision::RequireApproval);
-        Ok(decision)
+        // Mode dispatch against the held snapshot. A word with no arm is not a
+        // tier — the manifest validator rejects anything outside `POLICY_MODES`
+        // before a company loads — so `None` here means a path that reached a
+        // `Policy` without validation. It fails safe: require approval.
+        Ok(Self::mode_decision(&policy, &policy.mode, effect)
+            .unwrap_or(PolicyDecision::RequireApproval))
     }
 
     async fn park(&self, _company: &CompanyId, effect: Effect) -> Result<ApprovalId> {
@@ -720,6 +796,35 @@ mod test {
         gate.evaluate(&company(), effect).await.unwrap()
     }
 
+    #[tokio::test]
+    async fn apply_effective_policy_updates_live_state_without_dropping_queue_or_emergency() {
+        let gate = ManifestApprovalGate::new(policy("supervised", Some(5.0)));
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+
+        gate.apply_effective_policy(Policy {
+            approval_ttl_hours: Some(2),
+            ..policy("full", None)
+        });
+
+        assert_eq!(gate.parked_ids(), vec![id]);
+        assert!(gate.is_emergency());
+        assert_eq!(gate.ttl_millis(), 2 * 60 * 60 * 1000);
+        assert_eq!(
+            gate.policy(),
+            Policy {
+                approval_ttl_hours: Some(2),
+                ..policy("full", None)
+            }
+        );
+        assert_eq!(
+            decide(&gate, &effect("misc.do", EffectGroup::Other)).await,
+            PolicyDecision::Allow
+        );
+    }
     #[tokio::test]
     async fn readonly_gates_everything() {
         let gate = ManifestApprovalGate::new(policy("readonly", None));
@@ -962,13 +1067,15 @@ mod test {
     /// `Some` is the only way to tell those apart.
     #[tokio::test]
     async fn every_policy_mode_has_a_named_arm() {
-        let gate = ManifestApprovalGate::new(policy("supervised", None));
         let probe = effect("misc.do", EffectGroup::Other);
 
         let mut checked = 0;
         for mode in crate::company::POLICY_MODES {
+            // A fresh snapshot whose mode is the probed word: `mode_decision`
+            // takes the `Policy` explicitly, so the fail-safe arm stays
+            // reachable without building a gate for every word.
             assert!(
-                gate.mode_decision(mode, &probe).is_some(),
+                ManifestApprovalGate::mode_decision(&policy(mode, None), mode, &probe).is_some(),
                 "`{mode}` is a selectable tier but falls into the fail-safe \
                  catch-all, so it silently behaves like `readonly`"
             );
@@ -982,7 +1089,10 @@ mod test {
 
         // The catch-all still exists, and still fails safe, for a word that is
         // not a tier at all.
-        assert!(gate.mode_decision("moderately", &probe).is_none());
+        assert!(
+            ManifestApprovalGate::mode_decision(&policy("moderately", None), "moderately", &probe)
+                .is_none()
+        );
         let unknown = ManifestApprovalGate::new(policy("moderately", None));
         assert_eq!(
             decide(&unknown, &probe).await,
@@ -1644,6 +1754,78 @@ mod test {
         // A side-effecting group, so this would be `Deny` if the switch
         // defaulted engaged — but a kind outside `always_approve`, so under
         // `full` the undisturbed answer is `Allow` rather than a park.
+        assert_eq!(
+            decide(&gate, &effect("blog.post", EffectGroup::Publish)).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    /// The live-policy update keeps the parked queue and the emergency switch
+    /// while the evaluation snapshot and the derived deadline move (issue
+    /// #1455). This is the property the boot and per-cycle refresh rely on: a
+    /// console override lands on a gate that may already hold an approval the
+    /// operator was asked about and a stop an operator pulled, and neither may
+    /// be disturbed.
+    #[tokio::test]
+    async fn apply_effective_policy_moves_snapshot_and_ttl_but_not_parked_or_emergency() {
+        let gate = ManifestApprovalGate::new(policy("full", None)).with_ttl_millis(1000);
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+
+        let stricter = Policy {
+            mode: "supervised".to_string(),
+            always_approve: FENCE.iter().map(|s| s.to_string()).collect(),
+            auto_approve_under_usd: Some(5.0),
+            approval_ttl_hours: Some(48),
+        };
+        gate.apply_effective_policy(stricter);
+
+        // Parked queue and stop survive...
+        assert_eq!(gate.parked_ids(), vec![id.clone()]);
+        assert!(gate.is_emergency());
+        // ...and the deadline moved.
+        assert_eq!(gate.ttl_millis(), 48 * 60 * 60 * 1000);
+
+        // With the stop released, evaluation reflects the new snapshot: `full`
+        // waved every spend through, while the new `supervised` snapshot parks
+        // one over the cap.
+        gate.set_emergency(false);
+        let mut over = effect("x402.spend", EffectGroup::Spend);
+        over.amount_usd = Some(6.0);
+        assert_eq!(decide(&gate, &over).await, PolicyDecision::RequireApproval);
+    }
+
+    /// The TTL-only update — what the ops handler applies immediately after a
+    /// policy PUT/DELETE — moves the deadline without touching the snapshot, so
+    /// an in-flight turn evaluating under the old tier is not disturbed.
+    #[tokio::test]
+    async fn apply_effective_ttl_moves_only_the_deadline() {
+        let gate = ManifestApprovalGate::new(policy("full", None)).with_ttl_millis(1000);
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+
+        let new_deadline = Policy {
+            mode: "readonly".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: Some(1),
+        };
+        gate.apply_effective_ttl(&new_deadline);
+
+        assert_eq!(gate.ttl_millis(), 60 * 60 * 1000);
+        assert_eq!(gate.parked_ids(), vec![id]);
+        assert!(gate.is_emergency());
+
+        // Snapshot untouched: with the stop released, `blog.post` (Publish, not
+        // in FENCE) still `Allow`s under `full`, which a `readonly` snapshot
+        // would park.
+        gate.set_emergency(false);
         assert_eq!(
             decide(&gate, &effect("blog.post", EffectGroup::Publish)).await,
             PolicyDecision::Allow

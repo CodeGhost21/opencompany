@@ -1837,6 +1837,40 @@ export interface ReadStateResponse {
   markers: ReadMarker[];
 }
 
+/** Response of `GET {scope}/notifications`. */
+export interface NotificationFeedResponse {
+  /** Newest first, and only what this person is addressed by. */
+  notifications: NotificationDto[];
+  /** How many are still unread for this person — what the badge renders. */
+  unread: number;
+}
+
+/** One notification, as the person it is for reads it. */
+export interface NotificationDto {
+  id: string;
+  /** A free-form tag — `"mention"` today. */
+  kind: string;
+  /** `task` / `run` / `approval` / `workflow` / `message`. */
+  subjectKind: string;
+  /** The subject's id in its own space; a chat message id for `message`. */
+  subjectId: string;
+  title: string;
+  createdAt: number;
+  /** When this person read it; absent while unread for them. */
+  readAt?: number;
+  /**
+   * The console channel this belongs to, so a badge lands without the
+   * transcript being loaded.
+   */
+  context?: string;
+}
+
+/** Response of `PUT {scope}/notifications`. */
+export interface MarkNotificationsReadResponse {
+  /** Still unread for this person after the mark. */
+  unread: number;
+}
+
 /** Response of `GET {scope}/presence`. */
 export interface PresenceListResponse {
   /**

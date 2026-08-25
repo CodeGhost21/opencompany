@@ -93,6 +93,20 @@ export function widensAutonomy(
   return fromIndex !== -1 && toIndex > fromIndex;
 }
 
+/** Whether replacing the current spend cap with the manifest cap loosens it. */
+export function widensSpendCap(
+  current: number | null,
+  manifest: number | null,
+): boolean {
+  // `null` is the stricter state: with no cap every spend parks, and a finite
+  // cap lets sub-cap payments through on their own (`Some(None)` in
+  // `PolicyOverride` is a real, deliberate "no cap" choice). So loosening is
+  // null → finite, or a finite cap raised to a higher finite cap.
+  if (current === null) return manifest !== null;
+  if (manifest === null) return false;
+  return manifest > current;
+}
+
 /**
  * Whether a tier change gives the company more freedom than it has now.
  *
@@ -225,6 +239,11 @@ export function PolicySettings({ client, company }: Props) {
   // half-typed effect kind never reaches the gate.
   const [draftAlways, setDraftAlways] = useState("");
   const [dirty, setDirty] = useState(false);
+  // The spend cap and deadline are each edited as text and only committed on
+  // their own Save, so a half-typed value never reaches the gate.
+  const [draftSpend, setDraftSpend] = useState("");
+  const [noSpendCap, setNoSpendCap] = useState(false);
+  const [draftDeadline, setDraftDeadline] = useState("");
   // A looser tier changes what teammates can do without stopping for approval.
   // Keep the target, rather than a boolean, so the dialog can compare the
   // host-provided consequences that actually apply to this deployment.
@@ -237,6 +256,10 @@ export function PolicySettings({ client, company }: Props) {
   // tier state so the dialog knows which action to perform on confirm.
   const [resetAwaitingConfirmation, setResetAwaitingConfirmation] =
     useState(false);
+  // A direct spend-cap raise lets more payments through without asking — the
+  // same widening the tier buttons and a loosening reset confirm. Remember the
+  // target so the dialog's confirm button saves the value the operator typed.
+  const [pendingCapRaise, setPendingCapRaise] = useState<number | null>(null);
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
@@ -259,26 +282,79 @@ export function PolicySettings({ client, company }: Props) {
   // only a successful load lets the "is not a tool" warning speak.
   const [wiredToolsLoaded, setWiredToolsLoaded] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const next = await getPolicy(client, company);
-      setStatus(next);
-      setDraftAlways(next.alwaysApprove.join(", "));
-      setDirty(false);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Could not load the policy.";
-      setLoadError(message);
-      toast.error(message);
-    } finally {
-      setLoading(false);
-    }
+  // The scope this card's async work belongs to. A save or manual retry issued
+  // for one company must stand down once the operator switches to another:
+  // applying the stale response would overwrite the new company's card and
+  // drafts with the old company's policy. The effect-driven read is already
+  // guarded by its cleanup's `live` flag; this is the same guard for the write
+  // path and the manual retry, following the `scopeRef` pattern `app-shell`
+  // hands `ChatView` so sends cannot cross a company switch.
+  const scopeRef = useRef({ client, company });
+  useEffect(() => {
+    scopeRef.current = { client, company };
   }, [client, company]);
 
+  /** Whether an async completion still belongs to the scope on screen. */
+  const isCurrentScope = (origin: {
+    client: OpenCompanyClient;
+    company: string | null;
+  }) => {
+    const current = scopeRef.current;
+    return (
+      current.client === origin.client && current.company === origin.company
+    );
+  };
+
+  const load = useCallback(
+    async (live: () => boolean) => {
+      setLoading(true);
+      setLoadError(null);
+      // A new scoped read must not carry the previous company's values. If this
+      // read fails, the card should show the error state, not the old company's
+      // policy (deadline, cap, list) as if it were this one's — the drafts below
+      // are the exact state an operator would otherwise save against the new
+      // company. They are overwritten from `next` on success.
+      setStatus(null);
+      setDraftAlways("");
+      setDraftSpend("");
+      setNoSpendCap(false);
+      setDraftDeadline("");
+      try {
+        const next = await getPolicy(client, company);
+        // A response for a company this `load` no longer describes must not
+        // overwrite the current company's state: when the scope changes mid-
+        // flight, the effect's cleanup flips `live` for the stale request, so
+        // its continuation (and its `finally`) stand down here rather than
+        // clobbering the read that replaced it.
+        if (!live()) return;
+        setStatus(next);
+        setDraftAlways(next.alwaysApprove.join(", "));
+        setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
+        setNoSpendCap(next.autoApproveUnderUsd === null);
+        // A host that predates the deadline field omits it; `undefined` must
+        // fall back to the historical 24-hour default rather than render as
+        // "undefined hours".
+        setDraftDeadline((next.approvalTtlHours ?? 24).toString());
+        setDirty(false);
+      } catch (error) {
+        if (!live()) return;
+        const message =
+          error instanceof Error ? error.message : "Could not load the policy.";
+        setLoadError(message);
+        toast.error(message);
+      } finally {
+        if (live()) setLoading(false);
+      }
+    },
+    [client, company],
+  );
+
   useEffect(() => {
-    void load();
+    let live = true;
+    void load(() => live);
+    return () => {
+      live = false;
+    };
   }, [load]);
 
   // The confirmation dialog holds a choice reviewed against ONE company's
@@ -289,6 +365,7 @@ export function PolicySettings({ client, company }: Props) {
   useEffect(() => {
     setTierAwaitingConfirmation(null);
     setResetAwaitingConfirmation(false);
+    setPendingCapRaise(null);
   }, [client, company]);
 
   // Deliberately silent about its own failure, and deliberately not part of
@@ -318,19 +395,38 @@ export function PolicySettings({ client, company }: Props) {
   /**
    * Applies a server response.
    *
-   * `resyncDraft` is false when the operator has unsaved always-ask edits: the
-   * server's list is authoritative for what the gate is enforcing, but
-   * overwriting the box would silently discard what they were part-way through
-   * typing. The tier request does not touch the list, so leaving the draft
-   * alone keeps the two independent — the same separation the `PUT` body has.
+   * Only the draft for the field that was just saved is resynchronised: the
+   * server's value is authoritative for what the gate is enforcing, but
+   * overwriting a box the operator was part-way through typing silently
+   * discards their edit. `saveAlways` keeps a half-typed cap or deadline, and
+   * `saveSpendCap`/`saveDeadline` keep an unsaved always-ask list — the same
+   * separation the `PUT` bodies have. A reset replaces the whole override, so
+   * it resynchronises everything.
+   *
+   * `takesEffect` overrides the host's generic timing line for a save whose
+   * effect does not wait for the next turn — the deadline, whose new TTL the
+   * live gate enforces immediately.
    */
-  const apply = (next: PolicyStatus, message: string, resyncDraft = true) => {
+  const apply = (
+    next: PolicyStatus,
+    message: string,
+    resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
+    takesEffect?: string,
+  ) => {
     setStatus(next);
-    if (resyncDraft) {
+    const { alwaysAsk = true, spendCap = true, deadline = true } = resync;
+    if (alwaysAsk) {
       setDraftAlways(next.alwaysApprove.join(", "));
       setDirty(false);
     }
-    toast.success(message, { description: next.takesEffect });
+    if (spendCap) {
+      setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
+      setNoSpendCap(next.autoApproveUnderUsd === null);
+    }
+    if (deadline) {
+      setDraftDeadline((next.approvalTtlHours ?? 24).toString());
+    }
+    toast.success(message, { description: takesEffect ?? next.takesEffect });
   };
 
   const saveTier = async (mode: string) => {
@@ -340,12 +436,19 @@ export function PolicySettings({ client, company }: Props) {
       // Only `mode` is sent: an omitted field leaves the always-ask list where
       // it is, so picking a tier cannot silently discard a list the operator
       // edited earlier.
-      // `dirty` means the operator has unsaved list edits; keep them.
-      apply(
-        await setPolicy(client, company, { mode }),
-        "Autonomy tier updated",
-        !dirty,
-      );
+      // `dirty` means the operator has unsaved list edits; keep them. The tier
+      // request touches neither the cap nor the deadline, so their drafts stay
+      // too.
+      const next = await setPolicy(client, company, { mode });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state — the read path's `live` guard, applied to the
+      // write path.
+      if (!isCurrentScope({ client, company })) return false;
+      apply(next, "Autonomy tier updated", {
+        alwaysAsk: !dirty,
+        spendCap: false,
+        deadline: false,
+      });
       return true;
     } catch (error) {
       toast.error(
@@ -361,6 +464,7 @@ export function PolicySettings({ client, company }: Props) {
     if (!status || saving || tier.value === status.mode) return;
     if (widensAutonomy(status.tiers, status.mode, tier.value)) {
       confirmSource.current = "tier";
+      setPendingCapRaise(null);
       setTierAwaitingConfirmation(tier);
       return;
     }
@@ -428,14 +532,24 @@ export function PolicySettings({ client, company }: Props) {
     setSaving(true);
     try {
       // An empty box means an empty list, not "leave it alone" — the host keeps
-      // those apart and so must this.
+      // those apart and so must this. Saving the list resyncs the list; a
+      // half-typed cap or deadline in the other fields is the operator's, not
+      // the server's, so it stays.
       const kinds = draftAlways
         .split(",")
         .map((kind) => kind.trim())
         .filter(Boolean);
+      const next = await setPolicy(client, company, { alwaysApprove: kinds });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state: the operator may have switched companies while
+      // the PUT was in flight, and applying the stale response here would
+      // replace the new card's list (and later saves would send the old
+      // company's values to the new company's endpoint).
+      if (!isCurrentScope({ client, company })) return;
       apply(
-        await setPolicy(client, company, { alwaysApprove: kinds }),
+        next,
         "Always-ask list updated",
+        { spendCap: false, deadline: false },
       );
     } catch (error) {
       toast.error(
@@ -473,9 +587,29 @@ export function PolicySettings({ client, company }: Props) {
     if (!status || saving) return false;
     setSaving(true);
     try {
+      const next = await resetPolicy(client, company);
+      // A reset for a company this card no longer shows must not overwrite the
+      // current company's state.
+      if (!isCurrentScope({ client, company })) return false;
       apply(
-        await resetPolicy(client, company),
+        next,
         "Reverted to the manifest's policy",
+        undefined,
+        // A reset lands the manifest's deadline on the live gate immediately,
+        // the same way a deadline save does, and a parked card's deadline is
+        // re-evaluated against the current TTL whenever it is displayed or
+        // resolved — so a deadline that CHANGES on a reset is immediate in
+        // both directions. A shorter one lets already-parked approvals expire
+        // on the next sweep before any new turn; a longer one keeps them
+        // actionable past the deadline they were parked under. Either way the
+        // generic "next turn" line would misstate it, so name the change the
+        // way `saveDeadline` does whenever the reset moves the deadline. The
+        // `!= null` guard keeps a host that predates the deadline field on
+        // the generic line, since it has no deadline to have moved.
+        status.approvalTtlHours != null &&
+          (status.manifestApprovalTtlHours ?? 24) !== status.approvalTtlHours
+          ? "takes effect immediately — parked approvals are re-checked against the manifest deadline"
+          : undefined,
       );
       return true;
     } catch (error) {
@@ -498,12 +632,22 @@ export function PolicySettings({ client, company }: Props) {
       (entry) => !gatedBy(status.manifestAlwaysApprove, entry),
     ) ?? [];
 
+  // A reset can also loosen the spend cap when the manifest's cap is higher
+  // than the override's, which is the same widening the tier buttons confirm.
+  const spendCapWidens = status
+    ? widensSpendCap(
+        status.autoApproveUnderUsd,
+        status.manifestAutoApproveUnderUsd,
+      )
+    : false;
+
   /**
    * The "Use the manifest's policy" button. A reset that gives the company
    * *more* autonomy than the override it replaces is an escalation like any
    * other tier change, so it gets the same confirmation; so does a reset that
-   * drops always-ask gates the manifest does not carry. A reset that tightens
-   * or holds the tier lands immediately, the way a downgrade does.
+   * drops always-ask gates the manifest does not carry, or that restores a
+   * looser spend cap. A reset that tightens or holds the tier lands
+   * immediately, the way a downgrade does.
    */
   const requestReset = () => {
     if (!status || saving) return;
@@ -519,13 +663,108 @@ export function PolicySettings({ client, company }: Props) {
     if (
       manifestTier &&
       (widensAutonomy(status.tiers, status.mode, status.manifestMode) ||
-        removedAlwaysAsk.length > 0)
+        removedAlwaysAsk.length > 0 ||
+        spendCapWidens)
     ) {
       confirmSource.current = "reset";
+      setTierAwaitingConfirmation(null);
+      setPendingCapRaise(null);
       setResetAwaitingConfirmation(true);
       return;
     }
     void reset();
+  };
+
+  /** Persists a spend-cap value and resyncs the cap draft. */
+  const commitSpendCap = async (cap: number | null): Promise<boolean> => {
+    if (!status || saving) return false;
+    setSaving(true);
+    try {
+      const next = await setPolicy(client, company, {
+        autoApproveUnderUsd: cap,
+      });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state.
+      if (!isCurrentScope({ client, company })) return false;
+      apply(
+        next,
+        "Spend cap updated",
+        // An unsaved always-ask edit and a half-typed deadline are the
+        // operator's; the PUT only touched the cap.
+        { alwaysAsk: !dirty, deadline: false },
+      );
+      return true;
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Could not save the spend cap.",
+      );
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveSpendCap = async () => {
+    if (!status || saving) return;
+    const cap = Number(draftSpend);
+    if (noSpendCap) {
+      // Choosing "no cap" tightens: with no cap every spend parks. Straight
+      // through, like any other tightening save.
+      await commitSpendCap(null);
+      return;
+    }
+    if (draftSpend.trim() === "" || !Number.isFinite(cap) || cap < 0) {
+      toast.error("Enter a non-negative amount, or choose no cap.");
+      return;
+    }
+    // Raising the cap lets more payments through without asking — the same
+    // widening the tier buttons and a loosening reset confirm, so it earns the
+    // same dialog. A tightening save goes straight through.
+    if (widensSpendCap(status.autoApproveUnderUsd, cap)) {
+      setTierAwaitingConfirmation(null);
+      setResetAwaitingConfirmation(false);
+      setPendingCapRaise(cap);
+      return;
+    }
+    await commitSpendCap(cap);
+  };
+
+  const saveDeadline = async () => {
+    if (!status || saving) return;
+    const hours = Number(draftDeadline);
+    if (!Number.isSafeInteger(hours) || hours < 1) {
+      toast.error("Enter a whole number of hours, at least 1.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const next = await setPolicy(client, company, {
+        approvalTtlHours: hours,
+      });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state.
+      if (!isCurrentScope({ client, company })) return;
+      apply(
+        next,
+        "Approval deadline updated",
+        // An unsaved always-ask edit and a half-typed cap are the operator's;
+        // the PUT only touched the deadline.
+        { alwaysAsk: !dirty, spendCap: false },
+        // A deadline change is not "on the next turn": the live gate enforces
+        // the new TTL as soon as the save lands, and already-parked approvals
+        // are judged against it on the next sweep — so shortening the deadline
+        // can expire an approval sitting in the queue before any new turn.
+        "takes effect immediately — parked approvals are re-checked against the new deadline",
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Could not save the deadline.",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   /**
@@ -599,7 +838,15 @@ export function PolicySettings({ client, company }: Props) {
             <p className="text-sm text-muted-foreground">
               {loadError ?? "Could not load the policy."}
             </p>
-            <Button size="sm" variant="outline" onClick={() => void load()}>
+            {/* A manual retry is not tied to an effect cleanup, so its
+                liveness must still be scope-guarded: a retry that resolves
+                after the operator switched companies must not paint the new
+                company's card with the old company's policy. */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void load(() => isCurrentScope({ client, company }))}
+            >
               Try again
             </Button>
           </div>
@@ -660,6 +907,68 @@ export function PolicySettings({ client, company }: Props) {
               <p className="text-xs text-muted-foreground">
                 Takes effect {status.takesEffect}.
               </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="spend-cap">Spend without asking, under</Label>
+              <p className="text-xs text-muted-foreground">
+                Spend under this passes without asking — always-ask entries and
+                the daily budget still stop it.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="spend-cap"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={draftSpend}
+                  disabled={saving || noSpendCap}
+                  placeholder="No cap"
+                  onChange={(event) => setDraftSpend(event.target.value)}
+                  className="max-w-40"
+                />
+                <span className="text-sm text-muted-foreground">USD</span>
+                <Button
+                  size="sm"
+                  type="button"
+                  variant={noSpendCap ? "secondary" : "outline"}
+                  disabled={saving}
+                  onClick={() => {
+                    setNoSpendCap((current) => !current);
+                    if (noSpendCap) setDraftSpend("");
+                  }}
+                >
+                  {noSpendCap ? "No cap" : "Set no cap"}
+                </Button>
+                <Button size="sm" disabled={saving} onClick={() => void saveSpendCap()}>
+                  Save cap
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="approval-deadline">Decline anything undecided after</Label>
+              <p className="text-xs text-muted-foreground">
+                Each approval stays decidable for this long before it is declined.
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="approval-deadline"
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputMode="numeric"
+                  value={draftDeadline}
+                  disabled={saving}
+                  className="max-w-32"
+                  onChange={(event) => setDraftDeadline(event.target.value)}
+                />
+                <span className="text-sm text-muted-foreground">hours</span>
+                <Button size="sm" disabled={saving} onClick={() => void saveDeadline()}>
+                  Save deadline
+                </Button>
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -746,7 +1055,9 @@ export function PolicySettings({ client, company }: Props) {
             )}
             <AlertDialog
               open={
-                tierAwaitingConfirmation !== null || resetAwaitingConfirmation
+                tierAwaitingConfirmation !== null ||
+                resetAwaitingConfirmation ||
+                pendingCapRaise !== null
               }
               onOpenChange={(open) => {
                 if (!open) {
@@ -760,6 +1071,7 @@ export function PolicySettings({ client, company }: Props) {
                   if (saving) return;
                   setTierAwaitingConfirmation(null);
                   setResetAwaitingConfirmation(false);
+                  setPendingCapRaise(null);
                 }
               }}
             >
@@ -794,7 +1106,14 @@ export function PolicySettings({ client, company }: Props) {
                     Give teammates more autonomy?
                   </AlertDialogTitle>
                   <AlertDialogDescription>
-                    {resetAwaitingConfirmation ? (
+                    {pendingCapRaise !== null ? (
+                      <>
+                        {status.autoApproveUnderUsd === null
+                          ? "Today every spend asks first."
+                          : `Today spend under $${status.autoApproveUnderUsd} asks nothing.`}{" "}
+                        {`Raising the cap to ${pendingCapRaise} lets qualifying spends under the new cap pass without asking; the daily budget still stops spending after its limit.`}
+                      </>
+                    ) : resetAwaitingConfirmation ? (
                       <>
                         Reverting clears the override set here and returns to
                         the manifest's{" "}
@@ -818,6 +1137,19 @@ export function PolicySettings({ client, company }: Props) {
                                   ? "stops"
                                   : "stop"
                               } always asking for approval`}
+                            {spendCapWidens && (
+                              <>
+                                {removedAlwaysAsk.length > 0 ||
+                                widensAutonomy(
+                                  status.tiers,
+                                  status.mode,
+                                  status.manifestMode,
+                                )
+                                  ? " It also"
+                                  : " This"} restores the manifest's looser
+                                spend cap.
+                              </>
+                            )}
                             .
                           </>
                         )}
@@ -838,11 +1170,13 @@ export function PolicySettings({ client, company }: Props) {
                     )}
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
-                    {resetAwaitingConfirmation
-                      ? "Reset replaces the whole policy override, including the always-ask list."
-                      : dirty
-                        ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
-                        : "Your always-ask list still wins, even on Full."}
+                    {pendingCapRaise !== null
+                      ? "Your saved always-ask list still wins, even under the raised cap."
+                      : resetAwaitingConfirmation
+                        ? "Reset replaces the whole policy override, including the always-ask list."
+                        : dirty
+                          ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
+                          : "Your always-ask list still wins, even on Full."}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -858,7 +1192,11 @@ export function PolicySettings({ client, company }: Props) {
                       // explicitly only after a successful save — a failed
                       // persistence keeps the dialog open for a retry.
                       event.preventBaseUIHandler();
-                      if (tierAwaitingConfirmation) {
+                      if (pendingCapRaise !== null) {
+                        void commitSpendCap(pendingCapRaise).then((saved) => {
+                          if (saved) setPendingCapRaise(null);
+                        });
+                      } else if (tierAwaitingConfirmation) {
                         void saveTier(tierAwaitingConfirmation.value).then(
                           (saved) => {
                             if (saved) setTierAwaitingConfirmation(null);
@@ -871,9 +1209,11 @@ export function PolicySettings({ client, company }: Props) {
                       }
                     }}
                   >
-                    {resetAwaitingConfirmation
-                      ? "Revert and give more autonomy"
-                      : "Give more autonomy"}
+                    {pendingCapRaise !== null
+                      ? `Raise cap to $${pendingCapRaise}`
+                      : resetAwaitingConfirmation
+                        ? "Revert and give more autonomy"
+                        : "Give more autonomy"}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>

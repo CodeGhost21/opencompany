@@ -126,7 +126,8 @@ struct RosterProposalDto {
     jobs: Vec<String>,
     /// The jobs no teammate owns — non-empty only on the `model` path.
     uncovered: Vec<String>,
-    /// Why this is the curated team: `no_model` or `not_designable`.
+    /// Why this is the curated team: `no_model`, `model_unreachable` or
+    /// `not_designable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
 }
