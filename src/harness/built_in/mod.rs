@@ -1688,7 +1688,7 @@ impl HarnessPool {
     /// the only caller, and it calls this on every build — boot included, so the
     /// first rebuild has a recorded selection to differ from.
     pub async fn rebind_memory_engine(&self, company: &CompanyId, engine: Option<u64>) -> bool {
-        let mut recorded = self.memory_engine.write().await;
+        let recorded = self.memory_engine.write().await;
         if recorded.get(company).copied().flatten() == engine {
             return true;
         }
