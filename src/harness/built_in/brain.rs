@@ -2710,8 +2710,9 @@ impl Brain for HarnessBrain {
         // cycle's own turns; a standalone workflow turn between cycles must
         // instead rebuild against the live store overlay, and a pin left behind
         // would keep the roster on a snapshot that only an unrelated cycle could
-        // refresh.
-        self.pool.end_cycle(&company_id).await;
+        // refresh. Dispatched through `run_turn` so a router releases every
+        // lane's pool, not just the default one.
+        self.run_turn().end_cycle(&company_id).await;
         result
     }
 
