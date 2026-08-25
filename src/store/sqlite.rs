@@ -380,11 +380,10 @@ fn sql_err(e: rusqlite::Error) -> OpenCompanyError {
 /// land on an existing file. `PRAGMA table_info` is the check rather than
 /// swallowing the `ALTER`'s "duplicate column name" error, so a genuine `ALTER`
 /// failure still surfaces.
-/// Whether a stored `audience` column admits `user`.
+/// Decodes a stored audience and applies the shared visibility predicate.
 ///
-/// `NULL` is the whole company. A value that will not parse is also treated as
-/// company-wide, matching the read path: losing a notification is worse than
-/// showing one person one extra line.
+/// Invalid JSON preserves the fail-open migration behavior used by the read
+/// path: the notification remains company-wide rather than disappearing.
 fn audience_admits(audience: Option<&str>, user: &str) -> bool {
     let decoded: Option<Vec<String>> = audience.and_then(|raw| serde_json::from_str(raw).ok());
     // Decode once, then defer to the one shared rule on `Notification` so this
