@@ -1264,7 +1264,8 @@ pub struct HarnessPool {
     /// `Some(fp)` for a provider-backed engine — a fingerprint of its
     /// memory-family ports — and `None` for the base backend. Recorded by
     /// [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build) on every
-    /// build so the next rebuild can tell a live engine swap from a no-op;
+    /// build that re-applies the engine selection so the next rebuild can tell
+    /// a live engine swap from a no-op;
     /// [`ensure`](Self::ensure) does not know the selection, so the pool needs
     /// this bookkeeping of its own.
     ///
