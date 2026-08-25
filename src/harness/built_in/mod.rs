@@ -1325,6 +1325,7 @@ impl HarnessPool {
             policy_fingerprints: RwLock::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
             context_fingerprints: RwLock::new(HashMap::new()),
+            memory_engine: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
     }
