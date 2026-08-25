@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: does flushSync (or a macrotask + act) recover the
-// stuck error render after a plain reject?
+// Temporary diagnostic: is the async `get` wrapper the culprit? Compare
+// async vs non-async deferred clients under a plain reject-inside-act.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { flushSync } from "react-dom";
 import { beforeEach, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -14,20 +13,23 @@ import { RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 let container: HTMLDivElement;
 let root: Root;
 
-function deferredFilesClient(
-  deferred: {
-    resolve: (rows: RunArtifactRow[]) => void;
-    reject: (err: unknown) => void;
-  }[],
-): OpenCompanyClient {
+type DeferredEntry = {
+  resolve: (rows: RunArtifactRow[]) => void;
+  reject: (err: unknown) => void;
+};
+
+function deferredClient(deferred: DeferredEntry[], asyncGet: boolean): OpenCompanyClient {
+  const getImpl = (path: string): Promise<unknown> => {
+    return new Promise((resolve, reject) => {
+      deferred.push({ resolve, reject } as DeferredEntry);
+      void path;
+    });
+  };
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
-    get: async <T>(path: string): Promise<T> => {
-      return new Promise<T>((resolve, reject) => {
-        deferred.push({ resolve, reject });
-        void path;
-      });
-    },
+    get: asyncGet
+      ? async <T>(path: string): Promise<T> => (getImpl(path) as Promise<T>)
+      : (getImpl as unknown as (path: string) => Promise<unknown>),
   } as unknown as OpenCompanyClient;
 }
 
@@ -80,11 +82,9 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-type Variant = "plain" | "flushSync" | "macroAct";
-const VARIANTS: Variant[] = ["plain", "flushSync", "macroAct"];
-const ITERATIONS = 25;
+const ITERATIONS = 30;
 
-async function runVariant(variant: Variant): Promise<number> {
+async function runVariant(asyncGet: boolean): Promise<number> {
   let misses = 0;
   for (let i = 0; i < ITERATIONS; i++) {
     await act(async () => root.unmount());
@@ -93,11 +93,8 @@ async function runVariant(variant: Variant): Promise<number> {
     document.body.appendChild(container);
     root = createRoot(container);
 
-    const deferred: {
-      resolve: (rows: RunArtifactRow[]) => void;
-      reject: (err: unknown) => void;
-    }[] = [];
-    const client = deferredFilesClient(deferred);
+    const deferred: DeferredEntry[] = [];
+    const client = deferredClient(deferred, asyncGet);
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
     if (deferred.length !== 1) continue;
@@ -105,17 +102,6 @@ async function runVariant(variant: Variant): Promise<number> {
     await act(async () => {
       deferred[0].reject(new Error("boom"));
     });
-
-    if (variant === "flushSync") {
-      try {
-        flushSync();
-      } catch {
-        /* flushSync may throw on re-entrance; ignore */
-      }
-    } else if (variant === "macroAct") {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await act(async () => {});
-    }
 
     if (
       !container.querySelector('[data-testid="workflow-run-files-error"]')
@@ -126,10 +112,10 @@ async function runVariant(variant: Variant): Promise<number> {
   return misses;
 }
 
-it("diag: recovery-strategy miss rates", async () => {
-  for (const v of VARIANTS) {
-    const misses = await runVariant(v);
-    console.log(`variant=${v} misses=${misses}/${ITERATIONS}`);
+it("diag: async vs non-async get miss rates", async () => {
+  for (const asyncGet of [false, true]) {
+    const misses = await runVariant(asyncGet);
+    console.log(`asyncGet=${asyncGet} misses=${misses}/${ITERATIONS}`);
   }
   expect(true).toBe(true);
 });
