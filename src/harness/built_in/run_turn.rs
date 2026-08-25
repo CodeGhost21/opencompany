@@ -105,4 +105,8 @@ impl RunTurn for HarnessRunTurn {
             .ensure_with_policy(company, &self.deps, policy)
             .await
     }
+
+    async fn end_cycle(&self, company: &CompanyId) {
+        self.pool.end_cycle(company).await
+    }
 }
