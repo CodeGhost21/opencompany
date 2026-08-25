@@ -2703,6 +2703,15 @@ impl Brain for HarnessBrain {
         // park; now the window is the claim's lifetime and nothing outlives it.
         let claim = self.deps.approval_requests.claim(ApprovalScope::Cycle);
         let company_id = req.company_id.clone();
+        // Issue #1455: the cycle's policy pin must not outlive the cycle even
+        // if the cycle body is cancelled or unwinds through a panic after
+        // `ensure_with_policy` installed it — the `await` that would have
+        // released it is exactly where a dropped future stops. The guard holds
+        // the same `run_turn` the body warms through and releases every lane's
+        // pin synchronously from `Drop`, so the release covers success, error,
+        // cancellation and panic alike. The explicit `end_cycle` below keeps
+        // the happy path visible; both are idempotent map removals.
+        let _pin_guard = PolicyPinGuard::new(self.run_turn(), company_id.clone());
         let result = claim.scoped(self.run_cycle_scoped(req, host)).await;
         // Issue #1455: release the cycle's policy pin now that the cycle body is
         // over — success or error. The pin's whole job was to keep the in-flight
