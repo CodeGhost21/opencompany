@@ -1853,10 +1853,27 @@ mod tests {
     #[test]
     fn both_providers_advertise_the_same_context_window() {
         let expected = super::context_window();
-        assert!(
-            expected.is_some(),
-            "the default profile must advertise a context window"
-        );
+        // `OPENCOMPANY_CONTEXT_WINDOW=off|0` is the documented escape hatch that
+        // restores unbounded history, so `None` is legitimate only there; every
+        // other environment must still advertise a window.
+        let explicitly_disabled = std::env::var("OPENCOMPANY_CONTEXT_WINDOW")
+            .map(|raw| {
+                let raw = raw.trim();
+                raw.eq_ignore_ascii_case("off") || raw == "0"
+            })
+            .unwrap_or(false);
+        if explicitly_disabled {
+            assert_eq!(
+                expected,
+                None,
+                "OPENCOMPANY_CONTEXT_WINDOW=off|0 must disable the window"
+            );
+        } else {
+            assert!(
+                expected.is_some(),
+                "the default profile must advertise a context window"
+            );
+        }
         let hosted = HostedProvider::new(HostedProviderConfig {
             base_url: "https://example.test/v1".to_string(),
             credential: Credential::None,
