@@ -8223,6 +8223,47 @@ members = ["eng1", "eng2"]
         }
     }
 
+    /// A deterministic turn result for scheduled-cycle edge-case tests.
+    struct FixedOutcomeTurn {
+        outcome: crate::harness::built_in::TurnOutcome,
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for FixedOutcomeTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            Ok(self.outcome.clone())
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(company, agent_id, message, None).await
+        }
+    }
+
     /// A brain whose provider steers the dispatched card `key` with `actions`
     /// (one per turn). Returns the brain + its task store so a test can seed the
     /// card and read the disposition back.
