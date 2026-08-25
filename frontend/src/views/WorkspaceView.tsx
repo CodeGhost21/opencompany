@@ -92,7 +92,12 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
-import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster-names";
+import {
+  rosterDisplayName,
+  rosterIdKey,
+  rosterNameMap,
+  type RosterNames,
+} from "@/lib/roster-names";
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { createSaveBuffer, createUnloadGuard, type SaveBuffer } from "@/lib/workspace-save-buffer";
@@ -123,6 +128,7 @@ import {
   pathOf,
   readLegacyLocalNodes,
   renameAudienceWarning,
+  rosterOwnerOf,
   SECRETS_LABEL,
   SECRETS_REASON,
   sortedFolders,
@@ -2231,14 +2237,19 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
    * The provenance pill for this row, resolved — or `null` when there is
    * nothing worth saying (issue #1723).
    *
-   * Suppressed on a teammate's OWN roster folder: that row's label already
-   * *is* the resolved teammate name, so the pill would repeat it back
-   * verbatim. Everywhere else it is the one place the tree says who wrote a
-   * node, which is the whole of #326's marker.
+   * Suppressed inside the author's own `agents/`/`artifacts/` subtree, where
+   * the enclosing folder already attributes everything under it: on the
+   * teammate's own folder the pill would repeat the row's own label back
+   * verbatim, and on the `<task>/` folders and files beneath it, the same pill
+   * four times down the pane — each one taking the width the name needs.
+   * Everywhere else it is the one place the tree says who wrote a node, which
+   * is the whole of #326's marker, and a node one teammate wrote inside
+   * another's folder still wears it.
    */
+  const owner = rosterOwnerOf(nodes, node.id);
   const agentBadge =
     node.createdBy.kind === "agent" &&
-    !(isRosterFolder && node.name === node.createdBy.id)
+    (owner === undefined || rosterIdKey(owner) !== rosterIdKey(node.createdBy.id))
       ? { id: node.createdBy.id, name: rosterDisplayName(node.createdBy.id, rosterNames) }
       : null;
   /** What this row is actually called on screen. */

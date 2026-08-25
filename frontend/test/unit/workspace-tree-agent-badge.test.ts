@@ -163,6 +163,69 @@ describe("the workspace tree's agent provenance badge", () => {
     expect(badges()).toHaveLength(0);
   });
 
+  it("says nothing on the deliverables inside the author's own artifacts subtree", async () => {
+    // `artifacts/<agent>/<task>/<file>` is attributed wholesale by the folder
+    // it hangs under, so a per-row pill repeats the same fact once per row —
+    // four identical pills stacked down a 256px pane, each eating the width
+    // the *name* needs. That is the redundancy that made a `<title>-<id>`
+    // folder name unreadable at depth in the first place.
+    const tree = [
+      node({ id: "artifacts-root", name: "artifacts", kind: "folder" }),
+      node({
+        id: "n-fe",
+        name: "frontend_engineer",
+        kind: "folder",
+        parentId: "artifacts-root",
+        createdBy: { kind: "agent", id: "frontend_engineer" },
+      }),
+      node({
+        id: "n-task",
+        name: "checkout-flow-redesign-spike-01hq8zm4xk3n7y2p9v1w5c8t01",
+        kind: "folder",
+        parentId: "n-fe",
+        createdBy: { kind: "agent", id: "frontend_engineer" },
+      }),
+      node({
+        id: "n-file",
+        name: "spike.md",
+        kind: "file",
+        parentId: "n-task",
+        createdBy: { kind: "agent", id: "frontend_engineer" },
+      }),
+    ];
+
+    await render(client(tree, [member("frontend_engineer", "Frontend Engineer")]));
+
+    const rows = Array.from(container.querySelectorAll("button"));
+    for (const label of ["Frontend Engineer", "checkout-flow-redesign-spike"]) {
+      const row = rows.find((b) => b.textContent?.includes(label));
+      await act(async () => row?.click());
+    }
+
+    expect(container.textContent).toContain("checkout-flow-redesign-spike");
+    expect(badges()).toHaveLength(0);
+  });
+
+  it("still badges a node an agent wrote outside its own subtree", async () => {
+    // The suppression is "this subtree already says who wrote it", not "agent
+    // nodes are unbadged". A deliverable filed anywhere else keeps the marker,
+    // which is the whole of #326.
+    const tree = [
+      node({ id: "standards", name: "standards", kind: "folder" }),
+      node({
+        id: "n-note",
+        name: "api-review.md",
+        kind: "file",
+        parentId: "standards",
+        createdBy: { kind: "agent", id: "frontend_engineer" },
+      }),
+    ];
+
+    await render(client(tree, [member("frontend_engineer", "Frontend Engineer")]));
+
+    expect(badges().map((b) => b.textContent)).toEqual(["Frontend Engineer"]);
+  });
+
   it("still badges an agent-authored node inside a teammate's own folder", async () => {
     // Suppression is scoped to the teammate's own roster folder, not to the
     // subtree beneath it: a deliverable one teammate published into another's
