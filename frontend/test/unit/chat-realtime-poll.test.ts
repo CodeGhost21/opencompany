@@ -121,6 +121,62 @@ describe("chat channel history polling", () => {
     expect(merged).toEqual([old, boundary, optimistic]);
   });
 
+  it("keeps a newest identical operator send after a one-row snapshot", () => {
+    const old = fromHistory([dto("1", "repeat", true)])[0];
+    const optimistic: ChatMessage = {
+      id: "m42",
+      from: "you",
+      text: "repeat",
+      parentId: old.parentId,
+      at: old.at + 10_000,
+    };
+
+    // The response was captured before the second send. Even though the old
+    // row is the page's only (and newest) item, it is not the new send's echo.
+    expect(mergeHistoryInOrder([old, optimistic], [old])).toEqual([old, optimistic]);
+  });
+
+  it("keeps optimistic rows before a durable live tail", () => {
+    const durable = fromHistory([dto("2", "durable")])[0];
+    const optimistic: ChatMessage = {
+      id: "m42",
+      from: "you",
+      text: "optimistic",
+      at: durable.at + 1,
+    };
+    const hydrated = fromHistory([dto("1", "before"), dto("3", "after")]);
+
+    // The SSE durable row arrived after the send, but before the snapshot was
+    // applied. Preserve the live order [optimistic, durable] while placing the
+    // durable row at its sequence position within history.
+    expect(mergeHistoryInOrder([optimistic, durable], hydrated).map((m) => m.text)).toEqual([
+      "before",
+      "optimistic",
+      "durable",
+      "after",
+    ]);
+  });
+
+  it("does not consume an older identical operator row as a new send echo", () => {
+    const old = fromHistory([dto("1", "repeat", true)])[0];
+    const boundary = fromHistory([dto("2", "newer", true)])[0];
+    const optimistic: ChatMessage = {
+      id: "m42",
+      from: "you",
+      text: "repeat",
+      parentId: old.parentId,
+      at: old.at + 10_000,
+    };
+
+    // The page predates the new send. The old durable row must remain and the
+    // new local bubble must stay visible until its own echo arrives.
+    const merged = mergeHistoryInOrder(
+      [old, optimistic],
+      [old, boundary],
+    );
+    expect(merged).toEqual([old, boundary, optimistic]);
+  });
+
   it("reconciles a legacy company reply without a message id", () => {
     const optimistic: ChatMessage = {
       id: "m42",
