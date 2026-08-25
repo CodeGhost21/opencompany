@@ -897,6 +897,59 @@ fn a_marketing_biller_can_be_named_from_the_console() {
     );
 }
 
+/// A creative member cross-seated onto an unrestricted desk must not widen to
+/// the company grant.
+///
+/// Desks combine by **union**, and a member scoped only by the creative desk
+/// ceiling would resolve to the full company grant — billing included — the
+/// moment an operator seats them on the strategy or growth desk, which state
+/// no ceiling. The `chargebee` exclusion must therefore ride on the member's
+/// own `tools` line (which restates the desk's ceiling), not on the desk
+/// alone. Pinned through the same three-level narrowing the roster build uses.
+#[test]
+fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
+    let manifest = load_company("agentic_marketing_agency");
+    let strategy = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "strategy")
+        .unwrap();
+    assert!(
+        strategy.tools.is_empty(),
+        "precondition: the strategy desk must be unrestricted or this test \
+         proves nothing"
+    );
+    let creative = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "creative")
+        .unwrap();
+
+    for id in ["creative_director", "copywriter", "landing_page_builder"] {
+        let agent = manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .unwrap_or_else(|| panic!("{id} is a member of the creative desk"));
+        assert!(
+            !agent.tools.is_empty(),
+            "{id}: the `chargebee` exclusion must ride on the member's own \
+             `tools` line, not only on the creative desk ceiling"
+        );
+
+        // Seated on the creative desk AND the unrestricted strategy desk: the
+        // union would otherwise be the company grant.
+        let desk_refs: Vec<&[String]> =
+            vec![creative.tools.as_slice(), strategy.tools.as_slice()];
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        assert!(
+            !grants_chargebee_explicit(&grants),
+            "{id}: cross-seating a creative member onto an unrestricted desk \
+             must not hand back billing; effective grants: {grants:?}"
+        );
+    }
+}
+
 /// Every seeded `output` node names a destination its own manifest can resolve,
 /// except the research lab, which deliberately proves that workflows can
 /// coordinate without desks (issue #963).
