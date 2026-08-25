@@ -522,7 +522,13 @@ export function mergeHistoryInOrder(
   const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
   const optimistic = existing.filter((m) => {
     if (isHostMessageId(m.id) || historyIds.has(m.id)) return false;
-    return !durableByFingerprint.has(messageFingerprint(m));
+    const matches = durableByFingerprint.get(messageFingerprint(m));
+    if (!matches?.length) return true;
+    // Consume one durable echo per local row, oldest-first. Repeated sends
+    // have identical content, so a one-to-one queue prevents one echo from
+    // deleting every matching optimistic bubble.
+    matches.shift();
+    return false;
   });
   const merged = [...evictedDurable, ...persisted, ...optimistic];
   return merged.length === existing.length && merged.every((m, i) => m === existing[i])
