@@ -1460,14 +1460,16 @@ impl HarnessPool {
         // system prompt until a restart.
         let override_fp = override_fingerprint(&overlay.agent_edits);
         // The policy axis. A cycle pins it to the snapshot the native gate was
-        // re-applied from (so a mid-turn override reaches neither gate); a plain
-        // `ensure` — the workflow runner's cadence — reuses that pin while one is
-        // active, so a spawned workflow turn cannot adopt a live override a turn
-        // early (issue #1455). Either way the fingerprint covers the effective
-        // mode/list/cap values — not a relative override — so a manifest `[policy]`
-        // edit moves the cache key even when no override is stored (or a redundant
-        // one was carried and cleared), and the roster cannot keep an
-        // `ApprovalPolicy` built under a tier the native gate no longer enforces.
+        // re-applied from (so a mid-turn override reaches neither gate), and the
+        // pin is released when the cycle ends. A plain `ensure` — the workflow
+        // runner's cadence — reuses that pin while one is active, so a spawned
+        // workflow turn cannot adopt a live override a turn early (issue #1455);
+        // between cycles, no pin is active and the live overlay applies. Either
+        // way the fingerprint covers the effective mode/list/cap values — not a
+        // relative override — so a manifest `[policy]` edit moves the cache key
+        // even when no override is stored (or a redundant one was carried and
+        // cleared), and the roster cannot keep an `ApprovalPolicy` built under a
+        // tier the native gate no longer enforces.
         let (effective_snapshot, pin_to_store) = match policy_snapshot {
             Some(policy) => (Some(policy.clone()), Some(policy.clone())),
             None => {
