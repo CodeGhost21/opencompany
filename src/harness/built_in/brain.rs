@@ -3618,6 +3618,69 @@ description = "Runs Acme."
         assert_eq!(result.new_traces.len(), 1);
     }
 
+    /// A cron tick's reply is journaled onto the General desk under the
+    /// responder's name, and the returned bubble is stamped with the journaled
+    /// event's sequence — the same contract an operator reply's bubble carries
+    /// (issue #885: destination and author are separate facts).
+    #[tokio::test]
+    async fn schedule_fired_journals_an_agent_reply_on_the_general_desk() {
+        use crate::ports::types::EventSeq;
+        use crate::ports::EventLog;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone());
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // The reply lands on the General desk, authored by the responder —
+        // destination and author stay separate.
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        assert_eq!(
+            bubble.channel,
+            crate::server::ops::language::DEFAULT_DESK
+        );
+        assert_eq!(bubble.agent.as_deref(), Some("ceo"));
+
+        // The journal holds one AgentReply, on the General desk, attributed to
+        // the responder — not to the channel the reply was routed over.
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let reply = events
+            .iter()
+            .find(|e| matches!(&e.event, CompanyEvent::AgentReply { .. }))
+            .expect("a scheduled reply was journaled");
+        match &reply.event {
+            CompanyEvent::AgentReply {
+                chat_id,
+                agent_id,
+                text,
+                ..
+            } => {
+                assert_eq!(chat_id, crate::server::ops::language::DEFAULT_DESK);
+                assert_eq!(agent_id, "ceo");
+                assert!(text.contains("daily standup"), "{text}");
+            }
+            _ => unreachable!(),
+        }
+
+        // The returned bubble carries the appended event's sequence as its
+        // durable id.
+        assert_eq!(bubble.message_id, Some(reply.seq.value().to_string()));
+    }
+
     #[tokio::test]
     async fn no_events_still_acknowledges() {
         let dir = tempfile::tempdir().unwrap();
