@@ -2335,7 +2335,10 @@ mod test {
         std::fs::create_dir_all(&absent).unwrap();
         let settings =
             layer_config_memory(opencompany::store::StorageSettings::default(), &absent).unwrap();
-        assert_eq!(settings.memory_backend, opencompany::store::MemoryBackend::Store);
+        assert_eq!(
+            settings.memory_backend,
+            opencompany::store::MemoryBackend::Store
+        );
         let _ = std::fs::remove_dir_all(&absent);
 
         let _ = std::fs::remove_dir_all(&tmp);
