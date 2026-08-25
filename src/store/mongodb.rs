@@ -5129,6 +5129,87 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// A `create_binary` name conflict must not strand the payload it just
+    /// uploaded.
+    ///
+    /// This backend writes blob-first (issue #894), so a sibling-name collision
+    /// is detected only when the node-document insert fails — by which time the
+    /// bytes are already in GridFS. Before the conflict path reclaimed them, the
+    /// error returned with that blob still present: no node document referenced
+    /// it, and the boot sweep (which runs only at store construction, and only
+    /// for blobs older than an hour) was the sole reclaim path. The
+    /// chat-attachment flow reaches this branch every time a repeated filename
+    /// is disambiguated and retried, so a long-lived tenant would accumulate
+    /// invisible GridFS copies. The conflict path must own the payload it
+    /// uploaded before the caller learns of the conflict.
+    #[tokio::test]
+    async fn a_name_conflict_reclaims_the_blob_it_just_uploaded() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("conflict-co");
+
+        let first = crate::ports::workspace::WorkspaceNode {
+            id: "winner".to_string(),
+            name: "image.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+        crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &first, b"first")
+            .await
+            .unwrap();
+
+        let loser = crate::ports::workspace::WorkspaceNode {
+            id: "loser".to_string(),
+            ..first.clone()
+        };
+        let err =
+            crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &loser, b"second")
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(err, crate::error::OpenCompanyError::Conflict(_)),
+            "a taken sibling name is a Conflict, not a storage fault: {err:?}"
+        );
+
+        // The loser's payload must not survive the conflict as an orphan.
+        let files = s
+            .blobs()
+            .find(MongoStore::blob_filter(&company, "loser"))
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            files.len(),
+            0,
+            "the conflicted upload leaves no orphan blob for the sweep to find later"
+        );
+
+        // The winner still serves its bytes.
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&s, &company, "winner")
+                .await
+                .unwrap()
+                .expect("the winner's payload is untouched by the refusal");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, b"first".to_vec());
+
+        drop_db(&s).await;
+    }
+
     /// Issue #1077: the orphan report composes `list()` and `owners()`
     /// correctly against a real server.
     ///
