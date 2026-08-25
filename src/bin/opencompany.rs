@@ -1153,7 +1153,7 @@ async fn run_issue_password(
     .await?;
 
     let verb = if issued.created { "created" } else { "updated" };
-    println!("{verb} {} as an admin of `{}`", issued.email, id.as_ref());
+    println!("{verb} {} in `{}`", issued.email, id.as_ref());
     if issued.must_change_password {
         println!("they will be asked to replace this password on first sign-in");
     }
