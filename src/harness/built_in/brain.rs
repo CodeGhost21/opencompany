@@ -8226,6 +8226,7 @@ members = ["eng1", "eng2"]
     /// A deterministic turn result for scheduled-cycle edge-case tests.
     struct FixedOutcomeTurn {
         outcome: crate::harness::built_in::TurnOutcome,
+        approval_requests: Option<crate::harness::policy::ApprovalRequestQueue>,
     }
 
     #[async_trait]
@@ -8237,6 +8238,24 @@ members = ["eng1", "eng2"]
             _message: &str,
             _chat_id: Option<&str>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
+            if let Some(requests) = &self.approval_requests {
+                for index in 0..(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
+                    requests.push(crate::harness::policy::ApprovalRequest {
+                        tool: format!("test_tool_{index}"),
+                        reason: "test approval".to_string(),
+                        effect: Effect {
+                            kind: "test_tool".to_string(),
+                            group: crate::ports::types::EffectGroup::External,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({}),
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                }
+            }
             Ok(self.outcome.clone())
         }
 
