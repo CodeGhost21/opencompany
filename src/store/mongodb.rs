@@ -3941,7 +3941,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 }
             }
         }
-        self.put_blob(company, &node.id, &node.name, bytes).await?;
+        let file_id = self.put_blob(company, &node.id, &node.name, bytes).await?;
         let mut document = doc! {
             "company_id": company.as_ref(),
             "node_id": &node.id,
@@ -3967,10 +3967,14 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             // construction and spares blobs younger than an hour, so a repeated
             // name conflict (the chat-attachment flow's retry under a fresh id)
             // would otherwise strand the full payload as invisible GridFS disk
-            // until some later restart. Reclaim it here instead. Best-effort: a
-            // drop failure still leaves the sweep to finish the job, and the
-            // conflict is the outcome the caller is owed either way.
-            if let Err(drop_err) = self.drop_blobs(company, &node.id, None).await {
+            // until some later restart. Reclaim it here instead, but ONLY the
+            // upload this losing call made: a concurrent `create_binary` racing
+            // the same fresh node id has uploaded its own payload under that id
+            // too (issue #1694), and a sweep over the id would take the
+            // winner's bytes down with the loser's. Best-effort: a drop failure
+            // still leaves the sweep to finish the job, and the conflict is the
+            // outcome the caller is owed either way.
+            if let Err(drop_err) = self.delete_blob(company, &node.id, &file_id).await {
                 tracing::warn!(
                     company = %company,
                     node_id = %node.id,
