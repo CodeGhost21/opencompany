@@ -3,6 +3,31 @@
 // a desk scopes a transcript and fixes the company side's identity, it is not
 // a separate backend.
 
+import { MAIN_THREAD_ID } from "@/lib/chat";
+
+/**
+ * The name of the company-wide channel, rendered after the `#`.
+ *
+ * Mirrors the host's `GENERAL_CHANNEL` (`src/server/ops/language.rs`), the same
+ * way {@link MAIN_THREAD_ID} mirrors its `MAIN_THREAD_ID`.
+ */
+export const GENERAL_CHANNEL = "general";
+
+/**
+ * Does this id name the built-in `#general` channel?
+ *
+ * Mirrors the host's `is_general_chat` (`src/server/chat_history.rs`), which
+ * has folded four spellings into one conversation since issue #65: the empty
+ * string, `main` (what this console addresses the line as), `General` (the
+ * name the host attributes an unaddressed turn to), and `general`. The host
+ * reserves every one of them — a desk cannot be created with any of them as
+ * its id — so this is a closed set, not a guess.
+ */
+export function isGeneralChannel(id: string): boolean {
+  const key = id.trim().toLowerCase();
+  return key === "" || key === MAIN_THREAD_ID || key === GENERAL_CHANNEL;
+}
+
 export interface Desk {
   id: string;
   /** The channel name, rendered after a `#`. Lowercase, no spaces. */
@@ -34,8 +59,8 @@ export interface Desk {
 export function defaultDesks(): Desk[] {
   return [
     {
-      id: "main",
-      channel: "general",
+      id: MAIN_THREAD_ID,
+      channel: GENERAL_CHANNEL,
       name: "Your company",
       blurb: "The main line — ask for anything",
     },

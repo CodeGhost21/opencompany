@@ -38,7 +38,7 @@ import {
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { defaultDesks, isGeneralChannel, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
 import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
@@ -1690,7 +1690,15 @@ export function ChatView({
               others={outsideChannel}
               people={companyPeople}
               presence={presence}
-              leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
+              leadId={
+                // The built-in `#general` channel has no lead (issue #1743) —
+                // its `memberIds` are the roster in roster order, not a desk
+                // hierarchy, so `[0]` is whoever happens to be listed first.
+                // Badging them "lead" would state a rank nothing confers.
+                active.kind === "channel" && !isGeneralChannel(active.id)
+                  ? active.memberIds?.[0]
+                  : undefined
+              }
               loading={loadingTeam}
               fromHost={fromHost}
               onToggleInbox={(m) => void toggleMemberInbox(m)}
@@ -1709,6 +1717,16 @@ export function ChatView({
                * nothing to open. Both simply get no link rather than one that
                * lands nowhere.
                *
+               * Nor is the built-in `#general` (issue #1743), which *does*
+               * carry `memberIds` — the whole roster, derived — and would
+               * otherwise have passed this test and opened `#/company/main` on
+               * a desk that does not exist. It is deliberately not a desk: it
+               * has no lead, no hierarchy, and no membership to manage, and the
+               * host refuses every desk write aimed at it with a reason. The
+               * rule this file already follows (`api/setup.ts:58`) is not to
+               * offer a control that will be refused, so there is no link and
+               * no disabled one either — absence is the honest state.
+               *
                * A desk's channel id **is** its desk id (`deskFromDto`), so
                * there is no mapping to keep in step. Written to the hash rather
                * than routed through a callback, as `ArtifactsTab`'s "Open in
@@ -1716,7 +1734,7 @@ export function ChatView({
                * only hands chat a chat-scoped navigate.
                */
               onManageDesk={
-                active.kind === "channel" && active.memberIds
+                active.kind === "channel" && active.memberIds && !isGeneralChannel(active.id)
                   ? () => {
                       window.location.hash = `/company/${active.id}`;
                     }

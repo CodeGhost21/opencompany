@@ -2,8 +2,8 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
-import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { clearTaskCard, MAIN_THREAD_ID, type ChatMessage, type Reaction } from "@/lib/chat";
+import { defaultDesks, GENERAL_CHANNEL, isGeneralChannel, type Desk } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 
 /**
@@ -131,6 +131,50 @@ export interface ChannelSection {
 }
 
 /**
+ * The built-in `#general` channel: the company-wide line, in every company,
+ * from first boot (issue #1743).
+ *
+ * # It is not a desk, and that is the point
+ *
+ * Every other channel here is a desk, and a desk has a lead and a hierarchy.
+ * "Everyone" has neither, so `#general` is deliberately absent from
+ * `GET .../desks` — which is what keeps every desk-shaped surface honest for
+ * free: the org chart, the assignee picker and the desk counts all read that
+ * route, so none of them can offer this channel a lead, a seat, a rename or a
+ * delete. The console renders no edit or delete affordance on it because there
+ * is nothing to render one from, not because a button is hidden. The host
+ * refuses those writes anyway, with a reason (`GENERAL_CHANNEL_IMMUTABLE`).
+ *
+ * # Membership is derived, never stored
+ *
+ * `memberIds` is the roster this render was handed, in roster order. Nothing
+ * anywhere records who is in `#general`, so a teammate added a minute ago is a
+ * member with no write and the two cannot drift. The host derives the same set
+ * the same way when it expands `@everyone` here.
+ *
+ * # Who answers a message that mentions nobody
+ *
+ * The orchestrator — the same teammate that has always answered the company's
+ * main line, one turn per message. `isOrchestrator` is the host's own roster
+ * rule read off `GET .../team`, never re-derived from `tier`; a host that does
+ * not answer it leaves every row `undefined`, and the purpose line then simply
+ * does not make the claim.
+ */
+function generalChannel(members: TeamMember[]): Channel {
+  const orchestrator = members.find((m) => m.isOrchestrator);
+  return {
+    id: MAIN_THREAD_ID,
+    name: GENERAL_CHANNEL,
+    voice: orchestrator?.name ?? "Your company",
+    kind: "channel",
+    purpose: orchestrator
+      ? `Everyone's here. ${orchestrator.name} picks up anything you don't @-mention.`
+      : "Everyone's here — the whole company on one line",
+    memberIds: members.map((m) => m.id),
+  };
+}
+
+/**
  * The channel list.
  *
  * `desks` become the `#channels` — they are the standing lines you can
@@ -150,15 +194,26 @@ export function buildChannels(
   desks: Desk[] = defaultDesks(),
   transcripts: Transcripts = {},
 ): ChannelSection[] {
-  const channels: Channel[] = desks.map((d) => ({
-    id: d.id,
-    name: d.channel,
-    voice: d.name,
-    kind: "channel" as const,
-    purpose: d.blurb,
-    tone: d.tone,
-    memberIds: d.members,
-  }));
+  const channels: Channel[] = [
+    generalChannel(members),
+    // The static fallback set carries its own `main` row for the company-wide
+    // line; the derived one above replaces it rather than sitting beside it.
+    // A **host** desk that answers to a General spelling is deliberately not
+    // filtered — the host reserves those ids for new desks, so one can only
+    // reach here from a blueprint that authored it, and that is a real desk
+    // with a real lead which it would be wrong to hide.
+    ...desks
+      .filter((d) => d.id !== MAIN_THREAD_ID)
+      .map((d) => ({
+        id: d.id,
+        name: d.channel,
+        voice: d.name,
+        kind: "channel" as const,
+        purpose: d.blurb,
+        tone: d.tone,
+        memberIds: d.members,
+      })),
+  ];
 
   const dms = directMessageChannels(members)
     .filter((dm) => (transcripts[dm.id]?.length ?? 0) > 0)
@@ -298,6 +353,16 @@ export function channelIdForThread(
   members: TeamMember[],
 ): string | null {
   if (desks.some((d) => d.id === threadId)) return threadId;
+  // The built-in `#general` channel is in no desk list, so it has to be
+  // resolved by name (issue #1743). The host journals this one conversation
+  // under four ids — `""`, `main`, `General`, `general` — and folds them on
+  // read; a thread carrying any of them belongs to the one channel that
+  // renders it. Without this, an approval raised on the company's main line
+  // matched no channel and stayed stranded on the Approvals page.
+  //
+  // After the desk scan, deliberately: a blueprint desk that authored one of
+  // those ids keeps its own thread.
+  if (isGeneralChannel(threadId)) return MAIN_THREAD_ID;
   const member = members.find((m) => m.id === threadId);
   return member ? dmChannelId(member) : null;
 }
