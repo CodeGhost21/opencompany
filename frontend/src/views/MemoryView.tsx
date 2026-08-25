@@ -204,8 +204,15 @@ export function MemoryView({ client, company }: Props) {
 
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
-    await load({ silent: true });
+    // Close the moment the write is confirmed, then reload in the background.
+    // The dialog's catch owns the "could not save the memory" toast, so only
+    // createMemory — an actual save failure — may reach it. Awaiting the reload
+    // here instead would route a reload failure into that same catch (a false
+    // save error) and skip this close, stranding the dialog open so the operator
+    // retries and writes a duplicate. `void load` is fire-and-forget: load
+    // handles its own errors via the page banner and never leaks a rejection.
     setAddOpen(false);
+    void load({ silent: true });
   }
 
   async function remove(entry: MemoryEntry) {
