@@ -40,8 +40,9 @@
 //!   [`UserStore`](crate::ports::UserStore) (active `Admin` users). The graph
 //!   names no address, so an author cannot point it at an outsider. Constrained
 //!   by construction; no grant needed. With no admin address (or no mailbox) it
-//!   reports a failed delivery when neither a mailbox nor a durable channel is
-//!   available; the interactive operator buffer is not a workflow destination.
+//!   falls back to the **durable** operator channel (issue #1757) — the report
+//!   is journaled into the operator's main line, a real, readable delivery —
+//!   rather than dead-ending on the interactive in-memory buffer as it once did.
 //! * **`email`** — the graph names an arbitrary address, so it is the dangerous
 //!   one and carries **two independent gates**, both fail-closed:
 //!   1. the company's `[tools].allow` must cover the `email` namespace (the same
@@ -705,10 +706,13 @@ async fn deliver_one(
                         });
                     }
                 }
-                // No mailbox, or no admin has an address: try the operator
-                // adapter only to produce the explicit failure row. Its buffer
-                // is not a workflow delivery surface, so this cannot report a
-                // successful discard.
+                // No mailbox, or no admin has an address: fall back to the
+                // DURABLE operator channel (issue #1757). It journals the report
+                // into the operator's main line, so this is a genuine, readable
+                // delivery — not the discard-on-an-in-memory-buffer this arm used
+                // to report. It is a `Sent` row, and the fallback only fails when
+                // no operator adapter is wired at all (a misconfigured build),
+                // never silence.
                 _ => {
                     let (why, why_reason) = if delivery.mail.is_none() {
                         (
@@ -722,36 +726,31 @@ async fn deliver_one(
                         )
                     };
                     reports.push(
-                        post_to_channel(
-                            delivery,
-                            crate::runtime::channel::OPERATOR_CHANNEL,
-                            subject,
-                            text,
-                        )
-                        .await
-                        .map(|()| {
-                            row(
-                                Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
-                                DeliveryStatus::Sent,
-                                why_reason,
-                                format!("{why}, so the report went to the operator channel"),
-                            )
-                        })
-                        // The channel's own failure class (`_class`) is dropped
-                        // in favour of naming the fallback, which is the part an
-                        // operator reading a host log needs: the interesting
-                        // fact is that `owner` had nowhere left to go. The full
-                        // text, class included, is on `detail`.
-                        .unwrap_or_else(|(_class, detail)| {
-                            row(
-                                Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
-                                DeliveryStatus::Failed,
-                                DeliveryReason::OwnerFallbackFailed,
-                                format!(
-                                    "{why}, and the operator channel fallback failed: {detail}"
-                                ),
-                            )
-                        }),
+                        post_to_operator(delivery, subject, text)
+                            .await
+                            .map(|()| {
+                                row(
+                                    Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
+                                    DeliveryStatus::Sent,
+                                    why_reason,
+                                    format!("{why}, so the report went to the operator channel"),
+                                )
+                            })
+                            // The channel's own failure class (`_class`) is
+                            // dropped in favour of naming the fallback, which is
+                            // the part an operator reading a host log needs: the
+                            // interesting fact is that `owner` had nowhere left to
+                            // go. The full text, class included, is on `detail`.
+                            .unwrap_or_else(|(_class, detail)| {
+                                row(
+                                    Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
+                                    DeliveryStatus::Failed,
+                                    DeliveryReason::OwnerFallbackFailed,
+                                    format!(
+                                        "{why}, and the operator channel fallback failed: {detail}"
+                                    ),
+                                )
+                            }),
                     );
                 }
             }
@@ -1341,13 +1340,17 @@ async fn post_to_channel(
     subject: &str,
     text: &str,
 ) -> Result<(), (DeliveryReason, String)> {
-    // The built-in operator adapter is an in-memory response spy, not a
-    // durable delivery surface. Interactive chat journals its own replies
-    // after the cycle; workflow delivery has no such reader, so naming
-    // `operator` must fail rather than report a successful discard. The rule
-    // and this sentence both live beside the operator-channel constant (issue
-    // #981) — the save-time guard on the write routes reads the same two, so a
-    // destination this refuses is one the author was never offered.
+    // The built-in *interactive* operator adapter is an in-memory response spy,
+    // not a durable delivery surface, so an author may not name `operator` as an
+    // explicit `channel` target — the rule and this sentence both live beside the
+    // operator-channel constant (issue #981), and the save-time guard the
+    // console's picker reads the same two, so a destination this refuses is one
+    // the author was never offered.
+    //
+    // The `owner` fallback reaches the operator surface through
+    // [`post_to_operator`] instead, which is backed by the DURABLE operator
+    // adapter (issue #1757) — a different, journal-backed write path, so it is
+    // not subject to this refusal.
     if !crate::runtime::channel::is_deliverable_channel(channel_id) {
         let deliverable: Vec<&str> = delivery
             .channels
@@ -1360,6 +1363,46 @@ async fn post_to_channel(
             crate::runtime::channel::undeliverable_channel_message(channel_id, &deliverable),
         ));
     }
+    send_to_channel_adapter(delivery, channel_id, subject, text).await
+}
+
+/// Posts an `owner` fallback report to the **durable** operator channel (issue
+/// #1757).
+///
+/// This is the landing spot for an `owner` report the company cannot email — no
+/// mailbox, or no admin with an address. Unlike [`post_to_channel`] it does not
+/// run the [`is_deliverable_channel`](crate::runtime::channel) picker guard:
+/// `operator` is deliberately not an author-targetable `channel`, but the owner
+/// path is server-resolved and now has a durable landing, so it addresses the
+/// operator adapter directly. The runtime builder wires a
+/// [`DurableOperatorChannel`](crate::runtime::channel::DurableOperatorChannel)
+/// into the delivery adapter set under the `operator` id, so this finds a real,
+/// journal-backed write path; a build that wired none degrades to a plain
+/// "not wired" error and the caller reports the fallback as failed rather than
+/// silently discarding it.
+async fn post_to_operator(
+    delivery: &WorkflowDeliveryDeps,
+    subject: &str,
+    text: &str,
+) -> Result<(), (DeliveryReason, String)> {
+    send_to_channel_adapter(
+        delivery,
+        crate::runtime::channel::OPERATOR_CHANNEL,
+        subject,
+        text,
+    )
+    .await
+}
+
+/// Finds the wired adapter with id `channel_id` and sends `subject`/`text` to
+/// it. The shared core of [`post_to_channel`] and [`post_to_operator`] — the
+/// former gates on the picker rule first, the latter does not.
+async fn send_to_channel_adapter(
+    delivery: &WorkflowDeliveryDeps,
+    channel_id: &str,
+    subject: &str,
+    text: &str,
+) -> Result<(), (DeliveryReason, String)> {
     let Some(adapter) = delivery
         .channels
         .iter()
@@ -1491,7 +1534,9 @@ mod tests {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::UserRecord;
     use crate::ports::types::CompanyId;
-    use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
+    use crate::runtime::channel::{
+        DeskChannel, DurableOperatorChannel, OPERATOR_CHANNEL, OperatorChannel,
+    };
     use crate::server::ops::mailer::{MailSender, RecordingMailSender};
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
     use crate::store::{FsInboxStore, FsOps};
@@ -1659,16 +1704,27 @@ allow = [{allow}]
             let mail = RecordingMailSender::new();
             let inbox = Arc::new(FsInboxStore::new(dir));
             let users = Arc::new(FsOps::new(dir));
+            // The interactive in-memory operator buffer, kept so a test can
+            // assert it stays untouched — workflow delivery must never route to
+            // it. It is deliberately NOT wired into `deps.channels`.
             let channel = OperatorChannel::new();
-            let channels: Vec<Arc<dyn ChannelAdapter>> = if with_channel {
-                vec![Arc::new(channel.clone())]
-            } else {
-                Vec::new()
-            };
             // A real filesystem journal, like the outcome tests use: the write
             // side must actually land on disk and read back, so the delivered
             // ledger is exercised end to end rather than against a double.
             let events: Arc<dyn EventLog> = Arc::new(crate::store::FsEventLog::new(dir));
+            // The delivery adapter set the production builder wires (issue #1757):
+            // the DURABLE operator channel, journaling into the event log, is the
+            // owner/no-mailbox fallback's landing spot. `with_channel = false`
+            // wires nothing, so the fallback has no operator adapter and reports a
+            // failure row — the misconfigured-build case.
+            let channels: Vec<Arc<dyn ChannelAdapter>> = if with_channel {
+                vec![Arc::new(DurableOperatorChannel::new(
+                    CompanyId::new("acme"),
+                    events.clone(),
+                ))]
+            } else {
+                Vec::new()
+            };
             Self {
                 deps: WorkflowDeliveryDeps {
                     events: events.clone(),
@@ -1852,6 +1908,37 @@ admins = [{list}]
                 .into_iter()
                 .map(|s| s.event)
                 .filter(|e| matches!(e, CompanyEvent::WorkflowReportDelivered { .. }))
+                .collect()
+        }
+
+        /// The text of every workflow report the durable operator channel
+        /// journaled (issue #1757): `AgentReply`s authored by `workflow` on the
+        /// operator's main line (the General desk). This is what proves the
+        /// owner/no-mailbox fallback is a real, readable delivery rather than a
+        /// discard on the in-memory buffer.
+        async fn operator_reports(&self) -> Vec<String> {
+            self.events
+                .read_from(
+                    &self.company,
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("journal readable")
+                .into_iter()
+                .filter_map(|s| match s.event {
+                    CompanyEvent::AgentReply {
+                        chat_id,
+                        agent_id,
+                        text,
+                        ..
+                    } if chat_id == crate::server::ops::language::DEFAULT_DESK
+                        && agent_id == crate::runtime::channel::WORKFLOW_REPLY_AUTHOR =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
                 .collect()
         }
 
@@ -2070,10 +2157,12 @@ admins = [{list}]
         assert_eq!(h.mail.sent()[0].1.to, "ada@acme.test");
     }
 
-    /// With no mailbox wired, `owner` cannot use the operator's in-memory
-    /// response surface as workflow delivery and reports the failure loudly.
+    /// With no mailbox wired, `owner` falls back to the DURABLE operator channel
+    /// (issue #1757): a genuine, journal-backed delivery — not the discard-on-an-
+    /// in-memory-buffer failure it used to report. The report lands in the event
+    /// log on the operator's main line, and the interactive buffer is untouched.
     #[tokio::test]
-    async fn owner_falls_back_to_the_operator_channel_without_mail() {
+    async fn owner_falls_back_to_the_durable_operator_channel_without_mail() {
         let dir = tempfile::tempdir().unwrap();
         let h = Harness::new(dir.path(), false, true);
         h.add_admin("u1", "ada@acme.test").await;
@@ -2089,17 +2178,26 @@ admins = [{list}]
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(reports[0].status, DeliveryStatus::Failed);
+        assert_eq!(reports[0].status, DeliveryStatus::Sent, "{reports:?}");
         assert_eq!(reports[0].target.as_deref(), Some(OPERATOR_CHANNEL));
         assert!(reports[0].detail.contains("no mailbox"), "{reports:?}");
-        assert_eq!(reports[0].reason, DeliveryReason::OwnerFallbackFailed);
+        assert_eq!(reports[0].reason, DeliveryReason::OwnerFellBackNoMailbox);
+        // The interactive in-memory buffer is never a delivery surface.
         assert!(h.channel.sent().is_empty());
+        // The report is durable: an `AgentReply` landed on the operator's main
+        // line (the General desk), carrying the workflow's subject header so it
+        // reads as a workflow report, not an agent's own reply.
+        let landed = h.operator_reports().await;
+        assert_eq!(landed.len(), 1, "the report must be journaled: {landed:?}");
+        assert!(landed[0].contains("Q3 is up 12%."), "{landed:?}");
+        assert!(landed[0].contains("Report flow"), "{landed:?}");
     }
 
-    /// A company with a mailbox but no admin address also fails rather than
-    /// claiming that the operator buffer delivered the report.
+    /// A company with a mailbox but no admin address also delivers durably to the
+    /// operator channel rather than failing — the report still reaches the one
+    /// human who could act on it.
     #[tokio::test]
-    async fn owner_falls_back_when_no_admin_has_an_address() {
+    async fn owner_falls_back_to_the_durable_operator_channel_when_no_admin_has_an_address() {
         let dir = tempfile::tempdir().unwrap();
         let h = Harness::new(dir.path(), true, true);
 
@@ -2114,14 +2212,21 @@ admins = [{list}]
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(reports[0].status, DeliveryStatus::Failed);
+        assert_eq!(reports[0].status, DeliveryStatus::Sent, "{reports:?}");
+        assert_eq!(
+            reports[0].reason,
+            DeliveryReason::OwnerFellBackNoAdminAddress
+        );
         assert!(reports[0].detail.contains("no active admin"), "{reports:?}");
         assert!(h.mail.sent().is_empty(), "nothing should have been emailed");
         assert!(h.channel.sent().is_empty());
+        let landed = h.operator_reports().await;
+        assert_eq!(landed.len(), 1, "the report must be journaled: {landed:?}");
     }
 
-    /// Both fallbacks unavailable: no mail, no operator channel. Still a row —
-    /// `failed`, naming the gap — never silence.
+    /// Both fallbacks unavailable: no mail, no operator channel wired at all
+    /// (a misconfigured build). Still a row — `failed`, naming the gap — never
+    /// silence.
     #[tokio::test]
     async fn owner_with_neither_mail_nor_a_channel_reports_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -2218,8 +2323,9 @@ admins = [{list}]
     /// **User-record-wins.** A bootstrap admin who has since signed in and been
     /// *suspended* is not mailed through the leftover standing invite: their
     /// record wins, and a suspended admin is not an active one. `owner` then has
-    /// nowhere to send and falls back to the operator channel with the M8
-    /// wording.
+    /// no address to email and falls back to the durable operator channel with
+    /// the M8 wording — a real delivery (issue #1757), not the failure it once
+    /// reported.
     #[tokio::test]
     async fn owner_does_not_email_a_suspended_bootstrap_admin() {
         let dir = tempfile::tempdir().unwrap();
@@ -2256,8 +2362,11 @@ admins = [{list}]
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(reports[0].status, DeliveryStatus::Failed, "{reports:?}");
-        assert_eq!(reports[0].reason, DeliveryReason::OwnerFallbackFailed);
+        assert_eq!(reports[0].status, DeliveryStatus::Sent, "{reports:?}");
+        assert_eq!(
+            reports[0].reason,
+            DeliveryReason::OwnerFellBackNoAdminAddress
+        );
         assert!(
             reports[0].detail.contains("standing admin invite"),
             "the fallback wording must name standing invites now: {reports:?}"
@@ -2268,8 +2377,10 @@ admins = [{list}]
         );
         assert!(
             h.channel.sent().is_empty(),
-            "the operator buffer is not delivery"
+            "the interactive operator buffer is not delivery"
         );
+        // The report still lands, durably, on the operator channel.
+        assert_eq!(h.operator_reports().await.len(), 1);
     }
 
     /// **Dedupe.** An address named both as an active admin and as the bootstrap

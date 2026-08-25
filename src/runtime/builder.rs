@@ -3011,24 +3011,40 @@ impl RuntimeBuilder {
                                     // before their first sign-in mints a user
                                     // record. `None` off the hosted serve path.
                                     bootstrap_admin: self.bootstrap_admin.clone(),
-                                    // The operator adapter is an interactive
+                                    // The *interactive* operator adapter is a
                                     // response surface, not a workflow delivery
-                                    // destination: its buffer has no durable
-                                    // reader. Desk and provider adapters are the
-                                    // accepted workflow write paths. The rule
-                                    // itself lives next to the operator-channel
-                                    // constant (issue #981) so this set, the
-                                    // set the console's picker offers and the
-                                    // set delivery accepts cannot disagree.
-                                    channels: channels
-                                        .iter()
-                                        .filter(|channel| {
-                                            crate::runtime::channel::is_deliverable_channel(
-                                                channel.channel_id(),
-                                            )
-                                        })
-                                        .cloned()
-                                        .collect(),
+                                    // destination: its in-memory buffer has no
+                                    // durable reader, so it is filtered out here
+                                    // (issue #981). Desk and provider adapters
+                                    // are the accepted write paths. Issue #1757
+                                    // then adds a DURABLE operator channel in its
+                                    // place — same `operator` id, but it journals
+                                    // into the operator's main line — so an
+                                    // `owner` report with no mailbox lands
+                                    // somewhere a human reads instead of being
+                                    // discarded. It is added ONLY here, never to
+                                    // the interactive `channels` above, so it can
+                                    // never double-journal a `route_response`
+                                    // reply.
+                                    channels: {
+                                        let mut delivery_channels: Vec<Arc<dyn ChannelAdapter>> =
+                                            channels
+                                                .iter()
+                                                .filter(|channel| {
+                                                    crate::runtime::channel::is_deliverable_channel(
+                                                        channel.channel_id(),
+                                                    )
+                                                })
+                                                .cloned()
+                                                .collect();
+                                        delivery_channels.push(Arc::new(
+                                            crate::runtime::channel::DurableOperatorChannel::new(
+                                                id.clone(),
+                                                events.clone(),
+                                            ),
+                                        ));
+                                        delivery_channels
+                                    },
                                     // Issue #227: the same gate and journal the
                                     // runtime gets below — one approvals queue,
                                     // so a report parked by a workflow lands in
@@ -7265,22 +7281,25 @@ needs_reason = true
         );
     }
 
-    /// **The invariant that would have caught #981.** The picker's set and the
-    /// delivery layer's set are produced by the same `build()`, from the same
-    /// adapters, and must be the same list.
+    /// **The invariant that would have caught #981, as amended by #1757.** The
+    /// picker's set and the delivery layer's set are produced by the same
+    /// `build()`, from the same adapters. Every channel the picker offers MUST be
+    /// one the delivery layer accepts — an author must never be offered a target
+    /// the runner refuses by name.
     ///
-    /// They were not. `WorkflowDeliveryDeps.channels` dropped `operator` with an
-    /// inline filter while the accessor the console reads returned every adapter
-    /// — so an author was offered a destination the runner refuses by name, and
-    /// nothing in the build asserted the two agreed. Pinning them together is
-    /// what makes a future divergence a test failure rather than a run that
-    /// reports `channel-not-wired` for a target the console suggested.
+    /// Since #1757 the two are no longer *identical*: the delivery layer also
+    /// carries the durable `operator` channel, the server-resolved landing spot
+    /// for an `owner` report with no mailbox. That is deliberately NOT a
+    /// picker option (an author cannot target `operator` directly), so the
+    /// delivery set is the picker set **plus** `operator`. The invariant is the
+    /// subset relation — picker ⊆ delivery — with `operator` the single, known
+    /// extra.
     ///
     /// Needs the harness arm, because that is the only site that wires
     /// `WorkflowDeliveryDeps` at all.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn the_picker_set_equals_the_delivery_deps_the_same_build_wired() {
+    async fn the_delivery_deps_are_the_picker_set_plus_the_durable_operator() {
         use crate::harness::HarnessPool;
 
         let home_dir = tmp_home("oc-981-invariant-");
@@ -7334,13 +7353,29 @@ needs_reason = true
             .map(|channel| channel.channel_id().to_string())
             .collect();
 
+        // Every channel the picker offers is one the delivery layer accepts.
+        let picker = runtime.deliverable_channel_ids();
+        for offered in &picker {
+            assert!(
+                deps_channels.contains(offered),
+                "the picker offers `{offered}`, which the delivery layer does not carry: \
+                 {deps_channels:?}"
+            );
+        }
+        // The delivery set is the picker set plus exactly the durable operator
+        // fallback (issue #1757) — no other divergence.
+        let extra: Vec<&String> = deps_channels
+            .iter()
+            .filter(|id| !picker.contains(id))
+            .collect();
         assert_eq!(
-            runtime.deliverable_channel_ids(),
-            deps_channels,
-            "the destination picker offers a set the delivery layer does not accept"
+            extra,
+            vec![&OPERATOR_CHANNEL.to_string()],
+            "the only channel delivery carries beyond the picker set is the durable operator \
+             fallback: {deps_channels:?} vs {picker:?}"
         );
-        // Not vacuous in either direction: the runtime really did wire the
-        // operator adapter, and the desk really is deliverable.
+        // Not vacuous: the runtime really did wire the interactive operator
+        // adapter, and the desk really is a picker-offered, deliverable channel.
         assert!(
             runtime
                 .channels
@@ -7348,7 +7383,11 @@ needs_reason = true
                 .any(|channel| channel.channel_id() == OPERATOR_CHANNEL),
             "the operator adapter must be wired, or the exclusion proves nothing"
         );
-        assert_eq!(deps_channels, vec!["engineering".to_string()]);
+        assert_eq!(picker, vec!["engineering".to_string()]);
+        assert_eq!(
+            deps_channels,
+            vec!["engineering".to_string(), OPERATOR_CHANNEL.to_string()]
+        );
     }
 
     /// A desk added to `company.toml` since the last boot is wired on this one.
