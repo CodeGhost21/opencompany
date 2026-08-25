@@ -505,7 +505,17 @@ impl<'a> CycleRunner<'a> {
             // harness rebuilds its roster against it, so a console override
             // that lands mid-turn (between this load and the harness's own
             // refresh) reaches neither gate until the next cycle boundary.
-            policy: record.as_ref().map(|record| record.effective_policy()),
+            //
+            // A test-injected gate carries its own policy on purpose — the
+            // reason the re-apply above is exempted — so the roster must pin
+            // THAT policy, not the persisted record's effective one, or the
+            // harness gate and the native gate would disagree about which tier
+            // is live (issue #1455).
+            policy: if self.rt.gate_injected {
+                Some(self.rt.approval_gate.policy())
+            } else {
+                record.as_ref().map(|record| record.effective_policy())
+            },
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
