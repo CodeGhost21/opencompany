@@ -857,6 +857,12 @@ impl RuntimeBuilder {
         // ports must replace the outgoing engine's, never inherit them (see
         // `memory_overlay_applied`).
         self.memory_overlay_applied = true;
+        // Record the engine selection so a later rebuild can tell a live swap
+        // from a no-op and drop the inherited harness pool's cached roster
+        // accordingly — the roster's agents captured THIS overlay's ports
+        // (issue #1113).
+        #[cfg(feature = "openhuman")]
+        self.memory_engine = Some(memory_engine_fingerprint(overlay));
         let mut builder = self
             .with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone());
