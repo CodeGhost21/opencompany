@@ -922,9 +922,11 @@ mod test {
             .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
             .finish();
-        eprintln!("PROBE current={:?}", tracing::level_filters::LevelFilter::current());
+        eprintln!("PROBE before current={:?}", tracing::level_filters::LevelFilter::current());
         tracing::subscriber::with_default(subscriber, body);
+        eprintln!("PROBE after current={:?}", tracing::level_filters::LevelFilter::current());
         let bytes = sink.lock().expect("warning sink").clone();
+        eprintln!("PROBE captured={}", String::from_utf8_lossy(&bytes));
         String::from_utf8(bytes).expect("warnings are utf-8")
     }
 
