@@ -4199,7 +4199,9 @@ members = ["engineer"]
                     && n.parent_id
                         .as_deref()
                         .and_then(name_of)
-                        .is_some_and(|parent| parent == "t-1")
+                        // Task folders are now named from the title + a short id
+                        // suffix (card "t-1", title "Ship the thing"), not the raw id.
+                        .is_some_and(|parent| parent == "ship-the-thing-1")
             })
             .expect("agent B finds the deliverable by browsing the shared tree");
 
