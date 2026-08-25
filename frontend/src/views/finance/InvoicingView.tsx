@@ -5,6 +5,7 @@ import { getBilling, type BillingStatus } from "@/api/billing";
 import type { OpenCompanyClient } from "@/api/client";
 import { listInvoices, testChargebee, type Invoice } from "@/api/finance";
 import { ApiError } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -132,14 +133,13 @@ export function InvoicingView({ client, company }: Props) {
   const usable = health.state === "connected" || health.state === "not_granted";
 
   return (
-    <div className="flex-1 overflow-y-auto" data-testid="invoicing-view">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        <div>
-          <h1 className="text-lg font-medium">Invoicing</h1>
-          <p className="text-sm text-muted-foreground">
-            What your customers owe and have paid, through Chargebee.
-          </p>
-        </div>
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="invoicing-view">
+      <PageHeader
+        title="Invoicing"
+        width="5xl"
+        description="What your customers owe and have paid, through Chargebee."
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         <ConnectionPanel
           title="Chargebee"

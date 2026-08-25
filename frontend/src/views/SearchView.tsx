@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { clearSearch, getSearch, saveSearch, type SearchStatus } from "@/api/search";
 import type { OpenCompanyClient } from "@/api/client";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -188,16 +189,19 @@ export function SearchView({ client, company }: Props) {
   const connected = status.inBuild && status.granted && status.effectiveProvider !== "managed";
 
   return (
-    <div className="flex-1 overflow-y-auto" data-testid="search-view">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Search</h1>
-          <p className="text-sm text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="search-view">
+      <PageHeader
+        title="Search"
+        width="5xl"
+        description={
+          <>
             Where your teammates look things up. Every teammate that can search
             gets one <code>web_search</code> tool — this decides which index
             answers it, and whose account pays for the call.
-          </p>
-        </div>
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {!status.inBuild ? (
           <Alert data-testid="search-not-in-build">

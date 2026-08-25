@@ -38,6 +38,7 @@ import { toast } from "sonner";
 import { listPeople } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type DeskDto, type TeamMemberDto } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -440,14 +441,24 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
   }
 
   return (
-    <div ref={chartRef} className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6">
-        {/* A sub-page of Company, so it says where it is and offers the way
-            back (issue #1193). It used to be the other half of a toggle, which
-            said "another view of the same thing" about the one surface that can
-            create a desk. */}
-        {onBack && (
-          <nav aria-label="Breadcrumb">
+    <div ref={chartRef} className="flex min-h-0 flex-1 flex-col">
+      {/*
+        Issue #1207 put the actions on the heading's row rather than on a row of
+        their own; `PageHeader` is where that shape lives now (issue #1763), and
+        `desks-header` still names the row the two share.
+
+        The breadcrumb rides in `eyebrow`, above the title inside the same bar:
+        a sub-page of Company says where it is and offers the way back (issue
+        #1193), and that belongs with the page's name rather than floating over
+        the content beneath it.
+      */}
+      <PageHeader
+        title="Desks"
+        width="4xl"
+        rowTestId="desks-header"
+        eyebrow={
+          onBack && (
+            <nav aria-label="Breadcrumb">
             <ol className="flex flex-wrap items-center gap-1 text-sm">
               <li>
                 <Button
@@ -467,15 +478,18 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
                 Desks
               </li>
             </ol>
-          </nav>
-        )}
-        <div className="space-y-1">
-          <div
-            className="flex flex-wrap items-center justify-between gap-3"
-            data-testid="desks-header"
-          >
-            <h1 className="text-2xl font-semibold tracking-tight">Desks</h1>
-            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            </nav>
+          )
+        }
+        description={
+          <>
+            How your company is organised: the desks it works from and who
+            staffs each one. Add a desk, move someone between desks, or change
+            who leads.
+          </>
+        }
+        actions={
+          <>
               <Button
                 size="sm"
                 variant="outline"
@@ -497,14 +511,10 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
                 <UserPlus className="mr-1.5 size-4" />
                 Add teammate
               </Button>
-            </div>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            How your company is organised: the desks it works from and who
-            staffs each one. Add a desk, move someone between desks, or change
-            who leads.
-          </p>
-        </div>
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {error && (
           <Alert variant="destructive">

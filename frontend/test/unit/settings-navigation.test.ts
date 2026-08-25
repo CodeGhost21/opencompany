@@ -64,13 +64,21 @@ describe("Settings navigation (issue #1468)", () => {
     expect(section).toContain("title={item.hint}");
     expect(section).toContain("{activePage.hint}");
     expect(section).toContain('{page === "brain" && <MemoryView client={client} company={company} />}');
+    // Every settings page draws a visible title, and draws it the one way the
+    // console has (issue #1763). It used to be a hand-rolled
+    // `text-2xl font-semibold tracking-tight` on each of them; the type scale
+    // lives in `PageHeader` now, so what is worth pinning here is that each
+    // page still *has* a header rather than what size it sets.
     for (const page of settingsPages) {
-      expect(page).toContain("text-2xl font-semibold tracking-tight");
+      expect(page).toContain("<PageHeader");
+      expect(page).not.toContain('hidden title=');
     }
-    // The General page draws no visible title of its own — the rail already
-    // says "Settings" (issue #1221) — so its heading is screen-reader-only.
+    // General included. It used to hide its own title above `lg` on the
+    // reasoning that the rail beside it already says "Settings" (issue #1221);
+    // #1763 makes it visible at every width, because every one of its siblings
+    // above sits beside that same rail and shows one.
     expect(read("views/SettingsView.tsx")).toContain(
-      'className="text-2xl font-semibold tracking-tight lg:sr-only"',
+      '<PageHeader title="General settings" width="3xl" />',
     );
   });
 });

@@ -9,6 +9,7 @@ import {
   type HostingStatus,
 } from "@/api/hosting";
 import type { OpenCompanyClient } from "@/api/client";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -162,16 +163,19 @@ export function HostingView({ client, company }: Props) {
   const connected = status.inBuild && status.granted && status.apiKeyConfigured;
 
   return (
-    <div className="flex-1 overflow-y-auto" data-testid="hosting-view">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Hosting</h1>
-          <p className="text-sm text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="hosting-view">
+      <PageHeader
+        title="Hosting"
+        width="5xl"
+        description={
+          <>
             Connect a hosting provider so your teammates can put a site from this
             company&rsquo;s workspace on the internet — with a managed database
             behind it, and a custom domain in front.
-          </p>
-        </div>
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {/* The two problems this form cannot fix, said before the form so an
           operator does not fill it in and wonder why nothing happened. */}

@@ -1,0 +1,170 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+
+/**
+ * Every page's title comes from `PageHeader`. A view that hand-rolls an `<h1>`
+ * fails here (issue #1763).
+ *
+ * # Why this is a test rather than a convention
+ *
+ * The console reached twelve distinct heading styles without anyone deciding
+ * to have twelve. Each one was reasonable where it was written — `text-xl`
+ * because the page felt smaller, `text-lg font-medium` because it was a
+ * sub-page, `text-sm` because it lived in a toolbar — and none of them is
+ * visible as drift until you put four screens side by side, which no reviewer
+ * of any single PR ever does.
+ *
+ * So this guards the *mechanism* rather than the values: a page cannot invent a
+ * thirteenth style, because a page cannot write a heading at all. It is the
+ * same argument `scripts/ci/assert-design-tokens.sh` makes about raw hex —
+ * a grep is cheaper than the argument, and it does not get tired.
+ *
+ * # What it does not check
+ *
+ * Nothing about how `PageHeader` looks. Its type scale, its bar and its
+ * hairline are decided in one file; if they are wrong they are wrong once,
+ * which is the entire point of moving them there.
+ *
+ * `h2` and below are `page-section-heading-level.test.ts`'s business.
+ */
+
+const VIEWS = new URL("../../src/views", import.meta.url).pathname;
+
+/**
+ * Files allowed to open an `<h1>` of their own, and how many.
+ *
+ * The count is load-bearing. A bare allowlist would let `WorkflowsView` — which
+ * legitimately keeps one — quietly grow a second, which is exactly the drift
+ * this test exists to stop. Every entry below is a heading that names *the open
+ * item* or lives *outside the console shell*, not a page title that could have
+ * been a `PageHeader` and was not.
+ *
+ * Adding a row is a design decision, not a formality: say why the heading
+ * cannot be a page header, in the same register as the rows already here.
+ */
+const HAND_ROLLED: Record<string, { count: number; why: string }> = {
+  "Login.tsx": {
+    count: 1,
+    why:
+      "Sign-in, outside the console shell. A hero heading centred in a `max-w-md` " +
+      "column with no page around it — there is no bar for a bar-shaped header to sit in.",
+  },
+  "setup/SetupWizard.tsx": {
+    count: 2,
+    why:
+      "The first-run flow, outside the console shell. These head a wizard *step* " +
+      "and its completion screen, neither of which is a page an address reaches.",
+  },
+  "setup/AddHostPage.tsx": {
+    count: 1,
+    why: "Also the first-run flow, for the same reason.",
+  },
+  "WorkflowsView.tsx": {
+    count: 1,
+    why:
+      "The workflow detail identity row (#1135/#1138), pinned by " +
+      "`workflow-toolbar-layout.test.ts`: two rows, because identity-and-state and " +
+      "act-on-it are different questions. It names the open workflow, not the page — " +
+      "the page's own header is the index's, and that one is a `PageHeader`.",
+  },
+  "chat/ChatHeader.tsx": {
+    count: 1,
+    why:
+      "The channel bar. It names the open channel and changes as you switch, and its " +
+      "title sits inside a `group/title` whose hover reveals the copy control beside " +
+      "it — an affordance that only works while the heading and the button share a " +
+      "parent this file owns.",
+  },
+  "TaskDetailView.tsx": {
+    count: 1,
+    why:
+      "The card's title inside the Work detail pane, above the compressed metadata " +
+      "row #1347/#1348/#1349 cut 190px of preamble down to. A bar with a hairline " +
+      "over it is the chrome those issues removed.",
+  },
+  "team/AgentDetailView.tsx": {
+    count: 1,
+    why:
+      "The teammate profile block: a 56px avatar that is itself the control for " +
+      "changing it (#1181), the name, the role, and a row of desk and tier badges. " +
+      "It also renders only once the teammate has loaded, so it cannot be hoisted " +
+      "to a header that has to exist through the loading and error states too.",
+  },
+};
+
+/** Every `.tsx` under `src/views`, as paths relative to it. */
+function views(dir = VIEWS, prefix = ""): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) return views(join(dir, entry.name), rel);
+    return entry.name.endsWith(".tsx") ? [rel] : [];
+  });
+}
+
+/**
+ * `<h1` outside comments.
+ *
+ * A doc comment that *names* the anti-pattern it is warning about must not
+ * count as the anti-pattern — the same trap `assert-design-tokens.sh` documents
+ * having fallen into. Block comments are stripped whole (they span lines);
+ * `//` only when it opens the line, so a `//` inside a string literal on a line
+ * of real code cannot blind the scan to an `<h1>` before it.
+ */
+function handRolledCount(source: string): number {
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^[ \t]*\/\/.*$/gm, "");
+  return code.match(/<h1[\s>]/g)?.length ?? 0;
+}
+
+const SOURCES = new Map(views().map((rel) => [rel, readFileSync(join(VIEWS, rel), "utf8")]));
+
+describe("page headers come from PageHeader (#1763)", () => {
+  it("finds views to check at all, so a broken glob cannot pass silently", () => {
+    expect(SOURCES.size).toBeGreaterThan(20);
+  });
+
+  it("has no view hand-rolling a page heading outside the allowlist", () => {
+    const offenders = [...SOURCES]
+      .filter(([rel, src]) => !(rel in HAND_ROLLED) && handRolledCount(src) > 0)
+      .map(([rel, src]) => `${rel} opens ${handRolledCount(src)} <h1> of its own`);
+
+    expect(
+      offenders,
+      `Use <PageHeader> instead — src/components/page-header.tsx.\n` +
+        `A heading that genuinely cannot be one needs a row in HAND_ROLLED ` +
+        `saying why.\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("holds every allowlisted file to exactly the count it is allowed", () => {
+    const offenders = [...Object.entries(HAND_ROLLED)]
+      .map(([rel, { count }]) => {
+        const src = SOURCES.get(rel);
+        if (src === undefined) return `${rel} is allowlisted but no longer exists`;
+        const found = handRolledCount(src);
+        return found === count ? null : `${rel} opens ${found} <h1>, allowed ${count}`;
+      })
+      .filter((line): line is string => line !== null);
+
+    expect(
+      offenders,
+      `An allowlisted file grew or lost a heading. If it grew one, it is a new ` +
+        `page header and belongs in <PageHeader>; if it lost one, drop the row.\n` +
+        `${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("has every view with a visible page header importing the component", () => {
+    // A view that renders a title without importing PageHeader is a view that
+    // found some other way to draw one — which is the thing being prevented.
+    const drawn = [...SOURCES].filter(([, src]) => src.includes("<PageHeader"));
+    const missing = drawn
+      .filter(([, src]) => !src.includes('from "@/components/page-header"'))
+      .map(([rel]) => rel);
+
+    expect(missing, `render <PageHeader> without importing it: ${missing.join(", ")}`).toEqual([]);
+    expect(drawn.length).toBeGreaterThan(15);
+  });
+});

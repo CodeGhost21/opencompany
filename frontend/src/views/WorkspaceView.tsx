@@ -56,6 +56,7 @@ import {
   type WorkspaceOrigin,
 } from "@/api/workspace";
 import { cachedAvatarNodeIds, forgetAvatarNode } from "@/lib/avatar";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -1438,11 +1439,30 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const secretNote = isSecretNode(nodes, openId);
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-      {/* The file tree and editor are the page, with no title of their own
-          (issue #1221) — this names the page for a screen reader the same
-          way every other view's title does. */}
-      <h1 className="sr-only">Workspace</h1>
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/*
+        Issue #1763: Workspace was the one console page with no header at all.
+        It opened straight into the `EXPLORER` toolbar, so the first heading an
+        operator's eye landed on was a column label for the left rail, and the
+        only thing naming the page was the nav row they arrived from.
+
+        It had an `sr-only` title (issue #1221) on the reasoning that "the file
+        tree and editor are the page". That is true of Chat and Inbox, where the
+        content starts at the top edge and fills the frame. It is not true here:
+        the pane beside the tree is empty until a note is opened, so the page
+        opened on an unnamed toolbar over blank space. This was the omission,
+        not the decision.
+
+        The count is the notes, not the folders — a folder is how the tree is
+        arranged rather than a thing the workspace holds.
+      */}
+      <PageHeader
+        title="Workspace"
+        count={nodes.filter((n) => n.kind === "file").length}
+        description="Every note this company's teammates can read and write — the shared files they work from."
+        data-testid="workspace-header"
+      />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
       {/* Explorer */}
       <aside
         className={cn(
@@ -1927,6 +1947,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
           />
         )}
       </section>
+      </div>
 
       <NamePrompt
         nodes={nodes}

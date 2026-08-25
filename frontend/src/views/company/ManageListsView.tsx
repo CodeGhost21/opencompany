@@ -36,6 +36,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -116,29 +117,32 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
           <ArrowLeft className="mr-2 size-4" />
           Back
         </Button>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-semibold">Manage lists</h1>
-            <p className="text-sm text-muted-foreground">
+        <PageHeader
+          title="Manage lists"
+          className="-mx-6 -mt-6"
+          description={
+            <>
               Every list this company tracks — its own board, plus whatever else
               it records. Reach any of them from the switcher on its own title;
               retire one here.
-            </p>
-          </div>
-          <Button
-            size="sm"
-            onClick={() => setDeclaring(true)}
-            disabled={remaining <= 0}
-            title={
-              remaining <= 0
-                ? "This company is at the list cap. Retire one nothing reads first."
-                : undefined
-            }
-          >
-            <Plus className="mr-2 size-4" />
-            New list
-          </Button>
-        </div>
+            </>
+          }
+          actions={
+            <Button
+              size="sm"
+              onClick={() => setDeclaring(true)}
+              disabled={remaining <= 0}
+              title={
+                remaining <= 0
+                  ? "This company is at the list cap. Retire one nothing reads first."
+                  : undefined
+              }
+            >
+              <Plus className="mr-2 size-4" />
+              New list
+            </Button>
+          }
+        />
       </header>
 
       {faults.length > 0 && (

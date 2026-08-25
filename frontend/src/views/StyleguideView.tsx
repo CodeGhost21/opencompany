@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -134,22 +135,26 @@ function Header() {
   const backHref = withHostParam("overview");
   return (
     <header
-      className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur"
+      className="sticky top-0 z-10 bg-background/95 backdrop-blur"
       data-testid="styleguide-header"
     >
       {/*
-        Wraps rather than overflows. The title block's min-content width is set
-        by an unbreakable path (`docs/design-system/`), and the controls do not
-        shrink — so on a 320px viewport a single row would push "Back to
-        console" off the right edge instead of stacking under the heading.
+        Wraps rather than overflows (`PageHeader`'s row is `flex-wrap`). The
+        title block's min-content width is set by an unbreakable path
+        (`docs/design-system/`) and the controls do not shrink, so on a 320px
+        viewport a single row would push "Back to console" off the right edge
+        instead of stacking under the heading.
       */}
-      <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-x-6 gap-y-4 px-6 py-4">
-        <div className="min-w-0">
-          <p className="text-2xs font-medium tracking-wide text-sidebar-accent-foreground uppercase">
+      <PageHeader
+        title="Styleguide"
+        width="5xl"
+        eyebrow={
+          <span className="text-2xs font-medium tracking-wide text-sidebar-accent-foreground uppercase">
             OpenCompany design system
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">Styleguide</h1>
-          <p className="mt-2 max-w-2xl text-sm break-words text-muted-foreground">
+          </span>
+        }
+        description={
+          <>
             Every token and component state the console ships, rendered by the
             console&apos;s own stylesheet. Switch the theme to check both. Written
             reference lives in{" "}
@@ -157,19 +162,21 @@ function Header() {
               docs/design-system/
             </code>
             .
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <ThemeToggle />
-          <a
-            className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-            href={backHref}
-          >
-            <ArrowLeft className="size-4" />
-            Back to console
-          </a>
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          <>
+            <ThemeToggle />
+            <a
+              className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+              href={backHref}
+            >
+              <ArrowLeft className="size-4" />
+              Back to console
+            </a>
+          </>
+        }
+      />
     </header>
   );
 }

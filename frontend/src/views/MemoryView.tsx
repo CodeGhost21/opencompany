@@ -26,6 +26,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { DropZone } from "@/views/memory/DropZone";
 import { EngineSection } from "@/views/memory/EngineSection";
 import { Markdown } from "@/components/markdown";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -237,17 +238,18 @@ export function MemoryView({ client, company }: Props) {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl space-y-5 px-4 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">Brain</h1>
-            <p className="text-sm text-muted-foreground">
-              What your company remembers — facts, people, projects, and preferences your
-              teammates can recall.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Brain"
+        width="5xl"
+        description={
+          <>
+            What your company remembers — facts, people, projects, and preferences your
+            teammates can recall.
+          </>
+        }
+        actions={
+          <>
             {engine && (
               <span
                 className={cn(
@@ -296,8 +298,10 @@ export function MemoryView({ client, company }: Props) {
                 <Plus className="size-4" /> New memory
               </Button>
             </span>
-          </div>
-        </div>
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6">
 
         <EngineSection
           client={client}

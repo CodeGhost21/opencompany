@@ -22,6 +22,7 @@ import {
   useAskerNames,
   useApprovalThreadLinks,
 } from "@/components/approval-card";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useApprovalDeadline } from "@/hooks/use-approval-deadline";
@@ -421,7 +422,7 @@ export function ApprovalsView({
         {/* The queue's own count heading below only renders once loaded, so
             it can't be the page's one `h1` — this stays present through
             loading, error and empty states alike (issue #1221). */}
-        <h1 className="sr-only">Approvals</h1>
+        <PageHeader hidden title="Approvals" />
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}

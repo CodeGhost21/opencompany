@@ -27,6 +27,7 @@ import {
 } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -183,13 +184,13 @@ export function PeopleView({ client, company }: Props) {
 
   if (!isAdmin) {
     return (
-      <div className="mx-auto w-full max-w-3xl px-4 py-6">
-        <div className="mb-6 space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">People</h1>
-          <p className="text-sm text-muted-foreground">
-            The humans who can sign in to this company.
-          </p>
-        </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <PageHeader
+          title="People"
+          width="3xl"
+          description="The humans who can sign in to this company."
+        />
+        <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 overflow-y-auto px-4 py-6">
         <Alert>
           <ShieldCheck className="size-4" />
           <AlertDescription>
@@ -197,24 +198,25 @@ export function PeopleView({ client, company }: Props) {
             change access.
           </AlertDescription>
         </Alert>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">People</h1>
-          <p className="text-sm text-muted-foreground">
-            The humans who can sign in. Access is invite-only.
-          </p>
-        </div>
-        <Button size="sm" variant="outline" onClick={() => setInviteOpen(true)}>
-          <UserPlus className="mr-1.5 size-4" />
-          Invite
-        </Button>
-      </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="People"
+        width="4xl"
+        description="The humans who can sign in. Access is invite-only."
+        actions={
+          <Button size="sm" variant="outline" onClick={() => setInviteOpen(true)}>
+            <UserPlus className="mr-1.5 size-4" />
+            Invite
+          </Button>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
       {error ? (
         <Alert variant="destructive">
@@ -296,6 +298,7 @@ export function PeopleView({ client, company }: Props) {
           </CardContent>
         </Card>
       </section>
+      </div>
 
       <InviteDialog
         open={inviteOpen}

@@ -22,6 +22,7 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { cn } from "@/lib/utils";
+import { PageHeader } from "@/components/page-header";
 
 function usd(n: number, maxFrac = 2): string {
   return (n === 0 ? 0 : n).toLocaleString(undefined, {
@@ -104,15 +105,17 @@ export function FinancesView({ client, company }: Props) {
   const netSign = data.netUsd > 0 ? "+" : data.netUsd < 0 ? "−" : "";
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">Finances</h1>
-          <p className="text-sm text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Finances"
+        width="6xl"
+        description={
+          <>
             What your company is earning and spending this month.
-          </p>
-        </div>
-
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* KPIs */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Kpi icon={Wallet} label="Wallet balance" value={usd(data.balanceUsd)} hint="Ledger balance" />
