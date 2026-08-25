@@ -3803,7 +3803,7 @@ description = "Runs Acme."
                     hit_iteration_cap: false,
                     halted_for_spend: None,
                 },
-                approval_requests: Some(requests),
+                approval_requests: Some(requests.clone()),
             })));
         let result = brain
             .run_cycle(
