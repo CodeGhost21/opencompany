@@ -24,6 +24,8 @@ POST   /api/v1/companies/{id}/chat/messages/{seq}/reactions
                                                { "emoji": "👍", "on": true } → 204
 GET    /api/v1/companies/{id}/events?since=SEQ SSE stream of events/effects (work feed)
 GET    /api/v1/companies/{id}/approvals        pending approvals
+GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
+PUT    /api/v1/companies/{id}/notifications  mark notifications read (`{ "ids": [...] }`; empty body or null ids marks all)
 POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
                                                "detach": false }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
@@ -42,6 +44,13 @@ POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transiti
 
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
 with no `{id}`.
+
+`GET …/notifications` returns only unread `mention` notifications addressed to the
+signed-in human, newest first. Each row includes its subject, title, creation
+ time, and optional chat context; `unread` is the returned count. Machine
+credentials, which have no person identity, receive `401`. `PUT` accepts an
+optional `ids` array and returns the remaining unread count. An omitted or null
+`ids` value marks all notifications for that person; an empty array marks none.
 
 The `/feedback/board/...` routes are a **proxy** of the TinyHumans hub's shared
 board, spent with this instance's credential so a browser never holds one. An

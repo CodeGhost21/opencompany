@@ -20,6 +20,7 @@ import {
   type ApprovalSummary,
   type CompanyStatus,
   type GrantScope,
+  type NotificationDto,
   type TurnStep,
   type Verdict,
 } from "@/api/types";
@@ -62,6 +63,12 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
+import {
+  mentionCountsByChannel,
+  mentionsToClear,
+  threadViewAdvancesChannel,
+  threadsToReReadForMentions,
+} from "@/lib/mention-badge";
 import { usePresence } from "@/hooks/use-presence";
 import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
@@ -80,6 +87,7 @@ import {
   fromHistory,
   hostMessageId,
   liveReplyIdentity,
+  MAIN_THREAD_ID,
   makeMessage,
   mergeHistoryInOrder,
 } from "@/lib/chat";
@@ -384,6 +392,7 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
+  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
   for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
@@ -545,6 +554,13 @@ export function AppShell({
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
   const [transcripts, setTranscripts] = useState<Transcripts>({});
+  // The latest transcripts, readable from the stable `refreshMentions`
+  // callback without rebuilding it on every channel that lands a line (the
+  // same reason `mentionFeedRef` and `chatChannelByThreadRef` exist).
+  const transcriptsRef = useRef(transcripts);
+  useEffect(() => {
+    transcriptsRef.current = transcripts;
+  }, [transcripts]);
   // How far each channel's history rehydration has got. Kept beside
   // `transcripts` rather than inside it because an empty transcript is a
   // legitimate final answer, and the timeline has to tell that apart from not
@@ -1362,9 +1378,174 @@ export function AppShell({
    * again as the open channel's transcript grows so a line read as it lands
    * doesn't leave a badge behind.
    */
+  /**
+   * This person's unread mentions.
+   *
+   * Polled rather than streamed, deliberately: the company SSE feed has **no
+   * per-viewer projection**, which is the documented reason `ReactionToggled`
+   * is dropped from it entirely — a mention frame would have to carry either
+   * everyone's user ids or nobody's. So the feed is refetched on the same
+   * cadence the console already polls, on each reply, and on window focus.
+   *
+   * A host without the route leaves this empty, so no mention badges render and
+   * nothing else changes.
+   */
+  const [mentionFeed, setMentionFeed] = useState<NotificationDto[]>([]);
+  const mentionFeedRevision = useRef(0);
+  const mentionFeedVersion = mentionFeedRevision.current;
+  // Mention subject ids this session has already asked the shell to re-read a
+  // thread for. One re-read per mention, not one per poll: a re-read that
+  // fails (offline) is retried by the next reload rather than hammered.
+  const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
+  const refreshMentions = useCallback(() => {
+    const requestCompany = company;
+    const revision = ++mentionFeedRevision.current;
+    void client
+      .notifications(requestCompany)
+      // A host that answers this route with something other than the documented
+      // shape must not take the console down with it. `?? []` rather than a
+      // trusted `feed.notifications`: an older or proxied host can return a bare
+      // array, or `null`, and iterating that throws during render — which blanks
+      // the whole app, not just the badge. The badge is the least important
+      // thing on the screen and must fail like it.
+      .then((feed) => {
+        if (
+          revision !== mentionFeedRevision.current ||
+          requestCompany !== scopeRef.current.company
+        )
+          return;
+        const next = Array.isArray(feed?.notifications) ? feed.notifications : [];
+        setMentionFeed(next);
+        // A mention posted by another operator never reaches this tab through
+        // SSE (`OperatorMessage` is dropped from the projection), and the
+        // transcripts are otherwise re-read only when a turn this tab is
+        // *watching* settles — a turn another operator's message opened is not
+        // one it watches. So a newly polled mention whose message is absent
+        // from the loaded transcript would leave its badged channel with
+        // nothing to show and the `loadedMessageIds` gate unable to clear it
+        // (Codex). Re-read the host thread so the mentioned message lands.
+        const loadedByChannel: Record<string, ReadonlySet<string>> = {};
+        for (const [channelId, rows] of Object.entries(transcriptsRef.current)) {
+          loadedByChannel[channelId] = new Set(rows.map((m) => m.id));
+        }
+        const { threadIds, subjects } = threadsToReReadForMentions(
+          next,
+          loadedByChannel,
+          chatChannelByThreadRef.current,
+          firstDeskChannelId ?? undefined,
+          mentionReReadSubjectsRef.current,
+        );
+        if (threadIds.length > 0) {
+          // Guard first, then re-read: the fold `reReadSettledThread` runs is
+          // idempotent, but the poll that noticed the mention keeps firing, so
+          // without the guard every tick would re-read the same threads.
+          subjects.forEach((s) => mentionReReadSubjectsRef.current.add(s));
+          threadIds.forEach((threadId) => reReadSettledThread(threadId));
+        }
+      })
+      .catch(() => {
+        // A transient refresh failure must not erase the last successful feed:
+        // keeping it is safer than making durable unread mentions disappear.
+        // The next successful refresh reconciles the optimistic snapshot.
+      });
+  }, [client, company, firstDeskChannelId, reReadSettledThread]);
+
+  useEffect(() => {
+    mentionFeedRevision.current++;
+    mentionReReadSubjectsRef.current = new Set();
+    setMentionFeed([]);
+    refreshMentions();
+    const onFocus = () => refreshMentions();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshMentions]);
+
+  // Ride the existing company poll rather than adding a second timer.
+  useEffect(() => {
+    refreshMentions();
+  }, [feed.now, refreshMentions]);
+
+  const mentionCounts = useMemo(() => {
+    // `main` may be undefined while the desks/roster effect has not resolved —
+    // passing a fabricated `""` would file every legacy "General"/"main"
+    // mention under a channel the rail never has, invisible and unclearable.
+    // The lib drops those rows when there is no rendered main channel.
+    return mentionCountsByChannel(
+      mentionFeed,
+      firstDeskChannelId ?? undefined,
+      new Set(Object.values(chatChannelByThread)),
+    );
+  }, [mentionFeed, firstDeskChannelId, chatChannelByThread]);
+  const mentionFeedRef = useRef(mentionFeed);
+  mentionFeedRef.current = mentionFeed;
+  /**
+   * The same feed, readable from a callback that must not be rebuilt when it
+   * changes.
+   *
+   * `onChannelViewed` is handed to `ChatView` and is deliberately stable — it
+   * is called on every channel view and on every transcript growth, and adding
+   * the feed to its dependencies would rebuild it on every poll. But it also
+   * has to clear *this* channel's mentions, which means reading the current
+   * feed. A ref is how both hold: the callback stays stable and still sees the
+   * latest value, instead of capturing the empty array it was created with.
+   */
   const onChannelViewed = useCallback(
-    (channelId: string) => {
+    (
+      channelId: string,
+      historyPending: boolean,
+      mentionFeedRevision?: number,
+      replyParents?: ReadonlyMap<string, string>,
+      openThreadId?: string | null,
+      loadedMessageIds?: ReadonlySet<string>,
+      advanceChannelRead = true,
+    ) => {
       activeChatChannelRef.current = channelId;
+      if (mentionFeedRevision === undefined) return;
+      // Clear only THIS channel's mentions, and only once its history is
+      // actually on screen. A mention is durable and there is no
+      // older-history pagination to recover one, so clearing it before the
+      // named message has loaded — or while hydration is still failing —
+      // would lose the summons for good with nothing left to notice it by.
+      // The effect above re-fires once `historyPending` goes false, so this
+      // simply waits rather than dropping the clear.
+      const clearing = historyPending
+        ? []
+        : mentionsToClear(
+            mentionFeedRef.current,
+            channelId,
+            // Same undefined-means-none signal as the count memo: with no
+            // rendered main channel the general-chat arm matches nothing.
+            firstDeskChannelId ?? undefined,
+            new Set(
+              Object.keys(chatChannelByThread).filter(
+                (threadId) => chatChannelByThread[threadId] === channelId,
+              ),
+            ),
+            new Set(Object.values(chatChannelByThread)),
+            replyParents ?? new Map(),
+            openThreadId ?? null,
+            loadedMessageIds,
+          );
+      if (clearing.length > 0) {
+        // Optimistic, so the badge goes at once; the next poll reconciles.
+        setMentionFeed((current) =>
+          current.map((n) =>
+            clearing.includes(n.id) ? { ...n, readAt: Date.now() } : n,
+          ),
+        );
+        void client.markNotificationsRead(clearing, company).catch(() => {
+          // Older host, or offline. The next poll restores the true state
+          // rather than leaving a badge permanently wrong.
+          refreshMentions();
+        });
+      }
+      // A Conversation thread view that aliases `main` onto a real desk shows
+      // the legacy General transcript, not the desk's own (see `onThreadViewed`).
+      // The mention clear above is still owed — the thread's loaded ids prove
+      // the summoning message is on screen — but the channel-read side effects
+      // are not: advancing the desk's floor here would permanently un-badge
+      // unread lines the operator never saw.
+      if (!advanceChannelRead) return;
       const at = Date.now();
       setLastViewedChannel((v) => ({ ...v, [channelId]: at }));
       // The durable half (issue #755). Fire-and-forget on purpose: the local
@@ -1381,7 +1562,54 @@ export function AppShell({
       // exactly one of the trips that has to survive.
       writeLastChannel(scope, channelId);
     },
-    [scope, client, company],
+    // The whole map, not just `.main`: the callback reads every key and value
+    // (`Object.keys`/`Object.values` for the rendered and visible thread sets),
+    // and a company switch whose first desk id matches the previous company's
+    // leaves `.main` unchanged while the rest of the map — the DM channels for
+    // a different roster — moves. Rebuilding the callback on the whole map is
+    // cheap: it changes on desk load and company switch, never per poll (the
+    // `mentionFeedRef` comment above is what keeps the *feed* out of the deps).
+    [scope, client, company, chatChannelByThread],
+  );
+
+  /**
+   * The Conversation surface's own view report, mapped onto the Chat rail.
+   *
+   * Conversation renders the `main` thread (and every desk thread) that the
+   * rail maps to a channel, but it is a different store with its own view
+   * lifecycle — ChatView's `onChannelViewed` never fires for it. For a company
+   * with real desks the `main` conversation lives *only* here, so a mention
+   * whose subject sits in that thread could never clear: the rail channel it
+   * badges hydrates the first desk's own thread, whose loaded messages can
+   * never contain the main-thread subject. Reporting the view through the same
+   * channel id, gated by the *thread's* loaded ids, gives the badge its read
+   * path while keeping the clear honest — it still only fires once the named
+   * message is actually on screen.
+   *
+   * The mention clear is not the whole of `onChannelViewed`, though. A desk or
+   * DM thread view maps to the channel that owns that same transcript, so its
+   * ordinary channel-view side effects (advancing the unread floor and the
+   * persisted read marker) are correct. The `main` view is different: `main`
+   * aliases the first desk's channel for *badging*, but its transcript is the
+   * legacy General conversation, not the desk's own — so marking that desk read
+   * would permanently un-badge unread lines the operator never saw. That view
+   * reports the mention clear only ([`threadViewAdvancesChannel`]).
+   */
+  const onThreadViewed = useCallback(
+    (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
+      const channelId = chatChannelByThreadRef.current[threadId];
+      if (!channelId) return;
+      onChannelViewed(
+        channelId,
+        false,
+        mentionFeedVersion,
+        undefined,
+        null,
+        loadedMessageIds,
+        threadViewAdvancesChannel(threadId, channelId),
+      );
+    },
+    [onChannelViewed, mentionFeedVersion],
   );
 
   const setThreadMessages = (
@@ -2324,6 +2552,8 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
+              mentionFeedRevision={mentionFeedVersion}
+              mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
               now={feed.now}
@@ -2342,6 +2572,7 @@ export function AppShell({
               threads={threads}
               activeId={activeThreadId}
               onSelect={setActiveThreadId}
+              onThreadViewed={onThreadViewed}
               setMessages={setThreadMessages}
               onReply={() => void feed.refresh()}
               taskEventTick={taskEventTick}

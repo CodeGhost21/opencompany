@@ -269,6 +269,12 @@ CREATE TABLE IF NOT EXISTS notifications (
     subject_id   TEXT NOT NULL,
     title        TEXT NOT NULL,
     created_ms   INTEGER NOT NULL,
+    -- Who the row is for, as a JSON array of user ids. NULL means the whole
+    -- company, which is what every row written before this column meant.
+    audience     TEXT,
+    -- The console channel id the subject lives in, for placing a badge without
+    -- the browser having loaded that transcript.
+    context      TEXT,
     PRIMARY KEY (company_id, id)
 );
 -- Backs the documented newest-first feed (`NotificationStore::list`):
@@ -374,6 +380,41 @@ fn sql_err(e: rusqlite::Error) -> OpenCompanyError {
 /// land on an existing file. `PRAGMA table_info` is the check rather than
 /// swallowing the `ALTER`'s "duplicate column name" error, so a genuine `ALTER`
 /// failure still surfaces.
+/// Decodes a stored audience and applies the shared visibility predicate.
+///
+/// Invalid JSON preserves the fail-open migration behavior used by the read
+/// path: the notification remains company-wide rather than disappearing.
+fn audience_admits(audience: Option<&str>, user: &str) -> bool {
+    let decoded: Option<Vec<String>> = audience.and_then(|raw| serde_json::from_str(raw).ok());
+    // Decode once, then defer to the one shared rule on `Notification` so this
+    // cannot drift from `list()` in this file or the other two backends.
+    crate::ports::notifications::audience_admits(decoded.as_deref(), user)
+}
+
+/// Notification ids in this company that `user` is allowed to see.
+fn notification_ids_visible_to(
+    conn: &Connection,
+    company: &CompanyId,
+    user: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT id, audience FROM notifications WHERE company_id = ?1")
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![company.as_ref()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
+        .map_err(sql_err)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, audience) = row.map_err(sql_err)?;
+        if audience_admits(audience.as_deref(), user) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
     let present = {
         let mut stmt = conn
@@ -597,6 +638,11 @@ impl SqliteStore {
         // exactly the "this node is not binary" test the reads use, and needs no
         // backfill.
         add_column_if_missing(&conn, "workspace_nodes", "blob", "BLOB")?;
+        // Targeted notifications. Both nullable with no default, so every row
+        // written before them keeps `audience IS NULL` — which is exactly the
+        // "for the whole company" test the read uses, and needs no backfill.
+        add_column_if_missing(&conn, "notifications", "audience", "TEXT")?;
+        add_column_if_missing(&conn, "notifications", "context", "TEXT")?;
         // Issue #983: `runs.task_id` was `NOT NULL`, and SQLite has no way to
         // drop a column constraint — so a database created before this needs the
         // twelve-step table rebuild, or the first card-less chat turn fails its
@@ -3176,8 +3222,9 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
         // error, matching the fs and mongo backends.
         conn.execute(
             "INSERT OR IGNORE INTO notifications \
-                 (company_id, id, kind, subject_kind, subject_id, title, created_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (company_id, id, kind, subject_kind, subject_id, title, created_ms, \
+                  audience, context) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 company.as_ref(),
                 notification.id.as_str(),
@@ -3186,6 +3233,15 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
                 notification.subject.id.as_str(),
                 notification.title.as_str(),
                 notification.created_at as i64,
+                notification
+                    .audience
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|e| crate::error::OpenCompanyError::Store(format!(
+                        "notification audience is not serializable: {e}"
+                    )))?,
+                notification.context.as_deref(),
             ],
         )
         .map_err(sql_err)?;
@@ -3203,7 +3259,7 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT n.id, n.kind, n.subject_kind, n.subject_id, n.title, n.created_ms, \
-                        r.read_ms \
+                        r.read_ms, n.audience, n.context \
                  FROM notifications n \
                  LEFT JOIN notification_reads r \
                      ON r.company_id = n.company_id \
@@ -3223,12 +3279,14 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
                     r.get::<_, String>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, Option<i64>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             })
             .map_err(sql_err)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, kind, subject_kind, subject_id, title, created_ms, read_ms) =
+            let (id, kind, subject_kind, subject_id, title, created_ms, read_ms, audience, context) =
                 row.map_err(sql_err)?;
             let subject_kind = crate::ports::notifications::SubjectKind::from_token(&subject_kind)
                 .ok_or_else(|| {
@@ -3246,10 +3304,25 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
                     },
                     created_at: created_ms as u64,
                     title,
+                    // A row whose audience will not parse is treated as
+                    // company-wide rather than dropped: losing a notification
+                    // is worse than showing one person one extra line, and a
+                    // corrupt column is a bug to see, not to hide.
+                    audience: audience
+                        .as_deref()
+                        .and_then(|a| serde_json::from_str(a).ok()),
+                    context,
                 },
                 read_at: read_ms.map(|v| v as u64),
             });
         }
+        // Filtered here rather than in SQL: SQLite's JSON support is a
+        // compile-time option this crate does not require, and a company's feed
+        // is small enough that the index-ordered scan plus a predicate is
+        // cheaper than depending on it. The rule itself lives on
+        // `Notification::visible_to`, so all three backends read it from one
+        // place.
+        out.retain(|view| view.notification.visible_to(user));
         Ok(out)
     }
 
@@ -3279,29 +3352,54 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
                 }
             }
             None => {
-                conn.execute(
-                    "INSERT OR IGNORE INTO notification_reads \
-                         (company_id, user_id, notification_id, read_ms) \
-                     SELECT ?1, ?2, id, ?3 FROM notifications WHERE company_id = ?1",
-                    params![company.as_ref(), user, now],
-                )
-                .map_err(sql_err)?;
+                // Only what this person can actually see. Marking a colleague's
+                // targeted row read is inert, but writing markers for rows they
+                // will never be shown makes "mark all read" mean something
+                // different per backend, which is exactly what the conformance
+                // suite exists to prevent.
+                for id in notification_ids_visible_to(&conn, company, user)? {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO notification_reads \
+                             (company_id, user_id, notification_id, read_ms) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![company.as_ref(), user, id.as_str(), now],
+                    )
+                    .map_err(sql_err)?;
+                }
             }
         }
-        let unread: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM notifications n \
+        // Counted in Rust rather than in SQL: the audience is a JSON array, and
+        // reading it in SQLite needs the `json1` extension, which this crate
+        // does not require of its host. A company's feed is small, and the
+        // predicate lives on `Notification::visible_to` so all three backends
+        // agree by construction rather than by three careful queries.
+        let mut stmt = conn
+            .prepare(
+                "SELECT n.audience FROM notifications n \
                  WHERE n.company_id = ?1 \
                    AND NOT EXISTS \
                        (SELECT 1 FROM notification_reads r \
                         WHERE r.company_id = n.company_id \
                           AND r.notification_id = n.id \
                           AND r.user_id = ?2)",
-                params![company.as_ref(), user],
-                |r| r.get(0),
             )
             .map_err(sql_err)?;
-        Ok(unread as u64)
+        let rows = stmt
+            .query_map(params![company.as_ref(), user], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .map_err(sql_err)?;
+        let mut unread = 0u64;
+        for row in rows {
+            let audience = row.map_err(sql_err)?;
+            let decoded: Option<Vec<String>> = audience
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok());
+            if crate::ports::notifications::audience_admits(decoded.as_deref(), user) {
+                unread += 1;
+            }
+        }
+        Ok(unread)
     }
 }
 
