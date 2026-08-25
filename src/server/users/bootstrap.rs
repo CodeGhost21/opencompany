@@ -576,6 +576,7 @@ mod test {
     /// cannot complete. Everything else delegates to the real filesystem store.
     struct SessionRevocationFailure(Arc<FsOps>);
 
+    #[async_trait]
     impl crate::ports::sessions::SessionStore for SessionRevocationFailure {
         async fn create(
             &self,
