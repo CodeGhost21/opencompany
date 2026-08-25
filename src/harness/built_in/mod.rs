@@ -2823,6 +2823,28 @@ async fn refresh_oauth_decls(
 ) {
 }
 
+/// Whether an override row is purely a face — `avatar` set and nothing the
+/// harness reads set. Such a row must not move a fingerprint: the fingerprints
+/// hash what a teammate *is* (name, role, description, toolbelt, persona,
+/// model, harness), and an avatar is none of those. A row that changed only the
+/// face would otherwise count itself and its `agent_id` into the hash, rebuild
+/// the roster, and drop every live agent session for a cosmetic change — issue
+/// #1676's review note.
+///
+/// An explicit `Some(vec![])` tool list, `Some("")` instructions and `Some("")`
+/// model/harness (the stored form of "cleared") stay real overrides ("the
+/// company's standard grant" / "cleared" / "the blueprint's model and harness"),
+/// so only the all-`None` row is filtered, not the emptied one.
+fn is_avatar_only(edit: &crate::ports::types::AgentOverride) -> bool {
+    edit.name.is_none()
+        && edit.role.is_none()
+        && edit.description.is_none()
+        && edit.tools.is_none()
+        && edit.instructions.is_none()
+        && edit.model.is_none()
+        && edit.harness.is_none()
+}
+
 /// A stable fingerprint of the roster overlay — the operator-added teammates
 /// (issue #71) **and** the operator's edits of the manifest-declared ones —
 /// used to detect a teammate add/remove/edit between [`HarnessPool::ensure`]
@@ -2835,6 +2857,10 @@ async fn refresh_oauth_decls(
 /// roster, so a console rename that moved no fingerprint would persist, read
 /// back correctly on the Team page, and be invisible to every turn the teammate
 /// took until the process restarted.
+///
+/// Avatar-only rows ([`is_avatar_only`]) are excluded: the face a teammate
+/// wears is display data resolved at render time, never part of the persona the
+/// harness builds, so a choice of face must not discard live agent sessions.
 fn overlay_fingerprint(
     agents: &[OverlayAgent],
     edits: &[crate::ports::types::AgentOverride],
@@ -2856,14 +2882,26 @@ fn overlay_fingerprint(
     // Hashed in stored order, which `upsert_agent_override` keeps stable: it
     // replaces an existing entry in place and only ever appends a new one, so a
     // repeated edit of one teammate does not permute the list and drop every
-    // live session for a change that touched nobody else.
-    edits.len().hash(&mut hasher);
-    for edit in edits {
+    // live session for a change that touched nobody else. Avatar-only rows are
+    // skipped (`is_avatar_only`): they carry no persona, so they must not move
+    // the fingerprint.
+    let persona_edits: Vec<_> = edits.iter().filter(|edit| !is_avatar_only(edit)).collect();
+    persona_edits.len().hash(&mut hasher);
+    for edit in persona_edits {
         edit.agent_id.hash(&mut hasher);
         edit.name.hash(&mut hasher);
         edit.role.hash(&mut hasher);
         edit.description.hash(&mut hasher);
         edit.tools.hash(&mut hasher);
+        // A routing override changes the harness binding the roster must build,
+        // so it has to move this fingerprint too — otherwise re-binding one
+        // teammate to another model/harness would persist and be silently
+        // ignored until the next process restart (issue #1676 review note).
+        // Hashed as `Option`s, so the stored `Some("")` "cleared" form stays
+        // distinct from `None` ("never edited"), the same discriminant the
+        // resolver's reset-to-blueprint contract depends on.
+        edit.model.hash(&mut hasher);
+        edit.harness.hash(&mut hasher);
     }
     agents.len().hash(&mut hasher);
     for agent in agents {
@@ -2878,6 +2916,12 @@ fn overlay_fingerprint(
         // order (an operator's own list), length folded in first via the slice
         // length above so `["a","b"]` cannot collide with `["ab"]`.
         agent.tools.hash(&mut hasher);
+        // The overlay's own routing binding (`overlay_agent_to_manifest` carries
+        // both straight through), so a model/harness change on an overlay
+        // teammate invalidates the cached roster exactly as an edit of a
+        // manifest one does.
+        agent.model.hash(&mut hasher);
+        agent.harness.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -3132,11 +3176,19 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
 /// instructions text is hashed as an `Option` discriminant plus its bytes, so a
 /// stored `Some("")` stays distinct from `None` — the same distinction the
 /// resolver's reset-to-blueprint contract depends on.
+///
+/// Avatar-only rows ([`is_avatar_only`]) are excluded here exactly as in
+/// [`overlay_fingerprint`]: a face is resolved at render time, never part of the
+/// persona the harness builds, so choosing or clearing one must not rebuild the
+/// roster.
 fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let mut ordered: Vec<&AgentOverride> = overrides.iter().collect();
+    let mut ordered: Vec<&AgentOverride> = overrides
+        .iter()
+        .filter(|entry| !is_avatar_only(entry))
+        .collect();
     ordered.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
 
     let mut hasher = DefaultHasher::new();
@@ -3150,6 +3202,14 @@ fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
             }
             None => 0u8.hash(&mut hasher),
         }
+        // A routing override changes the harness binding the roster must build,
+        // so it has to move this fingerprint too — a model/harness change on a
+        // teammate who already has a persona override would otherwise be ignored
+        // until the next process restart (issue #1676 review note). Hashed as
+        // `Option`s so the stored `Some("")` "cleared" form stays distinct from
+        // `None` ("never edited").
+        entry.model.hash(&mut hasher);
+        entry.harness.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -3824,6 +3884,54 @@ mod tests {
         );
     }
 
+    /// An overlay teammate's routing binding has to move the same axis: a
+    /// model/harness change is not a persona edit, but the roster the harness
+    /// builds consumes it (`overlay_agent_to_manifest` carries both straight
+    /// through), so a re-bind that moved nothing would be ignored until the
+    /// process restarted (issue #1676 review note).
+    #[test]
+    fn overlay_fingerprint_moves_on_a_model_or_harness_change() {
+        let one = |model: Option<&str>, harness: Option<&str>| {
+            vec![OverlayAgent {
+                id: "a".into(),
+                name: "A".into(),
+                role: "r".into(),
+                description: None,
+                tools: Vec::new(),
+                model: model.map(str::to_string),
+                harness: harness.map(str::to_string),
+            }]
+        };
+        let none = one(None, None);
+        let model = one(Some("chat-v2"), None);
+        let model_again = one(Some("chat-v2"), None);
+        let harness = one(None, Some("acp"));
+        let cleared = one(Some(""), None);
+
+        assert_ne!(
+            overlay_fingerprint(&none, &[], &[]),
+            overlay_fingerprint(&model, &[], &[]),
+            "binding an overlay to a model must move the fingerprint or the re-bind is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&model, &[], &[]),
+            overlay_fingerprint(&harness, &[], &[]),
+            "binding an overlay to a harness must move the fingerprint too"
+        );
+        // The stored `Some("")` "cleared" form is a distinct routing state from
+        // `None` ("never edited"), the same discriminant the resolver uses.
+        assert_ne!(
+            overlay_fingerprint(&none, &[], &[]),
+            overlay_fingerprint(&cleared, &[], &[]),
+            "an explicit clear must not hash like an untouched overlay"
+        );
+        // The same binding twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            overlay_fingerprint(&model, &[], &[]),
+            overlay_fingerprint(&model_again, &[], &[])
+        );
+    }
+
     /// An edit of a **manifest** teammate has to move the same axis, and for the
     /// same reason: a persona is assembled once per roster, so a rename that
     /// moved nothing would read back correctly on the Team page and be invisible
@@ -3854,6 +3962,127 @@ mod tests {
         assert_eq!(
             overlay_fingerprint(&[], &edit("Chief Vibes"), &[]),
             overlay_fingerprint(&[], &edit("Chief Vibes"), &[])
+        );
+    }
+
+    /// A **routing** edit of a manifest teammate — a model or harness re-bind —
+    /// has to move the same axis for the same reason: the roster the harness
+    /// builds reads the override's routing fields, so a re-bind that moved
+    /// nothing would be silently ignored until the process restarted (issue
+    /// #1676 review note). `Some("")` (the stored "cleared" form) is a distinct
+    /// routing state from `None` ("never edited"), mirroring the resolver's
+    /// reset-to-blueprint contract.
+    #[test]
+    fn overlay_fingerprint_moves_on_a_model_or_harness_edit_of_a_manifest_teammate() {
+        use crate::ports::types::AgentOverride;
+        let edit = |model: Option<&str>, harness: Option<&str>| {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                model: model.map(str::to_string),
+                harness: harness.map(str::to_string),
+                ..Default::default()
+            }]
+        };
+        let none: Vec<AgentOverride> = Vec::new();
+
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            "a model re-bind must move the fingerprint or it is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            overlay_fingerprint(&[], &edit(None, Some("acp")), &[]),
+            "a harness re-bind must move it too"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edit(Some(""), None), &[]),
+            "an explicit model clear must not hash like an untouched teammate"
+        );
+        // The same edit twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[])
+        );
+    }
+
+    /// Choosing or clearing a face writes an `AgentOverride` row whose only set
+    /// field is `avatar` (a teammate with no other override). The fingerprints
+    /// hash what a teammate *is*, never its face, so such a row must not move
+    /// either fingerprint — otherwise a purely cosmetic change would rebuild the
+    /// roster and drop every live agent session (issue #1676 review note).
+    #[test]
+    fn overlay_fingerprint_ignores_an_avatar_only_edit() {
+        use crate::ports::types::AgentOverride;
+        let avatar_only = |avatar: &str| {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                avatar: Some(avatar.to_string()),
+                ..Default::default()
+            }]
+        };
+        let none: Vec<AgentOverride> = Vec::new();
+
+        // Choosing a face for a teammate with no other override writes a row
+        // whose only set field is `avatar`. That is not a persona change — the
+        // harness reads nothing from the face — so it must not move the
+        // fingerprint.
+        assert_eq!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &avatar_only("tiny:robot"), &[]),
+            "an avatar-only row must not move the fingerprint"
+        );
+        // Clearing the face drops the row entirely (`clear_agent_avatar` →
+        // `retain_nonempty_agent_edits`), which must not move it either.
+        assert_eq!(
+            overlay_fingerprint(&[], &avatar_only("tiny:robot"), &[]),
+            overlay_fingerprint(&[], &none, &[]),
+            "clearing an avatar-only row must not move the fingerprint"
+        );
+        // The filter is narrow: a real persona edit still moves the
+        // fingerprint, even when the same teammate also carries a face.
+        let edited = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some("Chief".into()),
+                avatar: Some("tiny:robot".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edited(), &[]),
+            "a real persona edit must still move the fingerprint"
+        );
+        // The filter is narrow the other way too: a row that changed only the
+        // routing — `model` or `harness` with nothing else set — is not a face
+        // change. The harness reads those fields when it binds a teammate, so
+        // such a row must move the fingerprint or the old binding survives
+        // until restart (codex review note).
+        let routing = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                model: Some("claude-opus-4-5".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &routing(), &[]),
+            "a routing-only edit must still move the fingerprint"
+        );
+        let harness_routing = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                harness: Some("external".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &harness_routing(), &[]),
+            "a harness-only edit must still move the fingerprint"
         );
     }
 
@@ -6976,6 +7205,87 @@ description = "Builds the product."
             override_fingerprint(&ab),
             override_fingerprint(&ba),
             "the fingerprint must not depend on the stored order"
+        );
+    }
+
+    /// A routing edit — a model or harness re-bind — has to move the persona
+    /// fingerprint too: the roster the harness builds reads those fields, so a
+    /// re-bind that moved nothing would be silently ignored until the process
+    /// restarted (issue #1676 review note). The `Some("")` "cleared" form stays
+    /// distinct from `None` ("never edited"), the same discriminant the
+    /// reset-to-blueprint contract depends on.
+    #[test]
+    fn override_fingerprint_moves_on_a_model_or_harness_change() {
+        use crate::ports::types::AgentOverride;
+        let entry = |model: Option<&str>, harness: Option<&str>| AgentOverride {
+            agent_id: "ceo".into(),
+            model: model.map(str::to_string),
+            harness: harness.map(str::to_string),
+            ..Default::default()
+        };
+
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            "a model override must move the fingerprint or the re-bind is ignored until restart"
+        );
+        assert_ne!(
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            override_fingerprint(&[entry(None, Some("acp"))]),
+            "a harness override must move the fingerprint too"
+        );
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry(Some(""), None)]),
+            "an explicit model clear must not hash like an untouched teammate"
+        );
+        // The same override twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            override_fingerprint(&[entry(Some("chat-v2"), None)])
+        );
+    }
+
+    /// The persona-override fingerprint is filtered the same way as the overlay
+    /// one: a row carrying only a face has no persona text to hash, so choosing
+    /// or clearing an avatar for a teammate with no other override must not
+    /// rebuild the roster (issue #1676 review note).
+    #[test]
+    fn override_fingerprint_ignores_an_avatar_only_row() {
+        use crate::ports::types::AgentOverride;
+        let avatar_only = AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:robot".into()),
+            ..Default::default()
+        };
+        let persona = AgentOverride {
+            agent_id: "ceo".into(),
+            instructions: Some("speak plainly".into()),
+            avatar: Some("tiny:robot".into()),
+            ..Default::default()
+        };
+
+        // A row carrying only a face hashes like no row at all.
+        assert_eq!(
+            override_fingerprint(&[]),
+            override_fingerprint(std::slice::from_ref(&avatar_only)),
+            "an avatar-only row must not move the fingerprint"
+        );
+        // A persona edit still moves it, with or without a face riding along.
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(std::slice::from_ref(&persona)),
+            "a persona edit must still move the fingerprint"
+        );
+        // Two rows differing only in their face hash alike — no spurious rebuild
+        // when an operator changes one teammate's avatar.
+        assert_eq!(
+            override_fingerprint(std::slice::from_ref(&persona)),
+            override_fingerprint(std::slice::from_ref(&AgentOverride {
+                avatar: Some("tiny:fox".into()),
+                ..persona
+            })),
+            "the face must not be part of the fingerprint"
         );
     }
 

@@ -788,3 +788,18 @@ mod test {
         );
     }
 }
+
+/// Who is sitting at this machine, as the operating system already knows.
+///
+/// A **suggestion** for a profile nobody has filled in yet — see
+/// [`crate::identity`] for why it is read rather than imported. Every field is
+/// optional and a machine that knows nothing answers an empty record, which the
+/// console reads as "ask them to type it".
+///
+/// Takes no `connection_id`, unlike every other command here: it is a fact about
+/// this computer, not about a host — the same answer whichever workspace the
+/// person is looking at.
+#[tauri::command]
+pub async fn oc_device_identity() -> Result<crate::identity::DeviceIdentity, String> {
+    Ok(crate::identity::device_identity())
+}

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { AtSign, Hash, Users } from "lucide-react";
+import { Hash, Users } from "lucide-react";
 
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
@@ -91,11 +91,16 @@ export function MentionPicker({
 }
 
 function RowIcon({ entry }: { entry: Mentionable }) {
-  if (entry.target.kind === "agent") {
-    return <TeammateAvatar name={entry.label} className="size-6 shrink-0" />;
+  if (entry.target.kind === "agent" || entry.target.kind === "user") {
+    return (
+      <TeammateAvatar
+        name={entry.label}
+        avatar={entry.avatar}
+        className="size-6 shrink-0"
+      />
+    );
   }
-  const Icon =
-    entry.target.kind === "desk" ? Hash : entry.target.kind === "everyone" ? Users : AtSign;
+  const Icon = entry.target.kind === "desk" ? Hash : Users;
   return (
     <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted">
       <Icon className="size-3.5 text-muted-foreground" aria-hidden />

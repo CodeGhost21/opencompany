@@ -489,11 +489,12 @@ export interface Sender {
   kind: SenderKind;
   tone?: string;
   /**
-   * The id-seeded mascot key (`TeamMember.avatar`), when the sender resolves
-   * to a roster teammate. Undefined for "you"/"system", and for an agent
-   * voice `senderOf` could not match against the roster — `TeammateAvatar`
-   * falls back to seeding on `name` in both of those cases, same as before
-   * issue #1185.
+   * The avatar reference (`TeamMember.avatar`) when the sender resolves to a
+   * roster teammate, and your own when the sender is you.
+   *
+   * Undefined for "system", and for an agent voice `senderOf` could not match
+   * against the roster — `TeammateAvatar` falls back to seeding on `name` in
+   * both of those cases, same as before issue #1185.
    */
   avatar?: string;
   /**
@@ -527,8 +528,17 @@ const COMPANY_VOICE = new Set(["operator", "console", "chat", "owner", ""]);
  * desk-originated cross-post and simply keeps today's name-seeded fallback,
  * never a wrong face.
  */
-export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]): Sender {
-  if (m.from === "you") return { key: "you", name: "You", kind: "you" };
+export function senderOf(
+  m: ChatMessage,
+  channel: Channel,
+  members: TeamMember[],
+  youAvatar?: string,
+): Sender {
+  // Still "You" rather than your name: in your own transcript the second person
+  // is what identifies the line, and a name there would read as somebody else.
+  // Only the face is yours — which is the half a reader scanning a busy channel
+  // actually picks their own lines out by.
+  if (m.from === "you") return { key: "you", name: "You", kind: "you", avatar: youAvatar };
   if (m.from === "system") return { key: "system", name: "System", kind: "system" };
 
   const named = m.channel?.trim().toLowerCase() ?? "";
@@ -603,11 +613,16 @@ export interface TimelineEntry {
  * A system line is dropped: it has no voice to draw, and a pile that counted it
  * would claim one more participant than the thread has.
  */
-function distinctSenders(messages: ChatMessage[], channel: Channel, members: TeamMember[]): Sender[] {
+function distinctSenders(
+  messages: ChatMessage[],
+  channel: Channel,
+  members: TeamMember[],
+  youAvatar?: string,
+): Sender[] {
   const byKey = new Map<string, Sender>();
   for (const m of messages) {
     if (m.from === "system") continue;
-    const sender = senderOf(m, channel, members);
+    const sender = senderOf(m, channel, members, youAvatar);
     if (!byKey.has(sender.key)) byKey.set(sender.key, sender);
   }
   return [...byKey.values()];
@@ -624,6 +639,8 @@ export function buildTimeline(
   messages: ChatMessage[],
   channel: Channel,
   members: TeamMember[],
+  /** Your own face, so your lines in a busy channel are yours at a glance. */
+  youAvatar?: string,
 ): TimelineEntry[] {
   const replies = new Map<string, ChatMessage[]>();
   for (const m of messages) {
@@ -638,7 +655,7 @@ export function buildTimeline(
 
   for (const m of messages) {
     if (m.parentId) continue;
-    const sender = senderOf(m, channel, members);
+    const sender = senderOf(m, channel, members, youAvatar);
     const newDay = !prev || !sameDay(prev.message.at, m.at);
     const continuation =
       !newDay &&
@@ -657,7 +674,7 @@ export function buildTimeline(
       continuation,
       dayLabel: newDay ? formatDay(m.at) : undefined,
       replies: own,
-      replySenders: distinctSenders(own, channel, members),
+      replySenders: distinctSenders(own, channel, members, youAvatar),
     };
     entries.push(entry);
     prev = entry;

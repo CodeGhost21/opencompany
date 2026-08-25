@@ -281,8 +281,12 @@ const AWAITING_APPROVAL = "awaiting approval";
  * itself did not fail and telling an operator it did would send them at a graph
  * that was fine. `awaiting approval` shares amber with `blocked`: both are
  * waiting on a person, and neither is a fault. See docs/design-system/color.md.
+ *
+ * Exported (issue #1697) so the traces list's status filter can enumerate the
+ * closed set of verdicts with the same dot and label every other reader uses,
+ * rather than a second wording that could drift from this one.
  */
-const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
+export const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
   {
     running: { dot: "animate-pulse bg-status-running", label: "running" },
     failed: { dot: "bg-status-failed", label: "failed" },

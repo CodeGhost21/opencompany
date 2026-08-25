@@ -232,10 +232,10 @@ fn sample_overlay_desk_members() -> Vec<crate::ports::types::OverlayDeskMember> 
 }
 
 /// The operator's edits of a manifest-declared teammate: a renamed role, a
-/// cleared description (the empty-string form) and a narrowed tool scope, so a
-/// backend that drops the field — or that collapses "cleared" back into "not
-/// overridden" — is caught by the round-trip rather than in a console that
-/// silently re-inherits the blueprint after a restart.
+/// cleared description (the empty-string form), a narrowed tool scope and a
+/// chosen face, so a backend that drops the field — or that collapses "cleared"
+/// back into "not overridden" — is caught by the round-trip rather than in a
+/// console that silently re-inherits the blueprint after a restart.
 fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
     vec![crate::ports::types::AgentOverride {
         agent_id: "ceo".to_string(),
@@ -244,6 +244,10 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         description: Some(String::new()),
         tools: Some(vec!["docs.*".to_string()]),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
+        // A dropped avatar reads as "nobody has chosen", so the teammate's face
+        // would silently revert to the hashed default on the next restart — the
+        // same class of loss as re-inheriting the blueprint role.
+        avatar: Some("tiny:violet".to_string()),
         // Set rather than defaulted: this fixture exists to prove a store
         // round-trips the whole override, so every field it gains needs a real
         // value here or the new ones are covered by nothing.
@@ -1524,6 +1528,10 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         id: id.to_string(),
         email: email.to_string(),
         display_name: Some(format!("name {id}")),
+        // Non-`None` so a backend that drops the column is caught here: a lost
+        // avatar reads as "never chose one", so the person's face would revert
+        // to the hashed default on the next read with nothing reporting it.
+        avatar: Some("tiny:indigo".to_string()),
         role: UserRole::Member,
         status: UserStatus::Active,
         password_hash: None,
@@ -1550,6 +1558,13 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
     let list = users.list_users(&alpha).await.unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].id, "u2");
+    // The whole record round-trips, not only the columns each backend happened
+    // to think of: a dropped display name or avatar silently reverts a person
+    // to the console's derived name and hashed face.
+    assert_eq!(
+        users.get_user(&alpha, "u1").await.unwrap().as_ref(),
+        Some(&user("u1", "ada@example.com", 1))
+    );
     assert_eq!(users.list_users(&beta).await.unwrap().len(), 1);
 
     // A user of one company is invisible to another, by id and by email.

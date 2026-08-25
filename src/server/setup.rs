@@ -1051,9 +1051,10 @@ pub struct SetupRosterDto {
     /// The jobs no teammate owns. Non-empty only on the `model` path; a curated
     /// team makes no coverage claim about a list it never read.
     uncovered: Vec<String>,
-    /// Why this is the curated team: `no_model` or `not_designable`. Absent on
-    /// the `model` path. The review screen needs it because the operator's next
-    /// move differs — "add a key" versus "tell us more".
+    /// Why this is the curated team: `no_model`, `model_unreachable` or
+    /// `not_designable`. Absent on the `model` path. The review screen needs it
+    /// because the operator's next move differs — "add a key" versus "try
+    /// again" versus "tell us more".
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
 }

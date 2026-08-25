@@ -166,7 +166,7 @@ Creating your team…
   ✓ Meta Ads Specialist — campaigns, budgets, creative testing
   ✓ SEO Specialist — product listings, organic traffic
   ✓ Logistics Coordinator — dispatch, tracking, returns
-  ✓ Operations Manager — keeps the others moving
+  ✓ Fulfillment Manager — suppliers, stock levels, and what the shop needs to keep selling
   ✓ Accountant — reconciliation, margins, spend
 
 Setting up their desks…
@@ -202,7 +202,7 @@ Someone answers:
 | Meta Ads Specialist | Campaigns, budgets, creative testing |
 | SEO Specialist | Product listings, organic traffic |
 | Logistics Coordinator | Dispatch, tracking, returns |
-| Operations Manager | Keeps the other four moving |
+| Fulfillment Manager | Suppliers, stock levels, and what the shop needs to keep selling |
 | Accountant | Reconciliation, margins, spend |
 | Customer Support | *(added by the user at question 2)* |
 
@@ -317,7 +317,7 @@ a seed file cannot name a column, and the seeder writes through the plain task
 store rather than the edge-firing path that turns `in_progress` into a run. A
 freshly provisioned company can boot with a full board and spend nothing.
 Seeding is first-boot only, so a card an operator deletes stays deleted. See
-[globals.md](globals.md) for the rules and the `disable = ["task:<id>"]` opt-out.
+[globals.md](../globals.md) for the rules and the `disable = ["task:<id>"]` opt-out.
 
 ## What the host enforces, rather than asks for
 
@@ -327,7 +327,7 @@ instructions the host writes rather than the model, a copy of the reference team
 refused the name "designed", and a fallback that says which fallback it is. Each
 is a boundary rather than a line in a prompt, and each has a test that fails when
 it stops holding:
-[company-setup-guarantees.md](company-setup-guarantees.md).
+[company-setup-guarantees.md](../company-setup-guarantees.md).
 
 ## Nobody gets stuck
 
@@ -337,6 +337,49 @@ a bad response — none of these should strand somebody on a setup screen. Getti
 in with a roster that is only roughly right is dramatically better than not
 getting in. A person who cannot get past setup has had the worst possible first
 five minutes and is not coming back.
+
+**Decision D3a: say it before the questions, not after the roster.** A host with
+no model still answers — that is D3 — but the operator has by then spent three
+answers believing they were shaping something, so the dialog states the
+consequence beside question one. Three things keep that honest. It asks the
+**company** (`GET {scope}/inference`), whose cognition path decides whether a
+roster builder exists; `/api/v1/setup` reads the *host's* credential and refuses
+multi-company hosts, so a BYOK company reads as unavailable there while its
+design pass runs fine. The wait is **bounded**, because nothing dismisses this
+dialog and the questions are withheld while the check runs. And leaving to wire
+a model is **not a skip but a debt**: it records a resume and reopens setup on
+the return — the controller outlives the navigation and bars a second unprompted
+open, so merely not persisting the skip would still strand them.
+
+**Decision D3b: the fallback says which fallback, because the next action
+differs.** `no_model` means nothing was reachable — wire a credential.
+`model_unreachable` means a credential is wired but the provider did not answer
+— check the connection or retry. `not_designable` means a model answered
+unusably, almost always because the answers were too sparse — the retry
+restarts the questions in place so the operator can say more about the business
+(the Company page's own setup prompt is unreachable once the fallback team
+staffs the company). "Add a model in Settings" shows only for `no_model`;
+elsewhere it would send someone to fix a credential that had just worked.
+
+**Decision D3c: redesign replaces the fallback team rather than stacking on it.**
+When an operator follows "Add a model in Settings" after receiving a fallback,
+the controller records a redesign debt that names the fallback team's rows. On
+return, setup reopens over the staffed company, removes only **those** rows, and
+creates the newly designed roster. The global baseline is preserved, and so are
+teammates other operators staffed while model settings were open — the debt
+names what the first pass created, rather than re-reading the roster on return
+and treating everyone else's work as part of the team being replaced. The
+completion screen's in-place "Try again" records the same debt (the rows the
+failed pass just created) before restarting the questions, so a reload or crash
+before that replacement lands can reopen setup in redesign mode rather than
+leaving the gate reporting staffed with no way back in. The debt is settled the
+moment the replacement lands, not when the operator clicks a completion action:
+a designed replacement clears it (the owed redesign is done, exactly as
+finishing setup would), a replacement that fell back again re-keys it to the new
+fallback's rows, and a rollback that could not remove every partial row extends
+it to name the survivors — so a reload on the completion screen, or before a
+retry after a refused rollback, never reopens against a boundary the landing
+just deleted or misses a row it left behind.
 
 ## How we know it is someone's first time
 
@@ -354,7 +397,7 @@ and a second person joining the same company, with no stored flag to drift out
 of step with reality.
 
 **"Staffed" is narrower than "has a roster", and the difference is load-bearing.**
-The [global baseline](globals.md) merges a fixed set of teammates into *every*
+The [global baseline](../globals.md) merges a fixed set of teammates into *every*
 company whatever its manifest says, and they cannot be deleted — `DELETE
 …/team/{id}` answers `409` on each. So "is the roster empty?" is false on every
 company this product can serve. Asked that way, as it was until issue #1404, the
@@ -442,59 +485,6 @@ Two related problems surfaced in the same run, both fixed:
 
 ## For engineers
 
-Everything above is intent. This section is where it meets code and is the part
-most likely to go stale — trust the code over this list.
-
-### Phase 1 needs
-
-| Need | Where it lives | Status |
-| --- | --- | --- |
-| Create an agent | `POST …/team` (`add_member`, `src/server/ops/team.rs`) | exists |
-| Set an agent's role/description | `PATCH …/team/{agent_id}` (`src/server/ops/team_agent.rs`) | exists |
-| Read the roster (first-run check, D4) | `GET …/team` (`list_team`) | exists |
-| Tell baseline teammates from staffed ones | `TeamMemberDto.global` (`list_team`, `team_agent::is_global`) | exists |
-| Desk and agent folders | `ensure_workspace_scaffold`, `ensure_agent_folder`, `ensure_desk_folder` (`src/company/workspace_scaffold.rs`) | exists |
-| Talk to an agent afterwards | existing chat surface | exists |
-| Answers → proposed roster | — | **new** |
-| The three-question dialog + build-out screen | `frontend/src/` | **new** |
-| Storing the raw answers for Phase 2 | — | **new** |
-
-The important line in that table: Phase 1 needs **no new backend route**. Agent
-creation, agent editing, roster reads and folder scaffolding all exist. The new
-work is the synthesis step, the UI, and somewhere to keep the answers.
-
-### Phase 2 needs (not now)
-
-| Need | Where it lives |
-| --- | --- |
-| Create a workflow | `POST …/workflows` (`create_workflow`, `src/server/ops/workflows.rs`) |
-| Scheduled runs | `[[schedule]]` / cron, `src/runtime/cron.rs`, `src/runtime/workflow_scheduler.rs` |
-| Intent → workflow graph | `run_workflow_build_pass` (`src/harness/workflow_build.rs`), see [workflow-build.md](workflow-build.md) |
-| Connections | `src/server/ops/connections.rs` (`oauth` feature) |
-
-### Notes on the decisions
-
-- D1 maps to `[policy].mode`, whose values are `readonly`, `supervised`
-  (default) and `full` — see [manifest.md](manifest.md) and
-  `Reach` in `src/policy/consequence.rs`. Because we are not asking, setup
-  inherits the default and needs no route to change it. A settings-page control
-  is a follow-up, and matters more in Phase 2.
-- D4 is a deliberate departure from `frontend/src/tour/state.ts`, which keeps
-  first-run state in `localStorage` and documents why (no per-user field on
-  `UserRecord`). Fine for a tour, wrong for anything that creates records.
-  Derive from an empty roster instead.
-- **Setup must not call `POST /api/v1/companies`** (`src/server/provision.rs`).
-  That route requires the `platform` scope and belongs to the control plane. A
-  company can arrive two ways — provisioned by the platform before anyone signs
-  in, or run locally by its owner — and setup has to work in both. So it
-  *populates the company the session is already scoped to*, through the
-  operator-scoped routes in `src/server/ops/`.
-- The build-out screen wants progress it can render as it happens. The event
-  vocabulary in [events.md](events.md) already carries per-entity events and the
-  console's existing stream (`frontend/src/hooks/use-events.ts`) is the natural
-  transport, rather than a bespoke polling endpoint.
-
-**Undecided:** where the stored answers live. They need to outlive the setup
-session so Phase 2 can read them, and they are company-scoped rather than
-user-scoped. Worth settling in Phase 1 rather than retrofitting — getting this
-wrong is the one Phase 1 decision that would force rework in Phase 2.
+Everything above is intent; where it meets code — the tables that map each
+phase's needs to routes, and the notes on the decisions — moved to
+[engineers.md](engineers.md), the part most likely to go stale.

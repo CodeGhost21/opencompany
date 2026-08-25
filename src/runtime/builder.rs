@@ -3161,7 +3161,7 @@ impl RuntimeBuilder {
         // against a snapshot predating the other. Adopting them is also what
         // makes the quiesce drain mean something after the swap.
         if let Some(h) = handover.as_ref() {
-            runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
+            runtime.adopt_locks(h.serial.clone(), h.per_agent.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
         runtime.adopt_workflow_gates(workflow_gates);
@@ -4751,6 +4751,7 @@ mod test {
                     id: "u1".into(),
                     email: "ada@example.com".into(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Active,
                     password_hash: None,
@@ -6900,6 +6901,7 @@ needs_reason = true
             description: None,
             tools: None,
             instructions: None,
+            avatar: None,
             ..Default::default()
         });
         record.retire_agent("cto");
