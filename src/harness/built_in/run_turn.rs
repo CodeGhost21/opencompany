@@ -109,4 +109,8 @@ impl RunTurn for HarnessRunTurn {
     async fn end_cycle(&self, company: &CompanyId) {
         self.pool.end_cycle(company).await
     }
+
+    fn release_policy_pin_sync(&self, company: &CompanyId) {
+        self.pool.release_policy_pin_sync(company);
+    }
 }
