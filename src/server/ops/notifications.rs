@@ -298,6 +298,7 @@ mod tests {
             id: "u-other".to_string(),
             email: "other@example.test".to_string(),
             display_name: Some("Other Person".to_string()),
+            avatar: None,
             role: UserRole::Member,
             status: UserStatus::Active,
             password_hash: None,
