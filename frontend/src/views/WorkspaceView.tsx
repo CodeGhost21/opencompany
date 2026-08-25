@@ -650,6 +650,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // Mount / company change: reset every scoped piece of state, then load.
   useEffect(() => {
     expandedSeeded.current = false;
+    nodesRef.current = [];
     setNodes([]);
     setOpenId(null);
     setOpenFile(null);
