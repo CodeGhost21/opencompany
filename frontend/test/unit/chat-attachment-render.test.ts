@@ -167,7 +167,7 @@ describe("MessageAttachments (issue #1682)", () => {
     // one attachment alive with all but the newest discarded. The exit must
     // cancel the in-flight fetch through the signal.
     it("cancels an in-flight preview fetch when the image leaves the viewport", async () => {
-      let settle: { aborted: boolean } = { aborted: false };
+      const settle = { aborted: false };
       const resolveUrl = vi.fn((_id: string, signal?: AbortSignal) => {
         return new Promise<string>((_resolve, reject) => {
           signal?.addEventListener("abort", () => {
