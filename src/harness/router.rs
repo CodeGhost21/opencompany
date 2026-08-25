@@ -275,7 +275,7 @@ impl RunTurn for HarnessRouter {
     async fn end_cycle(&self, company: &CompanyId) {
         // Fan the release out to every lane that pinned, so no engine's pool is
         // left holding a stale snapshot after its cycle ends (issue #1455).
-        for (_harness, engine) in &self.engines {
+        for engine in self.engines.values() {
             engine.end_cycle(company).await;
         }
     }
@@ -284,7 +284,7 @@ impl RunTurn for HarnessRouter {
         // The synchronous fan-out for a cycle's drop guard: a cancelled or
         // panicked cycle cannot await `end_cycle`, but must still release the
         // pin it installed on every lane (issue #1455).
-        for (_harness, engine) in &self.engines {
+        for engine in self.engines.values() {
             engine.release_policy_pin_sync(company);
         }
     }
