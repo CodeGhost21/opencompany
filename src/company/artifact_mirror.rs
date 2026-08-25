@@ -108,6 +108,26 @@ pub struct PublishTarget<'a> {
     pub existing_node_id: Option<&'a str>,
 }
 
+/// One card-less workflow-run artifact.
+///
+/// Runs cannot use [`PublishTarget`] directly because its second path segment
+/// is a task id and a workflow agent node has no card. This target preserves
+/// the same author/source/payload contract while giving the mirror the two ids
+/// that make the destination unique within a run.
+#[derive(Debug, Clone, Copy)]
+pub struct RunTarget<'a> {
+    /// The roster agent whose sandbox produced the file.
+    pub agent_id: &'a str,
+    /// The workflow run that owns the capture.
+    pub run_id: &'a str,
+    /// The graph node whose turn wrote it.
+    pub node_id: &'a str,
+    /// The normalized path relative to that agent's workspace.
+    pub source: &'a str,
+    /// The captured file body.
+    pub payload: MirrorPayload<'a>,
+}
+
 /// What [`materialize`] is being asked to put in the tree.
 ///
 /// Borrowed rather than owned: the drain already holds the bytes it read, and a
@@ -274,6 +294,34 @@ pub async fn materialize(
         // edits the tree by hand.
         None => create_first(workspace, company, &parent, filename, target).await,
     }
+}
+
+/// Files a card-less workflow-node output into the shared workspace tree.
+///
+/// The layout is `artifacts/<agent>/runs/<run>/<node>/<source…>`. Reusing
+/// [`materialize`] keeps the same path validation, conflict handling, binary
+/// storage, and atomic create semantics as task artifacts while the `runs`
+/// segment prevents a run id from being mistaken for a task id.
+pub async fn materialize_run(
+    workspace: &dyn WorkspaceStore,
+    company: &CompanyId,
+    target: RunTarget<'_>,
+) -> Result<Mirrored> {
+    let run = kebab_name_or(target.run_id, target.run_id);
+    let node = kebab_name_or(target.node_id, target.node_id);
+    let source = format!("{run}/{node}/{}", target.source);
+    materialize(
+        workspace,
+        company,
+        PublishTarget {
+            agent_id: target.agent_id,
+            task_id: "runs",
+            source: &source,
+            payload: target.payload,
+            existing_node_id: None,
+        },
+    )
+    .await
 }
 
 /// Publishes a deliverable to a path that nothing occupies yet, and loses
