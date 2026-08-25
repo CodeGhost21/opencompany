@@ -2750,11 +2750,14 @@ impl Brain for HarnessBrain {
 /// the pin cannot outlive the cycle no matter how it ends (issue #1455).
 struct PolicyPinGuard {
     run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
-    company_id: CompanyId,
+    company_id: crate::ports::types::CompanyId,
 }
 
 impl PolicyPinGuard {
-    fn new(run_turn: Arc<dyn crate::runtime::delegation::RunTurn>, company_id: CompanyId) -> Self {
+    fn new(
+        run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+        company_id: crate::ports::types::CompanyId,
+    ) -> Self {
         Self { run_turn, company_id }
     }
 }
