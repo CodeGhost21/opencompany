@@ -507,6 +507,37 @@ mod test {
     }
 
     #[tokio::test]
+    async fn memory_store_redacts_credentials_in_the_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let context = ctx(dir.path());
+        let (store, _, _) = tools_for(dir.path(), "acme", "ceo");
+
+        // A credential-shaped title must not persist verbatim anywhere: not in
+        // the stored body, not in the label, not in the success echo.
+        let stored = store
+            .execute(json!({"title": "Bearer sk-longsecret", "body": "the api key for staging"}))
+            .await
+            .unwrap();
+        assert!(!stored.is_error, "{stored:?}");
+        assert!(
+            stored.text().contains("[REDACTED]"),
+            "success echo must carry the redacted title: {}",
+            stored.text()
+        );
+        assert!(!stored.text().contains("sk-longsecret"), "{}", stored.text());
+
+        let addr = addr_from(&stored.text());
+        let peeked = context.peek(&company, &addr, None).await.unwrap();
+        assert!(
+            peeked.body.contains("Bearer [REDACTED]"),
+            "stored title must be redacted: {}",
+            peeked.body
+        );
+        assert!(!peeked.body.contains("sk-longsecret"), "{}", peeked.body);
+    }
+
+    #[tokio::test]
     async fn forget_cannot_touch_other_rows() {
         let dir = tempfile::tempdir().unwrap();
         let company = CompanyId::new("acme");
