@@ -1075,7 +1075,25 @@ impl<'a> DelegationRunner<'a> {
         // that branch only ever runs on an abstained triage. Without this seed
         // the greeting fast path below could never fire for the exact messages
         // it exists to optimise.
-        let mut chatter = triaged.is_matched_chatter();
+        //
+        // Kept as its own fact (`matched_chatter`), not folded into `chatter`
+        // below, because the two need different amounts of trust at the
+        // fast-path gate (see the `chat_only` computation further down, issue
+        // #1725 review round 2): `matched_chatter` is a WHOLE-MESSAGE match
+        // against `task_intent::GREETINGS` — by construction already exactly a
+        // bare greeting/ack, nothing else — so it is safe to fast-path on
+        // directly. `chatter` also absorbs the escalation verdict below, which
+        // judges an ARBITRARY abstained message as "conversational"; that is
+        // broader than a greeting shape, so it still needs the separate
+        // `is_pure_small_talk` gate. Gating the lexical match through
+        // `is_pure_small_talk` too was the review-round-2 bug: that predicate's
+        // `SMALLTALK_OPENERS` is a first-WORD opener list, independently
+        // maintained from `GREETINGS`'s whole-MESSAGE vocabulary, so they drift
+        // ("hii", "sup", "good morning", "kk", "gotcha", "done", "lgtm" are all
+        // in `GREETINGS` but not recognised as an opener) — a lexically matched
+        // greeting was silently falling back to the full agentic turn anyway.
+        let matched_chatter = triaged.is_matched_chatter();
+        let mut chatter = matched_chatter;
         if !answering
             && triaged.abstained()
             && let Some(escalation) = self.triage
@@ -1275,15 +1293,22 @@ impl<'a> DelegationRunner<'a> {
         };
         // Issue #1725: mark this turn chat-only when the operator's own message
         // is conversation, not work — either the explicit "Just chatting"
-        // (`not_work`, i.e. `deliverable: "chat"`) or a high-confidence greeting
-        // the model read as chatter. The harness pool reads the hint (same task,
-        // propagates through `RunTurn`) and runs a cheap tool-less/memory-less/
-        // goal-less turn instead of the full agentic loop. Only ever set on an
-        // operator turn — a dispatched task card is always real work — and a
-        // greeting that carries a request abstains via `is_pure_small_talk`, so
-        // the card-tracking paths above are untouched.
-        let chat_only =
-            operator_turn && (not_work || (chatter && is_pure_small_talk(operator_words(message))));
+        // (`not_work`, i.e. `deliverable: "chat"`), a lexically MATCHED greeting
+        // (`matched_chatter` — trusted directly, see its own comment above), or
+        // a high-confidence greeting the model read as chatter on an abstained
+        // message (gated through `is_pure_small_talk`, since the model's
+        // "conversational" verdict is broader than a bare-greeting shape). The
+        // harness pool reads the hint (same task, propagates through `RunTurn`)
+        // and runs a cheap tool-less/memory-less/goal-less turn instead of the
+        // full agentic loop. Only ever set on an operator turn — a dispatched
+        // task card is always real work — and a greeting that carries a request
+        // abstains via `is_pure_small_talk` (or is never lexically MATCHED
+        // chatter in the first place — `GREETINGS` is a whole-message match),
+        // so the card-tracking paths above are untouched.
+        let chat_only = operator_turn
+            && (not_work
+                || matched_chatter
+                || (chatter && is_pure_small_talk(operator_words(message))));
         let outcome = with_chat_only_hint(
             chat_only,
             self.run_turn.run(self.company, responder, message, chat_id),
@@ -6401,6 +6426,42 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert!(
             turns.chat_only_at_turn(0),
             "a bare greeting must enter CHAT_ONLY_TURN"
+        );
+    }
+
+    /// Codex review round 2: `is_pure_small_talk`'s `SMALLTALK_OPENERS` (a
+    /// first-WORD opener list, `runtime::delegation`) is independently
+    /// maintained from `task_intent::GREETINGS` (a whole-MESSAGE match list) —
+    /// so a message the lexical triage matches as `Chatter` can still fail
+    /// `is_pure_small_talk` and fall back to the full agentic turn. "sup" is in
+    /// `GREETINGS` but has no corresponding entry in `SMALLTALK_OPENERS`,
+    /// making it a fixture the vocabularies disagree on.
+    #[tokio::test]
+    async fn a_matched_greeting_absent_from_smalltalk_openers_still_fast_paths() {
+        let greeting = "sup";
+        let triaged = crate::company::task_intent::triage_message_detailed(greeting);
+        assert_eq!(
+            triaged.triage,
+            crate::company::task_intent::MessageTriage::Chatter,
+            "fixture must be chatter, or this proves nothing"
+        );
+        assert!(
+            !triaged.abstained(),
+            "fixture must be a MATCHED chatter (a GREETINGS whole-message hit)"
+        );
+
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("Not much, what's up?")]);
+        fx.runner(&turns)
+            .handle_operator_message("chief", greeting, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            turns.chat_only_at_turn(0),
+            "a lexically matched greeting must enter CHAT_ONLY_TURN even when \
+             `is_pure_small_talk`'s independently maintained opener list has no \
+             matching entry for it"
         );
     }
 
