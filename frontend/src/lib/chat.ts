@@ -539,7 +539,7 @@ export function mergeHistoryInOrder(
     matches.shift();
     return false;
   });
-  const merged = [...evictedDurable, ...persisted, ...optimistic];
+  const merged = [...evictedDurable, ...persisted, ...optimistic, ...postSnapshotDurable];
   return merged.length === existing.length && merged.every((m, i) => m === existing[i])
     ? existing
     : merged;
