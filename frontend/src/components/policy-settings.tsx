@@ -539,8 +539,15 @@ export function PolicySettings({ client, company }: Props) {
         .split(",")
         .map((kind) => kind.trim())
         .filter(Boolean);
+      const next = await setPolicy(client, company, { alwaysApprove: kinds });
+      // A save for a company this card no longer shows must not overwrite the
+      // current company's state: the operator may have switched companies while
+      // the PUT was in flight, and applying the stale response here would
+      // replace the new card's list (and later saves would send the old
+      // company's values to the new company's endpoint).
+      if (!isCurrentScope({ client, company })) return;
       apply(
-        await setPolicy(client, company, { alwaysApprove: kinds }),
+        next,
         "Always-ask list updated",
         { spendCap: false, deadline: false },
       );
