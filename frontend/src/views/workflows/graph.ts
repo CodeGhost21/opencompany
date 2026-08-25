@@ -558,16 +558,104 @@ export function failedNodeOf(run: WorkflowRunOutcome): string | null {
  * is a different subsystem's verdict, taken after the engine returned, and a
  * node in it is normally also in `runStates` as `ok` — both are true and the
  * card renders both. See {@link undeliveredNodes} in `run-health.ts`. */
+/**
+ * The edges that close a cycle, found by a three-colour DFS: an edge into a node
+ * that is currently **on the recursion stack** points back at an ancestor, and
+ * is the one edge of its cycle that has to be ignored for layering to terminate.
+ *
+ * Exported for the layout tests, which is the only reason it is not local to
+ * {@link layout}: the arithmetic in this module is deliberately pure so it can
+ * be checked without a canvas, and "which edge did it decide to break" is the
+ * assertion that distinguishes this working from it merely not crashing.
+ *
+ * ## Which edge gets broken
+ *
+ * The DFS starts from the roots — nodes with no incoming edge — so on a workflow
+ * with a trigger the traversal follows the direction the operator authored, and
+ * the edge it breaks is the one that reads as the loop's *return*: `plan_approved
+ * -> read_and_plan`, not `read_and_plan -> review_plan`. That is what keeps a
+ * revision loop laid out as a pipeline with an arrow curving back, rather than a
+ * pipeline cut at an arbitrary point.
+ *
+ * Nodes unreachable from any root are then visited in their own right, so a
+ * graph that is *entirely* a cycle — no root at all — still gets layered instead
+ * of falling back to the pathological case this exists to prevent.
+ *
+ * Back edges are only excluded from the depth arithmetic. They are still handed
+ * to React Flow and still drawn; a loop the operator authored stays visible.
+ */
+export function backEdges(graph: WorkflowGraph): Set<WorkflowGraph["edges"][number]> {
+  const outgoing = new Map<string, WorkflowGraph["edges"]>();
+  for (const e of graph.edges) {
+    const list = outgoing.get(e.from);
+    if (list) list.push(e);
+    else outgoing.set(e.from, [e]);
+  }
+
+  const back = new Set<WorkflowGraph["edges"][number]>();
+  // 0 = unvisited, 1 = on the stack, 2 = done.
+  const state = new Map<string, 0 | 1 | 2>(graph.nodes.map((n) => [n.id, 0]));
+
+  // Iterative rather than recursive: a long workflow is a long chain, and a
+  // recursive DFS would put its depth on the JS stack for no benefit.
+  const visit = (root: string) => {
+    if (state.get(root) !== 0) return;
+    const stack: { id: string; next: number }[] = [{ id: root, next: 0 }];
+    state.set(root, 1);
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const edges = outgoing.get(frame.id) ?? [];
+      if (frame.next >= edges.length) {
+        state.set(frame.id, 2);
+        stack.pop();
+        continue;
+      }
+      const edge = edges[frame.next++];
+      const target = state.get(edge.to);
+      // An edge to a node not in `nodes` at all is dangling — left to the
+      // relaxation, which simply never finds a depth for it, exactly as before.
+      if (target === undefined) continue;
+      if (target === 1) back.add(edge);
+      else if (target === 0) {
+        state.set(edge.to, 1);
+        stack.push({ id: edge.to, next: 0 });
+      }
+    }
+  };
+
+  const hasIncoming = new Set(graph.edges.map((e) => e.to));
+  for (const n of graph.nodes) {
+    if (!hasIncoming.has(n.id)) visit(n.id);
+  }
+  // Whatever a root could not reach — including a graph that is all cycle.
+  for (const n of graph.nodes) visit(n.id);
+
+  return back;
+}
+
 export function layout(
   graph: WorkflowGraph,
   runStates: Record<string, NodeRunState> = {},
   elapsed: Record<string, number> = {},
   undelivered: Set<string> = new Set(),
 ): { nodes: Node<WorkflowNodeData>[]; edges: Edge[] } {
+  // Layering is a longest-path relaxation, which is only defined on a DAG — so
+  // the cycles come out first. A workflow with a revision loop (`plan rejected
+  // -> re-plan`, `PR needs changes -> re-review`) is a correct graph the editor
+  // lets you draw and the engine runs, and before this it pumped every node in
+  // the cycle by +1 per pass: the `!changed` break never fired, the loop ran its
+  // full `nodes.length` iterations, and the depths it left behind were the
+  // iteration count rather than the graph's shape. Measured on an 11-node
+  // issue-to-PR lifecycle with two revision loops: the trigger sat at x=0 and
+  // every other node landed between x=9600 and x=11700, a graph 11890 units
+  // wide instead of 2890. On screen that is one node alone on the left and the
+  // rest off the right edge, with nothing to say the layout had given up.
+  const back = backEdges(graph);
   const depth = new Map<string, number>(graph.nodes.map((n) => [n.id, 0]));
   for (let i = 0; i < graph.nodes.length; i++) {
     let changed = false;
     for (const e of graph.edges) {
+      if (back.has(e)) continue;
       const d = (depth.get(e.from) ?? 0) + 1;
       if (d > (depth.get(e.to) ?? 0)) {
         depth.set(e.to, d);
@@ -575,6 +663,15 @@ export function layout(
       }
     }
     if (!changed) break;
+  }
+  // A backstop, not the fix: `backEdges` already breaks every cycle, so this
+  // clamp is unreachable on any graph it has seen. It stays because the failure
+  // it prevents is silent and disproportionate — a future edge kind that slips
+  // past the DFS would put nodes thousands of units off-screen, which reads as
+  // "the canvas is broken", while a clamped graph merely stacks a column.
+  const maxLayer = Math.max(0, graph.nodes.length - 1);
+  for (const [id, d] of depth) {
+    if (d > maxLayer) depth.set(id, maxLayer);
   }
 
   const rowInLayer = new Map<number, number>();
