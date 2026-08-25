@@ -54,6 +54,17 @@ fn hostile_events() -> Vec<Event> {
         "could not write /Users/someone/companies/acme/secrets for founder@acme.example".into(),
     );
 
+    // A second sample whose provider is neither MCP-prefixed nor a known slug:
+    // it must reach the `other` fallback rather than the `mcp` branch. Without
+    // it the whole fallback path went untested by the two assertions below —
+    // found by mutating `provider_slug`'s `_` arm into a `Box::leak`, which the
+    // MCP-prefixed sample alone did not notice.
+    let unknown_provider = UsageSample {
+        provider: "AcmeCorp Holdings".into(),
+        kind: SampleKind::OauthCall,
+        ..sample.clone()
+    };
+
     vec![
         Event::InstanceStarted {
             companies: 3,
@@ -69,6 +80,7 @@ fn hostile_events() -> Vec<Event> {
             approvals_parked: 1,
         },
         Event::metered(&sample),
+        Event::metered(&unknown_provider),
     ]
 }
 
@@ -82,10 +94,14 @@ fn hostile_events() -> Vec<Event> {
 fn a_payload_carries_no_caller_supplied_text() {
     let envelope = envelope();
     for event in hostile_events() {
-        let rendered = payload(&envelope, &event).to_string();
+        // Case-insensitively: a classifier that lowercases what it passes
+        // through has still passed it through, and an exact-case search would
+        // read that as clean. Found by mutation — the first version of this
+        // test missed exactly that.
+        let rendered = payload(&envelope, &event).to_string().to_ascii_lowercase();
         for needle in HOSTILE {
             assert!(
-                !rendered.contains(needle),
+                !rendered.contains(&needle.to_ascii_lowercase()),
                 "the {} payload leaked {needle:?}: {rendered}",
                 event.name()
             );
