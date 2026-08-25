@@ -939,8 +939,7 @@ fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
 
         // Seated on the creative desk AND the unrestricted strategy desk: the
         // union would otherwise be the company grant.
-        let desk_refs: Vec<&[String]> =
-            vec![creative.tools.as_slice(), strategy.tools.as_slice()];
+        let desk_refs: Vec<&[String]> = vec![creative.tools.as_slice(), strategy.tools.as_slice()];
         let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
         assert!(
             !grants_chargebee_explicit(&grants),
