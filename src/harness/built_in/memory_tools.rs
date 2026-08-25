@@ -219,7 +219,13 @@ impl Tool for MemoryStoreTool {
             label: format!("{}{}", self.mem.own_prefix(), slug(title)),
             // Title on the first line so the body is self-describing wherever
             // it surfaces (recall snippet, Brain view, ambient injection).
-            body: format!("{title}\n\n{body}"),
+            // The body passes through the same secret redaction as every other
+            // memory write, so an agent that stores a credential does not
+            // persist it.
+            body: format!(
+                "{title}\n\n{}",
+                super::memory::redact_secrets(body)
+            ),
         };
         let addr = self.mem.context.put(&self.mem.company, chunk).await?;
         Ok(ToolResult::success(format!(
