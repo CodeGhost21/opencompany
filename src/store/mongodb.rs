@@ -3462,19 +3462,22 @@ impl MongoStore {
         }
     }
 
-    /// Uploads `bytes` as this node's payload and returns nothing.
+    /// Uploads `bytes` as this node's payload and returns the GridFS file id.
     ///
     /// The blob is written **before** the node document that names it, on both
     /// the create and the replace path. See
     /// [`create_binary`](crate::ports::workspace::WorkspaceStore::create_binary)
-    /// on this type for why that direction.
+    /// on this type for why that direction. The id names exactly the upload
+    /// this call made, so a caller that must reclaim its own payload on a
+    /// losing insert can do so without touching a concurrent writer's blob for
+    /// the same node.
     async fn put_blob(
         &self,
         company: &CompanyId,
         node_id: &str,
         filename: &str,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<mongodb::bson::Bson> {
         use futures::io::AsyncWriteExt;
         let mut upload = self
             .blobs()
@@ -3485,6 +3488,10 @@ impl MongoStore {
             })
             .await
             .map_err(mongo_err)?;
+        // The id is minted when the stream opens and is the files-collection
+        // `_id` the close commits — capture it here, before close, because the
+        // caller may need to delete exactly this upload.
+        let id = upload.id().clone();
         upload
             .write_all(bytes)
             .await
@@ -3496,6 +3503,36 @@ impl MongoStore {
             .close()
             .await
             .map_err(|e| mongo_err(format!("closing a workspace blob failed: {e}")))?;
+        Ok(id)
+    }
+
+    /// Removes exactly the payload one call uploaded, not every payload for
+    /// the node id.
+    ///
+    /// The conflict path of a same-id `create_binary` race must not reclaim
+    /// the winning call's bytes (issue #1694): both racers uploaded under the
+    /// same fresh node id, so a sweep over the id would take the winner's
+    /// payload down with the loser's. The tenancy+node filter is the same
+    /// isolation boundary as [`blob_filter`](MongoStore::blob_filter) — a
+    /// stray id must never be deletable without proving which node owns it.
+    async fn delete_blob(
+        &self,
+        company: &CompanyId,
+        node_id: &str,
+        file_id: &mongodb::bson::Bson,
+    ) -> Result<()> {
+        let bucket = self.blobs();
+        let file = bucket
+            .find_one(doc! {
+                "_id": file_id,
+                "metadata.company_id": company.as_ref(),
+                "metadata.node_id": node_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        if let Some(file) = file {
+            bucket.delete(file.id).await.map_err(mongo_err)?;
+        }
         Ok(())
     }
 
