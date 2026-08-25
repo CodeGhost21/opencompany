@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: is the async `get` wrapper the culprit? Compare
-// async vs non-async deferred clients under a plain reject-inside-act.
+// Temporary diagnostic: does an already-rejected client render the error
+// reliably (like the workflow-create tests)?
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -12,26 +12,6 @@ import { RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 
 let container: HTMLDivElement;
 let root: Root;
-
-type DeferredEntry = {
-  resolve: (rows: RunArtifactRow[]) => void;
-  reject: (err: unknown) => void;
-};
-
-function deferredClient(deferred: DeferredEntry[], asyncGet: boolean): OpenCompanyClient {
-  const getImpl = (path: string): Promise<unknown> => {
-    return new Promise((resolve, reject) => {
-      deferred.push({ resolve, reject } as DeferredEntry);
-      void path;
-    });
-  };
-  return {
-    scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
-    get: asyncGet
-      ? async <T>(path: string): Promise<T> => (getImpl(path) as Promise<T>)
-      : (getImpl as unknown as (path: string) => Promise<unknown>),
-  } as unknown as OpenCompanyClient;
-}
 
 function completedRun(runId: string): WorkflowRunOutcome {
   return {
@@ -82,40 +62,35 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-const ITERATIONS = 30;
-
-async function runVariant(asyncGet: boolean): Promise<number> {
+it("diag: already-rejected client reliability", async () => {
   let misses = 0;
-  for (let i = 0; i < ITERATIONS; i++) {
+  for (let i = 0; i < 30; i++) {
     await act(async () => root.unmount());
     container.remove();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
 
-    const deferred: DeferredEntry[] = [];
-    const client = deferredClient(deferred, asyncGet);
+    const client = {
+      scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+      get: () => Promise.reject(new Error("boom")),
+    } as unknown as OpenCompanyClient;
+
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
-    if (deferred.length !== 1) continue;
-
-    await act(async () => {
-      deferred[0].reject(new Error("boom"));
-    });
 
     if (
       !container.querySelector('[data-testid="workflow-run-files-error"]')
     ) {
       misses++;
+      console.log(
+        `iter ${i}: MISS. DOM=${JSON.stringify(
+          container.querySelector('[data-testid="workflow-run-files"]')
+            ?.innerHTML,
+        )}`,
+      );
     }
   }
-  return misses;
-}
-
-it("diag: async vs non-async get miss rates", async () => {
-  for (const asyncGet of [false, true]) {
-    const misses = await runVariant(asyncGet);
-    console.log(`asyncGet=${asyncGet} misses=${misses}/${ITERATIONS}`);
-  }
-  expect(true).toBe(true);
+  console.log(`misses=${misses}/30`);
+  expect(misses).toBe(0);
 });
