@@ -266,10 +266,7 @@ impl ManifestApprovalGate {
     /// (issue #1455) — an injected gate carries its own policy on purpose, which
     /// may differ from the persisted record's effective one.
     pub fn policy(&self) -> Policy {
-        self.policy
-            .read()
-            .expect("policy lock poisoned")
-            .clone()
+        self.policy.read().expect("policy lock poisoned").clone()
     }
 
     /// Updates the deadline used for new and already parked approvals.
