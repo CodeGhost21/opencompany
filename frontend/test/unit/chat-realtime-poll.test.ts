@@ -100,6 +100,74 @@ describe("chat channel history polling", () => {
     expect(merged).toEqual([persisted]);
     expect(merged).not.toContain(optimistic);
   });
+
+  it("does not consume an older identical operator row as a new send echo", () => {
+    const old = fromHistory([dto("1", "repeat", true)])[0];
+    const optimistic: ChatMessage = {
+      id: "m42",
+      from: "you",
+      text: "repeat",
+      parentId: old.parentId,
+      at: old.at + 10_000,
+    };
+
+    // The page predates the new send. The old durable row must remain and the
+    // new local bubble must stay visible until its own echo arrives.
+    const merged = mergeHistoryInOrder([old, optimistic], [old]);
+    expect(merged).toEqual([old, optimistic]);
+  });
+
+  it("reconciles a legacy company reply without a message id", () => {
+    const optimistic: ChatMessage = {
+      id: "m42",
+      from: "company",
+      text: "legacy reply",
+      at: 1_700_000_000_002,
+      parentId: "h10",
+      channel: "engineer",
+    };
+    const persisted = fromHistory([dto("11", optimistic.text)]);
+    persisted[0].parentId = optimistic.parentId;
+    persisted[0].channel = optimistic.channel;
+
+    expect(mergeHistoryInOrder([optimistic], persisted)).toEqual(persisted);
+  });
+
+  it("uses durable sequence bounds when timestamps are tied", () => {
+    const first = fromHistory([dto("10", "first")])[0];
+    const last = fromHistory([dto("12", "last")])[0];
+    const live = fromHistory([dto("11", "live")])[0];
+    const hydrated = fromHistory([dto("10", "first"), dto("12", "last")]);
+
+    // Sequence 11 arrived after the snapshot but shares its millisecond with
+    // the page's newest row. It is still a post-snapshot durable tail row.
+    live.at = last.at;
+    expect(mergeHistoryInOrder([first, live], hydrated).map((m) => m.text)).toEqual([
+      "first",
+      "live",
+      "last",
+    ]);
+  });
+
+  it("preserves relative order between live durable and optimistic rows", () => {
+    const durable = fromHistory([dto("2", "durable")])[0];
+    const optimistic: ChatMessage = {
+      id: "m42",
+      from: "you",
+      text: "optimistic",
+      at: durable.at + 1,
+    };
+    const hydrated = fromHistory([dto("1", "before")]);
+
+    // Both rows were created after the snapshot; their live order is durable,
+    // then optimistic, and folding must not reorder them by category.
+    expect(mergeHistoryInOrder([durable, optimistic], hydrated).map((m) => m.text)).toEqual([
+      "before",
+      "durable",
+      "optimistic",
+    ]);
+  });
+
   it("keeps rows the host has not persisted yet at the tail", () => {
     // The operator's optimistic bubble is minted with a browser-local `m<seq>`
     // id the host does not know, so history does not name it. It must survive
