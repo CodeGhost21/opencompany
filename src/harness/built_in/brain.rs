@@ -1933,6 +1933,11 @@ impl HarnessBrain {
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
                     task_id: &card.id,
+                    // Issue #1687: the folder the deliverable lands in is
+                    // named for the work, not only keyed by it. The card is
+                    // right here and its title is the one string that says
+                    // what an operator is looking at.
+                    task_title: Some(card.title.as_str()),
                     source: &pending.source,
                     payload: match &pending.payload {
                         crate::harness::publish::PublishPayload::Text(text) => {
