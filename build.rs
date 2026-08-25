@@ -18,14 +18,22 @@
 //! no repository checkout beside it, so anything only readable from disk is
 //! simply absent there. A baseline that every company gets except the hosted
 //! ones is not a baseline.
+//!
+//! It also stamps the **build commit** into `OPENCOMPANY_BUILD_COMMIT` — see
+//! [`stamp_build_commit`], and `src/build_stamp.rs` for the choice of source.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+// The commit-stamp decision, shared verbatim with `cargo test` rather than
+// duplicated. See the header of that file.
+include!("src/build_stamp.rs");
 
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let companies = root.join("companies");
 
+    stamp_build_commit(&root);
     embed_globals(&root);
 
     // Re-run when a bundle changes. Watching `companies/` alone is not enough:
@@ -69,6 +77,139 @@ fn main() {
     }
 
     write_table(&bundles);
+}
+
+/// Stamps the commit this binary is being built from into
+/// `OPENCOMPANY_BUILD_COMMIT`, read back by `crate::BUILD_COMMIT`.
+///
+/// `CARGO_PKG_VERSION` has been `0.1.0` for thousands of commits, so a bug
+/// report, a support conversation or an analytics event carrying only a
+/// version cannot distinguish two builds a week apart. This closes that gap
+/// and nothing more: it is one revision id, not a build-metadata surface.
+///
+/// **It must never fail a build.** Every source below is allowed to be absent,
+/// and the worst outcome is the honest string `"unknown"` — which is why
+/// [`resolve_build_commit`] takes options rather than unwrapping.
+fn stamp_build_commit(root: &Path) {
+    // Both environment sources are watched, not just read: an injected value
+    // that changes must restamp, and cargo caches build-script output against
+    // exactly the variables a script declares an interest in.
+    println!("cargo:rerun-if-env-changed=OPENCOMPANY_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+
+    watch_git_refs(root);
+
+    // The paths whose bytes become this binary, watched so the `-dirty` half
+    // of the stamp is re-measured when they change. Without this the suffix
+    // would report the tree as it stood the last time some *other* watched
+    // path moved, which is a stamp that lies in the reassuring direction.
+    //
+    // Editing `docs/` or `frontend/` deliberately does not restamp: neither
+    // changes this binary, so a stamp that stays clean across such an edit is
+    // still telling the truth about the code that was compiled.
+    watch_if_present(&root.join("src"));
+    watch_if_present(&root.join("Cargo.toml"));
+
+    let commit = resolve_build_commit(
+        std::env::var("OPENCOMPANY_BUILD_COMMIT").ok(),
+        std::env::var("GITHUB_SHA").ok(),
+        || git(root, &["rev-parse", "HEAD"]),
+        || {
+            // Tracked files against HEAD, plus a submodule pinned to a
+            // different commit than the one recorded — that gitlink decides
+            // which OpenHuman source is compiled in, so it belongs in the
+            // answer. Deliberately *not* a full `git status`: recursing into
+            // the working trees of eight nested vendored crates measured
+            // 495ms against 27ms here, on a probe that runs on every
+            // incremental build.
+            git(
+                root,
+                &[
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                    "--ignore-submodules=dirty",
+                ],
+            )
+            .is_some()
+        },
+    );
+
+    println!("cargo:rustc-env=OPENCOMPANY_BUILD_COMMIT={commit}");
+}
+
+/// Watches the files git rewrites when the checked-out commit moves.
+///
+/// Not optional. This script already emits `rerun-if-changed`, which switches
+/// off cargo's default "any file in the package" watch — so without an
+/// explicit watch on the refs, `git commit` followed by `cargo build` would
+/// leave the previous SHA embedded in the new binary. A stamp that is
+/// confidently wrong is worse than no stamp at all.
+///
+/// Paths are resolved through `git rev-parse --git-path` rather than assumed
+/// to sit under `.git/`: in a linked worktree `.git` is a *file*, `HEAD` lives
+/// in that worktree's own directory, and the refs live in the shared one.
+fn watch_git_refs(root: &Path) {
+    // `HEAD` catches a checkout and every move of a detached head;
+    // `refs/heads` catches switching to or creating a branch; `packed-refs`
+    // catches a ref that lives there instead of in a loose file.
+    for path in ["HEAD", "packed-refs", "refs/heads"] {
+        if let Some(resolved) = git(root, &["rev-parse", "--git-path", path]) {
+            watch_if_present(&root.join(resolved));
+        }
+    }
+    // And the loose file behind the current branch, which is what an ordinary
+    // `git commit` rewrites. Watched by name as well as through the directory
+    // above, because a directory watch is the part of this that would be
+    // quietly doing nothing if cargo ever stopped scanning recursively.
+    if let Some(head_ref) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
+        && let Some(resolved) = git(root, &["rev-parse", "--git-path", &head_ref])
+    {
+        watch_if_present(&root.join(resolved));
+    }
+}
+
+/// Emits a watch only for a path that exists.
+///
+/// Cargo reads `rerun-if-changed` on a *missing* path as "rerun every time",
+/// so watching a loose ref that happens to be packed would re-read and
+/// re-embed every bundle on every single build.
+fn watch_if_present(path: &Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
+/// Runs `git` inside `root`, returning trimmed stdout when it says something.
+///
+/// Every failure collapses to `None` deliberately — no `git` on `PATH`, no
+/// repository beside the crate, a shallow clone git declines to answer for, a
+/// non-zero exit, non-UTF-8 output, or success with nothing to say. None of
+/// them may turn a diagnostic string into a red build.
+fn git(root: &Path, args: &[&str]) -> Option<String> {
+    // git walks *upwards* until it finds a repository. A crate unpacked into
+    // a registry cache under a home directory that happens to be versioned
+    // would otherwise be stamped with that unrelated repository's commit,
+    // which is a worse answer than `"unknown"` because it looks right.
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        // A build must not write to the repository it is reading: without
+        // this, `git status` refreshes the index and takes `index.lock`,
+        // which two builds running in parallel can collide on.
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Every file under `agents/`, keyed by its path relative to that directory.
