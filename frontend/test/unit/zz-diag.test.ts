@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: reproduce the mode-B failure (error NEVER renders).
+// Temporary diagnostic: does awaiting a macrotask inside the reject act
+// reliably render the error 30/30?
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -78,11 +79,9 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("diag: 30 fresh runs of the reject-render path", async () => {
+it("diag: 30 iterations with setTimeout(0) inside the reject act", async () => {
   let misses = 0;
-  let timeouts = 0;
   for (let i = 0; i < 30; i++) {
-    // fresh container/root per iteration, like beforeEach/afterEach
     await act(async () => root.unmount());
     container.remove();
     container = document.createElement("div");
@@ -103,34 +102,22 @@ it("diag: 30 fresh runs of the reject-render path", async () => {
 
     await act(async () => {
       deferred[0].reject(new Error("boom"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    const errorEl = () =>
-      container.querySelector('[data-testid="workflow-run-files-error"]');
-    if (errorEl()) {
-      // immediate
-      continue;
-    }
-    misses++;
-    // poll with empty acts (the file's own idiom) up to 20 tries
-    let appeared = false;
-    for (let t = 0; t < 20; t++) {
-      await act(async () => {});
-      if (errorEl()) {
-        appeared = true;
-        break;
-      }
-    }
-    if (!appeared) {
-      timeouts++;
+    const errorEl = container.querySelector(
+      '[data-testid="workflow-run-files-error"]',
+    );
+    if (!errorEl) {
+      misses++;
       console.log(
-        `iter ${i}: error NEVER rendered after reject. DOM=${JSON.stringify(
+        `iter ${i}: MISS. DOM=${JSON.stringify(
           container.querySelector('[data-testid="workflow-run-files"]')
             ?.innerHTML,
         )}`,
       );
     }
   }
-  console.log(`misses=${misses} neverRendered=${timeouts}`);
-  expect(true).toBe(true);
+  console.log(`misses=${misses}`);
+  expect(misses).toBe(0);
 });
