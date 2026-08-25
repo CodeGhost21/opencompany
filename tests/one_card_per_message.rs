@@ -945,16 +945,32 @@ async fn a_publish_with_no_card_in_scope_mints_one() {
     let host = spawn_host(model).await;
     host.seed_file("ceo", "notes.md", "notes\n");
 
-    // "ok" is neither trackable work nor a recognised imperative, so nothing
-    // else in the turn can open a card.
+    // Neither trackable work nor a recognised imperative, so nothing else in
+    // the turn can open a card — same property "hi" had before issue #1725's
+    // greeting fast path. NOT "hi" itself: a bare greeting is now a matched
+    // `Chatter` classification that runs the reduced-scope chat-only turn
+    // (no tools offered at all), so the model could never reach the
+    // `publish_artifact` call this test's whole point is to exercise. This
+    // fixture is ambiguous `Chatter` by abstention instead (it opens with
+    // neither a `SMALLTALK_OPENERS` greeting nor a work verb nor a `?`), which
+    // keeps the turn's tools available exactly like every non-greeting
+    // message did before #1725.
     //
-    // Not "hi" (issue #1725): a bare greeting or thanks is now answered by the
-    // runtime without a turn at all, so `publish_artifact` would never fire and
-    // this would assert on a board no publish had reached. An acknowledgement
-    // is deliberately outside that fast path — "yes" answering a teammate's
-    // question is an instruction — so it still runs the turn while opening
-    // nothing itself, which is exactly the fixture this needs.
-    let reply = host.chat("ok", None).await;
+    // And NOT "ok" either, which is what this branch reached for before the
+    // merge: #1725 landed twice, by two mechanisms that stack. This branch adds
+    // `small_talk`, which answers a bare hello or thanks from the cycle with no
+    // turn at all; `main` already carried `is_matched_chatter` → the chat-only
+    // turn hint, which fires on every *matched* `Chatter` — and `GREETINGS`
+    // holds "ok". So "ok" reaches a turn, but a turn with no tools, and the
+    // publish this test exists to exercise would never fire. Abstained
+    // `Chatter` is the only class left that still gets tools, which is why the
+    // fixture below is the one that survives both.
+    let neutral = "the deck looks good to me";
+    assert!(
+        detect_task_intent(neutral).is_none(),
+        "fixture must open no card via the REST handler, or this proves nothing"
+    );
+    let reply = host.chat(neutral, None).await;
     let board = host.board(&reply).await;
     assert_sole_card_carries(&host, &board, "ceo", "Some notes").await;
 }

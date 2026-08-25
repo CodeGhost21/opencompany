@@ -431,6 +431,21 @@ impl TriageOutcome {
     pub fn abstained(&self) -> bool {
         matches!(self.confidence, TriageConfidence::Abstained)
     }
+
+    /// Whether a rule *recognised* this message as chatter — a bare greeting
+    /// or acknowledgement (rule 2) or an empty message (rule 1) — as opposed to
+    /// `Chatter` being chosen because no rule matched at all (rule 6, the
+    /// abstention default; see [`abstained`](Self::abstained)).
+    ///
+    /// The distinction matters to callers that want to act on a *positive*
+    /// chatter classification (issue #1725's greeting fast path): an abstained
+    /// `Chatter` carries no claim about the message and is the escalation
+    /// trigger instead, so treating the two alike would fire the fast path on
+    /// every unclassifiable message, not just the ones the lexical layer
+    /// actually recognised as conversation.
+    pub fn is_matched_chatter(&self) -> bool {
+        self.confidence == TriageConfidence::Matched && self.triage == MessageTriage::Chatter
+    }
 }
 
 /// [`triage_message`], plus whether the answer was decided or fallen back to.
