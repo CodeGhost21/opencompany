@@ -708,10 +708,12 @@ mod test {
         let ops = Arc::new(FsOps::new(dir.path().to_path_buf()));
         let users: Arc<dyn UserStore> = ops.clone();
         let sessions: Arc<dyn crate::ports::sessions::SessionStore> = ops.clone();
-        let login_codes: Arc<dyn crate::ports::login_codes::LoginCodeStore> =
-            Arc::new(LoginCodeRevocationFailure(ops.clone()));
+        let login_codes: Arc<dyn crate::ports::login_codes::LoginCodeStore> = ops.clone();
         let company = CompanyId::new("acme");
 
+        // The login-code revocation runs on creation too (a pending magic link
+        // for the address must not outlive the issued password), so create the
+        // account with the real store first.
         issue_password(
             context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
             "ada@acme.test",
@@ -721,8 +723,12 @@ mod test {
         .await
         .expect("first issue");
 
+        // A pending magic link exists for the address, and revoking it fails:
+        // the reset must abort before committing the new password.
+        let failing: Arc<dyn crate::ports::login_codes::LoginCodeStore> =
+            Arc::new(LoginCodeRevocationFailure(ops.clone()));
         let error = issue_password(
-            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            context(&users, &sessions, &failing, &company, &[], Some("ada@acme.test")),
             "ada@acme.test",
             "a replacement long password",
             false,
