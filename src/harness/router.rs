@@ -675,4 +675,31 @@ mod tests {
             .unwrap();
         assert_eq!(out.reply, "deep", "recovery needs no restart");
     }
+
+    /// `end_cycle` fans the policy-pin release out to *every* lane, so a named
+    /// lane's pool cannot keep rebuilding against a stale cycle snapshot after
+    /// its cycle is over (issue #1455).
+    #[tokio::test]
+    async fn end_cycle_fans_out_to_every_lane() {
+        let embedded = SpyEngine::new("embedded");
+        let deep = SpyEngine::new("deep");
+        let router = HarnessRouter::new("embedded")
+            .with_engine("embedded", embedded.clone())
+            .with_engine("deep", deep.clone())
+            .bind("researcher", "deep")
+            .bind("ceo", "embedded");
+
+        router.end_cycle(&company()).await;
+
+        assert_eq!(
+            *embedded.cycle_ends.lock().unwrap(),
+            vec![company()],
+            "the default lane must receive the release"
+        );
+        assert_eq!(
+            *deep.cycle_ends.lock().unwrap(),
+            vec![company()],
+            "a named lane must receive the release"
+        );
+    }
 }
