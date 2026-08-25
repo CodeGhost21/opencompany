@@ -1650,13 +1650,14 @@ impl HarnessPool {
         // the live value here is what carries a console tier change into the roster
         // the next turn runs on.
         //
-        // A cycle's `ensure_with_policy` installs the snapshot instead: the
+        // A cycle's `ensure_with_policy` installs the snapshot instead — and so
+        // does a plain `ensure` while that snapshot is pinned — because the
         // override synthesized below reproduces exactly the policy the native
         // gate is evaluating this turn against, so the roster's ApprovalPolicy
         // and the gate cannot disagree about which tier is live.
-        fresh_company.overlay_policy = match policy_snapshot {
+        fresh_company.overlay_policy = match &effective_snapshot {
             Some(policy) => Some(policy_override_for(policy, &company.manifest.policy)),
-            None => overlay.policy,
+            None => overlay.policy.clone(),
         };
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
