@@ -45,9 +45,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
+      # Check out the exact `tag` being published, NOT the dispatch ref. If the
+      # branch advanced since the tag was cut, an unpinned checkout would build
+      # newer source and attach it to the older release — the drift Codex flagged
+      # on #1733. `tag` is a required input, so this ref always resolves.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag }}
           submodules: true
           persist-credentials: false
 
