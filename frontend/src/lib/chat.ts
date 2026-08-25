@@ -471,6 +471,14 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
 function messageFingerprint(message: ChatMessage): string {
   return JSON.stringify([message.from, message.text, message.parentId ?? null]);
 }
+
+/** The host event sequence encoded by a durable console id, when available. */
+function messageSequence(message: ChatMessage): number | null {
+  if (!isHostMessageId(message.id)) return null;
+  const sequence = Number(toHostMessageId(message.id));
+  return Number.isSafeInteger(sequence) ? sequence : null;
+}
+
 /**
  * Fold one `chat/history` response into a live transcript (issue #1690).
  *
@@ -487,9 +495,9 @@ function messageFingerprint(message: ChatMessage): string {
  *    dropped is filled in its correct position rather than tacked on after
  *    the tail — `[1, 3]` + history `[1, 2, 3]` must merge to `[1, 2, 3]`,
  *    never `[1, 3, 2]`.
- * 2. **Rows the host has not persisted yet stay at the tail.** Optimistic
- *    sends are always the newest lines, so the tail is the only position
- *    history implies for them; their relative order is preserved.
+ * 2. **Rows the host has not persisted yet stay in their live order.** They
+ *    are inserted at the boundary implied by their durable neighbours, while
+ *    optimistic sends with no durable sequence remain at the tail.
  *
  * Rows the history names that are already on screen are kept as the caller's
  * own objects (reactions and other local decoration survive the re-fetch)
@@ -503,40 +511,66 @@ export function mergeHistoryInOrder(
 ): ChatMessage[] {
   const historyIds = new Set(hydrated.map((m) => m.id));
   const existingById = new Map(existing.map((m) => [m.id, m]));
-  const durableByFingerprint = new Map<string, ChatMessage[]>();
+  const durableEchoes = new Map<string, ChatMessage[]>();
   for (const message of hydrated) {
-    if (message.from === "you") {
-      const matches = durableByFingerprint.get(messageFingerprint(message)) ?? [];
-      matches.push(message);
-      durableByFingerprint.set(messageFingerprint(message), matches);
-    }
+    const matches = durableEchoes.get(messageFingerprint(message)) ?? [];
+    matches.push(message);
+    durableEchoes.set(messageFingerprint(message), matches);
   }
-  // The endpoint returns only its newest page. Durable rows that fell off that
-  // page are still part of the transcript and must remain in their existing
-  // prefix; only browser-local rows can safely be treated as optimistic tail
-  // rows. A local operator row whose persisted echo is in this page is matched
-  // by its stable content/time fields and replaced by the durable projection.
+
   const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
-  const liveDurable = existing.filter(
-    (m) => isHostMessageId(m.id) && !historyIds.has(m.id),
-  );
-  const evictedDurable = liveDurable.filter((m) =>
-    hydrated.length === 0 || m.at <= hydrated[0].at,
-  );
-  const postSnapshotDurable = liveDurable.filter((m) =>
-    hydrated.length > 0 && m.at > hydrated[hydrated.length - 1].at,
-  );
-  const optimistic = existing.filter((m) => {
-    if (isHostMessageId(m.id) || historyIds.has(m.id)) return false;
-    const matches = durableByFingerprint.get(messageFingerprint(m));
-    if (!matches?.length) return true;
-    // Consume one durable echo per local row, oldest-first. Repeated sends
-    // have identical content, so a one-to-one queue prevents one echo from
-    // deleting every matching optimistic bubble.
-    matches.shift();
+  const consumedEchoes = new Set<ChatMessage>();
+  const liveRows = existing.filter((m) => !historyIds.has(m.id));
+  const liveDurable = liveRows.filter((m) => isHostMessageId(m.id));
+  const hydratedSequences = hydrated.map(messageSequence);
+  const firstSequence = hydratedSequences.find((sequence) => sequence !== null) ?? null;
+  const lastSequence = [...hydratedSequences]
+    .reverse()
+    .find((sequence) => sequence !== null) ?? null;
+
+  const optimistic = liveRows.filter((message) => {
+    if (isHostMessageId(message.id)) return false;
+    const matches = durableEchoes.get(messageFingerprint(message));
+    const echo = matches?.find((candidate) => !consumedEchoes.has(candidate));
+    if (!echo) return true;
+    // A page may contain an older identical message. Only consume it as this
+    // optimistic row's echo when its timestamp is not older than the send.
+    // Without this bound a failed send can disappear until its real echo (or
+    // forever if no echo exists).
+    if (echo.at < message.at) return true;
+    consumedEchoes.add(echo);
     return false;
   });
-  const merged = [...evictedDurable, ...persisted, ...optimistic, ...postSnapshotDurable];
+
+  const outsidePage = liveDurable.filter((message) => {
+    const sequence = messageSequence(message);
+    if (sequence !== null && firstSequence !== null && lastSequence !== null) {
+      return sequence < firstSequence || sequence > lastSequence;
+    }
+    if (!hydrated.length) return true;
+    return message.at <= hydrated[0].at || message.at >= hydrated[hydrated.length - 1].at;
+  });
+
+  // Start with the authoritative page, then insert rows that were already
+  // live. Numeric host sequences are the ordering authority; timestamps are a
+  // compatibility fallback for legacy/non-numeric ids. Finally append local
+  // rows that have no durable position, preserving their existing order.
+  const merged = [...persisted];
+  for (const message of outsidePage) {
+    const sequence = messageSequence(message);
+    let index = -1;
+    if (sequence !== null) {
+      index = merged.findIndex((candidate) => {
+        const candidateSequence = messageSequence(candidate);
+        return candidateSequence !== null && candidateSequence > sequence;
+      });
+    } else {
+      index = merged.findIndex((candidate) => candidate.at > message.at);
+    }
+    merged.splice(index < 0 ? merged.length : index, 0, message);
+  }
+  merged.push(...optimistic);
+
   return merged.length === existing.length && merged.every((m, i) => m === existing[i])
     ? existing
     : merged;
