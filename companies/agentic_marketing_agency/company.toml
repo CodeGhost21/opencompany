@@ -26,7 +26,22 @@ human_role = "Campaign review and sign-off"
 #
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
-allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+#
+# `chargebee` (#788) is a CEILING, not a grant: every shipped teammate below
+# states a `tools` line that omits it, so nobody this file ships holds billing
+# tools. An agency that bills its clients names the teammate who does from the
+# console — `PATCH {scope}/team/{agent_id}` with `chargebee` added — and that
+# edit is an overlay this manifest never sees.
+#
+# The exclusion lives at the per-agent layer rather than on a desk ceiling
+# because that layer is the one an operator can rewrite: desk ceilings are
+# manifest-only and cannot be widened from the console, so a ceiling-based
+# exclusion would make the billing grant unreachable. An agent's own `tools`
+# line and an operator's per-teammate override are both INTERSECTED with this
+# line, so a grant absent here can never be handed out by anyone. The ceiling
+# says what this kind of company may do; who actually does it is the
+# operator's call.
+allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]
 
 # Group chats — the desks the human talks to. Each pulls in a few agents.
 # Members must be ids declared under `agents/`.
@@ -35,13 +50,18 @@ allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "
 # `[tools].allow ∩ desk.tools ∩ agent.tools`. Stating a ceiling here restricts
 # every member at once, so a teammate seated on the desk later inherits the
 # restriction instead of quietly arriving with the company's full belt. Omitting
-# it (as `strategy` and `growth` do below) narrows nothing.
+# it narrows nothing — which is what `strategy` and `growth` do here: the
+# `chargebee` exclusion is stated per teammate (in `agents/`) so an operator can
+# still name a biller from the console without hitting an unwidenable ceiling.
 [[group_chat]]
 id = "strategy"
 name = "Strategy desk"
 description = "Plans, priorities, and direction."
 members = ["brand_strategist", "seo_specialist", "analytics_analyst"]
-
+# No ceiling. This desk plans and measures; its members' `tools` lines carry
+# the `chargebee` exclusion instead, which keeps nobody billing by default while
+# leaving the per-teammate layer — the one the console can rewrite — open for
+# an operator to name who does.
 [[group_chat]]
 id = "creative"
 name = "Creative studio"
@@ -66,9 +86,13 @@ members = ["creative_director", "copywriter", "landing_page_builder"]
 # AGENTS.md documents as always writable, so the write token has to ride through
 # the ceiling or the desk's own charter silently stops holding.
 #
-# Members of this desk sit on no other desk. That matters: a teammate on two
-# desks takes the UNION of their ceilings, so seating one of these agents on an
-# unrestricted desk would hand the company grant straight back.
+# The billing exclusion also rides on each member: their `tools` lines are the
+# company belt minus `chargebee` (#788), so this ceiling is not their only
+# guard. That matters because a teammate on two desks takes the UNION of their
+# ceilings — without the belt on them, seating one of these agents on an
+# unrestricted desk would hand the company grant, billing included, straight
+# back. The ceiling still narrows the belt further, keeping `search`, `media`
+# and `composio` off the desk.
 tools = ["*", "workspace.write"]
 
 [[group_chat]]
@@ -76,6 +100,11 @@ id = "growth"
 name = "Growth desk"
 description = "Acquisition and lifecycle."
 members = ["paid_ads_manager", "email_marketer"]
+# No ceiling, for the reason the strategy desk states: the `chargebee`
+# exclusion lives on the members' `tools` lines, and an operator naming one of
+# them as the biller from the console must not hit an unwidenable desk layer.
+# Growth buys attention and runs lifecycle email; billing a client for it is
+# somebody else's job.
 
 # Integrations to prioritize wiring. Intent only — scopes and why, never
 # secrets. Nothing here provisions a credential: the manager injects no
