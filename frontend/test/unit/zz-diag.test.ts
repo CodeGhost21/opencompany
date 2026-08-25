@@ -119,9 +119,14 @@ it("diag: fail-then-succeed two-phase cycle reliability", async () => {
     const err = container.querySelector(
       '[data-testid="workflow-run-files-error"]',
     );
-    if (!err || sink.calls.length !== 1) {
+    if (!err) {
       misses++;
-      console.log(`iter ${i} phase1: MISS. calls=${sink.calls.length}`);
+      console.log(`iter ${i} phase1-ERR: MISS. calls=${sink.calls.length}`);
+      continue;
+    }
+    if (sink.calls.length !== 1) {
+      misses++;
+      console.log(`iter ${i} phase1-CALLS: MISS. calls=${sink.calls.length} errRendered=${!!err}`);
       continue;
     }
 
