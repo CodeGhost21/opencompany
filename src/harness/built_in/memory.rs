@@ -545,6 +545,16 @@ mod tests {
             redact_secrets("the bearer bond matures in June"),
             "the bearer bond matures in June"
         );
+        // Lower-case "bearer" in its ordinary English sense: a plain word
+        // after it is prose, not a credential, and must survive untouched.
+        assert_eq!(
+            redact_secrets("the standard bearer candidate won the race"),
+            "the standard bearer candidate won the race"
+        );
+        assert_eq!(
+            redact_secrets("the ring bearer walked down the aisle"),
+            "the ring bearer walked down the aisle"
+        );
         // A Markdown-backtick or quote wrapper around a credential (formatted
         // chat) must not defeat the scan.
         assert_eq!(
