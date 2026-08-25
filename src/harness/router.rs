@@ -613,4 +613,51 @@ mod tests {
             .unwrap();
         assert_eq!(out.reply, "deep", "recovery needs no restart");
     }
+
+    /// `ensure_with_policy` fans out the same failure bookkeeping as `ensure`:
+    /// one lane failing to pin its roster against the cycle snapshot must block
+    /// only that lane's agents, and a later successful `ensure_with_policy`
+    /// clears the recorded failure. `FlakyEngine` overrides only `ensure`, and
+    /// the trait default routes `ensure_with_policy` to it, so the same double
+    /// exercises the router's own bookkeeping on this path.
+    #[tokio::test]
+    async fn ensure_with_policy_records_and_recovers_a_failed_lane() {
+        let policy = Policy {
+            mode: "supervised".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        };
+        let embedded = FlakyEngine::new("embedded");
+        let deep = FlakyEngine::new("deep");
+        let router = HarnessRouter::new("embedded")
+            .with_engine("embedded", embedded.clone())
+            .with_engine("deep", deep.clone())
+            .bind("researcher", "deep")
+            .bind("ceo", "embedded");
+
+        deep.set_fail(true);
+        router.ensure_with_policy(&record(), &policy).await.unwrap();
+
+        let err = router
+            .run(&company(), "researcher", "hi", None)
+            .await
+            .expect_err("the failed lane's turn must error");
+        let msg = err.to_string();
+        assert!(msg.contains("researcher"), "{msg}");
+        assert!(msg.contains("deep"), "{msg}");
+        assert!(msg.contains("warm-up"), "names the failed warm-up: {msg}");
+
+        let out = router.run(&company(), "ceo", "hi", None).await.unwrap();
+        assert_eq!(out.reply, "embedded", "the healthy lane keeps working");
+
+        // A later success clears the entry, so the lane comes back.
+        deep.set_fail(false);
+        router.ensure_with_policy(&record(), &policy).await.unwrap();
+        let out = router
+            .run(&company(), "researcher", "hi", None)
+            .await
+            .unwrap();
+        assert_eq!(out.reply, "deep", "recovery needs no restart");
+    }
 }
