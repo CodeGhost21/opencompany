@@ -249,6 +249,20 @@ them apart — collapsing `""` into `None` would fall back to whatever the
 manifest or the environment supplies and silently undo the operator's
 revocation.
 
+`SecretValue` is **opaque by construction** (issue #1741): it hand-writes both
+`Debug` and `Serialize` to emit `[redacted]`, so a struct that embeds one and
+derives either cannot leak the credential — the guard is on the type, not on
+each enclosing struct. Before this, five separate hand-written `Debug` impls
+guarded the containers and nothing at all guarded serialization, so
+`serde_json::to_value` over a config holding a secret emitted plaintext.
+
+`Deserialize` stays derived — reading a secret *in* never leaks one — so a
+serde round-trip is deliberately asymmetric and yields `SecretValue("[redacted]")`,
+which fails closed at the point of use. Persistence is unaffected because it
+never used serde: every backend writes `value.expose()` and reads back through
+the `SecretValue` constructor. `expose()` is the single named door out, so
+`grep 'expose()'` enumerates every place a credential leaves the type.
+
 `assert_secret_store` in `src/store/conformance.rs` is the contract every
 backend is checked against (issue #1505): read-back, absence, per-key
 independence, overwrite, the empty-value distinction above, and isolation in
