@@ -1491,17 +1491,28 @@ impl HarnessPool {
         // even when no override is stored (or a redundant one was carried and
         // cleared), and the roster cannot keep an `ApprovalPolicy` built under a
         // tier the native gate no longer enforces.
+        //
+        // Issue #1455: the pin decision and the roster publish below must be
+        // mutually exclusive with every other ensure for this company. A plain
+        // `ensure` that read no pin *before* the cycle installed one could
+        // otherwise finish rebuilding the shared roster from the looser live
+        // policy *after* the cycle's pinned ensure had published the strict
+        // roster — leaving the harness gate auto-approving what the native gate
+        // still parks. The per-company lock closes that window: either the plain
+        // ensure publishes first and the cycle's strict roster supersedes it, or
+        // it runs after the pin is installed and rebuilds against the pin.
+        let _policy_axis_guard = policy_ensure_lock(&company.id).lock().await;
         let (effective_snapshot, pin_to_store) = match policy_snapshot {
             Some(policy) => (Some(policy.clone()), Some(policy.clone())),
             None => {
-                let pin = self.pinned_policies.read().await.get(&company.id).cloned();
+                let pin = self.pinned_policies.lock().unwrap().get(&company.id).cloned();
                 (pin, None)
             }
         };
         if let Some(pin) = pin_to_store {
             self.pinned_policies
-                .write()
-                .await
+                .lock()
+                .unwrap()
                 .insert(company.id.clone(), pin);
         }
         let policy_fp = match &effective_snapshot {
