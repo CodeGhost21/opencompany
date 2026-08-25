@@ -498,12 +498,19 @@ export function mergeHistoryInOrder(
   hydrated: ChatMessage[],
 ): ChatMessage[] {
   const historyIds = new Set(hydrated.map((m) => m.id));
-  const byId = new Map(existing.map((m) => [m.id, m]));
-  // The persisted rows, in the host's own order — keeping the transcript's
-  // copy of a row that is already there, falling back to the fresh one.
-  const persisted = hydrated.map((m) => byId.get(m.id) ?? m);
-  const optimistic = existing.filter((m) => !historyIds.has(m.id));
-  const merged = [...persisted, ...optimistic];
+  const existingById = new Map(existing.map((m) => [m.id, m]));
+  // The endpoint returns only its newest page. Durable rows that fell off that
+  // page are still part of the transcript and must remain in their existing
+  // prefix; only browser-local rows can safely be treated as optimistic tail
+  // rows. This also makes a later page overlap harmless.
+  const evictedDurable = existing.filter(
+    (m) => isHostMessageId(m.id) && !historyIds.has(m.id),
+  );
+  const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
+  const optimistic = existing.filter(
+    (m) => !isHostMessageId(m.id) && !historyIds.has(m.id),
+  );
+  const merged = [...evictedDurable, ...persisted, ...optimistic];
   return merged.length === existing.length && merged.every((m, i) => m === existing[i])
     ? existing
     : merged;
