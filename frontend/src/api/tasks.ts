@@ -877,6 +877,41 @@ export interface InflightRun {
   pendingAction: string | null;
 }
 
+/**
+ * The live board state Chat needs for a card-linked background turn (#1758).
+ *
+ * `column` is the task's stage when the current three-column API provides one,
+ * otherwise its column. `startedAt` is present only while the task appears in
+ * the in-flight read, so it supplies the elapsed clock and wins a brief race
+ * where the board has already moved but the run has not disappeared yet.
+ */
+export interface TaskStatus {
+  column: string;
+  startedAt?: number;
+}
+
+/** Task id -> status, merged from the board and in-flight reads (#1758). */
+export function taskStatusesById(
+  tasks: readonly Task[],
+  inflight: readonly InflightRun[],
+): Record<string, TaskStatus> {
+  const statuses: Record<string, TaskStatus> = {};
+
+  for (const task of tasks) {
+    statuses[task.id] = { column: task.stage ?? task.column };
+  }
+
+  for (const run of inflight) {
+    if (!run.taskId) continue;
+    statuses[run.taskId] = {
+      column: statuses[run.taskId]?.column ?? "in_progress",
+      startedAt: run.startedAt,
+    };
+  }
+
+  return statuses;
+}
+
 /** The steer body. `redirect` requires `instruction`; `cancel` requires `confirm`. */
 export interface SteerInput {
   action: SteerAction;

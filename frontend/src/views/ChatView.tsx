@@ -14,7 +14,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent } from "@/api/tasks";
+import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
@@ -268,6 +268,8 @@ interface Props {
    */
   approvals?: ApprovalSummary[];
   chatChannelByThread?: Record<string, string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -331,6 +333,7 @@ export function ChatView({
   onChannelViewed,
   approvals,
   chatChannelByThread,
+  taskStatusByTaskId,
   now,
   onDecideApproval,
   decidingApprovals,
@@ -1606,6 +1609,7 @@ export function ChatView({
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
               resolveAttachmentUrl={resolveAttachmentUrl}
+              taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
                 setComposerPrefill((current) => ({
                   text: FIRST_TEAM_BRIEF,

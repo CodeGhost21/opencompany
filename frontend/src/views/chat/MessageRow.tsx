@@ -1,5 +1,6 @@
 import { MessageSquareReply } from "lucide-react";
 
+import type { TaskStatus } from "@/api/tasks";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -18,6 +19,7 @@ import {
   type TimelineEntry,
 } from "./model";
 import { CardChip, StepTimeline } from "./StepTimeline";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
   entry: TimelineEntry;
@@ -35,6 +37,35 @@ interface Props {
    * client the blob route needs.
    */
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /** Shared shell clock for elapsed background-work copy. */
+  now?: number;
+}
+
+const TERMINAL_TASK_COLUMNS = new Set(["in_review", "done", "paused"]);
+
+/**
+ * Whether a card-linked reply still represents background work (#1758).
+ *
+ * An in-flight row wins over a briefly stale terminal board column. Otherwise
+ * the board is authoritative: review, done and paused are all stopped states.
+ */
+export function isTaskWorking(status: TaskStatus | undefined): boolean {
+  if (!status) return false;
+  return status.startedAt !== undefined || !TERMINAL_TASK_COLUMNS.has(status.column);
+}
+
+/** The requested stable elapsed sentence, or nothing without a run clock. */
+export function taskElapsedLabel(
+  startedAt: number | undefined,
+  now: number,
+): string | null {
+  if (startedAt === undefined || !Number.isFinite(startedAt) || !Number.isFinite(now)) {
+    return null;
+  }
+  const minutes = Math.max(0, Math.floor((now - startedAt) / 60_000));
+  return `${minutes} min elapsed, still working`;
 }
 
 /**
@@ -75,10 +106,15 @@ export function MessageRow({
   onDismissCard,
   dismissingCardId,
   resolveAttachmentUrl,
+  taskStatusByTaskId,
+  now = Date.now(),
 }: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
+  const taskStatus = message.taskId ? taskStatusByTaskId?.[message.taskId] : undefined;
+  const taskWorking = isTaskWorking(taskStatus);
+  const elapsed = taskWorking ? taskElapsedLabel(taskStatus?.startedAt, now) : null;
 
   if (sender.kind === "system") return <SystemPill message={message} />;
 
@@ -125,12 +161,27 @@ export function MessageRow({
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.taskId && (
-          <CardChip
-            taskId={message.taskId}
-            busy={dismissingCardId === message.taskId}
-            disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
-            onDismiss={onDismissCard}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <CardChip
+              taskId={message.taskId}
+              busy={dismissingCardId === message.taskId}
+              disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
+              onDismiss={onDismissCard}
+            />
+            {taskWorking && (
+              <div className="mt-1.5 flex min-w-0 items-center gap-2">
+                <WorkingIndicator
+                  srLabel="This task is still working."
+                  className="shrink-0 px-2 py-0.5 text-2xs"
+                />
+                {elapsed && (
+                  <span className="text-2xs text-muted-foreground tabular-nums">
+                    {elapsed}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {chips.length > 0 && (

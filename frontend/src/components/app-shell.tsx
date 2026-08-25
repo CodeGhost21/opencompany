@@ -59,6 +59,12 @@ import {
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
+import {
+  listInflight,
+  listTasks,
+  taskStatusesById,
+  type TaskStatus,
+} from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
@@ -596,6 +602,15 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  /**
+   * Board-card state for chat's durable background-work indicator (#1758).
+   * Owned here because ChatView unmounts on navigation while the task keeps
+   * running, and because the task SSE tick already terminates in this shell.
+   */
+  const [taskStatusByTaskId, setTaskStatusByTaskId] = useState<
+    Record<string, TaskStatus>
+  >({});
+  const taskStatusRead = useRef(0);
   // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
   // sees an attempt move rather than waiting up to four seconds for its poll —
   // and sees it at all while the tab is hidden, which the poll deliberately does
@@ -753,6 +768,36 @@ export function AppShell({
   // decisions are in flight or freshly settled, which is never many.
   const ownApprovalDecisionsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
+
+  const refreshTaskStatuses = useCallback(async () => {
+    const read = ++taskStatusRead.current;
+    const [tasks, inflight] = await Promise.allSettled([
+      listTasks(client, company),
+      listInflight(client, company),
+    ]);
+    if (read !== taskStatusRead.current) return;
+    // Both reads are best-effort, like the board's own decoration read. Keep a
+    // last good snapshot when the host is offline instead of making a running
+    // pill disappear because one poll failed.
+    if (tasks.status === "rejected" && inflight.status === "rejected") return;
+    setTaskStatusByTaskId(
+      taskStatusesById(
+        tasks.status === "fulfilled" ? tasks.value : [],
+        inflight.status === "fulfilled" ? inflight.value : [],
+      ),
+    );
+  }, [client, company]);
+
+  useEffect(() => {
+    taskStatusRead.current += 1;
+    setTaskStatusByTaskId({});
+  }, [client, company]);
+
+  // Ride the existing visible-tab company poll, and also re-read immediately
+  // when the task stream reports a dispatch, move or settle (#1758).
+  useEffect(() => {
+    void refreshTaskStatuses();
+  }, [feed.now, taskEventTick, refreshTaskStatuses]);
   // Issue #379: the inline approval cards' console-local state, owned here
   // rather than in `ChatView` for the same reason `transcripts` is — the shell
   // mounts and unmounts that view per route, and an operator who approves in a
@@ -2562,6 +2607,7 @@ export function AppShell({
               mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
+              taskStatusByTaskId={taskStatusByTaskId}
               now={feed.now}
               onDecideApproval={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
