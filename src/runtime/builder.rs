@@ -4105,8 +4105,8 @@ mod test {
             },
         ];
 
-        let migrated =
-            RuntimeBuilder::preserve_pre_upgrade_grant_scope(overlay_agents, Some(&old), &new);
+        let (migrated, _) =
+            RuntimeBuilder::preserve_pre_upgrade_grant_scope(overlay_agents, Vec::new(), Some(&old), &new);
 
         assert_eq!(
             migrated[0].tools, old.tools.allow,
@@ -4116,6 +4116,58 @@ mod test {
             migrated[1].tools,
             vec!["docs.*".to_string()],
             "a stated grant is untouched"
+        );
+    }
+
+    /// The console's per-agent edit half carries the same empty-means-standard
+    /// rule (`AgentOverride.tools = Some([])` is "give this teammate the
+    /// company's standard grant"), so an upgrade into a BYO namespace must
+    /// freeze its empty line to the previous allow-list as well — otherwise the
+    /// override, copied across the rebuild verbatim, replaces the new
+    /// manifest's explicit non-billing `tools` line with the widened list.
+    #[test]
+    fn an_upgrade_into_chargebee_freezes_an_empty_agent_override_scope() {
+        let old: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\"]\n",
+        )
+        .expect("old manifest");
+        let new: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("new manifest");
+        let edits = vec![
+            AgentOverride {
+                agent_id: "tax_preparer".to_string(),
+                // The stored spelling of "reset to the company's standard
+                // grant" — what the console writes for an empty tools list.
+                tools: Some(Vec::new()),
+                ..Default::default()
+            },
+            AgentOverride {
+                agent_id: "brand_strategist".to_string(),
+                tools: Some(vec!["docs.*".to_string()]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, migrated) =
+            RuntimeBuilder::preserve_pre_upgrade_grant_scope(Vec::new(), edits, Some(&old), &new);
+
+        assert_eq!(
+            migrated[0].tools.as_deref().unwrap(),
+            old.tools.allow,
+            "an empty override is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+        );
+        assert_eq!(
+            migrated[1].tools.as_deref().unwrap(),
+            vec!["docs.*".to_string()],
+            "a stated override grant is untouched"
         );
     }
 
@@ -4145,8 +4197,8 @@ mod test {
             harness: None,
         }];
 
-        let migrated =
-            RuntimeBuilder::preserve_pre_upgrade_grant_scope(overlay_agents, Some(&old), &new);
+        let (migrated, _) =
+            RuntimeBuilder::preserve_pre_upgrade_grant_scope(overlay_agents, Vec::new(), Some(&old), &new);
 
         assert!(
             migrated[0].tools.is_empty(),
