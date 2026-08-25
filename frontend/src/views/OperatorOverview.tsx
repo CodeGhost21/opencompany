@@ -52,7 +52,7 @@ export function OperatorOverview({
   scope,
   attemptEventTick,
 }: Props) {
-  const [previousVisit] = useState(() => readOverviewVisit(scope));
+  const [previousVisit, setPreviousVisit] = useState(() => readOverviewVisit(scope));
   const [stoppedRuns, setStoppedRuns] = useState<RunSummary[]>([]);
   const [failedRuns, setFailedRuns] = useState<RunSummary[]>([]);
   const [runLoad, setRunLoad] = useState<RunLoad>("loading");
@@ -160,6 +160,17 @@ export function OperatorOverview({
         /* the current lists stay; the next event or reload re-reads */
       });
   }, [attemptEventTick, fetchRuns]);
+
+  // Refresh the "since your previous visit" baseline whenever `scope` changes
+  // while this page stays mounted — the lazy `useState` initialiser above reads
+  // it only once, so without this a scope switch would keep comparing against
+  // the old scope's boundary. This effect is declared *before* the write effect
+  // below so, on both first mount and every scope change, React runs the read
+  // first and the baseline captures the stored *previous* visit before the
+  // write records the current one — the current time never clobbers it.
+  useEffect(() => {
+    setPreviousVisit(readOverviewVisit(scope));
+  }, [scope]);
 
   useEffect(() => {
     writeOverviewVisit(scope, Date.now());
