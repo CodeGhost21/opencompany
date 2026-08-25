@@ -1746,17 +1746,26 @@ export function WorkflowsView({
           runId: run.runId,
           errorHint: run.error,
         });
+        // This reply is about a run of `run.workflowId` in `company`, and
+        // NEITHER outcome may land anywhere else.
+        //
+        // The correction arm has always checked this: the edit dialog binds to
+        // the SELECTED workflow's `graph` for its version token, so opening it
+        // after a switch would write this correction over a different workflow.
+        //
+        // Issue #1704: the un-fixable arm needs the same guard, and for a
+        // sharper reason than symmetry. Clearing `fixReason` on the switch is
+        // not enough on its own — the switch happens while this request is
+        // still in flight, so the clear runs FIRST and the assignment below
+        // would put the reason straight back, keyed by a `seq` that now names
+        // an unrelated run. The guard is what makes the clear stick.
+        if (selectedIdRef.current !== run.workflowId || companyRef.current !== company) {
+          toast.message(
+            "Selection changed while the copilot was working — reopen Fix on that run to review its correction.",
+          );
+          return;
+        }
         if (res.automatable && res.workflow) {
-          // The edit dialog binds to the SELECTED workflow's `graph` for its
-          // version token; if the operator changed selection while the fix was in
-          // flight, opening it now would write the correction of `run.workflowId`
-          // over a different workflow. Abandon rather than save the wrong one.
-          if (selectedIdRef.current !== run.workflowId) {
-            toast.message(
-              "Selection changed while the copilot was working — reopen Fix on that run to review its correction.",
-            );
-            return;
-          }
           setPrefilledDraft({
             summary: res.summary,
             workflow: res.workflow,
@@ -1780,7 +1789,15 @@ export function WorkflowsView({
         // Only the run that set the slot may clear it — if a second Fix started
         // on another row while this one was in flight, this `finally` firing
         // first must not re-enable that still-running row's button.
-        setFixingRunSeq((current) => (current === run.seq ? null : current));
+        //
+        // Issue #1704: and only while that run's own workflow is still on
+        // screen. `seq` is allocated per company rather than per workflow, so
+        // after a switch `run.seq` can name a DIFFERENT workflow's run whose
+        // fix is genuinely running. The switch has already emptied this slot,
+        // so there is nothing here left for this request to clear anyway.
+        if (selectedIdRef.current === run.workflowId && companyRef.current === company) {
+          setFixingRunSeq((current) => (current === run.seq ? null : current));
+        }
       }
     },
     [client, company],
@@ -1987,6 +2004,36 @@ export function WorkflowsView({
     // lifetime; leaving one behind is how "this console watched that run" came
     // to outlive the console's view of it.
     liveRanRef.current = new Set();
+    // Issue #1704: the two copilot-fix slots. Both are keyed by run `seq`, and
+    // `seq` is allocated per COMPANY rather than per workflow — so a value left
+    // behind does not merely go unread, it lands on whichever run of the newly
+    // selected workflow happens to share that number.
+    //
+    // `fixingRunSeq` is the worse of the two, because `RunHistoryPanel` disables
+    // EVERY row's Fix button while it is set (one fix at a time). A leaked one
+    // therefore does not just spin a row that is not fixing — it takes the
+    // affordance away from a workflow no fix was ever requested for, until an
+    // unrelated request the operator cannot see finishes.
+    //
+    // Clearing here is only half of it: the request that set them is still in
+    // flight and would write them back. `handleFixWithCopilot` carries the
+    // other half.
+    setFixingRunSeq(null);
+    setFixReason(null);
+    // Issue #1704: and the version-conflict banner — the last of the persistent
+    // banners still outliving the switch, after `result` (#528), `runRefusal`
+    // (#528/#514) and `runFailure` (#1007) were each cleared here in turn for
+    // exactly this reason. It states that the graph on screen is stale and
+    // offers a Reload that re-reads the NEW selection: a false claim with a
+    // remedy that quietly addresses something else. A successful graph read
+    // clears it — but a graph read that FAILS does not, which is precisely the
+    // case where the operator is left staring at it.
+    setConflict(null);
+    // Issue #1704: and the load error, whose reach is wider still. It renders
+    // outside the `detailOpen` gate, so "could not load the workflow graph"
+    // about the workflow just left follows the operator all the way back to the
+    // index and sits over a list that loaded perfectly.
+    setError(null);
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.
@@ -2796,7 +2843,7 @@ export function WorkflowsView({
 
       {error && (
         <div className="px-4 pt-3">
-          <Alert variant="destructive">
+          <Alert variant="destructive" data-testid="workflow-load-error">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         </div>
