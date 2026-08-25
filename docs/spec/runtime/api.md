@@ -23,6 +23,12 @@ POST   /api/v1/companies/{id}/chat/upload      multipart file → attachment ref
 GET    /api/v1/companies/{id}/chat/history     one desk's transcript (?desk=<thread>)
 POST   /api/v1/companies/{id}/chat/messages/{seq}/reactions
                                                { "emoji": "👍", "on": true } → 204
+GET    /api/v1/companies/{id}/desks            the company's desks (group chats)
+POST   /api/v1/companies/{id}/desks            create an operator-overlay desk
+DELETE .../desks/{deskId}                      delete an operator-created desk
+POST   .../desks/{deskId}/members              { "agent_id": "…" } → 204
+DELETE .../desks/{deskId}/members/{agentId}    remove an operator-added member
+PUT    .../desks/{deskId}/order                { "ordered_member_ids": [...] } → 204
 GET    /api/v1/companies/{id}/events?since=SEQ SSE stream of events/effects (work feed)
 GET    /api/v1/companies/{id}/approvals        pending approvals
 GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
@@ -78,6 +84,64 @@ on its own task, so it is no longer cancelled when a client or a reverse proxy
 gives up mid-turn. `detach` removes the *wait*; it is not what provides the
 drop-safety. See
 [company-brain/approvals.md](../company-brain/approvals.md#settling-the-verdict-is-not-running-the-follow-up).
+
+### The built-in `#general` channel (issue #1743)
+
+Every company has a company-wide line from first boot, and nobody can delete,
+rename or restaff it. It is **not** a desk, and the shape follows from that.
+
+A desk has a lead and a hierarchy — `members[0]` is the lead, `PUT
+…/desks/{id}/order` is how the hierarchy is set, and `delegate_to_desk` routes
+work to whoever leads it. "Everyone" has none of those. So `#general` is
+deliberately **absent from `GET …/desks`**, which is what keeps every
+desk-shaped surface honest without any of them carrying a special case: the org
+chart, the assignee picker and the desk counts all read that one route, so none
+of them can offer this channel a lead, a seat, a rename or a delete.
+
+Nothing new is stored, and nothing new is addressable. The host has folded four
+spellings — `""`, `main`, `General`, `general` — into one conversation since
+issue #65 (`chat_history::is_general_chat`), and an unaddressed `POST …/chat`
+has always landed there and been answered by the orchestrator. This channel is
+that conversation, made visible in the rail rather than invented beside it.
+
+**Membership is derived, never stored.** "Who is in `#general`" is "every
+teammate on the roster", computed on each read. There is no membership record,
+so a teammate added a minute ago is a member with no write anywhere and the two
+cannot drift; a retired one leaves on the next read for the same reason.
+`@everyone` posted here expands to that roster (before #1743 it expanded to
+nobody, because the broadcast arm looked for a desk and found none). It stays a
+**list, not a fan-out** — one operator message spawns exactly one turn, whatever
+it names — so a broadcast here costs the same as any other message.
+
+**Who answers a message that mentions nobody:** the orchestrator, one turn, as
+it always has for the company's main line. An `@`-mention overrides that exactly
+as it does in a desk channel, and delegation from the answering turn is
+unchanged. Deliberately not "every agent sees it": a message that woke the whole
+roster would cost one turn per teammate for a line that may be a greeting (cf.
+issue #1725), and the conservative default is the one this host already had.
+
+**Every desk write aimed at it is refused with a reason** — `409` and a sentence,
+never a bare `404`, because "this id is reserved" and "no such desk" are
+different facts the caller needs to tell apart:
+
+| write | answer |
+|---|---|
+| `DELETE …/desks/general` (or `main`, any case) | `409` — it is not a desk; there is nothing to delete |
+| `POST …/desks/{general}/members` | `409` — membership is derived; there is nothing to write |
+| `DELETE …/desks/{general}/members/{agentId}` | `409` — same |
+| `PUT …/desks/{general}/order` | `409` — it has no hierarchy to order |
+| `POST …/desks` with a general id (given or derived from the name) | `409` — the id is reserved, so no desk can shadow the channel |
+
+There is no `PATCH …/desks/{id}` route on this host, so that table is the
+complete desk mutation surface.
+
+The refusals are guarded on the id naming **no existing desk**. A company whose
+blueprint really declares a `[[group_chat]]` with one of those ids keeps it and
+keeps every write that has always worked on it — the reservation replaces the
+"no such desk" answer and nothing else. Refusing on the id alone would have
+taken a desk away from every company that authored one, which is a migration
+rather than a feature. No shipped `companies/` manifest declares one, and new
+ones are refused at creation.
 
 ### Chat attachments (issue #1682)
 

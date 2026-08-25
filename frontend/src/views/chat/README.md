@@ -16,8 +16,10 @@ start an otherwise absent DM.
 - A DM is `dm:<teammate-id>` — e.g. `#/chat/dm:designer` for a host roster
   agent, or `#/chat/dm:member-product-manager-1f3k` for a teammate this console
   invented.
-- A host with no `.../desks` route falls back to `#general`, `#strategy`,
-  `#creative`, `#front-desk` (`lib/desks.ts`).
+- `#general` is always first, in every company, and is **not** a desk — see
+  below.
+- A host with no `.../desks` route falls back to `#strategy`, `#creative`,
+  `#front-desk` (`lib/desks.ts`) under it.
 
 Nothing resolves until `/desks` has answered — the view holds a loading state
 rather than resolving against the fallback desks and swapping under you, which
@@ -36,6 +38,51 @@ move their DM's URL or orphan the history already journaled under it.
 Ids minted before #364 were `dm:<slug-of-name>-<hash>`. `resolveDmChannelId`
 still resolves those for one release so a saved link lands, but nothing is ever
 addressed or stored under one.
+
+## `#general` — the one channel that is not a desk (#1743)
+
+Every other channel here is a desk. `#general` is the company-wide line, and it
+is composed by `buildChannels` rather than read from `GET .../desks`, because
+the host deliberately does not list it there.
+
+That absence is the design, not an omission. A desk has a lead
+(`members[0]`) and a hierarchy (`PUT .../desks/{id}/order`); "everyone" has
+neither. Keeping it out of the desk list is what stops every desk-shaped
+surface — the org chart, the assignee picker, the desk counts — from offering
+it a lead, a seat, a rename or a delete, without any of them needing to know it
+exists. Two affordances in this view derive from a channel and had to be told
+about it explicitly, because it is the first channel to carry `memberIds`
+*without* being a desk:
+
+- **no lead badge.** Its `memberIds` are the roster in roster order, so `[0]` is
+  whoever is listed first. Badging them "lead" would state a rank nothing
+  confers.
+- **no "Manage on the org chart" link.** It would open `#/company/main` on a
+  desk that does not exist. The rule `api/setup.ts:58` states — do not render a
+  control that will be refused — makes absence the honest state, so there is no
+  link and no disabled one either.
+
+The host enforces the same thing from its side rather than trusting this:
+`DELETE`, the two membership writes and the order write are all refused with a
+`409` and a sentence, and a desk cannot be created with an id that would shadow
+the channel. See `docs/spec/runtime/api.md`.
+
+**Its membership is derived on every render** — the roster this view already
+holds, in roster order. Nothing records who is in `#general`, so a teammate
+added a minute ago is in it with no write anywhere and the two cannot drift.
+The host derives the same set the same way when it expands `@everyone` here.
+
+**Its thread id is `main`**, which is what this console has always addressed the
+company's main line as, and what the host folds `""`, `General` and `general`
+onto (`chat_history::is_general_chat`). So the transcript, the unread counts,
+the mention badges and the remembered-channel key are the ones that already
+existed — nothing was re-keyed, and no history moved.
+
+**An unmentioned message is answered by the orchestrator**, one turn, exactly as
+the main line always was; the purpose line under the title says so by name when
+`GET .../team` reports `isOrchestrator`, and says nothing about it when the host
+does not answer that. `@`-mentioning somebody overrides it here as it does in a
+desk channel.
 
 ## What is real and what is console-local
 
@@ -113,7 +160,9 @@ other end.
 
 The fallback desks in `lib/desks.ts` carry no membership — there is none to
 carry — so a channel built from them falls back to the whole roster, and the
-pane renders one plain list. The rest of the company is always one section
+pane renders one plain list. `#general` is the exception in the other
+direction: it states the whole roster as its membership, derived, rather than
+declining to answer (see above). The rest of the company is always one section
 below, so adding a teammate or opening somebody's DM never needs a different
 surface.
 
@@ -135,9 +184,10 @@ ghosts are visible. Keep the two behaviours as they are; the divergence is what
 makes the split coherent rather than arbitrary.
 
 The link is offered only for a **host-backed desk channel**. A DM is not a desk,
-and a fallback desk names one the host does not have — the chart would open on
-nothing, so neither gets a link. There is no admin gate, because the chart has
-none either (its controls are gated by provenance).
+a fallback desk names one the host does not have, and `#general` is not a desk
+at all (#1743) — the chart would open on nothing in all three cases, so none of
+them gets a link. There is no admin gate, because the chart has none either
+(its controls are gated by provenance).
 
 The channel rail stays flat, and #485 settled that too: it already is the org
 chart's desk level, since no desk can name a parent desk. See
