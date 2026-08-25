@@ -525,8 +525,15 @@ describe("the finished build-out points at what would actually help", () => {
   });
 
   it('"Try again" returns to the questions in replacing mode', async () => {
-    await show(clientWith({ source: "fallback", reason: "model_unreachable" }));
+    let creations = 0;
+    const client = clientWith({ source: "fallback", reason: "model_unreachable" });
+    client.addTeamMember = async () => {
+      creations += 1;
+      return ({ id: `fallback-${creations}`, role: "Operations" }) as TeamMemberDto;
+    };
+    await show(client);
     await runFlow();
+    expect(creations).toBe(1);
     await click(find("setup-try-redesign")!);
     expect(find("setup-question")).toBeTruthy();
     // The company now carries the standard team, so the next build-out must
@@ -537,6 +544,7 @@ describe("the finished build-out points at what would actually help", () => {
     // team…" with no effect entering to build anything.
     await runFlow();
     expect(find("setup-finish")).toBeTruthy();
+    expect(creations).toBe(2);
   });
 
   it('"Try again" persists the redesign debt the retry is owed', async () => {
