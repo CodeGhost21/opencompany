@@ -3107,6 +3107,7 @@ mod test {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::ChannelAdapter;
     use crate::ports::brain::Brain;
+    use crate::ports::types::SecretValue;
     use crate::ports::types::{
         ActorKind, ChunkAddr, ChunkHit, ChunkMeta, CompressedTrace, ContextChunk, CycleResult,
         EffectGroup, EventSeq, EvictionPolicy, ReplyTo, TaskResult, TokenUsage,
@@ -5510,7 +5511,7 @@ mod test {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "user".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: from_email.into(),
         }

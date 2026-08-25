@@ -263,6 +263,15 @@ never used serde: every backend writes `value.expose()` and reads back through
 the `SecretValue` constructor. `expose()` is the single named door out, so
 `grep 'expose()'` enumerates every place a credential leaves the type.
 
+Credential-bearing fields hold a `SecretValue` rather than a `String` for the
+same reason (issue #1770): `SmtpCredentials::password`, `ImapCredentials::password`
+and the legacy `StoredConfig::password` were each guarded on one rendering
+surface and not the other — three structs, three hand-written or documented
+`Debug` decisions, and a derived `Serialize` nobody considered. Holding the
+credential in the guarded type is what makes `#[derive(Debug, Serialize)]` on
+`MailCredentials`, `TenantMailboxConfig` or the next mail struct safe without
+anyone remembering.
+
 `assert_secret_store` in `src/store/conformance.rs` is the contract every
 backend is checked against (issue #1505): read-back, absence, per-key
 independence, overwrite, the empty-value distinction above, and isolation in

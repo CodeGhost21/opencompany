@@ -394,7 +394,12 @@ moment survives instead of being reverted, however many processes are writing.
 
 Credentials written before that split still carry the password inside the
 configuration blob; reads fall back to it, and the first passwordless save after
-the split migrates it to its own key. That migration is the one path that must
+the split migrates it to its own key. It is **read-only**: the configuration
+blob is rewritten on every save without it, guaranteed by
+`#[serde(skip_serializing)]` on the field rather than by every construction site
+remembering to pass `None` (issue #1770). Writing it back would not only put a
+credential in the blob, it would overwrite the pre-split password that the
+legacy read path still depends on. That migration is the one path that must
 read and then write, so `PUT …/smtp` serializes per company for the duration of
 the handler. The lock is in-process, which covers the deployed topology (a
 tenant is a single container); two replicas of one company would reopen the
