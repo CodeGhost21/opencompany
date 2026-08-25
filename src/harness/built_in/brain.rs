@@ -3311,6 +3311,29 @@ impl HarnessBrain {
                     // journal order reads failure-then-reply.
                     self.surface_mcp_failures(&mut responses[0].steps, None)
                         .await?;
+                    // Issue #561, scheduled edition: if this scheduled turn
+                    // gated more calls than one turn may raise, park the batch
+                    // and journal the overflow notice here. The after-loop
+                    // `park_approval_requests` below routes its notice to the
+                    // in-memory operator adapter, which a cron tick has no live
+                    // operator reading, so the warning that some approvals were
+                    // permanently discarded would otherwise vanish from the only
+                    // surface that records a scheduled turn. Draining here
+                    // leaves the after-loop call with an empty queue, so the
+                    // notice is never raised twice.
+                    if let Some(notice) = self.park_approval_requests(host).await? {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK
+                                .to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: notice,
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
                     if let Some(events) = self.deps.events.as_ref() {
                         for response in &mut responses {
                             // Per-bubble authorship: a delegation bubble names
