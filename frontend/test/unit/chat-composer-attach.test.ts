@@ -338,6 +338,53 @@ describe("composer paperclip (issue #1682)", () => {
         expect(first).toHaveBeenCalledExactlyOnceWith("node-1");
         expect(second).not.toHaveBeenCalled();
       });
+
+      // Codex review finding: the staged-then-switch tests above cover a chip
+      // that already exists when the scope moves. The upload itself can still
+      // be IN FLIGHT at the switch — no chip yet, so nothing stages or frees
+      // it, and the continuation only checked mount state. Landing after the
+      // switch used to stage the old company's node as if it belonged to the
+      // new scope, and the next send posted that foreign node id to the new
+      // company — a broken optimistic attachment, with the old node left to
+      // charge the old company's quota forever. The continuation must compare
+      // the scope it was sent to against the one on screen and discard a
+      // stale result through the owning company's callback.
+      it("discards an upload that resolves after the switch, through the owning company's callback", async () => {
+        let resolveUpload!: (value: AttachmentDto) => void;
+        upload = vi.fn(
+          () =>
+            new Promise<AttachmentDto>((resolve) => {
+              resolveUpload = resolve;
+            }),
+        );
+        await render();
+
+        const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+        const file = new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" });
+        Object.defineProperty(input, "files", { value: [file], configurable: true });
+        act(() => {
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+
+        // Scope moves while the upload is still pending — no chip exists yet,
+        // so nothing is staged or freed at the switch itself.
+        await renderAsCompanySwitch();
+        expect(first).not.toHaveBeenCalled();
+        expect(second).not.toHaveBeenCalled();
+
+        // The upload lands after the switch: the reference must NOT be staged
+        // for the new scope (the next send would post this old company's node
+        // id to the new one), and the node must be freed through the callback
+        // bound to the company that owns the upload.
+        await act(async () => {
+          resolveUpload(reference);
+          await Promise.resolve();
+        });
+
+        expect(first).toHaveBeenCalledExactlyOnceWith("node-1");
+        expect(second).not.toHaveBeenCalled();
+        expect(container.textContent).not.toContain("diagram.png");
+      });
     });
   });
 });
