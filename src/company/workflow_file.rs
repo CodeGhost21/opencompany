@@ -274,16 +274,11 @@ impl WorkflowFile {
 ///   those are per-recipient runtime conditions an author-time check cannot see,
 ///   so this stays at the coarser mailbox lever — the same one that decides
 ///   whether there is anything to send *from* at all.)
-/// - `channel` is reachable when its target is a currently wired, deliverable
-///   channel — `wired_channels` already excludes the operator channel via
-///   [`deliverable_channel_ids`](crate::company::CompanyRuntime::deliverable_channel_ids),
-///   and the explicit `!= OPERATOR_CHANNEL` keeps the rule honest even if a
-///   caller passes a rawer list.
+/// - `channel` is reachable when its target is one of `wired_channels` — the
+///   company's [`deliverable_channel_ids`](crate::company::CompanyRuntime::deliverable_channel_ids).
+///   Since issue #1757 that set includes `operator` (now a durable channel), so
+///   an explicit `channel = operator` is reachable like any desk.
 /// - any other (or empty) kind never delivers.
-///
-/// Reuses [`is_deliverable_channel`](crate::runtime::channel)'s constant rather
-/// than editing `delivery.rs` (issue #981 owns it): the reachability rule is
-/// stated once there and read here.
 pub fn destination_is_reachable(
     destination: &WorkflowDestinationDef,
     mail_configured: bool,
@@ -296,8 +291,7 @@ pub fn destination_is_reachable(
         "email" => mail_configured,
         "channel" => {
             let target = destination.target.as_deref().map(str::trim).unwrap_or("");
-            target != crate::runtime::channel::OPERATOR_CHANNEL
-                && wired_channels.iter().any(|id| id == target)
+            wired_channels.iter().any(|id| id == target)
         }
         _ => false,
     }
@@ -3205,21 +3199,25 @@ to = "done"
             target: Some("engineering".to_string()),
         };
         assert!(destination_is_reachable(&channel, false, &eng));
-        // Unwired channel and the operator channel never land, mailbox or not.
+        // An unwired channel never lands, mailbox or not.
         let unwired = WorkflowDestinationDef {
             kind: "channel".to_string(),
             target: Some("marketing".to_string()),
         };
         assert!(!destination_is_reachable(&unwired, true, &eng));
+        // `operator` IS reachable now (issue #1757): it is a durable channel the
+        // company always wires, so `deliverable_channel_ids` lists it.
         let operator = WorkflowDestinationDef {
             kind: "channel".to_string(),
             target: Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
         };
-        assert!(!destination_is_reachable(
+        assert!(destination_is_reachable(
             &operator,
             true,
             &[crate::runtime::channel::OPERATOR_CHANNEL.to_string()],
         ));
+        // But only when it is in the wired set — an empty runtime still can't.
+        assert!(!destination_is_reachable(&operator, true, &[]));
     }
 
     /// The none-vs-any line the arm gate rides on. A graph with one unreachable

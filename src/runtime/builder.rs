@@ -3011,29 +3011,29 @@ impl RuntimeBuilder {
                                     // before their first sign-in mints a user
                                     // record. `None` off the hosted serve path.
                                     bootstrap_admin: self.bootstrap_admin.clone(),
-                                    // The *interactive* operator adapter is a
-                                    // response surface, not a workflow delivery
-                                    // destination: its in-memory buffer has no
-                                    // durable reader, so it is filtered out here
-                                    // (issue #981). Desk and provider adapters
-                                    // are the accepted write paths. Issue #1757
-                                    // then adds a DURABLE operator channel in its
-                                    // place — same `operator` id, but it journals
-                                    // into the operator's main line — so an
-                                    // `owner` report with no mailbox lands
-                                    // somewhere a human reads instead of being
-                                    // discarded. It is added ONLY here, never to
-                                    // the interactive `channels` above, so it can
-                                    // never double-journal a `route_response`
-                                    // reply.
+                                    // Swap the *interactive* operator adapter for
+                                    // the DURABLE one (issue #1757). The in-memory
+                                    // operator is a response surface with no
+                                    // durable reader, so it is dropped by
+                                    // **identity** (its `operator` id) and the
+                                    // journal-backed `DurableOperatorChannel` is
+                                    // pushed under the same id in its place — so a
+                                    // report to `operator` (an `owner` fallback or
+                                    // an explicit `channel` target) lands durably
+                                    // in the standing Operator channel. The durable
+                                    // one is added ONLY here, never to the
+                                    // interactive `channels` above, so it can never
+                                    // double-journal a `route_response` reply. The
+                                    // result is exactly the picker set
+                                    // (`deliverable_channel_ids`) by membership —
+                                    // the #981 equality invariant, now with
+                                    // `operator` on both sides.
                                     channels: {
                                         let mut delivery_channels: Vec<Arc<dyn ChannelAdapter>> =
                                             channels
                                                 .iter()
                                                 .filter(|channel| {
-                                                    crate::runtime::channel::is_deliverable_channel(
-                                                        channel.channel_id(),
-                                                    )
+                                                    channel.channel_id() != OPERATOR_CHANNEL
                                                 })
                                                 .cloned()
                                                 .collect();
@@ -7124,11 +7124,19 @@ needs_reason = true
         assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
 
         // The accessor the console's channel picker reads (#813) names the
-        // openhuman-backed provider channel and NOT `operator`: delivery
-        // refuses the operator adapter by name, so offering it as a
-        // destination would offer the one target guaranteed to fail (#981).
+        // openhuman-backed provider channel AND `operator`: since issue #1757 the
+        // operator channel is a durable delivery target, so it is offered like
+        // any other real channel.
         let deliverable = runtime.deliverable_channel_ids();
-        assert_eq!(deliverable, vec!["email".to_string()], "{deliverable:?}");
+        assert!(
+            deliverable.contains(&"email".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            deliverable.contains(&"operator".to_string()),
+            "{deliverable:?}"
+        );
+        assert_eq!(deliverable.len(), 2, "{deliverable:?}");
 
         // A granted call routes through the OpenHuman transport.
         let result = runtime
@@ -7160,14 +7168,13 @@ needs_reason = true
         assert_eq!(runtime.channels.len(), 1);
         assert_eq!(runtime.channels[0].channel_id(), "operator");
         // The accessor the console's channel picker reads (#813): `operator` is
-        // the only wired adapter here, and it is not a delivery target — so a
-        // workflow on this runtime has NOWHERE to deliver, and the honest
-        // answer is an empty picker (#981). It previously answered
-        // `["operator"]`, which is what put the guaranteed-to-fail target in
-        // front of authors.
-        assert!(
-            runtime.deliverable_channel_ids().is_empty(),
-            "an operator-only runtime has no workflow delivery channel: {:?}",
+        // the only wired adapter here, and since issue #1757 it is a durable
+        // delivery target — so an operator-only runtime can still deliver, to the
+        // standing Operator channel. The picker answers `["operator"]`.
+        assert_eq!(
+            runtime.deliverable_channel_ids(),
+            vec!["operator".to_string()],
+            "an operator-only runtime delivers to its Operator channel: {:?}",
             runtime.deliverable_channel_ids()
         );
 
@@ -7265,7 +7272,8 @@ needs_reason = true
         assert!(ids.contains(&"research"));
 
         // Both desks are real delivery targets — they write to the company's
-        // durable event log — and `operator` is not one of them (#981).
+        // durable event log — and since issue #1757 so is `operator`, whose
+        // report now lands durably in the standing Operator channel.
         let deliverable = runtime.deliverable_channel_ids();
         assert!(
             deliverable.contains(&"engineering".to_string()),
@@ -7276,30 +7284,29 @@ needs_reason = true
             "{deliverable:?}"
         );
         assert!(
-            !deliverable.contains(&"operator".to_string()),
-            "{deliverable:?}"
+            deliverable.contains(&"operator".to_string()),
+            "operator is now a durable, offerable delivery channel: {deliverable:?}"
         );
     }
 
-    /// **The invariant that would have caught #981, as amended by #1757.** The
-    /// picker's set and the delivery layer's set are produced by the same
-    /// `build()`, from the same adapters. Every channel the picker offers MUST be
-    /// one the delivery layer accepts — an author must never be offered a target
-    /// the runner refuses by name.
+    /// **The invariant that would have caught #981, restored by #1757.** The
+    /// picker's set (`deliverable_channel_ids`) and the delivery layer's set
+    /// (`WorkflowDeliveryDeps.channels`) are produced by the same `build()`, and
+    /// must have the **same membership** — an author must never be offered a
+    /// target the runner refuses, nor be refused a target the picker offers.
     ///
-    /// Since #1757 the two are no longer *identical*: the delivery layer also
-    /// carries the durable `operator` channel, the server-resolved landing spot
-    /// for an `owner` report with no mailbox. That is deliberately NOT a
-    /// picker option (an author cannot target `operator` directly), so the
-    /// delivery set is the picker set **plus** `operator`. The invariant is the
-    /// subset relation — picker ⊆ delivery — with `operator` the single, known
-    /// extra.
+    /// #981 broke it by excluding `operator` from one side only; my earlier #1757
+    /// cut broke it the other way (operator in delivery, not the picker). Now
+    /// `operator` is a first-class durable channel on **both** sides, so the two
+    /// sets match by membership again. Order differs by construction — the picker
+    /// reads the interactive runtime channels (operator first), delivery swaps in
+    /// the durable operator last — so this compares as sets, not sequences.
     ///
     /// Needs the harness arm, because that is the only site that wires
     /// `WorkflowDeliveryDeps` at all.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn the_delivery_deps_are_the_picker_set_plus_the_durable_operator() {
+    async fn the_picker_set_and_the_delivery_deps_have_the_same_membership() {
         use crate::harness::HarnessPool;
 
         let home_dir = tmp_home("oc-981-invariant-");
@@ -7353,40 +7360,28 @@ needs_reason = true
             .map(|channel| channel.channel_id().to_string())
             .collect();
 
-        // Every channel the picker offers is one the delivery layer accepts.
+        // Same membership on both sides, order-independent.
         let picker = runtime.deliverable_channel_ids();
-        for offered in &picker {
-            assert!(
-                deps_channels.contains(offered),
-                "the picker offers `{offered}`, which the delivery layer does not carry: \
-                 {deps_channels:?}"
-            );
-        }
-        // The delivery set is the picker set plus exactly the durable operator
-        // fallback (issue #1757) — no other divergence.
-        let extra: Vec<&String> = deps_channels
-            .iter()
-            .filter(|id| !picker.contains(id))
-            .collect();
+        let picker_set: std::collections::BTreeSet<&String> = picker.iter().collect();
+        let deps_set: std::collections::BTreeSet<&String> = deps_channels.iter().collect();
         assert_eq!(
-            extra,
-            vec![&OPERATOR_CHANNEL.to_string()],
-            "the only channel delivery carries beyond the picker set is the durable operator \
-             fallback: {deps_channels:?} vs {picker:?}"
+            picker_set, deps_set,
+            "the picker and the delivery layer must offer/accept the same channels: \
+             picker={picker:?} delivery={deps_channels:?}"
         );
-        // Not vacuous: the runtime really did wire the interactive operator
-        // adapter, and the desk really is a picker-offered, deliverable channel.
+        // Not vacuous: both really carry the desk AND `operator`, so the equality
+        // is proving inclusion of both, not an empty match.
+        assert!(picker.contains(&"engineering".to_string()), "{picker:?}");
+        assert!(
+            picker.contains(&OPERATOR_CHANNEL.to_string()),
+            "operator is a first-class deliverable channel now: {picker:?}"
+        );
         assert!(
             runtime
                 .channels
                 .iter()
                 .any(|channel| channel.channel_id() == OPERATOR_CHANNEL),
-            "the operator adapter must be wired, or the exclusion proves nothing"
-        );
-        assert_eq!(picker, vec!["engineering".to_string()]);
-        assert_eq!(
-            deps_channels,
-            vec!["engineering".to_string(), OPERATOR_CHANNEL.to_string()]
+            "the interactive operator adapter must be wired, or the equality proves nothing"
         );
     }
 

@@ -851,31 +851,27 @@ impl CompanyRuntime {
 
     /// The ids of this running company's channels a workflow may actually
     /// deliver to — exactly what an `output` node's `channel` destination may
-    /// target (issues #813, #981). Desk channels (one per `[[group_chat]]` and
-    /// per operator-created desk) and enabled OpenHuman-provider manifest
-    /// channels; **never `operator`**, whose adapter is an in-memory response
-    /// spy with no durable reader
-    /// ([`is_deliverable_channel`](crate::runtime::is_deliverable_channel)).
+    /// target (issues #813, #981, #1757). Desk channels (one per `[[group_chat]]`
+    /// and per operator-created desk), enabled OpenHuman-provider manifest
+    /// channels, **and** the always-present `operator` channel — which is now a
+    /// durable, journal-backed surface (issue #1757), so it is a real target the
+    /// console offers like any other.
     ///
     /// The console reads this to offer a picker of real targets, and the
     /// workflow write routes reject a channel destination outside it, instead
     /// of a free-text box that only fails at delivery time with
     /// `ChannelNotWired`.
     ///
-    /// The set is empty when a company has no desks and no provider channels.
-    /// That is a legitimate state, not a degraded one: it means there is
-    /// nowhere to deliver, and the honest answer is to say so rather than to
-    /// name a target that would be discarded.
+    /// The set is empty only when a company somehow wires no channels at all —
+    /// normally it holds at least `operator`, which every company has.
     ///
-    /// This was `wired_channel_ids`, which returned every adapter and claimed
-    /// in its own doc comment that `operator` was always a valid target. The
-    /// rename is deliberate: it is what made the mistake plausible, and every
-    /// call site is worth re-reading against the delivery rule.
+    /// This was `wired_channel_ids`; the rename survives because every call site
+    /// is still worth re-reading against the delivery rule — but the rule no
+    /// longer excludes `operator`, whose report now lands durably.
     pub fn deliverable_channel_ids(&self) -> Vec<String> {
         self.channels
             .iter()
             .map(|channel| channel.channel_id().to_string())
-            .filter(|id| crate::runtime::channel::is_deliverable_channel(id))
             .collect()
     }
 

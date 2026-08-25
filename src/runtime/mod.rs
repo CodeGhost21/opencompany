@@ -135,7 +135,7 @@ pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPD
 pub use builder::{RuntimeBuilder, company_id_from_name};
 pub use channel::{
     DeskChannel, DurableOperatorChannel, OPERATOR_CHANNEL, OperatorChannel, WORKFLOW_REPLY_AUTHOR,
-    is_deliverable_channel, undeliverable_channel_message,
+    undeliverable_channel_message,
 };
 pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;

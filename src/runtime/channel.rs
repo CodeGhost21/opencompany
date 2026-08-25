@@ -12,12 +12,13 @@
 //! A workflow `owner` report on a company with no mailbox used to dead-end on
 //! the in-memory buffer — which has no durable reader, so the one human who
 //! could act on it never saw it. The durable adapter instead journals the
-//! report into the operator's main line (the General desk) through the same
-//! event-log mechanism [`DeskChannel`] uses, so it lands in a place the console
-//! already renders and survives a restart. It carries the `operator` channel id
-//! but is wired only into the workflow-delivery adapter set, never into the
-//! interactive runtime channels — so it can never double-journal an
-//! interactive reply.
+//! report onto its own `operator` chat line through the same event-log
+//! mechanism [`DeskChannel`] uses, so it survives a restart and is rendered by
+//! the console's standing **Operator channel** — a first-class, always-present
+//! system desk the desk list enumerates alongside the real desks. It carries the
+//! `operator` channel id but is wired only into the workflow-delivery adapter
+//! set, never into the interactive runtime channels — so it can never
+//! double-journal an interactive reply.
 
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -28,7 +29,6 @@ use crate::Result;
 use crate::ports::channel::ChannelAdapter;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, OutboundMessage};
-use crate::server::ops::language::DEFAULT_DESK;
 
 /// The `agent_id` a workflow-delivered report is journaled under, so the
 /// console (and any other reader) can tell a workflow report apart from an
@@ -39,31 +39,6 @@ pub const WORKFLOW_REPLY_AUTHOR: &str = "workflow";
 
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
-
-/// Whether a channel with this id may be named as the target of an `output`
-/// node's `channel` delivery destination.
-///
-/// The operator channel is the single exclusion, and it is deliberate: the
-/// interactive [`OperatorChannel`] is an in-memory response spy with no durable
-/// reader, so an author must not point a `channel` destination at it. This
-/// governs **author-targetable** channels only — the picker's set and the
-/// explicit `channel` arm — which is why it stays `false` for `operator`.
-///
-/// It does **not** speak for the `owner` fallback (issue #1757): an `owner`
-/// report with no mailbox reaches the operator through the separate, durable
-/// [`DurableOperatorChannel`], a real write path the runtime builder wires into
-/// the delivery adapter set under the same id. That path is server-resolved, not
-/// author-named, so it is not gated here.
-///
-/// Issue #981: this is the one place the author-targeting rule is stated. It
-/// previously lived as an inline `!=` where the builder assembles the delivery
-/// deps, as a `by name` refusal in [`crate::workflows::delivery`], and as a
-/// prose sentence in the accessor the console's destination picker reads — and
-/// that third copy said the opposite, so the picker offered authors the one
-/// target guaranteed to fail. Call this instead of re-deciding.
-pub fn is_deliverable_channel(channel_id: &str) -> bool {
-    channel_id != OPERATOR_CHANNEL
-}
 
 /// The operator-readable sentence for a `channel` destination that names
 /// something outside the deliverable set, built from the set that is live right
@@ -198,17 +173,19 @@ impl std::fmt::Debug for OperatorChannel {
 /// The **durable** operator delivery channel (issue #1757).
 ///
 /// Carries the [`OPERATOR_CHANNEL`] id, but unlike [`OperatorChannel`] it does
-/// not buffer in memory — it appends the report to the company's event log as
-/// an `AgentReply` on the operator's main line (the [`DEFAULT_DESK`], i.e. the
-/// General thread the console renders as the operator's home). That is the same
-/// durable write path [`DeskChannel`] uses, so a workflow `owner` report on a
-/// company with no mailbox now lands somewhere a human actually reads and
-/// survives a restart, instead of being discarded on the in-memory buffer.
+/// not buffer in memory — it appends the report to the company's event log as an
+/// `AgentReply` on the **dedicated operator line** (`chat_id == OPERATOR_CHANNEL`,
+/// NOT the General/main line). That is the same durable write path [`DeskChannel`]
+/// uses, so a report survives a restart; and because it lands on its own
+/// `operator` chat id, the console renders it in the standing **Operator channel**
+/// — a first-class, always-present system desk the desk list enumerates
+/// alongside the real desks (see `server::operator::list_desks`). It is the
+/// aggregating "what happened" surface for workflow-run reports and the
+/// owner/no-mailbox fallback.
 ///
-/// Authored under [`WORKFLOW_REPLY_AUTHOR`], and the report text already carries
-/// the `[company] workflow — node` subject header
-/// ([`subject_for`](crate::workflows::delivery)), so a workflow report is
-/// distinguishable at a glance from an agent's own reply in the same thread.
+/// Authored under [`WORKFLOW_REPLY_AUTHOR`], and the report text carries a source
+/// header ([`operator_report`](crate::workflows::delivery)), so a workflow report
+/// is distinguishable at a glance from any other message.
 ///
 /// Wired **only** into the workflow-delivery adapter set (see the runtime
 /// builder), never into the interactive runtime channels the cycle's
@@ -243,11 +220,12 @@ impl ChannelAdapter for DurableOperatorChannel {
             .append(
                 &self.company,
                 CompanyEvent::AgentReply {
-                    // The operator's main line, folded into General by the
-                    // history reader (`server::chat_history::is_general_chat`),
-                    // so the report renders in the console's home thread with no
-                    // bespoke frontend.
-                    chat_id: DEFAULT_DESK.to_string(),
+                    // The dedicated operator line. `owns("operator","operator",…)`
+                    // matches it (it is NOT folded into General — see
+                    // `server::chat_history::is_general_chat`), so the console's
+                    // standing Operator channel renders exactly these reports and
+                    // nothing else.
+                    chat_id: OPERATOR_CHANNEL.to_string(),
                     agent_id: WORKFLOW_REPLY_AUTHOR.to_string(),
                     text: msg.text,
                     steps: msg.steps,
@@ -333,18 +311,7 @@ impl ChannelAdapter for RecordingChannel {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    /// The operator channel is excluded from workflow delivery, and every other
-    /// wired id is not. The rule reads the same for a desk, a provider channel
-    /// and an id nobody wired — deliverability is about `operator`, not about
-    /// whether the caller has already checked the adapter exists.
-    #[test]
-    fn only_the_operator_channel_is_undeliverable() {
-        assert!(!is_deliverable_channel(OPERATOR_CHANNEL));
-        assert!(is_deliverable_channel("engineering"));
-        assert!(is_deliverable_channel("email"));
-        assert!(is_deliverable_channel("Operator"));
-    }
+    use crate::server::ops::language::DEFAULT_DESK;
 
     /// The shared refusal sentence names what IS deliverable, and says so
     /// plainly when the answer is nothing — a desk-less company is a legitimate
@@ -503,7 +470,7 @@ mod test {
     /// renders and survives a restart, and reads as a workflow report rather than
     /// an agent's own reply (issue #1757).
     #[tokio::test]
-    async fn the_durable_operator_channel_journals_to_the_general_line() {
+    async fn the_durable_operator_channel_journals_to_the_operator_line() {
         let log = Arc::new(RecordingEventLog::default());
         let channel = DurableOperatorChannel::new(CompanyId::new("acme"), log.clone());
         assert_eq!(channel.channel_id(), OPERATOR_CHANNEL);
@@ -531,7 +498,11 @@ mod test {
                 text,
                 ..
             } => {
-                assert_eq!(chat_id, DEFAULT_DESK, "lands on the operator's main line");
+                assert_eq!(
+                    chat_id, OPERATOR_CHANNEL,
+                    "lands on the dedicated operator line, not General"
+                );
+                assert_ne!(chat_id, DEFAULT_DESK, "must NOT fold into the main line");
                 assert_eq!(agent_id, WORKFLOW_REPLY_AUTHOR, "authored by the workflow");
                 assert!(text.contains("Q3 is up 12%."), "{text}");
                 assert!(text.contains("Weekly digest"), "carries its subject header");

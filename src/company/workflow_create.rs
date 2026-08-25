@@ -3328,12 +3328,12 @@ to = "done"
         .expect("a report to a wired channel can land");
     }
 
-    /// A scheduled output to the operator channel is refused: the operator
-    /// channel is an in-memory spy with no durable reader, so a report posted
-    /// there reaches nobody. `deliverable_channel_ids` never lists it, and the
-    /// predicate excludes it by name for good measure.
+    /// A scheduled output to the operator channel now ARMS (issue #1757): the
+    /// operator channel is a durable, journal-backed surface the company always
+    /// wires, so `deliverable_channel_ids` lists it and a report posted there
+    /// lands in the standing Operator channel.
     #[tokio::test]
-    async fn arming_a_scheduled_channel_output_to_operator_is_refused() {
+    async fn arming_a_scheduled_channel_output_to_operator_arms() {
         let dir = tempfile::tempdir().unwrap();
         let company = CompanyId::new("acme");
         let store = store_of(MemStore::seeded(record(
@@ -3352,7 +3352,7 @@ to = "done"
         .await
         .expect("saves");
 
-        let err = set_company_workflow_enabled(
+        set_company_workflow_enabled(
             &company,
             Some(dir.path()),
             &store,
@@ -3360,13 +3360,11 @@ to = "done"
             "digest",
             true,
             false,
-            // Even if a caller passed a rawer list carrying `operator`, it is refused.
+            // `operator` is a wired, durable channel now.
             &["operator".to_string()],
         )
         .await
-        .expect_err("the operator channel is not a delivery surface");
-
-        assert!(err.to_string().contains("nowhere to land"), "{err}");
+        .expect("a report to the durable operator channel can land, so the schedule arms");
     }
 
     /// Switching an undeliverable scheduled graph **off** is always allowed — an
