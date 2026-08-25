@@ -289,7 +289,7 @@ mod tests {
 
     /// An engine that records which agent it was asked to run, so a test can
     /// assert on *which* harness served a turn rather than only that one did.
-    #[derive(Default)]
+    /// Also records `end_cycle` releases, so a test can assert the fan-out.
     struct SpyEngine {
         label: String,
         seen: Mutex<Vec<String>>,
