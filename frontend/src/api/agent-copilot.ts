@@ -1,0 +1,151 @@
+// Issue #1776: drafting ONE teammate's mandate or persona.
+//
+// ## Nothing here saves
+//
+// This module asks the host for text and hands it back. It calls no write, and
+// deliberately does not import one: the draft is rendered beside the field for
+// the operator to keep or throw away, and it only ever becomes a teammate's
+// persona through the ordinary `PATCH` that a Save already performs.
+//
+// That is the whole reason a model may write into these two fields at all. The
+// host's roster designer keeps a model out of a teammate's standing
+// instructions (`src/company/setup.rs`) because there the text reaches a system
+// prompt with nobody having read it. Here a person reads it, takes it, and then
+// saves it — two deliberate actions — which is the same stance the workflow
+// copilot's proposal protocol takes: the model's output is data in a reply, and
+// the operator's own action is what writes.
+//
+// ## The grounding is the host's, not ours
+//
+// The console holds the roster, the company name and this teammate's fields
+// already, and could have composed the prompt itself — the workflow copilot
+// does exactly that. It must not here. A grounding the caller composes is one
+// the caller can widen, and this one is deliberately narrow: the teammate, its
+// neighbours' ids and roles, and nothing else about the company. So the request
+// carries only which field to draft and what the operator typed.
+
+import type { OpenCompanyClient } from "./client";
+
+/** The teammate fields a draft can be asked for. */
+export type DraftableField = "description" | "instructions";
+
+/**
+ * Why there is no draft.
+ *
+ * Three reasons rather than one, because the operator's next move differs for
+ * each — the same split the roster proposal's `RosterFallback` makes, and for
+ * the same reason: a single sentence covering all three is too vague to act on.
+ */
+export type DraftRefusal =
+  /** Nothing is wired, so no call ran. Set up a model. */
+  | "no_model"
+  /** A model is wired and the call did not land. Retry, or check the provider. */
+  | "model_unreachable"
+  /** A model answered and the answer could not be used. Say more, or write it. */
+  | "unreadable";
+
+/** One drafted field, as the host answers. */
+export interface ProfileDraft {
+  /**
+   * The field this draft is for, echoed by the host.
+   *
+   * Load-bearing rather than decorative: two fields share one form, so a
+   * response landing after the operator moved to the other box has to be
+   * matched to the box it was asked for.
+   */
+  field: DraftableField;
+  /** The drafted text, already clamped host-side. Absent on a refusal. */
+  text?: string;
+  /**
+   * Who wrote this.
+   *
+   * `"model"` — a model drafted it from this teammate and its neighbours.
+   * `"unavailable"` — there is no draft, and `reason` says why.
+   *
+   * There is deliberately no curated fallback: "what does this particular
+   * teammate own" has no canned answer the way a starting roster does, so the
+   * honest response is the refusal rather than text nobody wrote.
+   */
+  source: "model" | "unavailable";
+  /** Why there is no draft. Present only when `source` is `"unavailable"`. */
+  reason?: DraftRefusal;
+}
+
+/**
+ * What to tell the operator when no draft came back.
+ *
+ * Keyed by reason because the sentence has to name a different next move each
+ * time; a shared "couldn't draft that" would send someone to check a credential
+ * that is working, or to rewrite a note when the provider is simply down.
+ */
+export function refusalNotice(reason: DraftRefusal | undefined): string {
+  switch (reason) {
+    case "no_model":
+      return "This company has no model configured, so the copilot can't draft yet — set one up in Settings → Inference, or write the field yourself.";
+    case "model_unreachable":
+      return "The model didn't answer in time. Try again, or check the provider in Settings → Inference.";
+    case "unreadable":
+      return "The model's answer couldn't be used. Try again, or add a note saying what this teammate should own.";
+    default:
+      // A host too old to send a reason, or one that grew a reason this console
+      // does not know. Says what happened without inventing which of the three
+      // it was — guessing here would send the operator to fix the wrong thing.
+      return "The copilot couldn't draft that. Try again, or write the field yourself.";
+  }
+}
+
+/**
+ * Ask the host to draft one field for one teammate.
+ *
+ * Never throws for a *drafting* reason: a company with no model, a provider
+ * that did not answer and an answer that could not be read all come back as a
+ * `200` carrying a reason, because none of them is a failure of the request.
+ * A rejection here is a genuine transport, auth or not-found failure.
+ */
+export function draftAgentField(
+  client: OpenCompanyClient,
+  company: string | null,
+  agentId: string,
+  field: DraftableField,
+  hint: string,
+): Promise<ProfileDraft> {
+  return client.post<ProfileDraft>(
+    `${client.scopeFor(company)}/team/${encodeURIComponent(agentId)}/draft`,
+    { field, hint: hint.trim() || undefined },
+  );
+}
+
+/**
+ * Ask the host to draft one field for a teammate that does not exist yet — the
+ * Add-teammate form.
+ *
+ * The teammate's own fields ride the request because nothing has been created
+ * and there is nowhere else to read them from. That is not the widening the
+ * id-bearing call refuses: these are the fields being authored on screen right
+ * now. What stays host-side is the part that matters — the rest of the company.
+ *
+ * A blank `role` is refused by the host, because both prompts are written from
+ * it. The form disables the control for the same reason, so this is the host
+ * stating the rule rather than trusting the console to.
+ */
+export function draftNewAgentField(
+  client: OpenCompanyClient,
+  company: string | null,
+  field: DraftableField,
+  hint: string,
+  teammate: {
+    role: string;
+    name?: string;
+    description?: string;
+    instructions?: string;
+  },
+): Promise<ProfileDraft> {
+  return client.post<ProfileDraft>(`${client.scopeFor(company)}/team/draft`, {
+    field,
+    hint: hint.trim() || undefined,
+    role: teammate.role.trim(),
+    name: teammate.name?.trim() || undefined,
+    description: teammate.description?.trim() || undefined,
+    instructions: teammate.instructions?.trim() || undefined,
+  });
+}

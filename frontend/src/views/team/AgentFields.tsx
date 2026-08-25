@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -10,6 +12,18 @@ import { AGENT_FIELDS, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
  * the same three things, and rendering them from
  * [`AGENT_FIELDS`](@/lib/agent) is what keeps the labels, the placeholders and
  * the order the same in both places rather than the same by coincidence.
+ *
+ * `copilot` renders the drafting control under a field (issue #1776). A render
+ * prop rather than a set of handlers, because the two surfaces ask the host
+ * different questions — the detail view addresses a teammate by id, the
+ * Add-teammate form sends the role being typed — and neither difference is this
+ * component's business. What IS its business is the rule about *where* the
+ * control may appear, and that rule lives here so it cannot be half-applied:
+ * only under a `prose` field, and never under a locked one. Offering to draft
+ * text into a box the host will refuse to store is a dead end, and drafting a
+ * `name` or a `role` is deliberately not on the table — a role is what
+ * delegation grounds on, so a drafted one would change who the company routes
+ * work to.
  *
  * `readOnly` is a predicate rather than a boolean because editability is
  * per-field and decided by the **host**: the detail response carries an
@@ -28,6 +42,7 @@ export function AgentFields({
   draft,
   onChange,
   readOnly,
+  copilot,
 }: {
   /** Namespaces the DOM ids, so two of these can be mounted at once. */
   idPrefix: string;
@@ -35,6 +50,12 @@ export function AgentFields({
   onChange: (key: AgentFieldKey, value: string) => void;
   /** Whether a given field is read-only. Defaults to all-editable. */
   readOnly?: (key: AgentFieldKey) => boolean;
+  /**
+   * The drafting control for one field, when this surface offers one. Called
+   * only for an editable `prose` field; omit it and the fields render exactly
+   * as they did before.
+   */
+  copilot?: (key: AgentFieldKey) => ReactNode;
 }) {
   return (
     <>
@@ -64,6 +85,7 @@ export function AgentFields({
                 data-testid={`agent-field-${field.key}`}
               />
             )}
+            {field.kind === "prose" && !locked && copilot?.(field.key)}
           </div>
         );
       })}

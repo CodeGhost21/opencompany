@@ -66,6 +66,9 @@ import {
   type AgentDraft,
   type AgentFieldKey,
 } from "@/lib/agent";
+import { draftAgentField } from "@/api/agent-copilot";
+import { getInferenceStatus, type CognitionPath } from "@/api/inference";
+import { FieldCopilot } from "@/views/team/FieldCopilot";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
@@ -199,6 +202,17 @@ export function AgentDetailView({
   const editing = editRequested && (agent?.editable.length ?? 0) > 0;
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
+  /**
+   * The cognition path this company booted onto (issue #1776).
+   *
+   * Gates the copilot the same way `WorkflowCreateDialog` gates its Draft
+   * button: on the offline `echo` brain there is no model to draft with, so the
+   * control is disabled with a sentence saying why rather than failing on click.
+   * `null` until the check settles, and on a host without the route — which
+   * leaves it enabled, because refusing to draft on a host we could not ask
+   * would break the control everywhere it actually works.
+   */
+  const [cognition, setCognition] = useState<CognitionPath | null>(null);
   /** An icon save is in flight — the picker is disabled until it settles, so two
       avatar PATCHes for the same teammate can never be pending at once and
       resolve out of order (the older one overwriting the newer choice). */
@@ -277,6 +291,29 @@ export function AgentDetailView({
       live = false;
     };
   }, [client, company]);
+
+  // Issue #1776: read the cognition path while the edit form is open, so the
+  // copilot can say "no model is configured" instead of offering a draft that
+  // can only come back refused. Its own effect rather than a field on the boot
+  // read: a slow `/inference` must not delay the teammate itself appearing.
+  useEffect(() => {
+    if (!editing) return;
+    let live = true;
+    (async () => {
+      try {
+        const status = await getInferenceStatus(client, company);
+        if (live) setCognition(status.cognition);
+      } catch {
+        // A host without the route tells us nothing either way. `null` is not
+        // `echo`, so the control stays enabled and a refusal (with its reason)
+        // is what the operator would see instead.
+        if (live) setCognition(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [editing, client, company]);
 
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
@@ -799,6 +836,29 @@ export function AgentDetailView({
                       setDraft((d) => ({ ...d, [key]: value }))
                     }
                     readOnly={(key) => !isEditable(agent, key)}
+                    copilot={(key) =>
+                      key === "description" || key === "instructions" ? (
+                        <FieldCopilot
+                          field={key}
+                          // Addressed by id: this teammate exists, so the host
+                          // grounds the draft in its own record rather than in
+                          // anything this console sends.
+                          onDraft={(hint) =>
+                            draftAgentField(client, company, agentId, key, hint)
+                          }
+                          // Fills the form draft and nothing else. The Save
+                          // below is still what writes, which is what makes a
+                          // drafted persona no different from a typed one.
+                          onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
+                          disabled={saving || cognition === "echo"}
+                          disabledNotice={
+                            cognition === "echo"
+                              ? "No model is configured, so the copilot can't draft yet."
+                              : undefined
+                          }
+                        />
+                      ) : null
+                    }
                   />
                   {agent.instructionsOverridden && agent.blueprintInstructions?.trim() && (
                     <p

@@ -30,6 +30,8 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
+import { draftNewAgentField } from "@/api/agent-copilot";
+import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
 import {
@@ -44,6 +46,7 @@ import { personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
+import { FieldCopilot } from "@/views/team/FieldCopilot";
 
 interface Props {
   client: OpenCompanyClient;
@@ -324,6 +327,9 @@ export function TeamView({
           name: fields.name,
           role: fields.role,
           description: fields.description || undefined,
+          // Blank stays off the wire: at creation there is no blueprint to
+          // override, so an empty box means "no persona", not "an empty one".
+          instructions: fields.instructions || undefined,
           // Omitted unless the operator typed one: an add that carries a cap is
           // admin-only on the host, while a plain add is open to any member.
           budgetUsdDaily: fields.budgetUsdDaily,
@@ -557,6 +563,8 @@ export function TeamView({
         onOpenChange={setAddOpen}
         onAdd={addMember}
         canSetBudget={isAdmin && fromHost}
+        client={client}
+        company={company}
       />
     </div>
   );
@@ -575,6 +583,16 @@ interface AddMemberFields {
   name: string;
   role: string;
   description: string;
+  /**
+   * The persona typed into the dialog's Instructions box.
+   *
+   * Collected since #264 put `instructions` in `AGENT_FIELDS`, and dropped on
+   * the floor until #1776 noticed: the box was rendered, filled in, and never
+   * sent. The host has accepted `instructions` at creation since #1530 and
+   * `addTeamMember` has carried it since — this was the one link missing, so an
+   * operator who wrote a persona in the add dialog watched it vanish.
+   */
+  instructions: string;
   inbox?: boolean;
   /** An optional daily cap. Undefined means "don't set one", never "$0". */
   budgetUsdDaily?: number;
@@ -896,12 +914,17 @@ function AddMemberDialog({
   onOpenChange,
   onAdd,
   canSetBudget,
+  client,
+  company,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onAdd: (fields: AddMemberFields) => void;
   /** Whether to offer the cap field — setting one is admin-only on the host. */
   canSetBudget: boolean;
+  /** For the copilot's draft call (issue #1776) — this dialog writes nothing. */
+  client: OpenCompanyClient;
+  company: string | null;
 }) {
   // The same three authored fields the detail view edits, held in the same
   // shape (issue #264) so "Add teammate" and "Edit teammate" cannot drift into
@@ -909,6 +932,30 @@ function AddMemberDialog({
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft);
   const [inbox, setInbox] = useState(false);
   const [budget, setBudget] = useState("");
+  /**
+   * The cognition path this company booted onto (issue #1776), read while the
+   * dialog is open so the copilot can say "no model is configured" rather than
+   * offering a draft that can only come back refused. `null` until the check
+   * settles and on a host without the route, which leaves it enabled — see
+   * `AgentDetailView` for why that is the right way to be wrong.
+   */
+  const [cognition, setCognition] = useState<CognitionPath | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    (async () => {
+      try {
+        const status = await getInferenceStatus(client, company);
+        if (live) setCognition(status.cognition);
+      } catch {
+        if (live) setCognition(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [open, client, company]);
 
   function reset() {
     setDraft(emptyDraft());
@@ -931,6 +978,7 @@ function AddMemberDialog({
       name: draft.name,
       role: draft.role,
       description: draft.description,
+      instructions: draft.instructions,
       inbox,
       budgetUsdDaily,
     });
@@ -954,6 +1002,37 @@ function AddMemberDialog({
           idPrefix="member"
           draft={draft}
           onChange={(key: AgentFieldKey, value) => setDraft((d) => ({ ...d, [key]: value }))}
+          copilot={(key) =>
+            key === "description" || key === "instructions" ? (
+              <FieldCopilot
+                field={key}
+                // No id to address — this teammate does not exist yet — so the
+                // fields being typed ride the request. Everything else the
+                // draft is grounded in still comes from the record host-side.
+                onDraft={(hint) =>
+                  draftNewAgentField(client, company, key, hint, {
+                    role: draft.role,
+                    name: draft.name,
+                    description: draft.description,
+                    instructions: draft.instructions,
+                  })
+                }
+                onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
+                // A draft is written FROM the role, so there is nothing to
+                // write one from until it is filled in — the same rule the
+                // host enforces, said here before the operator meets it as a
+                // refusal.
+                disabled={!draft.role.trim() || cognition === "echo"}
+                disabledNotice={
+                  cognition === "echo"
+                    ? "No model is configured, so the copilot can't draft yet."
+                    : !draft.role.trim()
+                      ? "Give this teammate a role first — the copilot drafts from it."
+                      : undefined
+                }
+              />
+            ) : null
+          }
         />
         {canSetBudget && (
           <div className="grid gap-2">
