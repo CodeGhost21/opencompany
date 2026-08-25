@@ -23,6 +23,7 @@ import {
   ApiError,
   type ApprovalSummary,
   type AttachmentDto,
+  type CognitionState,
   type GrantScope,
   type TeamMemberDto,
   type TurnStep,
@@ -40,6 +41,7 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
+import { settingsHref } from "@/views/settings-pages";
 import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
   addMemberFailure,
@@ -341,6 +343,17 @@ export function ChatView({
   const scope = useLocalScope();
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
+  /**
+   * Whether this company's teammates can actually think (issue #1734/#1735).
+   *
+   * `null` until the host has answered, and it stays `null` on a host that has
+   * no such field — an older one, or one that could not answer. That silence is
+   * *not* evidence of an echo, so the banner stays down and every row renders
+   * exactly as it did before. The failure this fixes is the console asserting
+   * something it was never told; asserting the opposite would be the same bug
+   * pointed the other way.
+   */
+  const [cognition, setCognition] = useState<CognitionState | null>(null);
   const [fromHost, setFromHost] = useState(false);
   /**
    * The company's channels — `null` until `/desks` has answered.
@@ -399,6 +412,46 @@ export function ChatView({
   useEffect(() => {
     setChannelsCollapsed(readChannelRailCollapsed(scope));
   }, [scope]);
+
+  /**
+   * Ask the host whether this company can think (issues #1734, #1735).
+   *
+   * There is no other way to tell. A company with no inference configured
+   * answers `200` with `"You said: <your message>"` from the offline echo
+   * brain, and that reply reaches the transcript with the same shape as a
+   * considered one — same avatar, same name, same timestamp. The runtime knows
+   * the difference and, until #1735, never said so.
+   *
+   * Cleared on every company switch and re-read, so the previous company's
+   * answer is never rendered over this one's transcript. On failure it stays
+   * `null` — see the state declaration for why silence must not become a claim.
+   */
+  useEffect(() => {
+    let live = true;
+    setCognition(null);
+    void (async () => {
+      try {
+        const capabilities = await client.capabilityStatus(company);
+        if (live) setCognition(capabilities.cognition ?? null);
+      } catch (e) {
+        // An older host, or one that could not answer. Nothing is claimed
+        // either way, and chat renders exactly as it did before the banner
+        // existed.
+        console.debug("[ChatView] cognition state unavailable", e);
+        if (live) setCognition(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  /**
+   * The company is on the offline echo brain, whichever of the two reasons it
+   * is for. Both mean the same thing to a reader of the transcript: the lines
+   * on the company side were not written by the teammates they appear under.
+   */
+  const echoing = cognition === "unconfigured" || cognition === "not-in-build";
 
   function toggleChannels() {
     setChannelsCollapsed((collapsed) => {
@@ -1591,9 +1644,54 @@ export function ChatView({
                 </span>
               </p>
             )}
+            {/* Issues #1734 / #1735. Above the scroller rather than inside it,
+                like the two strips it sits between: this is a standing fact
+                about the company, not a row in the transcript, and it must not
+                scroll away from the operator who is reading the replies it
+                explains. `role="status"` (not `alert`) for the reason
+                `components/ui/alert.tsx` gives — a notice present on mount
+                should not interrupt a screen reader. */}
+            {echoing && (
+              <p
+                role="status"
+                data-testid="chat-cognition-banner"
+                className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0">
+                  {cognition === "unconfigured" ? (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think yet.
+                      </span>{" "}
+                      This company has no model configured, so the replies below come from the
+                      offline echo brain rather than the teammate they appear under. Choose a
+                      provider in{" "}
+                      <a
+                        className="font-medium text-foreground underline-offset-4 hover:underline"
+                        href={settingsHref("inference")}
+                      >
+                        Settings → Inference
+                      </a>
+                      .
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-medium text-foreground">
+                        This build cannot reach a model — the agent harness is not compiled in.
+                      </span>{" "}
+                      The replies below come from the offline echo brain rather than the teammate
+                      they appear under. No setting changes that: it takes a build with the
+                      harness.
+                    </>
+                  )}
+                </span>
+              </p>
+            )}
             <MessageTimeline
               channel={channel}
               items={items}
+              echoing={echoing}
               historyPending={historyPending}
               openThreadId={openThreadId}
               // An open turn keeps the row up after the POST has resolved, and

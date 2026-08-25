@@ -80,6 +80,13 @@ interface Props {
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
   failedApprovals?: Record<string, string>;
   onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  /**
+   * The company is running the offline echo brain, so every company-side row
+   * below is a canned line rather than a teammate's answer (issue #1734).
+   * Passed straight through to `MessageRow`, which explains why this is a
+   * company-level fact and not a per-message one.
+   */
+  echoing?: boolean;
 }
 
 /**
@@ -131,6 +138,7 @@ export function MessageTimeline({
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
+  echoing,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
@@ -296,6 +304,7 @@ export function MessageTimeline({
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
                 resolveAttachmentUrl={resolveAttachmentUrl}
+                echoing={echoing}
               />
             </div>
           ) : (

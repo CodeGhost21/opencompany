@@ -35,6 +35,28 @@ interface Props {
    * client the blob route needs.
    */
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
+  /**
+   * The company is running the offline echo brain, so nothing on the company
+   * side of this transcript was written by the teammate it appears under
+   * (issue #1734).
+   *
+   * A company-level fact rather than a per-message one, because that is the
+   * only shape the truth has here: `ChatMessage` carries no provenance, so a
+   * canned line and a considered one are byte-for-byte identical at this layer.
+   * The alternatives were worse. Matching the text (`"You said: …"`) would hide
+   * a genuine reply that happens to start that way, and would miss the echo
+   * brain's other two lines (`"Acknowledged."`, `"webhook on …"`) entirely.
+   * Suppressing the row would leave the operator's message with no answer at
+   * all, which reads as "still working" — one lie traded for another, and it
+   * would put the transcript out of step with the journal, which did record a
+   * reply.
+   *
+   * The known imprecision runs one way only: a company on the echo brain *now*
+   * may hold replies from a boot when it was configured, and those get marked
+   * too. Over-marking a real reply costs a moment of doubt; under-marking an
+   * echo is the bug this exists to fix.
+   */
+  echoing?: boolean;
 }
 
 /**
@@ -75,6 +97,7 @@ export function MessageRow({
   onDismissCard,
   dismissingCardId,
   resolveAttachmentUrl,
+  echoing,
 }: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
@@ -113,7 +136,17 @@ export function MessageRow({
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {!continuation && <AuthorLine sender={sender} at={message.at} />}
+        {!continuation && (
+          <AuthorLine
+            sender={sender}
+            at={message.at}
+            // `you` never gets the marker — the operator wrote that line and
+            // knows it. `system` never reaches here (it short-circuits to
+            // `SystemPill` above), so what is left is the company side, which
+            // is exactly what the echo brain produced.
+            placeholder={!!echoing && sender.kind !== "you"}
+          />
+        )}
         <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
 
         {message.attachments && message.attachments.length > 0 && (
@@ -205,7 +238,22 @@ function SystemPill({ message }: { message: ChatMessage }) {
   );
 }
 
-function AuthorLine({ sender, at }: { sender: Sender; at: number }) {
+function AuthorLine({
+  sender,
+  at,
+  placeholder,
+}: {
+  sender: Sender;
+  at: number;
+  /**
+   * Mark this line as not authored by the voice above it (issue #1734). The
+   * chip is short because it sits on every company row; the sentence behind it
+   * is the tooltip, following the `disabledReason` idiom above — a control (or
+   * a label) that just changes shape reads as a bug, so the reason is available
+   * without leaving the row.
+   */
+  placeholder?: boolean;
+}) {
   const openProfile = useAgentProfileOpener();
   const { agentId } = sender;
   // The name is the other half of the same target as the avatar beside it: a
@@ -225,6 +273,15 @@ function AuthorLine({ sender, at }: { sender: Sender; at: number }) {
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 leading-5">
       {name}
+      {placeholder && (
+        <span
+          data-testid="chat-echo-placeholder"
+          title={`${sender.name} did not write this. The company has no model configured, so the offline echo brain answered instead.`}
+          className="shrink-0 rounded-full bg-muted px-1.5 py-px text-2xs font-medium text-muted-foreground"
+        >
+          Placeholder
+        </span>
+      )}
       <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
         {formatTime(at)}
       </span>

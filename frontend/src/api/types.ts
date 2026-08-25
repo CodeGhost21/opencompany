@@ -1606,7 +1606,39 @@ export interface CapabilityStatusDto {
    * send the field) and must never be rendered as "absent".
    */
   mcpInBuild?: boolean;
+  /**
+   * Whether this company's teammates can actually think, and why not when they
+   * cannot (issue #1735).
+   *
+   * * `configured` — a cognition path that runs a real model is live. It says
+   *   nothing about whether that provider will *answer*; reachability is what
+   *   `POST .../inference/test` probes.
+   * * `unconfigured` — the harness is in this build, but the company resolved
+   *   no inference source at boot, so it is running the offline echo brain and
+   *   replying `"You said: …"` to everything. **Fixable in the app**, at
+   *   Settings → Inference. This is the state a fresh instance starts in.
+   * * `not-in-build` — no agent harness is compiled into this host, so no
+   *   configuration reaches a model. Only a rebuild changes it, and the console
+   *   must say so rather than offering a settings link that cannot help.
+   *
+   * The only field here that is not a build fact alone — `mediaInBuild` and its
+   * neighbours answer "was this compiled in", and cognition is that question
+   * *and* "did a model resolve at boot". A fifth boolean would have collapsed
+   * the two, sending an operator who needs one settings page off looking for a
+   * new binary.
+   *
+   * `undefined` is **unknown** — an older host that does not send the field —
+   * and must never be rendered as either working or broken. The chat banner
+   * stays down in that case: a host we cannot ask is not evidence of an echo.
+   */
+  cognition?: CognitionState;
 }
+
+/**
+ * Whether a company's teammates can think, and why not when they cannot
+ * (issue #1735). See `CapabilityStatusDto.cognition`.
+ */
+export type CognitionState = "configured" | "unconfigured" | "not-in-build";
 
 /** One day's token totals in the usage series (`GET .../usage`). */
 export interface UsagePointDto {
