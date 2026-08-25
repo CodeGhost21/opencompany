@@ -4994,7 +4994,6 @@ description = "Builds the product."
             !reply.contains("SECRET-PAYROLL-REVIEW"),
             "sanity: the boot store holds no marker for this query"
         );
-        let _ = boot_context;
     }
 
     #[tokio::test]
