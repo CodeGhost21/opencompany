@@ -298,6 +298,52 @@ describe("changing the autonomy tier", () => {
     expect(put).not.toHaveBeenCalled();
   });
 
+  it("does not apply a stale always-ask save after a company switch", async () => {
+    let resolvePut!: (v: PolicyStatus) => void;
+    const put = vi.fn(
+      () =>
+        new Promise<PolicyStatus>((res) => {
+          resolvePut = res;
+        }),
+    );
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async (path: string) =>
+        path.endsWith("/policy") ? status("supervised") : { slugs: [], unwired: [] },
+      put,
+      del: async () => status("supervised"),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    // The operator edits the list and hits "Save list"; the PUT hangs.
+    await type(
+      container.querySelector<HTMLInputElement>("#always-approve")!,
+      "shell, http_request",
+    );
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Save list"))!
+        .click();
+    });
+    expect(put).toHaveBeenCalledTimes(1);
+
+    // The scope moves to another company while the PUT is in flight.
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "other" }));
+      await Promise.resolve();
+    });
+
+    // The stale response resolves late: it must not apply to the new company's
+    // card — no success toast, no state repaint. (A later save would otherwise
+    // send the old company's list to the new company's endpoint.)
+    await act(async () => {
+      resolvePut(status("full"));
+      await Promise.resolve();
+    });
+    expect(toasts.success).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("Always-ask list updated");
+  });
+
   it("qualifies the always-ask reassurance when edits are unsaved", async () => {
     const { client } = makeClient(status("supervised"));
     await mount(client);
