@@ -67,6 +67,15 @@ export interface InferenceStatus {
    * (this host has no harness path at all) — tell those apart with `cognition`.
    */
   restartRequired: boolean;
+  /**
+   * Whether the harness cognition path is reachable on this host at all (the
+   * `openhuman` feature compiled in and a pool attached). `false` means no
+   * model configuration can ever move this company onto the design path, so
+   * the setup dialog's "set up a model" call-to-action would be a dead end —
+   * it omits the CTA rather than send the operator round a redesign loop that
+   * cannot end.
+   */
+  harnessReachable: boolean;
 }
 
 /** The set-provider body. `key` is write-only (never returned). */
