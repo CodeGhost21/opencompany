@@ -413,6 +413,14 @@ mod tests {
             redact_secrets("auth with Bearer aGVsbG8r/d29ybGQ=andtheRestOfTheKey please"),
             "auth with Bearer [REDACTED] please"
         );
+        // A short bearer credential is still a secret: the MCP config accepts
+        // any non-empty bearer value, so a token-shaped value like `s3cret`
+        // (it contains a digit) is redacted despite being under the prose
+        // length floor.
+        assert_eq!(
+            redact_secrets("auth with Bearer s3cret please"),
+            "auth with Bearer [REDACTED] please"
+        );
         // No marker: borrowed through untouched, no allocation.
         assert!(matches!(
             redact_secrets("nothing secret here"),
