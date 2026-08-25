@@ -86,12 +86,13 @@ members = ["creative_director", "copywriter", "landing_page_builder"]
 # AGENTS.md documents as always writable, so the write token has to ride through
 # the ceiling or the desk's own charter silently stops holding.
 #
-# This desk's scope is also stated per member: each member's `tools` line
-# restates this ceiling, so the exclusions ride on the member as well as the
-# desk. That matters because a teammate on two desks takes the UNION of their
+# The billing exclusion also rides on each member: their `tools` lines are the
+# company belt minus `chargebee` (#788), so this ceiling is not their only
+# guard. That matters because a teammate on two desks takes the UNION of their
 # ceilings — without the belt on them, seating one of these agents on an
 # unrestricted desk would hand the company grant, billing included, straight
-# back.
+# back. The ceiling still narrows the belt further, keeping `search`, `media`
+# and `composio` off the desk.
 tools = ["*", "workspace.write"]
 
 [[group_chat]]
