@@ -441,10 +441,26 @@ export function ChatView({
    * scope it came from — the read is what is scoped, not just when it is
    * cleared. On failure the stamped state is `null`: see the state declaration
    * for why silence must not become a claim.
+   *
+   * Also re-read whenever the tab comes back to the foreground, because this
+   * answer can go stale under a console that is doing nothing at all: another
+   * admin, or this operator in a second window, can configure inference and
+   * rebuild the runtime while this chat sits open (codex, PR #1740). The
+   * operator's *own* trip to Settings → Inference already re-reads — the shell
+   * mounts and unmounts `ChatView` per route, so coming back remounts it — but
+   * nothing covered the cross-session case, and a standing banner insisting
+   * that a company which now thinks perfectly well cannot is the same class of
+   * wrong claim as the one this surface exists to remove.
+   *
+   * A visibility hook rather than a poll: it re-asks exactly when someone is
+   * about to read the answer, costs nothing while the tab is hidden, and adds
+   * no host concept. It does not close the window for an operator who never
+   * leaves the tab; a runtime revision on the wire is the complete answer, and
+   * it belongs with the host rather than in a console-honesty fix.
    */
   useEffect(() => {
     let live = true;
-    void (async () => {
+    const read = async () => {
       try {
         const capabilities = await client.capabilityStatus(company);
         if (live) setLoadedCognition({ client, company, state: capabilities.cognition ?? null });
@@ -455,9 +471,15 @@ export function ChatView({
         console.debug("[ChatView] cognition state unavailable", e);
         if (live) setLoadedCognition({ client, company, state: null });
       }
-    })();
+    };
+    void read();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void read();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       live = false;
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [client, company]);
 

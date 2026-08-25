@@ -18,7 +18,7 @@ import {
   type Sender,
   type TimelineEntry,
 } from "./model";
-import { EchoPlaceholder, echoCause } from "./EchoPlaceholder";
+import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { CardChip, StepTimeline } from "./StepTimeline";
 
 interface Props {
@@ -154,11 +154,10 @@ export function MessageRow({
           <AuthorLine
             sender={sender}
             at={message.at}
-            // `you` never gets the marker — the operator wrote that line and
-            // knows it. `system` never reaches here (it short-circuits to
-            // `SystemPill` above), so what is left is the company side, which
-            // is exactly what the echo brain produced.
-            placeholder={sender.kind === "you" ? null : echoCause(cognition)}
+            // One predicate, shared with `ThreadPanel`: neither the reader's
+            // own line nor another signed-in person's is the echo brain's, and
+            // both arrive as `from: "company"`. `system` never reaches here.
+            placeholder={echoMarkerFor(message, sender, cognition)}
           />
         )}
         <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>

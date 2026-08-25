@@ -232,4 +232,73 @@ describe("the echo-brain placeholder marker", () => {
 
     expect(markers()).toHaveLength(0);
   });
+
+  /**
+   * The row this marker must never touch, and the one easiest to miss.
+   *
+   * In a multi-user company `fromHistory` maps every `mine: false` message to
+   * `from: "company"`, so another signed-in person's own words arrive on the
+   * company side of the transcript — distinguishable only by the `operator`
+   * channel the host stamps on them (`chat_history.rs`, `OperatorMessage`).
+   * Marking one tells a colleague that the echo brain wrote another colleague's
+   * message, which is a *fabricated* attribution — strictly worse than the
+   * missing one this whole change exists to fix (codex, PR #1740).
+   */
+  it("never marks another signed-in person's message", () => {
+    const messages = [
+      message({ id: "h1", from: "you", text: "yo" }),
+      // A collaborator: not mine, so `from: "company"`, but authored by a human
+      // and stamped with the operator voice.
+      message({ id: "h2", from: "company", channel: "operator", text: "on it", at: T0 + 1000 }),
+      // And a genuine echo reply beside it, so the test proves the predicate
+      // discriminates rather than simply marking nothing. Past the 5-minute
+      // grouping window, or it would join `h2`'s run and render no author line
+      // of its own — passing for a reason that has nothing to do with the
+      // predicate under test.
+      message({ id: "h3", from: "company", text: "You said: yo", at: T0 + 20 * 60 * 1000 }),
+    ];
+    const items = buildTimelineItems(buildTimeline(messages, CHANNEL, []), []);
+    act(() => {
+      root.render(
+        createElement(MessageTimeline, {
+          channel: CHANNEL,
+          items,
+          historyPending: false,
+          openThreadId: null,
+          typing: false,
+          onOpenThread: () => {},
+          onReact: () => {},
+          onDismissCard: () => {},
+          dismissingCardId: null,
+          cognition: "unconfigured",
+        }),
+      );
+    });
+
+    expect(rowFor("h2").querySelector('[data-testid="chat-echo-placeholder"]')).toBeNull();
+    expect(rowFor("h3").querySelector('[data-testid="chat-echo-placeholder"]')).not.toBeNull();
+    expect(markers()).toHaveLength(1);
+  });
+
+  /** The same rule, on the panel that draws its own author line. */
+  it("never marks another signed-in person's reply inside a thread", () => {
+    act(() => {
+      root.render(
+        createElement(ThreadPanel, {
+          channel: CHANNEL,
+          members: [],
+          parent: message({ id: "p1", from: "you", text: "yo" }),
+          replies: [
+            message({ id: "r1", from: "company", channel: "operator", text: "on it", at: T0 + 1000 }),
+          ],
+          sending: false,
+          onSend: () => {},
+          onClose: () => {},
+          cognition: "unconfigured",
+        }),
+      );
+    });
+
+    expect(markers()).toHaveLength(0);
+  });
 });

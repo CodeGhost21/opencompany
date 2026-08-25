@@ -1,4 +1,6 @@
 import type { CognitionState } from "@/api/types";
+import type { ChatMessage } from "@/lib/chat";
+import type { Sender } from "./model";
 
 /**
  * The marker that says a line was produced by the offline echo brain rather
@@ -22,6 +24,46 @@ import type { CognitionState } from "@/api/types";
  */
 export function echoCause(cognition: CognitionState | null | undefined): CognitionState | null {
   return cognition === "unconfigured" || cognition === "unavailable" ? cognition : null;
+}
+
+/**
+ * The originating-channel label the host stamps on a message a **person** sent
+ * (`chat_history.rs`'s `OperatorMessage` arm), as opposed to one a desk or an
+ * agent produced.
+ *
+ * Already a known voice here — `model.ts`'s `COMPANY_VOICE` lists it — because
+ * a human's line is not the company speaking even though it arrives on the
+ * company side of the transcript.
+ */
+const OPERATOR_VOICE = "operator";
+
+/**
+ * Whether to mark this row, and with which cause — the single predicate both
+ * author-line surfaces use.
+ *
+ * Two rows must never be marked, and they are easy to miss because both arrive
+ * as `from: "company"`:
+ *
+ * 1. **The reader's own line.** They wrote it and know it; marking it would be
+ *    the same misattribution pointed the other way.
+ * 2. **Another signed-in person's line.** In a multi-user company `fromHistory`
+ *    maps every `mine: false` message to `from: "company"`, so a collaborator's
+ *    own words land on the company side with `channel: "operator"`. Marking
+ *    those would have the console tell one colleague that the echo brain wrote
+ *    another colleague's message — a *fabricated* attribution, which is worse
+ *    than the missing one this PR set out to fix (codex, PR #1740).
+ *
+ * `system` never reaches either call site: both short-circuit it to a centred
+ * pill above.
+ */
+export function echoMarkerFor(
+  message: Pick<ChatMessage, "channel">,
+  sender: Sender,
+  cognition: CognitionState | null | undefined,
+): CognitionState | null {
+  if (sender.kind === "you") return null;
+  if (message.channel?.trim().toLowerCase() === OPERATOR_VOICE) return null;
+  return echoCause(cognition);
 }
 
 /**

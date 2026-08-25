@@ -193,6 +193,72 @@ describe("the chat cognition banner", () => {
   });
 
   /**
+   * The answer can go stale under a console doing nothing at all: another admin,
+   * or this operator in a second window, configures inference and rebuilds the
+   * runtime while this chat sits open (codex, PR #1740). The operator's own trip
+   * to Settings already re-reads — the shell mounts and unmounts `ChatView` per
+   * route — but nothing covered the cross-session case, and a standing banner
+   * insisting that a company which now thinks perfectly well cannot is the same
+   * class of wrong claim this surface exists to remove.
+   */
+  it("re-reads cognition when the tab comes back to the foreground", async () => {
+    let answer: CognitionState = "unconfigured";
+    const capabilityStatus = vi.fn(() =>
+      Promise.resolve({ configured: false, cognition: answer } as CapabilityStatusDto),
+    );
+    const named: Record<string, unknown> = {
+      capabilityStatus,
+      scopeFor: () => "/api/v1/company",
+    };
+    const client = new Proxy(named, {
+      get: (target, prop: string) => target[prop] ?? (() => Promise.resolve([])),
+    }) as unknown as OpenCompanyClient;
+
+    const scopeRef = createRef<{
+      connection: string;
+      company: string | null;
+      client: OpenCompanyClient;
+    }>() as { current: { connection: string; company: string | null; client: OpenCompanyClient } };
+    scopeRef.current = { connection: "c1", company: "acme", client };
+    await act(async () => {
+      root.render(
+        createElement(ConnectionScopeProvider, {
+          scope: { connection: "c1", company: "acme" },
+          children: createElement(ChatView, {
+            client,
+            company: "acme",
+            sub: "main",
+            onNavigate: () => {},
+            transcripts: {},
+            setTranscripts: () => {},
+            scopeRef,
+          }),
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(banner()).not.toBeNull();
+
+    // Somebody else configures a provider. Nothing in this tab changed.
+    answer = "configured";
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(capabilityStatus.mock.calls.length).toBeGreaterThan(1);
+    expect(banner()).toBeNull();
+  });
+
+  /**
    * A company switch must not show the previous company's verdict, not even for
    * the frame before the new read lands (CodeRabbit review of PR #1740).
    *

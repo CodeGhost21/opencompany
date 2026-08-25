@@ -7,7 +7,7 @@ import type { MessageIntent } from "@/api/tasks";
 import type { AttachmentDto, CognitionState } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
-import { EchoPlaceholder, echoCause } from "./EchoPlaceholder";
+import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { MessageAttachments } from "./MessageAttachments";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
@@ -168,9 +168,10 @@ function Line({
   cognition?: CognitionState | null;
 }) {
   const sender = senderOf(message, channel, members);
-  // Same rule as `MessageRow`: the operator wrote their own line and knows it,
-  // and `system` returns above. What is left is the company side.
-  const placeholder = sender.kind === "you" ? null : echoCause(cognition);
+  // Literally the same predicate `MessageRow` uses, not a second copy of it —
+  // two spellings of "which rows are the echo brain's" is how this panel came
+  // to be missing the marker in the first place.
+  const placeholder = echoMarkerFor(message, sender, cognition);
 
   if (sender.kind === "system") {
     return (
