@@ -3006,16 +3006,22 @@ impl Tool for AddAgentTool {
         // Issue #619: the company grant is the wrong ceiling. Clamp to the
         // MINTER's own scope, resolved before the store is touched so a refused
         // scope never leaves a half-written roster.
-        let mut tools = match requested {
+        //
+        // The boolean says whether the request LEFT the grant unstated — the
+        // `None` and empty-list cases, which inherit the minter — rather than
+        // stating one explicitly. Only an unstated grant is filtered for the BYO
+        // real-money namespaces below; an explicitly requested billing namespace
+        // survives, narrowed to what the minter holds.
+        let (mut tools, unstated) = match requested {
             // Nothing asked for: copy the minter's own line. Copying the *line*
             // rather than its resolved grant is deliberate — an unscoped minter
             // mints an unscoped teammate that keeps tracking `[tools].allow`,
             // instead of freezing today's allow-list into the record as an
             // explicit scope a later company-wide narrowing would not reach.
-            None => self.minter_tools.clone(),
+            None => (self.minter_tools.clone(), true),
             // An explicitly empty list is the same request as none at all —
             // "give them what you have" — not "grant everything".
-            Some(globs) if globs.is_empty() => self.minter_tools.clone(),
+            Some(globs) if globs.is_empty() => (self.minter_tools.clone(), true),
             Some(globs) => {
                 // Narrow against what the minter actually holds. An empty result
                 // means nothing asked for was within reach, and storing that
@@ -3034,7 +3040,7 @@ impl Tool for AddAgentTool {
                         },
                     )));
                 }
-                narrowed
+                (narrowed, false)
             }
         };
 
@@ -3053,20 +3059,28 @@ impl Tool for AddAgentTool {
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.company.to_string()))?;
 
         // The BYO real-money namespaces are not inherited by a minted teammate
-        // either (#788/#789). The branches above copy the MINTER'S LINE when
-        // nothing was asked for, and a minter scoped by its desk rather than by
-        // its own `tools` has an empty line — so an unscoped-looking mint from,
-        // say, a desk-restricted creative director would store an empty grant,
-        // which reads back as the whole company allow-list and hands the new
-        // deskless teammate billing tools its own minter does not hold.
+        // (#788/#789). What an unstated grant inherits depends on the minter:
+        // an empty minter line means the whole company allow-list (so an
+        // unscoped-looking mint from, say, a desk-restricted creative director
+        // would otherwise store an empty grant that reads back as billing it
+        // does not hold), and a non-empty minter line that itself names billing
+        // (the shipped bookkeeper) would hand it on. Both are filtered — the
+        // company allow-list when the minter line is empty, the minter's own
+        // line otherwise — before persistence.
         //
         // Same helper and same reasoning as the console `POST .../team` route,
         // deliberately rather than incidentally: two creation paths that answer
         // "what does an unstated grant mean" differently is how the first hole
         // got here. `CreationGrant::Standard` leaves the copied line untouched,
-        // so nothing changes for the companies that grant none of these.
-        if tools.is_empty() {
-            match crate::company::creation_default_grants(&record.manifest.tools.allow) {
+        // so nothing changes for the companies that grant none of these, and an
+        // explicitly requested billing namespace is untouched too.
+        if unstated {
+            let inherited = if tools.is_empty() {
+                &record.manifest.tools.allow
+            } else {
+                &tools
+            };
+            match crate::company::creation_default_grants(inherited) {
                 crate::company::CreationGrant::Standard => {}
                 crate::company::CreationGrant::Narrowed(narrowed) => tools = narrowed,
                 crate::company::CreationGrant::NothingLeft => {
@@ -7397,6 +7411,109 @@ name = "Morning"
 
         let record = store.load(&company).await.unwrap().expect("record");
         assert!(record.overlay_agents[0].tools.is_empty());
+    }
+
+    /// A minter whose own line names `chargebee` (the shipped bookkeeper) hands
+    /// that line on when `tools` is omitted — but an unstated grant never
+    /// confers billing (#788/#789), so the copied line is filtered before it is
+    /// stored. The #619 copy-the-line rule still holds for the non-BYO parts.
+    #[tokio::test]
+    async fn an_unstated_mint_from_a_billing_holding_minter_withholds_chargebee() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("valid manifest");
+        let store = Arc::new(MemStore::seeded(record));
+        let belt = vec![
+            "*".to_string(),
+            "workspace.*".to_string(),
+            "workspace.write".to_string(),
+            "media".to_string(),
+            "composio".to_string(),
+            "search".to_string(),
+            "mcp:*".to_string(),
+            "chargebee".to_string(),
+        ];
+        let tool = AddAgentTool::new(
+            company.clone(),
+            store.clone(),
+            "bookkeeper".to_string(),
+            belt.clone(),
+            belt,
+        );
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Data Entry" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        let added = &record.overlay_agents[0];
+        assert!(
+            !added
+                .tools
+                .iter()
+                .any(|g| g == "chargebee" || g.starts_with("chargebee.")),
+            "an unstated mint must not hand on billing: {:?}",
+            added.tools
+        );
+        assert!(
+            added.tools.contains(&"*".to_string()),
+            "the rest of the minter's line is still copied verbatim (#619): {:?}",
+            added.tools
+        );
+    }
+
+    /// An EXPLICIT `tools` request naming `chargebee` survives — an unstated
+    /// grant is withheld, a stated one is narrowed to what the minter holds.
+    #[tokio::test]
+    async fn an_explicit_chargebee_request_from_a_billing_minter_is_honored() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("valid manifest");
+        let store = Arc::new(MemStore::seeded(record));
+        let belt = vec![
+            "*".to_string(),
+            "workspace.*".to_string(),
+            "workspace.write".to_string(),
+            "media".to_string(),
+            "composio".to_string(),
+            "search".to_string(),
+            "mcp:*".to_string(),
+            "chargebee".to_string(),
+        ];
+        let tool = AddAgentTool::new(
+            company.clone(),
+            store.clone(),
+            "bookkeeper".to_string(),
+            belt.clone(),
+            belt,
+        );
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Data Entry", "tools": ["chargebee"] }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            vec!["chargebee".to_string()],
+            "a stated billing namespace is narrowed to the minter's grant, not dropped"
+        );
     }
 
     /// A non-string `tools` item is a clean argument error, the same shape as a
