@@ -527,25 +527,27 @@ export function mergeHistoryInOrder(
   const lastSequence = [...hydratedSequences]
     .reverse()
     .find((sequence) => sequence !== null) ?? null;
+  const snapshotAt = hydrated.length ? hydrated[hydrated.length - 1].at : null;
 
   const optimistic = liveRows.filter((message) => {
     if (isHostMessageId(message.id)) return false;
     const matches = durableEchoes.get(messageFingerprint(message));
-    const echo = matches?.find((candidate) => !consumedEchoes.has(candidate));
+    const echo = matches?.find((candidate) => {
+      if (consumedEchoes.has(candidate)) return false;
+      // A matching row before the snapshot may be an older identical message,
+      // not this send. A row at/after the snapshot is fresh evidence; for a
+      // single-row response there is no older page boundary to consult.
+      return snapshotAt === null || hydrated.length === 1 || candidate.at >= snapshotAt;
+    });
     if (!echo) return true;
-    // A page may contain an older identical message. Only consume it as this
-    // optimistic row's echo when its timestamp is not older than the send.
-    // Without this bound a failed send can disappear until its real echo (or
-    // forever if no echo exists).
-    if (echo.at < message.at) return true;
     consumedEchoes.add(echo);
     return false;
   });
 
   const outsidePage = liveDurable.filter((message) => {
     const sequence = messageSequence(message);
-    if (sequence !== null && firstSequence !== null && lastSequence !== null) {
-      return sequence < firstSequence || sequence > lastSequence;
+    if (sequence !== null && lastSequence !== null) {
+      return sequence > lastSequence || (firstSequence !== null && sequence < firstSequence);
     }
     if (!hydrated.length) return true;
     return message.at <= hydrated[0].at || message.at >= hydrated[hydrated.length - 1].at;
