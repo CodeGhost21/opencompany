@@ -92,7 +92,7 @@ import {
   mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
@@ -392,7 +392,19 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
-  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
+  // The company's main line has a channel of its own now — the built-in
+  // `#general` (issue #1743) — so it maps to itself, under every spelling the
+  // host journals it under (`""`, `main`, `General`, `general`).
+  //
+  // The main line used to be seeded with the first desk's id instead: with no
+  // `#general` channel to land in, it was parked on whichever desk sorted
+  // first, so it would still be somewhere the operator could find it. That is
+  // now actively wrong — an unaddressed message and its reply were rendered in
+  // `#engineering`, complete with an unread badge, while the host's own
+  // history for that desk was empty. Verified in a browser before and after.
+  for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) {
+    map[spelling] = MAIN_THREAD_ID;
+  }
   for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
@@ -1006,7 +1018,9 @@ export function AppShell({
         else channelsByThread.set(threadId, [{ channelId }]);
       }
       // Every resolved thread gets its own fetch, even when nothing renders as
-      // a channel — the main line is a thread with no Chat channel. And every
+      // a channel — a workflow run is a thread with no Chat channel. (The main
+      // line used to be the example here; since issue #1743 it has `#general`.)
+      // And every
       // channel's backing thread is in `threadIds`, so the union is the full
       // set, each exactly once (issue #1690).
       [...new Set([...threadIds, ...channelsByThread.keys()])].forEach((threadId) =>
@@ -1042,9 +1056,17 @@ export function AppShell({
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
-        setFirstDeskChannelId(chatDesks[0]?.id ?? null);
+        // The channel `ChatView` lands on when the hash names none, which since
+        // issue #1743 is the built-in `#general` rather than the first desk —
+        // the two must agree, or a line with nowhere else to go lands in a
+        // channel the operator is not looking at.
+        setFirstDeskChannelId(MAIN_THREAD_ID);
         const threadIds = resolved.map((t) => t.id);
         const channels = [
+          // `#general` is not in the desk list (it is not a desk), so its
+          // history has to be named here or nothing would rehydrate it on
+          // reload — the one channel every company has would come back empty.
+          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
           ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
         ];

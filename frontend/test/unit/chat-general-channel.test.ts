@@ -191,3 +191,42 @@ describe("ChatView offers no desk affordance on the built-in channel", () => {
     expect(source).toContain('import { defaultDesks, isGeneralChannel, type Desk } from "@/lib/desks";');
   });
 });
+
+/**
+ * The shell's host-thread → channel map, and the line #1743 had to change.
+ *
+ * `channelMap` used to seed `map[MAIN_THREAD_ID] = desks[0].id`: with no
+ * `#general` channel to land in, the company's main line was parked on
+ * whichever desk sorted first so it would at least be somewhere findable.
+ * That is now wrong in a way a browser makes obvious — an unaddressed message
+ * and its reply rendered inside `#engineering`, with an unread badge, while
+ * the host's own history for that desk was empty.
+ *
+ * The map is module-private to `app-shell.tsx`, so this pins the wiring the
+ * same way the `ChatView` block above does.
+ */
+describe("the shell maps the main line to #general, not to the first desk", () => {
+  const here2 = dirname(fileURLToPath(import.meta.url));
+  const shell = readFileSync(resolve(here2, "../../src/components/app-shell.tsx"), "utf8").replace(
+    /\s+/g,
+    " ",
+  );
+
+  it("no longer parks the main line on the first desk", () => {
+    expect(shell).not.toContain("map[MAIN_THREAD_ID] = desks[0].id");
+  });
+
+  it("maps every spelling the host journals the general line under", () => {
+    expect(shell).toContain(
+      'for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) { map[spelling] = MAIN_THREAD_ID; }',
+    );
+  });
+
+  it("lands an unaddressed system line in #general rather than the first desk", () => {
+    expect(shell).toContain("setFirstDeskChannelId(MAIN_THREAD_ID);");
+  });
+
+  it("names #general as a rehydration target, since it is in no desk list", () => {
+    expect(shell).toContain("{ channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },");
+  });
+});
