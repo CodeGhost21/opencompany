@@ -141,6 +141,20 @@ pub trait RunTurn: Send + Sync {
     async fn ensure_with_policy(&self, company: &CompanyRecord, _policy: &Policy) -> Result<()> {
         self.ensure(company).await
     }
+
+    /// Releases any cycle-start policy pin this engine's roster is holding, so
+    /// the next plain [`ensure`](Self::ensure) rebuilds against the live store
+    /// overlay.
+    ///
+    /// Defaults to a no-op: only the harness pool tracks a pin, and an engine
+    /// that never pins has nothing to release. The built-in harness overrides
+    /// it so a pin stored by [`ensure_with_policy`](Self::ensure_with_policy)
+    /// is gone by the time the cycle is over — otherwise a standalone workflow
+    /// turn between cycles would keep rebuilding against the last cycle's tier
+    /// until an unrelated cycle refreshed it (issue #1455).
+    async fn end_cycle(&self, _company: &CompanyId) {
+        // no-op
+    }
 }
 
 // `desk_lead` is the brain-agnostic desk-lead resolver — it moved to
