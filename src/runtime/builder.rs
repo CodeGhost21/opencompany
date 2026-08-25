@@ -895,6 +895,11 @@ impl RuntimeBuilder {
     /// company that has selected `store`.
     pub fn with_memory_overlay_cleared(mut self) -> Self {
         self.memory_overlay_applied = true;
+        // The base backend is a distinct engine selection: record it so a
+        // rebuild TO `store` drops the inherited pool's provider-built roster,
+        // exactly as the reverse swap does (issue #1113).
+        #[cfg(feature = "openhuman")]
+        self.memory_engine = None;
         self
     }
 
