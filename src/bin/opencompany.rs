@@ -1109,48 +1109,70 @@ async fn run_issue_password(
         .unwrap_or_else(|| fs_ops.clone());
 
     // In shared-single-DB mode the `--company` argument is also a tenant
-    // namespace carrier: this command reads a caller-supplied string straight
-    // into the storage handles, so `tenant-b--company` from tenant A's
-    // container would load tenant B's company and reset its admin password —
-    // exactly the authority `serve` and provisioning never hand to a caller
-    // (they only name ids this workload namespaced itself). A prefix that is
-    // not this tenant's is refused; a bare id is namespaced here to the
-    // `<tenant>--<id>` form the shared database stores.
-    let id = match std::env::var("OPENCOMPANY_TENANT_ID")
+    // namespace carrier. Try the tenant-prefixed candidate first, because a
+    // bare company id may itself contain `--`; then accept an already-expanded
+    // id only when it carries this tenant's prefix. A different prefix is
+    // refused rather than allowing a caller to select another tenant.
+    let (id, record) = match std::env::var("OPENCOMPANY_TENANT_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
     {
-        None => CompanyId::new(company),
+        None => {
+            let id = CompanyId::new(company);
+            let record = if let Some(handles) = handles.as_ref() {
+                handles.company.load(&id).await?
+            } else {
+                opencompany::store::FsCompanyStore::new(home.clone())
+                    .load(&id)
+                    .await?
+            };
+            (id, record)
+        }
         Some(tenant) => {
             if let Err(reason) = opencompany::app::validate_tenant_namespace(&tenant) {
                 return Err(opencompany::error::OpenCompanyError::Config(reason));
             }
             let prefix = format!("{tenant}--");
-            if let Some(bare) = company.strip_prefix(&prefix) {
+            let (id, record) = if let Some(bare) = company.strip_prefix(&prefix) {
                 if bare.is_empty() {
                     return Err(opencompany::error::OpenCompanyError::Config(format!(
                         "company id `{company}` is only the `{tenant}--` namespace prefix; \
                          it names no company"
                     )));
                 }
-                CompanyId::new(company)
+                let id = CompanyId::new(company);
+                let record = if let Some(handles) = handles.as_ref() {
+                    handles.company.load(&id).await?
+                } else {
+                    opencompany::store::FsCompanyStore::new(home.clone())
+                        .load(&id)
+                        .await?
+                };
+                (id, record)
             } else {
-                // A bare company id may itself contain `--`. Prefer treating
-                // the argument as bare and applying this tenant's prefix; a
-                // caller that supplies the already-expanded local id still
-                // matches the branch above.
-                CompanyId::new(format!("{prefix}{company}"))
-            }
+                let bare_id = CompanyId::new(format!("{prefix}{company}"));
+                let bare_record = if let Some(handles) = handles.as_ref() {
+                    handles.company.load(&bare_id).await?
+                } else {
+                    opencompany::store::FsCompanyStore::new(home.clone())
+                        .load(&bare_id)
+                        .await?
+                };
+                if let Some(record) = bare_record {
+                    (bare_id, Some(record))
+                } else if company.contains("--") {
+                    return Err(opencompany::error::OpenCompanyError::Config(format!(
+                        "company id `{company}` is namespaced for another tenant; this deployment is \
+                         `{tenant}`, whose ids take the `<tenant>--<name>` form"
+                    )));
+                } else {
+                    (bare_id, None)
+                }
+            };
+            (id, record)
         }
     };
-    let record = if let Some(handles) = handles.as_ref() {
-        handles.company.load(&id).await?
-    } else {
-        opencompany::store::FsCompanyStore::new(home.clone())
-            .load(&id)
-            .await?
-    }
-    .ok_or_else(|| {
+    let record = record.ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(format!(
             "no company `{}` in this storage. Check the id — in shared-database mode it is the \
              namespaced `<tenant>--<id>` form.",
