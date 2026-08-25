@@ -3246,6 +3246,41 @@ impl HarnessBrain {
                         mentions: Vec::new(),
                     }];
                     responses.extend(turn.bubbles);
+                    // Issue #926/#1032, scheduled edition: a turn that paused at
+                    // its step cap or halted for spend says so in its own
+                    // sibling bubble, exactly as the operator path does. Here
+                    // the journal is the turn's only durable record — the
+                    // operator channel is in-memory for a cron tick — so
+                    // omitting them would present interrupted scheduled work as
+                    // a completed answer. Unauthored on the operator path; here
+                    // they must carry an author to be journaled at all, so they
+                    // take the same system author `system_notice` uses.
+                    if turn.hit_iteration_cap {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK
+                                .to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    if let Some(halt) = &turn.halted_for_spend {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK
+                                .to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: spend_halt_notice(halt),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
                     // Drain what the scheduled turn published (#445) and file it
                     // onto the card the turn opened — or a freshly minted one —
                     // exactly as an operator turn's publish is filed.
