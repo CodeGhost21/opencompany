@@ -1528,7 +1528,8 @@ impl HarnessPool {
         // still parks. The per-company lock closes that window: either the plain
         // ensure publishes first and the cycle's strict roster supersedes it, or
         // it runs after the pin is installed and rebuilds against the pin.
-        let _policy_axis_guard = policy_ensure_lock(&company.id).lock().await;
+        let _policy_axis_lock = policy_ensure_lock(&company.id);
+        let _policy_axis_guard = _policy_axis_lock.lock().await;
         let (effective_snapshot, pin_to_store) = match policy_snapshot {
             Some(policy) => (Some(policy.clone()), Some(policy.clone())),
             None => {
