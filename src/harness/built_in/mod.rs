@@ -1441,7 +1441,22 @@ impl HarnessPool {
     /// cycles would keep rebuilding against the last cycle's tier even after
     /// the operator moved the store (issue #1455).
     pub async fn end_cycle(&self, company: &CompanyId) {
-        self.pinned_policies.write().await.remove(company);
+        self.pinned_policies.lock().unwrap().remove(company);
+    }
+
+    /// The synchronous half of [`end_cycle`](Self::end_cycle), for a cycle's
+    /// drop guard.
+    ///
+    /// A cycle whose future is cancelled or unwinds through a panic after
+    /// [`ensure_with_policy`](Self::ensure_with_policy) installed its pin never
+    /// reaches the async `end_cycle` — the `await` that would have called it is
+    /// exactly where the future is dropped. The pin would then outlive the
+    /// cycle and keep a standalone workflow turn between cycles on a stale
+    /// snapshot until an unrelated cycle replaced it. Releasing here is a
+    /// synchronous map removal, so the guard can do it from `Drop` (issue
+    /// #1455). Idempotent with `end_cycle`; callers may run either or both.
+    pub fn release_policy_pin_sync(&self, company: &CompanyId) {
+        self.pinned_policies.lock().unwrap().remove(company);
     }
 
     async fn ensure_impl(
