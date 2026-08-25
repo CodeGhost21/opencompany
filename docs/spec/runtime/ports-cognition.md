@@ -46,6 +46,45 @@ pub enum UsageMetering {
 `PerTurn` or `None` and then reports non-zero cycle usage is warned about and
 dropped, never metered. Only `PerCycle` reaches the meter.
 
+### What the console is told: `cognition` (issue #1735)
+
+`Cognition` is a *metering and diagnosis* descriptor with an open set of path
+labels, and it is deliberately not `Serialize`. What a console surface actually
+asks is narrower and closed — **can a teammate answer me, and if not, is that
+mine to fix?** — so the host derives that answer and reports it, rather than
+publishing the path vocabulary and letting every view restate the rule.
+
+```rust
+// src/server/cognition.rs
+pub enum CognitionState { Configured, Unconfigured, NotInBuild }
+
+pub fn cognition_state(path: &str, harness_in_build: bool) -> CognitionState;
+```
+
+| state | what is true | remedy |
+|---|---|---|
+| `configured` | a path that runs a real model is live | — |
+| `unconfigured` | the harness is compiled in, but nothing resolved at boot, so the company is on the echo brain | Settings → Inference, **in-app** |
+| `not-in-build` | no agent harness in this binary | a rebuild — say so plainly |
+
+Not a fifth `*_in_build` boolean. Cognition is two facts at once — compiled in,
+*and* configured at runtime — and only the second is actionable without a new
+binary. One flag collapses them and sends the operator who needs a settings page
+off looking for a build.
+
+Derived on every read from the brain the runtime is holding
+(`runtime.cognition().path`) plus `cfg!(feature = "openhuman")`, so it cannot
+drift from reality. Reported on `GET …/capabilities` beside `mediaInBuild`,
+`searchInBuild`, `publishInBuild` and `mcpInBuild` — the per-company answer to
+"what can this company actually do" — as `cognition`.
+
+The console consumes it in chat (issue #1734): on anything but `configured` the
+transcript carries a banner naming the cause and, where one exists, the remedy,
+and every company-side row is marked as a placeholder rather than presented as
+the teammate's own words. `ChatMessage` carries no provenance, so a company-level
+flag is the only shape that answer has — see `MessageRow`'s `echoing` prop for
+why marking beats suppressing.
+
 ```rust
 /// Callbacks the brain makes into the host mid-cycle.
 pub trait CycleHost: Send + Sync {

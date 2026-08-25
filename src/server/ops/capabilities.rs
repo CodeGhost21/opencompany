@@ -18,6 +18,7 @@ use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::metering::capability::{CapabilityPlan, tokens_in};
 use crate::ports::now_millis;
+use crate::server::cognition::{CognitionState, cognition_state};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -188,6 +189,21 @@ struct CapabilityStatusDto {
     /// lets the MCP surfaces state that plainly instead of the operator finding
     /// out by asking an agent and watching nothing happen.
     mcp_in_build: bool,
+    /// Whether this company's teammates can actually think, and why not when
+    /// they cannot (issue #1735): `configured`, `unconfigured`, or
+    /// `not-in-build`.
+    ///
+    /// The one capability on this response that is **not** a build fact alone.
+    /// `media_in_build` and its neighbours answer "was this compiled in";
+    /// cognition is that question *and* "did a model resolve at boot", and only
+    /// the second is something an operator can fix without a new binary. A
+    /// fifth boolean would have collapsed the two, which is the same mistake as
+    /// the echo reply it exists to explain — an operator told "not available"
+    /// goes looking for a rebuild when a provider was one settings page away.
+    ///
+    /// Derived on every read from the brain the runtime is holding, never
+    /// stored. See [`crate::server::cognition`].
+    cognition: CognitionState,
 }
 
 /// One tier's budget row.
@@ -246,12 +262,24 @@ struct OptInFlags {
     /// reports honestly for a company with no plan and lies to every company
     /// that has one.
     publish_granted: bool,
+    /// Issue #1735. Carried here for the reason the two notes above already
+    /// give: the DTO is built in two places, and a field wired into one of them
+    /// alone reports honestly for a company with no plan and lies to every
+    /// company that has one — which for this field would mean chat rendering
+    /// the echo brain's output as a teammate's reply on exactly the companies
+    /// that have a budget configured.
+    cognition: CognitionState,
 }
 
 impl OptInFlags {
     /// All-false — used when no company record is present.
-    fn none() -> Self {
+    ///
+    /// Takes the cognition state because that one is knowable without a record:
+    /// the runtime is in hand either way, and which brain it holds does not
+    /// depend on whether its company row loaded.
+    fn none(cognition: CognitionState) -> Self {
         Self {
+            cognition,
             media_granted: false,
             chargebee_granted: false,
             composio_granted: false,
@@ -296,6 +324,7 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
+        cognition: flags.cognition,
     }
 }
 
@@ -384,13 +413,19 @@ fn media_credential_configured() -> bool {
 
 /// Resolves the capability-budget status DTO for a company.
 async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDto, ApiError> {
+    // Issue #1735. Read off the brain this runtime is actually holding, before
+    // anything else can fail: a company whose record will not load still has a
+    // brain, and "can a teammate answer me" is the one question on this
+    // response that must never degrade to a reassuring default.
+    let cognition = cognition_state(runtime.cognition().path, cfg!(feature = "openhuman"));
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     let Some(record) = record else {
-        return Ok(unconfigured(OptInFlags::none()));
+        return Ok(unconfigured(OptInFlags::none(cognition)));
     };
     // Media + composio are opt-in per tool grant (explicit namespace, never `*`)
     // and live on the manifest regardless of whether a `[plan]` is configured.
     let flags = OptInFlags {
+        cognition,
         media_granted: crate::company::grants_media_explicit(&record.manifest.tools.allow),
         chargebee_granted: crate::company::grants_chargebee_explicit(&record.manifest.tools.allow),
         composio_granted: crate::company::grants_composio_explicit(&record.manifest.tools.allow),
@@ -511,6 +546,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
+        cognition: flags.cognition,
     })
 }
 
@@ -608,6 +644,109 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value)
+    }
+
+    /// Issue #1735: a build whose runtime is on the offline echo brain must
+    /// never report itself as able to think — with or without a `[plan]`, since
+    /// the DTO is built in two places.
+    ///
+    /// Which of the two honest answers it gives depends on the lane: with the
+    /// `openhuman` feature the harness is compiled in and a provider is one
+    /// settings page away (`unconfigured`); without it, no configuration
+    /// reaches a model (`not-in-build`). Both are asserted so the test says
+    /// something in every lane rather than being silently vacuous in one.
+    #[tokio::test]
+    async fn a_company_on_the_echo_brain_never_reports_itself_configured() {
+        let expected = if cfg!(feature = "openhuman") {
+            "unconfigured"
+        } else {
+            "not-in-build"
+        };
+
+        // No `[plan]` — the `unconfigured()` construction site.
+        let home_a_dir = home();
+        let state = state_with_manifest(
+            home_a_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["configured"], false, "{dto}");
+        assert_eq!(
+            dto["cognition"], expected,
+            "a runtime built with no inference source runs the echo brain: {dto}"
+        );
+
+        // With a `[plan]` — the other construction site. A field wired into one
+        // of them alone reports honestly here and lies to every company that
+        // has a budget configured, which is the trap this file already warns
+        // about twice.
+        let home_b_dir = home();
+        let state_b = state_with_manifest(
+            home_b_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[plan]\nname = \"starter\"\nperiod = \"daily\"\ntotal_tokens = 1000\n",
+        )
+        .await;
+        let (status_b, dto_b) = get_capabilities(&state_b).await;
+        assert_eq!(status_b, StatusCode::OK);
+        assert_eq!(dto_b["configured"], true, "{dto_b}");
+        assert_eq!(
+            dto_b["cognition"], expected,
+            "the plan-configured construction site must carry the same answer: {dto_b}"
+        );
+    }
+
+    /// The other direction, so the field is not a constant: a runtime holding a
+    /// brain that is not the echo brain reports `configured`.
+    #[tokio::test]
+    async fn a_company_with_a_real_brain_reports_configured() {
+        use crate::ports::brain::{Brain, CycleHost};
+        use crate::ports::types::{CycleRequest, CycleResult};
+
+        /// A brain that does nothing but exist. It reports the default
+        /// `Cognition` (path `custom`), which is what any embedder-injected
+        /// brain reports — cognition of a kind this crate cannot name, but
+        /// cognition all the same.
+        struct InjectedBrain;
+
+        #[async_trait::async_trait]
+        impl Brain for InjectedBrain {
+            async fn run_cycle(
+                &self,
+                _req: CycleRequest,
+                _host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                Ok(CycleResult {
+                    channel_responses: Vec::new(),
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: Default::default(),
+                })
+            }
+        }
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+        // Seeds the company record and an echo-brain runtime; the insert below
+        // replaces that runtime with one holding a real brain, over the same
+        // record — so the only thing that differs from the test above is the
+        // brain, which is the point.
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_brain(std::sync::Arc::new(InjectedBrain))
+            .build()
+            .await
+            .unwrap();
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["cognition"], "configured", "{dto}");
     }
 
     #[tokio::test]
