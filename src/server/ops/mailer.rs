@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::config::{EnvSource, ProcessEnv};
 use crate::error::OpenCompanyError;
+use crate::ports::types::SecretValue;
 use crate::server::ops::imap::ImapCredentials;
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 
@@ -87,9 +88,13 @@ impl std::str::FromStr for MailProvider {
 /// Credentials for one mail provider — **secret**.
 ///
 /// Tagged by `provider` on the wire so a stored blob is self-describing.
-/// `Debug` is written by hand: a derived one would print the password into
-/// whatever logged it.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// `Debug` used to be hand-written here because [`SmtpCredentials`] derived one
+/// that printed its password. Since issue #1770 the password is a
+/// [`SecretValue`], so the derive is safe at every level and the container no
+/// longer has to remember — which is the whole point of guarding the field's
+/// type rather than each struct that holds one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "lowercase")]
 pub enum MailCredentials {
     /// An SMTP submission server.
@@ -116,16 +121,6 @@ impl MailCredentials {
         match self {
             MailCredentials::Smtp(c) => &c.from_name,
         }
-    }
-}
-
-impl std::fmt::Debug for MailCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never the password. Mirrors AppConfig's hand-written Debug.
-        f.debug_struct("MailCredentials")
-            .field("provider", &self.provider())
-            .field("from_email", &self.from_email())
-            .finish_non_exhaustive()
     }
 }
 
@@ -344,7 +339,7 @@ impl MailConfig {
                         port,
                         security,
                         username: var("OPENCOMPANY_MAIL_USERNAME").unwrap_or_default(),
-                        password: var("OPENCOMPANY_MAIL_PASSWORD").unwrap_or_default(),
+                        password: SecretValue(var("OPENCOMPANY_MAIL_PASSWORD").unwrap_or_default()),
                         from_name: var("OPENCOMPANY_MAIL_FROM_NAME").unwrap_or_default(),
                         from_email,
                     }),
@@ -367,8 +362,9 @@ pub struct TenantMailboxConfig {
 
 impl std::fmt::Debug for TenantMailboxConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never the SMTP/IMAP passwords: `SmtpCredentials` derives Debug and
-        // would otherwise print its password field through this struct.
+        // Deliberately narrower than a derive, which would be safe on its own
+        // since #1770 made both passwords `SecretValue`s: this renders one line
+        // naming the two hosts rather than two nested credential structs.
         f.debug_struct("TenantMailboxConfig")
             .field("address", &self.address)
             .field("smtp_host", &self.smtp.host)
@@ -403,7 +399,7 @@ impl TenantMailboxConfig {
                 .map_err(|_| OpenCompanyError::Config(format!("{k} must be a port number")))
         };
         let user = need("OPENCOMPANY_MAIL_USER")?;
-        let password = need("OPENCOMPANY_MAIL_PASSWORD")?;
+        let password = SecretValue(need("OPENCOMPANY_MAIL_PASSWORD")?);
         let smtp_port = port("OPENCOMPANY_MAIL_SMTP_PORT")?;
         // The injected env carries no SECURITY var, so derive it from the port:
         // 465 = implicit TLS (SMTPS); everything else (587, 25, custom) = STARTTLS.
@@ -501,7 +497,7 @@ mod test {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "user".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: "hi@acme.test".into(),
         }
@@ -533,18 +529,24 @@ mod test {
         assert!(rendered.contains("hi@acme.test"));
     }
 
+    /// The inverse of the guard-rail this used to be.
+    ///
+    /// Until issue #1770 this test asserted that `SmtpCredentials`' derived
+    /// `Debug` *did* print its password, and said that when it stopped, the
+    /// derive had been fixed and `MailCredentials`' hand-written `Debug` could
+    /// be relaxed. Both of those happened: the password is a `SecretValue`, so
+    /// the derive is safe at every level and `MailCredentials` now derives too.
+    /// The assertion is kept, pointing the other way, so that reverting the
+    /// field to a `String` fails here as well as in `smtp::credential_tests`.
     #[test]
-    fn smtp_credentials_debug_still_leaks_so_never_derive_it_upward() {
-        // A guard-rail, not an endorsement: SmtpCredentials derives Debug and
-        // prints its password. That is tolerable only because the type is
-        // confined to the SecretStore. If this ever starts passing, the derive
-        // was fixed and MailCredentials' hand-written Debug could be relaxed —
-        // until then, nothing may put SmtpCredentials in a Debug-printed struct.
+    fn smtp_credentials_debug_no_longer_leaks_so_containers_may_derive() {
         let rendered = format!("{:?}", smtp_creds());
         assert!(
-            rendered.contains("hunter2"),
-            "SmtpCredentials::Debug no longer leaks; revisit this guard"
+            !rendered.contains("hunter2"),
+            "SmtpCredentials::Debug leaks its password again: {rendered}"
         );
+        // Still useful for diagnosis.
+        assert!(rendered.contains("smtp.example.com"), "{rendered}");
     }
 
     #[test]
@@ -587,7 +589,7 @@ mod test {
             host: "h".into(),
             port: 993,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
         };
         let rx = RecordingMailReceiver::new();
         rx.push_batch(vec![FetchedEmail {
@@ -610,7 +612,7 @@ mod test {
             host: "h".into(),
             port: 993,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
         };
         let rx = RecordingMailReceiver::new();
         rx.mark_seen(&creds, &[3, 4]).await.unwrap();
