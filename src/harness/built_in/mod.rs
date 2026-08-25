@@ -861,16 +861,19 @@ impl CompanyAgent {
         let mut agent = self.agent.lock().await;
         agent.set_on_progress(Some(tx));
 
-        // Per-conversation history isolation (issue #1725). One `Agent` is reused
-        // for every chat of this `(company, agent_id)` pair, so its in-memory
-        // `history` would otherwise replay a prior thread's transcript into an
-        // unrelated one — the operator opens a new chat, types "hi", and the
-        // reply is grounded in the previous task. Bind the agent to the incoming
-        // chat thread: on a switch, clear the history and re-seed it from that
-        // thread's own durable transcript (best-effort — a cold thread seeds
-        // nothing and starts fresh). Runs inside the `agent` critical section,
-        // which already serialises this agent's turns, so the bound-chat pair
-        // cannot be read torn.
+        // Per-turn overrides for this turn (issue #1725), built once and applied
+        // in a single `set_next_turn_overrides` call so the chat-binding and the
+        // chat-only reductions cannot clobber each other.
+        let mut overrides = oh::agent::harness::session::TurnOverrides::default();
+
+        // Per-conversation history isolation. One `Agent` is reused for every
+        // chat of this `(company, agent_id)` pair, so its in-memory `history`
+        // would otherwise replay a prior thread's transcript into an unrelated
+        // one — the operator opens a new chat, types "hi", and the reply is
+        // grounded in the previous task. Bind the agent to the incoming chat
+        // thread: on a switch, clear the history and re-seed from THAT thread's
+        // own durable transcript. Runs inside the `agent` critical section,
+        // which already serialises this agent's turns.
         if let Some(incoming) = turn_chat_id.as_deref() {
             let mut bound = self.bound_chat.lock().await;
             let switched = bound.as_deref() != Some(incoming);
@@ -878,13 +881,16 @@ impl CompanyAgent {
                 tracing::debug!(
                     from = bound.as_deref().unwrap_or("<none>"),
                     to = incoming,
-                    "[harness] chat switched — resetting agent history and re-seeding from the incoming thread transcript"
+                    "[harness] chat switched — resetting agent history and re-binding to the incoming thread"
                 );
                 agent.clear_history();
-                // Seed the fresh history from the incoming thread's transcript so
-                // the same conversation continues, not a blank slate. No-op when
-                // no transcript exists yet for the thread.
                 let seeded = agent.seed_resume_from_thread_transcript(incoming);
+                // On a switch the agent-latest transcript is the WRONG thread, so
+                // never let the turn's fallback auto-resume run: a seed hit sets
+                // `cached_transcript_messages` (the fallback is skipped anyway); a
+                // miss must start fresh, NOT reload the previous chat's
+                // transcript and re-leak it (the exact screenshot bug).
+                overrides.suppress_transcript_autoload = true;
                 tracing::debug!(
                     chat = incoming,
                     seeded,
@@ -894,22 +900,24 @@ impl CompanyAgent {
             }
         }
 
-        // Reduced-scope chat turn (issue #1725). When the delegation runner
-        // marked this turn chat-only (an explicit "Just chatting" or a
-        // high-confidence greeting — see `delegation::with_chat_only_hint`), run
-        // it as a cheap conversational reply: no tools to loop on, no pre-turn
-        // memory-agent retrieval, and no prior task's thread goal re-injected. The
-        // override is one-shot (openhuman resets it after the turn), so the next
-        // real turn has its full agentic scope back.
+        // Reduced-scope chat turn. When the delegation runner marked this turn
+        // chat-only (an explicit "Just chatting" or a high-confidence greeting —
+        // see `delegation::with_chat_only_hint`), run it as a cheap conversational
+        // reply: no tools to loop on, no pre-turn memory retrieval, and no prior
+        // task's thread goal re-injected.
         if crate::runtime::delegation::is_chat_only_turn() {
             tracing::debug!(
-                "[harness] chat-only turn — running tool-less, memory-less, goal-less (fast path, #1725)"
+                "[harness] chat-only turn — tool-less, memory-less, goal-less (fast path, #1725)"
             );
-            agent.set_next_turn_overrides(oh::agent::harness::session::TurnOverrides {
-                suppress_active_goal: true,
-                suppress_tools: true,
-                suppress_memory_agent: true,
-            });
+            overrides.suppress_active_goal = true;
+            overrides.suppress_tools = true;
+            overrides.suppress_memory_agent = true;
+        }
+
+        // One-shot: openhuman resets it after this turn, so the next real turn
+        // gets its full agentic scope and normal transcript resume back.
+        if overrides != oh::agent::harness::session::TurnOverrides::default() {
+            agent.set_next_turn_overrides(overrides);
         }
 
         // Two hooks, both fired by openhuman between tool-loop iterations:
