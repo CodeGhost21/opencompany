@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: full timeline in the miss case — does the error ever
-// appear, does the latch reset, and when?
+// Temporary diagnostic: does flushSync (or a macrotask + act) recover the
+// stuck error render after a plain reject?
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { beforeEach, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -79,9 +80,13 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("diag: timeline after miss", async () => {
+type Variant = "plain" | "flushSync" | "macroAct";
+const VARIANTS: Variant[] = ["plain", "flushSync", "macroAct"];
+const ITERATIONS = 25;
+
+async function runVariant(variant: Variant): Promise<number> {
   let misses = 0;
-  for (let i = 0; i < 25; i++) {
+  for (let i = 0; i < ITERATIONS; i++) {
     await act(async () => root.unmount());
     container.remove();
     container = document.createElement("div");
@@ -95,38 +100,36 @@ it("diag: timeline after miss", async () => {
     const client = deferredFilesClient(deferred);
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
+    if (deferred.length !== 1) continue;
 
     await act(async () => {
       deferred[0].reject(new Error("boom"));
     });
 
-    const err = () =>
-      container.querySelector('[data-testid="workflow-run-files-error"]');
-    if (err()) continue;
-    misses++;
+    if (variant === "flushSync") {
+      try {
+        flushSync();
+      } catch {
+        /* flushSync may throw on re-entrance; ignore */
+      }
+    } else if (variant === "macroAct") {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await act(async () => {});
+    }
 
-    const loading = () =>
-      container.querySelector('[data-testid="workflow-run-files"]')
-        ?.textContent?.includes("Loading…") ?? false;
-    console.log(
-      `iter ${i}: miss. loading=${loading()}. latch reset? -> `,
-    );
-    // Reopen: did the latch reset (catch ran)?
-    const details = container.querySelector<HTMLDetailsElement>(
-      '[data-testid="workflow-run-files"]',
-    )!;
-    await act(async () => {
-      details.open = false;
-      details.dispatchEvent(new Event("toggle", { bubbles: true }));
-    });
-    await expandFiles();
-    const latchReset = deferred.length === 2;
-    console.log(`  latchReset=${latchReset}`);
-    // Does the error element exist NOW, after the reopen cycle?
-    console.log(
-      `  error after reopen=${!!err()} loading=${loading()} deferred=${deferred.length}`,
-    );
+    if (
+      !container.querySelector('[data-testid="workflow-run-files-error"]')
+    ) {
+      misses++;
+    }
   }
-  console.log(`misses=${misses}`);
+  return misses;
+}
+
+it("diag: recovery-strategy miss rates", async () => {
+  for (const v of VARIANTS) {
+    const misses = await runVariant(v);
+    console.log(`variant=${v} misses=${misses}/${ITERATIONS}`);
+  }
   expect(true).toBe(true);
 });
