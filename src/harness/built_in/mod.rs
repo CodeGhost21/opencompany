@@ -1258,6 +1258,23 @@ pub struct HarnessPool {
     /// A company with no workspace store wired, or whose roles route nothing,
     /// keeps a stable fingerprint and never rebuilds on this axis.
     context_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// The memory-engine selection the company's cached roster was built
+    /// against, keyed by company (issue #1113).
+    ///
+    /// `Some(fp)` for a provider-backed engine — a fingerprint of its
+    /// memory-family ports — and `None` for the base backend. Recorded by
+    /// [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build) on every
+    /// build so the next rebuild can tell a live engine swap from a no-op;
+    /// [`ensure`](Self::ensure) does not know the selection, so the pool needs
+    /// this bookkeeping of its own.
+    ///
+    /// Missing on the boot path and when no build has run yet, `None` is also
+    /// the base backend's marker — `get(company).copied().flatten()` makes an
+    /// absent row and a recorded `None` indistinguishable, which is correct: a
+    /// roster built over the base backend must be dropped exactly when a swap
+    /// binds a provider engine, and a build that re-applies the base backend
+    /// must keep it.
+    memory_engine: RwLock<HashMap<CompanyId, Option<u64>>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
