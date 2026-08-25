@@ -1687,18 +1687,17 @@ impl HarnessPool {
     /// engine's ports arrive on the builder, not here. The builder is therefore
     /// the only caller, and it calls this on every build — boot included, so the
     /// first rebuild has a recorded selection to differ from.
-    pub async fn rebind_memory_engine(
-        &self,
-        company: &CompanyId,
-        engine: Option<u64>,
-    ) -> bool {
+    pub async fn rebind_memory_engine(&self, company: &CompanyId, engine: Option<u64>) -> bool {
         let mut recorded = self.memory_engine.write().await;
         if recorded.get(company).copied().flatten() == engine {
             return true;
         }
         drop(recorded);
         self.invalidate_roster(company).await;
-        self.memory_engine.write().await.insert(company.clone(), engine);
+        self.memory_engine
+            .write()
+            .await
+            .insert(company.clone(), engine);
         false
     }
 
