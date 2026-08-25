@@ -209,6 +209,17 @@ pub async fn issue_password(
     }
     login_codes.delete_for_email(company, &user.email).await?;
     users.upsert_user(company, &user).await?;
+    // A newly minted account is the same materialization the login path
+    // produces on redemption, so mark any outstanding invite redeemed the same
+    // way — a manifest admin's bootstrapped invite record otherwise reads as
+    // still pending beside an account that now exists. A bootstrap admin with
+    // no invite record is a no-op.
+    if created
+        && let Some(mut invite) = users.find_invite_by_email(company, &email).await?
+    {
+        invite.accepted_at_millis = Some(now);
+        users.upsert_invite(company, &invite).await?;
+    }
     Ok(Issued {
         email,
         created,
