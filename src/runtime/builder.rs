@@ -1355,7 +1355,24 @@ impl RuntimeBuilder {
         // `set_harness` wiring further down agree by construction.
         #[cfg(feature = "openhuman")]
         if let Some(pool) = handover.as_ref().and_then(|h| h.harness.clone()) {
+            // Issue #1113: a live memory-engine swap replaces the memory-family
+            // ports (context, facts, scratch, scopes) that `build_agent` folded
+            // into every roster agent's `OcMemory`, and none of the fingerprints
+            // `HarnessPool::ensure` compares cover that family. An inherited
+            // pool would therefore keep serving agents that read and write the
+            // engine the swap just deselected until a process restart. Drop the
+            // cached roster whenever the recorded engine selection differs from
+            // this build's; the next turn's `ensure` then rebuilds it over the
+            // replacement ports. When the selection is unchanged — the ordinary
+            // issue #290 fast path — this is a fingerprint read, no rebuild, and
+            // every agent's conversation history is preserved.
+            pool.rebind_memory_engine(&id, self.memory_engine);
             self.harness = Some(pool);
+        } else if let Some(pool) = self.harness.as_ref() {
+            // Boot (no handover to inherit from): record this build's selection
+            // on the pool so the first rebuild can tell a live swap from a
+            // no-op.
+            pool.rebind_memory_engine(&id, self.memory_engine);
         }
 
         // Inherit-or-construct. The handover's handles outrank an explicitly
