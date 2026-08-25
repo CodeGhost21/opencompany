@@ -55,6 +55,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { personName } from "@/lib/person";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 
@@ -342,9 +343,11 @@ function PersonRow({
     <div className="flex items-center gap-3 p-4">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">
-            {person.displayName ?? person.email}
-          </span>
+          {/* The name they chose, else the one derived from their address —
+              the same one every other surface calls them by. The address itself
+              is on the line below, where an admin needs it and it is not
+              standing in for a name. */}
+          <span className="truncate text-sm font-medium">{personName(person)}</span>
           {person.role === "admin" ? <Badge variant="secondary">Admin</Badge> : null}
           {suspended ? <Badge variant="destructive">Suspended</Badge> : null}
           {person.mustChangePassword ? (
@@ -353,7 +356,7 @@ function PersonRow({
           {isSelf ? <span className="text-xs text-muted-foreground">you</span> : null}
         </div>
         <p className="truncate text-xs text-muted-foreground">
-          {person.displayName ? `${person.email} · ` : ""}
+          {`${person.email} · `}
           {person.hasPassword ? "password set" : "magic link only"}
           {/* "signed in", not "seen": this is stamped when a session is minted,
               not on every request. Saying "last seen" would imply activity

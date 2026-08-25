@@ -695,9 +695,11 @@ pub async fn channel_attributed_replies(
 
 /// Loads roster display labels for a company: user id → label.
 ///
-/// Prefers a display name, and falls back to the email's *local part* rather
-/// than the whole address: a desk history is read by every member, and it
-/// should not hand each of them everyone else's email.
+/// Prefers a display name, and falls back to one derived from the email's
+/// local part rather than the whole address: a desk history is read by every
+/// member, and it should not hand each of them everyone else's email. The
+/// ladder is [`UserRecord::display_label`] — the same one the profile pane and
+/// the mention picker use, so the same person reads the same way everywhere.
 pub async fn author_labels(
     runtime: &CompanyRuntime,
 ) -> Result<HashMap<String, String>, OpenCompanyError> {
@@ -705,13 +707,9 @@ pub async fn author_labels(
     Ok(users
         .into_iter()
         .map(|user| {
-            let label = user.display_name.unwrap_or_else(|| {
-                user.email
-                    .split('@')
-                    .next()
-                    .unwrap_or("someone")
-                    .to_string()
-            });
+            let label = user
+                .display_label()
+                .unwrap_or_else(|| "someone".to_string());
             (user.id, label)
         })
         .collect())

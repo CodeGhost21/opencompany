@@ -67,7 +67,10 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { avatarFor, roleSubtitle, toneFor } from "@/lib/team";
+import { avatarRef } from "@/lib/avatar";
+import { AvatarPicker } from "@/components/avatar-picker";
+import { personName } from "@/lib/person";
+import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
@@ -196,6 +199,10 @@ export function AgentDetailView({
   const editing = editRequested && (agent?.editable.length ?? 0) > 0;
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
+  /** An icon save is in flight — the picker is disabled until it settles, so two
+      avatar PATCHes for the same teammate can never be pending at once and
+      resolve out of order (the older one overwriting the newer choice). */
+  const [avatarSaving, setAvatarSaving] = useState(false);
   /**
    * What this teammate is on and carrying (issue #1141), or `null` when the
    * board could not be read — in which case the header states neither rather
@@ -241,6 +248,7 @@ export function AgentDetailView({
   const [people, setPeople] = useState<Person[]>([]);
   /** Whether the daily-budget dialog is open. */
   const [budgetOpen, setBudgetOpen] = useState(false);
+  const [avatarOpen, setAvatarOpen] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -273,7 +281,7 @@ export function AgentDetailView({
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
     const person = people.find((p) => p.id === userId);
-    return person?.displayName?.trim() || person?.email || "an admin";
+    return person ? personName(person) : "an admin";
   }
 
   const boot = useCallback(async () => {
@@ -465,6 +473,35 @@ export function AgentDetailView({
       toast.success("Reset to the company default.");
     } catch (error) {
       toast.error(budgetError(error, "Couldn't reset the daily cap."));
+    }
+  }
+
+  /**
+   * Save a chosen face, or `undefined` to go back to the hashed default.
+   *
+   * Its own write rather than a field of the edit form: a face is picked by
+   * clicking it, and making that click wait for a Save button — in a form whose
+   * other fields are text — would be the only place in the console where
+   * choosing something visual is a two-step commit. Same identity guard as the
+   * budget and inbox writes, for the same reason.
+   */
+  async function saveAvatar(avatar: string | undefined) {
+    if (!agent) return;
+    // The picker is disabled for the duration (see `avatarSaving`), so at most
+    // one avatar PATCH can be pending at a time — an older response can never
+    // land after a newer choice was saved.
+    setAvatarSaving(true);
+    try {
+      const updated = await client.updateAgent(agentId, { avatar: avatar ?? null }, company);
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+      toast.success(avatar ? "Icon updated." : "Back to the default icon.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't change this teammate's icon.",
+      );
+    } finally {
+      setAvatarSaving(false);
     }
   }
 
@@ -677,6 +714,16 @@ export function AgentDetailView({
           <>
             <Identity
               agent={agent}
+              // The host's own `editable` list decides, never this file: a host
+              // predating the field lists no `avatar`, and offering the picker
+              // there would be a click whose save is a 400. Same rule the edit
+              // form's fields follow.
+              onPickAvatar={
+                agent.editable.includes("avatar")
+                  ? () => setAvatarOpen(true)
+                  : undefined
+              }
+              avatarBusy={avatarSaving}
               action={
                 !editing ? (
                   <Button
@@ -887,6 +934,17 @@ export function AgentDetailView({
           </>
         )}
       </div>
+      <AvatarDialog
+        client={client}
+        company={company}
+        agent={avatarOpen ? agent : null}
+        busy={avatarSaving}
+        onOpenChange={setAvatarOpen}
+        onPick={(avatar) => {
+          setAvatarOpen(false);
+          void saveAvatar(avatar);
+        }}
+      />
       <BudgetDialog
         agent={budgetOpen ? agent : null}
         onOpenChange={setBudgetOpen}
@@ -900,14 +958,27 @@ export function AgentDetailView({
 }
 
 /** Name, role, id, desks, and the two facts that classify an agent. */
-function Identity({ agent, action }: { agent: AgentDetailDto; action?: ReactNode }) {
+function Identity({
+  agent,
+  action,
+  onPickAvatar,
+  avatarBusy,
+}: {
+  agent: AgentDetailDto;
+  action?: ReactNode;
+  /** Opens the icon picker. Absent leaves the tile inert — a read-only header. */
+  onPickAvatar?: () => void;
+  /** An icon save is in flight — the tile must not start another one. */
+  avatarBusy?: boolean;
+}) {
   const display = agent.name?.trim() || agent.role;
   const seed = agent.id || display;
   const tone = toneFor(seed);
-  // Same seed as `tone` — the id where there is one — so a rename doesn't
+  // What this teammate wears: the chosen face, else the mascot hashed from the
+  // same seed as `tone` — the id where there is one — so a rename doesn't
   // change this teammate's face on the one screen that should never be
   // showing letters (issue #1181, and issue #1185 for the seed itself).
-  const avatar = avatarFor(seed);
+  const avatar = avatarRef(agent.avatar, seed);
   // #1208, on the page a teammate *is*. `display` already falls back to the
   // role, and a manifest-declared agent has no `name` at all, so the line under
   // the title was the title again on every teammate in every shipped company.
@@ -917,13 +988,38 @@ function Identity({ agent, action }: { agent: AgentDetailDto; action?: ReactNode
       <div className="flex items-start gap-4 min-w-0">
         {/* The header of the page a teammate *is* — the one screen that should
             never be the one showing letters (issue #1181). 56px. */}
-        <TeammateAvatar
-          name={display}
-          tone={tone}
-          avatar={avatar}
-          className="size-14 rounded-xl text-base"
-          data-testid="agent-avatar"
-        />
+        {/* The tile is the control. A face is a visual thing, so the way to
+            change it is to click the one on screen rather than to hunt for a
+            field named after it — and the hover ring is what says so, since an
+            avatar that looks identical to an inert one is a button nobody
+            finds. Falls back to a plain tile where there is no handler. */}
+        {onPickAvatar ? (
+          <button
+            type="button"
+            onClick={onPickAvatar}
+            disabled={avatarBusy}
+            aria-label="Change this teammate's icon"
+            title="Change icon"
+            className="rounded-xl ring-2 ring-transparent transition-colors hover:ring-primary focus-visible:ring-primary focus-visible:outline-none disabled:cursor-wait"
+            data-testid="agent-avatar-pick"
+          >
+            <TeammateAvatar
+              name={display}
+              tone={tone}
+              avatar={avatar}
+              className="size-14 rounded-xl text-base"
+              data-testid="agent-avatar"
+            />
+          </button>
+        ) : (
+          <TeammateAvatar
+            name={display}
+            tone={tone}
+            avatar={avatar}
+            className="size-14 rounded-xl text-base"
+            data-testid="agent-avatar"
+          />
+        )}
         <div className="min-w-0 flex-1 space-y-2">
           <div>
             <h1 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
@@ -1632,6 +1728,58 @@ function Budget({
         </div>
       )}
     </Section>
+  );
+}
+
+/**
+ * Pick a teammate's icon.
+ *
+ * Picking **is** the save — there is no Save button — because a face is chosen
+ * by clicking it and a confirm step over a visual choice only adds a way to
+ * lose it. The dialog closes on the click, and the write reports itself with a
+ * toast like every other one-click write on this page.
+ */
+function AvatarDialog({
+  client,
+  company,
+  agent,
+  busy,
+  onOpenChange,
+  onPick,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  agent: AgentDetailDto | null;
+  /** An avatar save is in flight — the picker is inert until it settles. */
+  busy: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPick: (avatar: string | undefined) => void;
+}) {
+  const name = agent?.name?.trim() || agent?.role || "this teammate";
+  return (
+    <Dialog open={agent !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Icon</DialogTitle>
+          <DialogDescription>
+            The face {name} wears everywhere in this console — chat, the org chart, every list
+            they appear in.
+          </DialogDescription>
+        </DialogHeader>
+        {agent && (
+          <AvatarPicker
+            client={client}
+            company={company}
+            value={agent.avatar}
+            seed={agent.id || name}
+            name={name}
+            tone={toneFor(agent.id || name)}
+            disabled={busy}
+            onChange={onPick}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

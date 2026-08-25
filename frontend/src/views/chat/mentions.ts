@@ -33,6 +33,8 @@ export interface Mentionable {
   target: MentionTarget;
   /** What to render, and what gets inserted after the `@`. */
   label: string;
+  /** The person's collaboration-facing avatar reference, when chosen. */
+  avatar?: string;
   /** Every spelling that reaches this row, lowercase. */
   aliases: string[];
   /** A line of context under the label — a job title, a slug, a member count. */
@@ -632,7 +634,7 @@ export function mentionRegex(mentions: Array<{ text: string }>): RegExp {
 export function mentionablesFor(
   directory: {
     agents: Array<{ id: string; name: string; role: string }>;
-    people: Array<{ id: string; label: string; slug: string }>;
+    people: Array<{ id: string; label: string; slug: string; avatar?: string }>;
     desks: Array<{ id: string; name: string; memberIds: string[] }>;
     everyone: { label: string; aliases: string[] };
   },
@@ -665,6 +667,7 @@ export function mentionablesFor(
     .map((p) => ({
       target: { kind: "user", id: p.id },
       label: p.label,
+      avatar: p.avatar,
       aliases: [...new Set([p.label.toLowerCase(), p.slug])],
       hint:
         (labelCounts.get(p.label) ?? 0) > 1
