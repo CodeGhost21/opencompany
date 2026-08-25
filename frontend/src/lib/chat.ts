@@ -546,8 +546,10 @@ export function mergeHistoryInOrder(
 
   const outsidePage = liveDurable.filter((message) => {
     const sequence = messageSequence(message);
-    if (sequence !== null && lastSequence !== null) {
-      return sequence > lastSequence || (firstSequence !== null && sequence < firstSequence);
+    if (sequence !== null && firstSequence !== null && lastSequence !== null) {
+      // A durable row absent from the page may be a gap or a live tail. Keep
+      // every such row and let sequence-aware insertion restore its position.
+      return true;
     }
     if (!hydrated.length) return true;
     return message.at <= hydrated[0].at || message.at >= hydrated[hydrated.length - 1].at;
