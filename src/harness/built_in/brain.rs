@@ -3286,7 +3286,9 @@ impl HarnessBrain {
                     // exactly as an operator turn's publish is filed.
                     let spawned_task = responses[0].task_id.clone();
                     let published = self.deps.pending_publishes.drain();
-                    let published_card = self
+                    let published_sources: Vec<String> =
+                        published.iter().map(|publish| publish.source.clone()).collect();
+                    let mut published_card = self
                         .file_conversation_batch(
                             &responder,
                             spawned_task.as_deref(),
