@@ -780,6 +780,103 @@ pub fn composio_brief(toolkits: &[String]) -> String {
     brief
 }
 
+// ---------------------------------------------------------------------------
+// The http_request deflection guardrail (issue #1759, slice S2)
+// ---------------------------------------------------------------------------
+//
+// S1 (`composio_brief`) TELLS the agent to route GitHub and other connected
+// SaaS through Composio and not hand-roll HTTP. This is the enforcement twin:
+// even when the agent ignores that brief, a raw `http_request` / `curl` /
+// `web_fetch` aimed at a CONNECTED provider's API host is refused with a message
+// that names the Composio route. It is defense-in-depth — the observed failure
+// was a raw `http_request` to `api.github.com` that returned 403 (the web tools
+// carry no connection credential), followed by the agent promising a browser
+// action it has no tool for.
+//
+// Everything here is pure — a static slug→host table and a URL host check — so,
+// like the rest of this module, it is NOT behind the `composio` feature and is
+// exercised by the test lane that actually runs. The live wiring that feeds it
+// the company's connected-toolkit set lives at the policy construction site.
+
+/// The API host(s) a Composio toolkit fronts — the endpoints an agent would
+/// reach by hand if it ignored the routing brief.
+///
+/// Deliberately small and provider-anchored: each arm is a toolkit slug
+/// (lowercased, as [`composio_brief`] normalises them) and the API host(s) that
+/// toolkit's Composio actions call. It does **not** try to enumerate every host
+/// a provider owns — only the API hosts an agent plausibly curls for data, which
+/// is what the observed failure did (`api.github.com`). A host not listed here
+/// is never deflected, so the table erring small only ever means the S1 brief
+/// still applies while the hard block does not — never a false deny.
+fn toolkit_api_hosts(toolkit: &str) -> &'static [&'static str] {
+    match toolkit {
+        "github" => &["api.github.com"],
+        "gmail" => &["gmail.googleapis.com"],
+        "googlecalendar" => &["calendar.googleapis.com"],
+        "googledrive" => &["drive.googleapis.com", "www.googleapis.com"],
+        "slack" => &["slack.com"],
+        "notion" => &["api.notion.com"],
+        "linear" => &["api.linear.app"],
+        "hubspot" => &["api.hubapi.com"],
+        "stripe" => &["api.stripe.com"],
+        "jira" => &["api.atlassian.com"],
+        "discord" => &["discord.com", "discordapp.com"],
+        _ => &[],
+    }
+}
+
+/// Whether `host` is `api_host` or a subdomain of it, case-insensitively.
+///
+/// Sub-domain matching (not just equality) so `uploads.api.github.com` is caught
+/// alongside `api.github.com`, while an unrelated host that merely *ends with*
+/// the same letters (`notapi.github.com.evil.test`) is not — the boundary dot is
+/// required.
+fn host_is(host: &str, api_host: &str) -> bool {
+    host == api_host || host.ends_with(&format!(".{api_host}"))
+}
+
+/// The S2 decision: given the company's CONNECTED Composio toolkits and the URL
+/// a raw web tool (`http_request` / `curl` / `web_fetch`) is about to call,
+/// return `Some(reason)` — the operator-facing deny message naming the Composio
+/// route — when the URL's host belongs to a connected toolkit, or `None` when
+/// the call must pass through unchanged.
+///
+/// `None` (pass through) covers the three cases the guardrail must NOT block:
+/// a non-provider host, a provider host whose toolkit is **not** in `connected`
+/// (the company may legitimately hit a public endpoint of a provider it has not
+/// wired), and a URL that does not parse to a host. The deny is scoped strictly
+/// to hosts of toolkits this company actually connected, per requirement #2.
+pub fn web_call_deflection(connected: &[String], url: &str) -> Option<String> {
+    let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    for toolkit in connected {
+        let toolkit = toolkit.trim().to_ascii_lowercase();
+        if toolkit.is_empty() {
+            continue;
+        }
+        if toolkit_api_hosts(&toolkit)
+            .iter()
+            .any(|api_host| host_is(&host, api_host))
+        {
+            return Some(web_deflection_message(&toolkit, &host));
+        }
+    }
+    None
+}
+
+/// The refusal a deflected web call carries. Mirrors the S1 routing sentence:
+/// the raw web tools reach the provider with no credential and get 401/403, and
+/// the Composio two-step (`composio_list_tools` → `composio_execute`) is the
+/// door that carries the company's connection.
+fn web_deflection_message(toolkit: &str, host: &str) -> String {
+    format!(
+        "Blocked: `{host}` is the `{toolkit}` provider's API, and `{toolkit}` is connected to this \
+         company through Composio. `http_request`, `curl` and `web_fetch` call it with no \
+         credential and get 401/403 — only the Composio tools carry the company's connection. Use \
+         them instead: find the action with `composio_list_tools` (search words, then \
+         `detail: \"schemas\"` on the one slug) and run it with `composio_execute`."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1288,5 +1385,73 @@ mod tests {
         // The routing rule and grounding still hold with no allowlist.
         assert!(brief.contains("composio_execute"), "{brief}");
         assert!(brief.contains("http_request"), "{brief}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The http_request deflection guardrail (issue #1759, slice S2)
+    // -----------------------------------------------------------------------
+
+    /// The headline case the guardrail exists for: a raw call to
+    /// `api.github.com` when `github` is connected is deflected, and the refusal
+    /// names the Composio route the agent should have taken.
+    #[test]
+    fn a_connected_provider_host_is_deflected_with_the_composio_route() {
+        let connected = vec!["github".to_string()];
+        let reason = web_call_deflection(&connected, "https://api.github.com/repos/o/r/issues")
+            .expect("a connected provider host must be deflected");
+        assert!(reason.contains("api.github.com"), "{reason}");
+        assert!(reason.contains("composio_execute"), "{reason}");
+        assert!(reason.contains("composio_list_tools"), "{reason}");
+        assert!(
+            reason.contains("401") || reason.contains("403"),
+            "the refusal must explain the unauthenticated failure: {reason}"
+        );
+    }
+
+    /// Requirement #2: the SAME host passes through untouched when its toolkit is
+    /// NOT connected — the company may legitimately hit a public endpoint of a
+    /// provider it has not wired.
+    #[test]
+    fn the_same_host_passes_through_when_its_toolkit_is_not_connected() {
+        // Some other toolkit is connected, but not github.
+        let connected = vec!["slack".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://api.github.com/repos/o/r").is_none(),
+            "an unconnected provider host must pass through"
+        );
+        // And with nothing connected at all.
+        assert!(
+            web_call_deflection(&[], "https://api.github.com/repos/o/r").is_none(),
+            "no connected toolkits means no deflection"
+        );
+    }
+
+    /// A non-provider host is never deflected, whatever is connected.
+    #[test]
+    fn a_non_provider_host_always_passes_through() {
+        let connected = vec!["github".to_string(), "gmail".to_string()];
+        assert!(web_call_deflection(&connected, "https://example.com/data.json").is_none());
+        assert!(web_call_deflection(&connected, "https://raw.githubusercontent.com/x").is_none());
+    }
+
+    /// Sub-domains of a connected provider's API host are caught; the connected
+    /// list is normalised (trim + lowercase) the same way [`composio_brief`]
+    /// normalises it, so a manifest `"GitHub"` still matches.
+    #[test]
+    fn subdomains_are_caught_and_the_connected_list_is_normalised() {
+        let connected = vec![" GitHub ".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://uploads.api.github.com/x").is_some(),
+            "a sub-domain of the API host must be deflected"
+        );
+    }
+
+    /// A URL that does not parse to a host is not a provider call — it passes
+    /// through rather than panicking or denying.
+    #[test]
+    fn an_unparseable_url_passes_through() {
+        let connected = vec!["github".to_string()];
+        assert!(web_call_deflection(&connected, "not a url").is_none());
+        assert!(web_call_deflection(&connected, "file:///etc/hosts").is_none());
     }
 }
