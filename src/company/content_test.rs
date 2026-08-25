@@ -522,6 +522,46 @@ fn a_teammate_created_with_no_grant_never_inherits_billing() {
     assert!(grants_search_explicit(&defaulted), "{defaulted:?}");
 }
 
+/// The second half of the same hole: a teammate MINTED by an orchestrator whose
+/// own scope comes from its desk rather than its `tools` line. The minter copies
+/// its (empty) line, the new teammate is on no desk, and an empty line reads
+/// back as the whole company grant — so it would hold billing its own minter
+/// does not. Pinned as a data property of the shipped templates: no marketing
+/// teammate may be in a position to mint a biller by accident.
+#[test]
+fn a_deskless_teammate_minted_with_no_scope_never_inherits_billing() {
+    use super::{CreationGrant, creation_default_grants};
+
+    for company in [
+        "agentic_marketing_agency",
+        "agentic_accounting_firm",
+        "agentic_venture_studio",
+    ] {
+        let manifest = load_company(company);
+        // The state that makes the escalation reachable: a minter scoped only by
+        // its desk has an empty `tools` line, so "copy the minter's line" stores
+        // an empty grant on a teammate that sits on no desk.
+        let deskless = agent_scoped_grants(&manifest.tools.allow, &[], &[]);
+        assert!(
+            grants_chargebee_explicit(&deskless),
+            "{company}: precondition — an empty line on no desk must resolve to \
+             the company ceiling, or this test proves nothing"
+        );
+
+        // What both creation paths now store instead.
+        match creation_default_grants(&manifest.tools.allow) {
+            CreationGrant::Narrowed(narrowed) => {
+                let resolved = agent_scoped_grants(&manifest.tools.allow, &[], &narrowed);
+                assert!(
+                    !grants_chargebee_explicit(&resolved),
+                    "{company}: a minted teammate must not inherit billing: {resolved:?}"
+                );
+            }
+            other => panic!("{company}: expected a narrowed creation grant, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
     assert!(grants_chargebee_explicit(&["chargebee".to_string()]));

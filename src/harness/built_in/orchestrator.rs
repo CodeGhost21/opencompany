@@ -3006,7 +3006,7 @@ impl Tool for AddAgentTool {
         // Issue #619: the company grant is the wrong ceiling. Clamp to the
         // MINTER's own scope, resolved before the store is touched so a refused
         // scope never leaves a half-written roster.
-        let tools = match requested {
+        let mut tools = match requested {
             // Nothing asked for: copy the minter's own line. Copying the *line*
             // rather than its resolved grant is deliberate — an unscoped minter
             // mints an unscoped teammate that keeps tracking `[tools].allow`,
@@ -3051,6 +3051,31 @@ impl Tool for AddAgentTool {
             .load(&self.company)
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.company.to_string()))?;
+
+        // The BYO real-money namespaces are not inherited by a minted teammate
+        // either (#788/#789). The branches above copy the MINTER'S LINE when
+        // nothing was asked for, and a minter scoped by its desk rather than by
+        // its own `tools` has an empty line — so an unscoped-looking mint from,
+        // say, a desk-restricted creative director would store an empty grant,
+        // which reads back as the whole company allow-list and hands the new
+        // deskless teammate billing tools its own minter does not hold.
+        //
+        // Same helper and same reasoning as the console `POST .../team` route,
+        // deliberately rather than incidentally: two creation paths that answer
+        // "what does an unstated grant mean" differently is how the first hole
+        // got here. `CreationGrant::Standard` leaves the copied line untouched,
+        // so nothing changes for the companies that grant none of these.
+        if tools.is_empty() {
+            match crate::company::creation_default_grants(&record.manifest.tools.allow) {
+                crate::company::CreationGrant::Standard => {}
+                crate::company::CreationGrant::Narrowed(narrowed) => tools = narrowed,
+                crate::company::CreationGrant::NothingLeft => {
+                    return Ok(ToolResult::error(format!(
+                        "This company grants only billing namespaces, so \"{name}\" would inherit them. Pass an explicit `tools` list naming what they should hold."
+                    )));
+                }
+            }
+        }
 
         // Deduplication guard: reject a call whose `name` already names an
         // existing overlay teammate, so a trigger-happy orchestrator can't
