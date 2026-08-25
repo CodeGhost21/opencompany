@@ -532,6 +532,19 @@ mod tests {
             redact_secrets("auth with Bearer \"sk-verylongsecret\" please"),
             "auth with Bearer \"[REDACTED]\" please"
         );
+        // The MCP config keeps the whole trimmed remainder as the bearer value,
+        // so a credential can span space-separated fragments — every fragment
+        // of the run is redacted, not just the first.
+        assert_eq!(
+            redact_secrets("auth with Bearer firstpart secondpart please"),
+            "auth with Bearer [REDACTED] [REDACTED] please"
+        );
+        // Trailing prose after a single-token credential stays readable: a
+        // short fragment like "please" (6) is under the continuation floor.
+        assert_eq!(
+            redact_secrets("auth with Bearer sk-abc123 please"),
+            "auth with Bearer [REDACTED] please"
+        );
         // No marker: borrowed through untouched, no allocation.
         assert!(matches!(
             redact_secrets("nothing secret here"),
