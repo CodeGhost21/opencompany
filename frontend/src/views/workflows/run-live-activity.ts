@@ -138,22 +138,31 @@ export function useLiveNodeActivity(
 
   useEffect(() => {
     if (!active || !workflowRunId) return;
-    const unsubscribe = client.subscribeToEvents(company, {
-      onMessage: (data) => {
-        let frame: CompanyStreamEvent;
-        try {
-          frame = JSON.parse(data) as CompanyStreamEvent;
-        } catch {
-          return;
-        }
-        if (
-          (frame.type === "tool_call" || frame.type === "tool_result") &&
-          frame.workflowRunId === workflowRunId
-        ) {
-          setState((prev) => foldLiveFrame(prev, frame, workflowRunId));
-        }
-      },
-    });
+    let unsubscribe: (() => void) | undefined;
+    try {
+      unsubscribe = client.subscribeToEvents(company, {
+        onMessage: (data) => {
+          let frame: CompanyStreamEvent;
+          try {
+            frame = JSON.parse(data) as CompanyStreamEvent;
+          } catch {
+            return;
+          }
+          if (
+            (frame.type === "tool_call" || frame.type === "tool_result") &&
+            frame.workflowRunId === workflowRunId
+          ) {
+            setState((prev) => foldLiveFrame(prev, frame, workflowRunId));
+          }
+        },
+      });
+    } catch {
+      // Streaming unavailable (no `EventSource`, a malformed URL, …): the
+      // contract lets `subscribeToEvents` throw synchronously, and the sheet
+      // must simply omit the live half and keep the durable snapshot rather
+      // than surface a React effect error and blank the view.
+      return;
+    }
     return unsubscribe;
   }, [client, company, workflowRunId, active]);
 
