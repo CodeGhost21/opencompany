@@ -85,7 +85,9 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
         out.push_str(&tail[..value_start]);
         let value = &tail[value_start..];
         // The value runs up to the first character that cannot be part of a token.
-        let end = value.find(|c: char| !is_token_char(c)).unwrap_or(value.len());
+        let end = value
+            .find(|c: char| !is_token_char(c))
+            .unwrap_or(value.len());
         // Long values are always a secret. A short value is still redacted when
         // it is token-shaped — it contains a digit, which prose after a marker
         // does not — so a valid short bearer credential like `s3cret` (the MCP
