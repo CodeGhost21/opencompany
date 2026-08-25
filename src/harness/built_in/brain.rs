@@ -2737,6 +2737,36 @@ impl Brain for HarnessBrain {
     }
 }
 
+/// RAII release for a cycle's policy pins, the analogue of
+/// [`ApprovalClaim`](crate::harness::policy::ApprovalClaim)'s `Drop` half.
+///
+/// A cycle pins its policy snapshot to every lane's pool through
+/// [`RunTurn::ensure_with_policy`]; the pin must be released when the cycle is
+/// over so a standalone workflow turn between cycles rebuilds against the live
+/// store overlay. The async [`RunTurn::end_cycle`] covers the normal end, but
+/// a cycle whose future is cancelled or unwinds through a panic after the pin
+/// was installed never reaches it — the `await` that would have called it is
+/// exactly where the future is dropped. This guard releases from `Drop`, so
+/// the pin cannot outlive the cycle no matter how it ends (issue #1455).
+struct PolicyPinGuard {
+    run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    company_id: CompanyId,
+}
+
+impl PolicyPinGuard {
+    fn new(run_turn: Arc<dyn crate::runtime::delegation::RunTurn>, company_id: CompanyId) -> Self {
+        Self { run_turn, company_id }
+    }
+}
+
+impl Drop for PolicyPinGuard {
+    fn drop(&mut self) {
+        // Synchronous, so it runs even when the cycle future is dropped or
+        // unwound mid-await. Idempotent with `end_cycle`.
+        self.run_turn.release_policy_pin_sync(&self.company_id);
+    }
+}
+
 impl HarnessBrain {
     /// The cycle body, running inside its [`ApprovalScope::Cycle`] claim.
     ///
