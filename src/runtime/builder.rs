@@ -863,7 +863,7 @@ impl RuntimeBuilder {
         // (issue #1113).
         #[cfg(feature = "openhuman")]
         {
-            self.memory_engine = Some(memory_engine_fingerprint(overlay));
+            self.memory_engine = Some(Self::memory_engine_fingerprint(overlay));
         }
         let mut builder = self
             .with_memory(overlay.memory.clone())
