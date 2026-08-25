@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: which expand gesture fires load() exactly once and
-// renders the error reliably? Compare:
-//   A) details.open = true only (native async toggle)
-//   B) summary click
+// Temporary diagnostic: the outcome-based error-then-retry test shape.
+// Client fails while modes.fail, succeeds after. Robust to jsdom's racy
+// native async toggle on details.open (which may or may not fire a second
+// load while the latch is reset after a failure).
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -44,36 +44,40 @@ async function renderPanel(run: WorkflowRunOutcome, client: OpenCompanyClient) {
   });
 }
 
-function rejectClient(sink: { calls: string[] }): OpenCompanyClient {
-  return {
-    scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
-    get: async <T>(path: string): Promise<T> => {
-      sink.calls.push(path);
-      return Promise.reject(new Error("boom")) as never;
-    },
-  } as unknown as OpenCompanyClient;
-}
-
-async function expandByOpen() {
+async function expandFiles() {
   const details = container.querySelector<HTMLDetailsElement>(
     '[data-testid="workflow-run-files"]',
   );
   await act(async () => {
     details!.open = true;
+    details!.dispatchEvent(new Event("toggle", { bubbles: true }));
   });
-  await act(async () => {});
   await act(async () => {});
 }
 
-async function expandBySummaryClick() {
-  const summary = container.querySelector<HTMLElement>(
-    '[data-testid="workflow-run-files-toggle"]',
+async function collapseFiles() {
+  const details = container.querySelector<HTMLDetailsElement>(
+    '[data-testid="workflow-run-files"]',
   );
   await act(async () => {
-    summary!.click();
+    details!.open = false;
+    details!.dispatchEvent(new Event("toggle", { bubbles: true }));
   });
-  await act(async () => {});
-  await act(async () => {});
+}
+
+function modeClient(
+  rows: RunArtifactRow[],
+  sink: { calls: string[] },
+  modes: { fail: boolean },
+): OpenCompanyClient {
+  return {
+    scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+    get: async <T>(path: string): Promise<T> => {
+      sink.calls.push(path);
+      if (modes.fail) return Promise.reject(new Error("boom")) as never;
+      return { files: rows, truncated: false } as T;
+    },
+  } as unknown as OpenCompanyClient;
 }
 
 beforeEach(() => {
@@ -85,9 +89,20 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("diag: expand-by-open native toggle reliability", async () => {
+it("diag: outcome-based error-then-retry reliability", async () => {
+  const FILE: RunArtifactRow = {
+    taskId: "t-a",
+    artifactId: "art-a1",
+    title: "Retried launch spec",
+    kind: "markdown",
+    source: "specs/launch.md",
+    latestVersion: 2,
+    updatedAtMillis: 30,
+    taskTitle: "Draft the launch",
+  };
+
   let misses = 0;
-  const callCounts = new Map<number, number>();
+  let doubleFired = 0;
   for (let i = 0; i < 30; i++) {
     await act(async () => root.unmount());
     container.remove();
@@ -96,45 +111,41 @@ it("diag: expand-by-open native toggle reliability", async () => {
     root = createRoot(container);
 
     const sink = { calls: [] as string[] };
-    await renderPanel(completedRun("run-1"), rejectClient(sink));
-    await expandByOpen();
+    const modes = { fail: true };
+    const client = modeClient([FILE], sink, modes);
 
+    await renderPanel(completedRun("run-1"), client);
+    await expandFiles();
+
+    // Phase 1: error renders (outcome, not call count).
     const err = container.querySelector(
       '[data-testid="workflow-run-files-error"]',
     );
-    callCounts.set(sink.calls.length, (callCounts.get(sink.calls.length) ?? 0) + 1);
-    if (!err || sink.calls.length !== 1) {
+    if (!err || sink.calls.length < 1) {
       misses++;
-      console.log(`iter ${i}: MISS. calls=${sink.calls.length} err=${!!err}`);
+      console.log(`iter ${i} phase1: MISS. calls=${sink.calls.length} err=${!!err}`);
+      continue;
     }
-  }
-  console.log(`open-only: misses=${misses}/30 callsHisto=${JSON.stringify([...callCounts.entries()])}`);
-  expect(misses).toBe(0);
-});
+    if (sink.calls.length !== 1) doubleFired++;
 
-it("diag: expand-by-summary-click reliability", async () => {
-  let misses = 0;
-  const callCounts = new Map<number, number>();
-  for (let i = 0; i < 30; i++) {
-    await act(async () => root.unmount());
-    container.remove();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    // Retry succeeds after the mode flip.
+    modes.fail = false;
+    await collapseFiles();
+    await expandFiles();
 
-    const sink = { calls: [] as string[] };
-    await renderPanel(completedRun("run-1"), rejectClient(sink));
-    await expandBySummaryClick();
-
-    const err = container.querySelector(
+    const entries = container.querySelectorAll(
+      '[data-testid="workflow-run-file"]',
+    );
+    const errAfter = container.querySelector(
       '[data-testid="workflow-run-files-error"]',
     );
-    callCounts.set(sink.calls.length, (callCounts.get(sink.calls.length) ?? 0) + 1);
-    if (!err || sink.calls.length !== 1) {
+    if (sink.calls.length < 2 || entries.length !== 1 || errAfter) {
       misses++;
-      console.log(`iter ${i}: MISS. calls=${sink.calls.length} err=${!!err}`);
+      console.log(
+        `iter ${i} phase2: MISS. calls=${sink.calls.length} entries=${entries.length} err=${!!errAfter}`,
+      );
     }
   }
-  console.log(`summary-click: misses=${misses}/30 callsHisto=${JSON.stringify([...callCounts.entries()])}`);
+  console.log(`misses=${misses}/30 doubleFired=${doubleFired}/30`);
   expect(misses).toBe(0);
 });
