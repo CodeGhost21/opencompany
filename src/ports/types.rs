@@ -199,8 +199,7 @@ pub const SECRET_REDACTED: &str = "[redacted]";
 /// "storable form goes through one explicit, named method" discipline, and it
 /// was already the house style before this impl existed:
 /// `cargo check --all-targets --all-features` passes with *both* serde derives
-/// deleted outright. So the redacting `Serialize` costs no persistence path,
-/// and the greppable `expose()` call stays the only door out.
+/// deleted outright. So the redacting `Serialize` costs no persistence path.
 ///
 /// `Deserialize` stays derived: reading a secret *in* never leaks one, and a
 /// config or stored shape that names a `SecretValue` field is legitimate. The
@@ -213,8 +212,20 @@ pub struct SecretValue(pub String);
 impl SecretValue {
     /// Borrows the underlying secret string.
     ///
-    /// The **only** way to get the plaintext out, and named so that `grep
-    /// expose(` enumerates every place a credential leaves this type.
+    /// The *named* way to get the plaintext out — but **not the only one**, and
+    /// an audit that greps for `expose(` alone will miss the rest. The field is
+    /// `pub`, so `let SecretValue(raw) = value` reads it just as well, and ten
+    /// production call sites already do: four in `company::mcp`, three in
+    /// `company::inference`, two in `company::composio`, one in
+    /// `company::company_key`. A complete search is
+    /// `grep -E 'expose\(|SecretValue\('`.
+    ///
+    /// Stating that rather than the tidier claim is deliberate: the tidier one
+    /// was in this file and was false, and a security audit that trusts an
+    /// incomplete grep is worse off than one told where the gaps are. Closing
+    /// the gap means privatizing the field behind a constructor, which is a
+    /// mechanical change across ~110 construction sites and belongs in its own
+    /// change rather than riding along with the serialization guard.
     pub fn expose(&self) -> &str {
         &self.0
     }
