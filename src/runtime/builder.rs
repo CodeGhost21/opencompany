@@ -862,7 +862,9 @@ impl RuntimeBuilder {
         // accordingly — the roster's agents captured THIS overlay's ports
         // (issue #1113).
         #[cfg(feature = "openhuman")]
-        self.memory_engine = Some(memory_engine_fingerprint(overlay));
+        {
+            self.memory_engine = Some(memory_engine_fingerprint(overlay));
+        }
         let mut builder = self
             .with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone());
