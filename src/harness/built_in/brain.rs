@@ -3298,6 +3298,46 @@ impl HarnessBrain {
                             &mut responses[0].text,
                         )
                         .await;
+                    // Issue #989: a capped scheduled turn gets the same
+                    // unpublished-file recovery as an operator turn. The nudge
+                    // is deliberately limited to iteration caps, not spend
+                    // halts: spending another model turn after a budget brake
+                    // would defeat that brake. The scheduled path has no
+                    // operator present to notice a stranded workspace file, so
+                    // silently leaving it behind would lose a deliverable.
+                    if turn.hit_iteration_cap {
+                        let changed = cap_scan_baseline.changed_since(&cap_scan_workspace);
+                        let unpublished = publish::unpublished(&changed.files, &published_sources);
+                        if !unpublished.is_empty() {
+                            let nudge_control = SteerControl::new();
+                            let _declined = self
+                                .nudge_for_unpublished(
+                                    run_turn.as_ref(),
+                                    &responder,
+                                    prompt,
+                                    &responses[0].text,
+                                    &unpublished,
+                                    changed.partial,
+                                    &nudge_control,
+                                    None,
+                                )
+                                .await;
+                            let nudge_published = self.deps.pending_publishes.drain();
+                            if let Some(card_id) = self
+                                .file_conversation_batch(
+                                    &responder,
+                                    spawned_task.as_deref(),
+                                    Some(crate::server::ops::language::DEFAULT_DESK),
+                                    publish_claim.is_some(),
+                                    nudge_published,
+                                    &mut responses[0].text,
+                                )
+                                .await
+                            {
+                                published_card = published_card.or(Some(card_id));
+                            }
+                        }
+                    }
                     drop(publish_claim);
                     // `published_card` wins over the turn's own card, the same
                     // rule the operator path applies (#463): it names the card
