@@ -3199,14 +3199,16 @@ impl HarnessBrain {
                         channel_responses.push(message);
                     }
                 }
-                CompanyEvent::ScheduleFired { prompt, .. } => {
-                    let responder = self.responder_for(None);
-                    // A scheduled tick drives a real turn, so it needs the same
-                    // scaffolding an operator message gets: stale MCP failures
-                    // cleared before it (nothing leaks from a prior turn), a
-                    // live publish claim while it runs, and its own MCP
-                    // failures re-skinned onto the reply afterwards.
                     self.deps.mcp_failures.clear();
+                    // Issue #989: capture the workspace before the scheduled
+                    // turn, so a capped turn can recover files it wrote but
+                    // never offered to publish.
+                    let cap_scan_workspace = agent_workspace(
+                        &self.deps.workspace_root,
+                        &self.record().id,
+                        &responder,
+                    );
+                    let cap_scan_baseline = WorkspaceSnapshot::take(&cap_scan_workspace);
                     // Issue #445: claim the publish queue for this conversation,
                     // so a file the scheduled turn publishes is drained below
                     // instead of being staged into a queue nothing reaches.
