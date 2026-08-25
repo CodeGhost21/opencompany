@@ -90,6 +90,15 @@ fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// A character that can appear inside a credential value. Beyond base64url's
+/// `-` and `_`, a JWT joins its `header.payload.signature` segments with `.`,
+/// and opaque keys use the base64 punctuation `+`, `/`, `~`, `=`. Stopping at
+/// any of these would leak the un-redacted remainder of the credential into
+/// memory, so the value runs until a character that cannot be part of a token.
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | '/' | '~' | '=')
+}
+
 /// openhuman [`Memory`] backed by an opencompany [`ContextStore`], namespaced to
 /// one `{company}/{agent}` pair.
 pub struct OcMemory {
