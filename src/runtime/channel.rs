@@ -1,10 +1,23 @@
 //! The built-in `"operator"` channel adapter.
 //!
-//! Every company has an operator channel — the human's chat surface. Phase 1
-//! backs it with an in-memory buffer: outbound messages the runtime routes here
-//! are captured so the HTTP layer (and tests) can read them back. Inbound
-//! operator messages arrive as `OperatorMessage` events through the HTTP chat
-//! route, not through this stream, so `inbound` is an empty stream for now.
+//! Every company has an operator channel — the human's chat surface. The
+//! *interactive* side is backed by an in-memory buffer ([`OperatorChannel`]):
+//! outbound messages the runtime routes here are captured so the HTTP layer
+//! (and tests) can read them back, while the console's live POST already reads
+//! `CycleReport.responses` directly. Inbound operator messages arrive as
+//! `OperatorMessage` events through the HTTP chat route, not through this
+//! stream, so `inbound` is an empty stream for now.
+//!
+//! The *delivery* side is backed by [`DurableOperatorChannel`] (issue #1757).
+//! A workflow `owner` report on a company with no mailbox used to dead-end on
+//! the in-memory buffer — which has no durable reader, so the one human who
+//! could act on it never saw it. The durable adapter instead journals the
+//! report into the operator's main line (the General desk) through the same
+//! event-log mechanism [`DeskChannel`] uses, so it lands in a place the console
+//! already renders and survives a restart. It carries the `operator` channel id
+//! but is wired only into the workflow-delivery adapter set, never into the
+//! interactive runtime channels — so it can never double-journal an
+//! interactive reply.
 
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -15,6 +28,14 @@ use crate::Result;
 use crate::ports::channel::ChannelAdapter;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, OutboundMessage};
+use crate::server::ops::language::DEFAULT_DESK;
+
+/// The `agent_id` a workflow-delivered report is journaled under, so the
+/// console (and any other reader) can tell a workflow report apart from an
+/// agent's own reply. Shared by [`DeskChannel`] and [`DurableOperatorChannel`]
+/// so every workflow bubble names the same author whichever surface it lands
+/// on.
+pub const WORKFLOW_REPLY_AUTHOR: &str = "workflow";
 
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
@@ -22,19 +43,24 @@ pub const OPERATOR_CHANNEL: &str = "operator";
 /// Whether a channel with this id may be named as the target of an `output`
 /// node's `channel` delivery destination.
 ///
-/// The operator channel is the single exclusion, and it is deliberate:
-/// [`OperatorChannel`] is an in-memory response spy with no durable reader.
-/// Interactive chat journals its own replies after the cycle, but a workflow
-/// report posted here reaches nobody — accepting it would report a successful
-/// discard. Everything else that is wired (desk channels, provider channels) is
-/// a real write path.
+/// The operator channel is the single exclusion, and it is deliberate: the
+/// interactive [`OperatorChannel`] is an in-memory response spy with no durable
+/// reader, so an author must not point a `channel` destination at it. This
+/// governs **author-targetable** channels only — the picker's set and the
+/// explicit `channel` arm — which is why it stays `false` for `operator`.
 ///
-/// Issue #981: this is the one place the rule is stated. It previously lived as
-/// an inline `!=` where the builder assembles the delivery deps, as a `by name`
-/// refusal in [`crate::workflows::delivery`], and as a prose sentence in the
-/// accessor the console's destination picker reads — and that third copy said
-/// the opposite, so the picker offered authors the one target guaranteed to
-/// fail. Call this instead of re-deciding.
+/// It does **not** speak for the `owner` fallback (issue #1757): an `owner`
+/// report with no mailbox reaches the operator through the separate, durable
+/// [`DurableOperatorChannel`], a real write path the runtime builder wires into
+/// the delivery adapter set under the same id. That path is server-resolved, not
+/// author-named, so it is not gated here.
+///
+/// Issue #981: this is the one place the author-targeting rule is stated. It
+/// previously lived as an inline `!=` where the builder assembles the delivery
+/// deps, as a `by name` refusal in [`crate::workflows::delivery`], and as a
+/// prose sentence in the accessor the console's destination picker reads — and
+/// that third copy said the opposite, so the picker offered authors the one
+/// target guaranteed to fail. Call this instead of re-deciding.
 pub fn is_deliverable_channel(channel_id: &str) -> bool {
     channel_id != OPERATOR_CHANNEL
 }
@@ -93,7 +119,7 @@ impl ChannelAdapter for DeskChannel {
                 &self.company,
                 CompanyEvent::AgentReply {
                     chat_id: self.desk_id.clone(),
-                    agent_id: "workflow".to_string(),
+                    agent_id: WORKFLOW_REPLY_AUTHOR.to_string(),
                     text: msg.text,
                     steps: msg.steps,
                     task_id: msg.task_id,
@@ -165,6 +191,86 @@ impl std::fmt::Debug for OperatorChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OperatorChannel")
             .field("sent", &self.sent().len())
+            .finish()
+    }
+}
+
+/// The **durable** operator delivery channel (issue #1757).
+///
+/// Carries the [`OPERATOR_CHANNEL`] id, but unlike [`OperatorChannel`] it does
+/// not buffer in memory — it appends the report to the company's event log as
+/// an `AgentReply` on the operator's main line (the [`DEFAULT_DESK`], i.e. the
+/// General thread the console renders as the operator's home). That is the same
+/// durable write path [`DeskChannel`] uses, so a workflow `owner` report on a
+/// company with no mailbox now lands somewhere a human actually reads and
+/// survives a restart, instead of being discarded on the in-memory buffer.
+///
+/// Authored under [`WORKFLOW_REPLY_AUTHOR`], and the report text already carries
+/// the `[company] workflow — node` subject header
+/// ([`subject_for`](crate::workflows::delivery)), so a workflow report is
+/// distinguishable at a glance from an agent's own reply in the same thread.
+///
+/// Wired **only** into the workflow-delivery adapter set (see the runtime
+/// builder), never into the interactive runtime channels the cycle's
+/// `route_response` sends to — so an interactive reply that already journals
+/// itself can never be double-recorded here.
+#[derive(Clone)]
+pub struct DurableOperatorChannel {
+    company: CompanyId,
+    events: Arc<dyn EventLog>,
+}
+
+impl DurableOperatorChannel {
+    /// Creates a durable operator channel for `company`, journaling through
+    /// `events`.
+    pub fn new(company: CompanyId, events: Arc<dyn EventLog>) -> Self {
+        Self { company, events }
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for DurableOperatorChannel {
+    fn channel_id(&self) -> &str {
+        OPERATOR_CHANNEL
+    }
+
+    fn inbound(&self) -> BoxStream<'static, InboundMessage> {
+        Box::pin(stream::empty())
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        self.events
+            .append(
+                &self.company,
+                CompanyEvent::AgentReply {
+                    // The operator's main line, folded into General by the
+                    // history reader (`server::chat_history::is_general_chat`),
+                    // so the report renders in the console's home thread with no
+                    // bespoke frontend.
+                    chat_id: DEFAULT_DESK.to_string(),
+                    agent_id: WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: msg.text,
+                    steps: msg.steps,
+                    task_id: msg.task_id,
+                    parent: msg
+                        .reply_to
+                        .and_then(|reply| reply.chat_id.parse::<u64>().ok())
+                        .map(EventSeq::new),
+                    // A workflow report addresses the thread it posts into, not a
+                    // person in it — nothing to resolve an `@name` against.
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for DurableOperatorChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableOperatorChannel")
+            .field("company", &self.company)
             .finish()
     }
 }
@@ -351,6 +457,104 @@ mod test {
                 channel: "engineering".into(),
                 agent: None,
                 text: "the weekly digest".into(),
+                steps: Vec::new(),
+                reply_to: None,
+                mentions: Vec::new(),
+            })
+            .await;
+        assert!(result.is_err(), "an unwritable journal must fail the send");
+    }
+
+    /// An [`EventLog`] that records every appended event, for asserting what a
+    /// channel journals.
+    #[derive(Default)]
+    struct RecordingEventLog {
+        events: StdMutex<Vec<CompanyEvent>>,
+    }
+
+    #[async_trait]
+    impl EventLog for RecordingEventLog {
+        async fn append(&self, _company: &CompanyId, event: CompanyEvent) -> Result<EventSeq> {
+            let mut events = self.events.lock().expect("recording log poisoned");
+            events.push(event);
+            Ok(EventSeq::new(events.len() as u64))
+        }
+
+        async fn read_from(
+            &self,
+            _company: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> Result<Vec<crate::ports::types::StoredEvent>> {
+            Ok(Vec::new())
+        }
+
+        fn subscribe(
+            &self,
+            _company: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
+            Box::pin(stream::empty())
+        }
+    }
+
+    /// The durable operator channel carries the `operator` id but journals its
+    /// report onto the operator's main line (the General desk), authored by
+    /// `workflow` — so the owner/no-mailbox fallback lands somewhere the console
+    /// renders and survives a restart, and reads as a workflow report rather than
+    /// an agent's own reply (issue #1757).
+    #[tokio::test]
+    async fn the_durable_operator_channel_journals_to_the_general_line() {
+        let log = Arc::new(RecordingEventLog::default());
+        let channel = DurableOperatorChannel::new(CompanyId::new("acme"), log.clone());
+        assert_eq!(channel.channel_id(), OPERATOR_CHANNEL);
+
+        channel
+            .send(OutboundMessage {
+                message_id: None,
+                task_id: None,
+                channel: OPERATOR_CHANNEL.into(),
+                agent: None,
+                text: "[Acme] Weekly digest — Owner summary\n\nQ3 is up 12%.".into(),
+                steps: Vec::new(),
+                reply_to: None,
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("a durable operator send journals rather than buffering");
+
+        let events = log.events.lock().expect("recording log poisoned");
+        assert_eq!(events.len(), 1, "the report must be journaled");
+        match &events[0] {
+            CompanyEvent::AgentReply {
+                chat_id,
+                agent_id,
+                text,
+                ..
+            } => {
+                assert_eq!(chat_id, DEFAULT_DESK, "lands on the operator's main line");
+                assert_eq!(agent_id, WORKFLOW_REPLY_AUTHOR, "authored by the workflow");
+                assert!(text.contains("Q3 is up 12%."), "{text}");
+                assert!(text.contains("Weekly digest"), "carries its subject header");
+            }
+            other => panic!("expected an AgentReply, got {other:?}"),
+        }
+    }
+
+    /// A durable operator send is a real write, so a journal that refuses it is a
+    /// failed delivery — the same fail-loud contract [`DeskChannel`] holds. This
+    /// is what lets the owner fallback report `Failed` on a broken journal instead
+    /// of a silent discard.
+    #[tokio::test]
+    async fn a_durable_operator_send_fails_when_the_journal_refuses_it() {
+        let channel =
+            DurableOperatorChannel::new(CompanyId::new("acme"), Arc::new(FailingEventLog));
+        let result = channel
+            .send(OutboundMessage {
+                message_id: None,
+                task_id: None,
+                channel: OPERATOR_CHANNEL.into(),
+                agent: None,
+                text: "the owner report".into(),
                 steps: Vec::new(),
                 reply_to: None,
                 mentions: Vec::new(),
