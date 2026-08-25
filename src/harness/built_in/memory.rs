@@ -456,11 +456,14 @@ mod tests {
             redact_secrets("auth with Bearer   sk-longsecret please"),
             "auth with Bearer   [REDACTED] please"
         );
-        // Dots do not turn a short prose word into a secret.
+        // Dots do not turn a short prose word into a secret: "key." is still
+        // under the digit-free threshold, and plain "token" (no trailing dot)
+        // is too.
         assert_eq!(
-            redact_secrets("Bearer token. Please"),
-            "Bearer token. Please"
+            redact_secrets("Bearer key. Please"),
+            "Bearer key. Please"
         );
+        assert_eq!(redact_secrets("Bearer token please"), "Bearer token please");
     }
 
     /// Minimal in-memory ContextStore for adapter isolation tests.
