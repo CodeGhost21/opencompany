@@ -1482,8 +1482,8 @@ mod disambiguate_name_test {
     #[test]
     fn a_short_stem_is_never_truncated() {
         assert_eq!(
-            disambiguate_name("image.png", "01j8abc"),
-            "image-01j8a.png"
+            disambiguate_name("image.png", "01j8ab"),
+            "image-01j8ab.png"
         );
     }
 }
