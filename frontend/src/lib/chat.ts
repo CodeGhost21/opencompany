@@ -467,11 +467,7 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
   return changed ? next : messages;
 }
 
-/**
- * Stable fields shared by an optimistic operator row and its history echo.
- * Parent/message text and timestamp identify one local send without making
- * unrelated repeated messages collapse together.
- */
+/** Stable content fields shared by an optimistic row and its history echo. */
 function messageFingerprint(message: ChatMessage): string {
   return JSON.stringify([message.from, message.text, message.parentId ?? null]);
 }
