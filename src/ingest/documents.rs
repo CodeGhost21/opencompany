@@ -10,6 +10,37 @@ use super::Extracted;
 #[cfg(feature = "documents")]
 use super::text::normalize;
 
+/// The largest declared uncompressed size an OOXML archive or spreadsheet may
+/// have before it is refused, in bytes.
+///
+/// The callers cap the *compressed* blob they hand us (4 MiB for a chat
+/// attachment, 25 MiB for a memory drop), but a small highly-compressed part
+/// can expand arbitrarily — a zip bomb — and every parser here holds the whole
+/// document plus its extraction in memory at once. The entry sizes declared in
+/// the archive's central directory are summed before anything is read, and
+/// each entry read is additionally capped, so a crafted archive cannot force a
+/// multi-hundred-megabyte allocation out of a few-hundred-kilobyte upload.
+#[cfg(feature = "documents")]
+pub(crate) const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Sums the uncompressed sizes every entry of `archive` declares, without
+/// reading any entry data.
+///
+/// The central directory is the only thing touched, so this stays cheap no
+/// matter how much the archive expands. `None` means an entry could not be
+/// inspected, which the caller treats as a refusal.
+#[cfg(feature = "documents")]
+fn declared_uncompressed<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Option<u64> {
+    (0..archive.len()).try_fold(0u64, |total, i| {
+        archive
+            .by_index(i)
+            .ok()
+            .map(|file| total.saturating_add(file.size()))
+    })
+}
+
 /// Extracts a PDF's text layer.
 ///
 /// A scanned PDF has none, and that is [`Extracted::Empty`], not a failure:
@@ -56,6 +87,22 @@ pub fn pptx(bytes: &[u8]) -> Extracted {
 #[cfg(feature = "documents")]
 pub fn xlsx(bytes: &[u8]) -> Extracted {
     use calamine::{Data, Reader};
+
+    // Zip-bomb guard before calamine materializes the whole workbook: the
+    // declared uncompressed sizes are summed from the central directory, and
+    // an archive that expands beyond the cap is refused without parsing any
+    // entry data. `None` (an uninspectable archive) is refused too.
+    let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
+        Ok(archive) => archive,
+        Err(error) => {
+            return Extracted::Unsupported(format!("the spreadsheet could not be read: {error}"));
+        }
+    };
+    if declared_uncompressed(&mut archive).is_none_or(|total| total > MAX_DECOMPRESSED_BYTES) {
+        return Extracted::Unsupported(
+            "the spreadsheet expands beyond the size this build can read safely".to_string(),
+        );
+    }
 
     let cursor = std::io::Cursor::new(bytes.to_vec());
     let mut workbook = match calamine::open_workbook_auto_from_rs(cursor) {
@@ -105,13 +152,23 @@ fn ooxml(bytes: &[u8], entries: &[&str], paragraph_tag: &str, text_tag: &str) ->
             return Extracted::Unsupported(format!("the document is not a readable file: {error}"));
         }
     };
+    // Zip-bomb guard before any entry data is read: refuse an archive whose
+    // declared expansion exceeds the cap instead of materializing it.
+    if declared_uncompressed(&mut archive).is_none_or(|total| total > MAX_DECOMPRESSED_BYTES) {
+        return Extracted::Unsupported(
+            "the document expands beyond the size this build can read safely".to_string(),
+        );
+    }
     let mut out = String::new();
     for entry in entries {
-        let Ok(mut file) = archive.by_name(entry) else {
+        let Ok(file) = archive.by_name(entry) else {
             continue;
         };
         let mut xml = String::new();
-        if std::io::Read::read_to_string(&mut file, &mut xml).is_err() {
+        // Capped read as well: a lying archive that declares small sizes but
+        // streams more data cannot force an unbounded allocation either.
+        let mut capped = std::io::Read::take(file, MAX_DECOMPRESSED_BYTES);
+        if std::io::Read::read_to_string(&mut capped, &mut xml).is_err() {
             continue;
         }
         out.push_str(&xml_text(&xml, paragraph_tag, text_tag));

@@ -192,3 +192,29 @@ fn a_pdf_without_the_feature_names_the_feature() {
     };
     assert!(reason.contains("documents"), "{reason}");
 }
+
+/// An archive whose entries declare more uncompressed bytes than the cap is
+/// refused before any entry data is read — the zip-bomb guard. The fixture is
+/// one entry of zero bytes just over the cap: zeroes compress to almost
+/// nothing, so the archive is a few hundred bytes on disk while its declared
+/// expansion exceeds the limit, exactly the shape of a crafted bomb.
+#[cfg(feature = "documents")]
+#[test]
+fn an_overexpanding_document_is_refused_not_allocated() {
+    use crate::ingest::documents::MAX_DECOMPRESSED_BYTES;
+
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("word/document.xml", options).unwrap();
+        std::io::Write::write_all(&mut writer, &vec![0u8; MAX_DECOMPRESSED_BYTES as usize + 1])
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let Extracted::Unsupported(reason) = extract("bomb.docx", None, &buffer.into_inner()) else {
+        panic!("an overexpanding document must be refused");
+    };
+    assert!(reason.contains("expands"), "{reason}");
+}
