@@ -86,6 +86,9 @@ pub struct CompanyStatus {
     pub id: CompanyId,
     /// The display name.
     pub name: String,
+    /// The operator-set company logo, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_url: Option<String>,
     /// Lifecycle state, e.g. `running`, `paused`, `archived`.
     pub lifecycle: String,
     /// The number of approvals currently awaiting the operator.
