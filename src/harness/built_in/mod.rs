@@ -6418,6 +6418,56 @@ description = "Builds the product."
         );
     }
 
+    /// The drop-guard half of the release (issue #1455): a cycle cancelled or
+    /// unwound through a panic after installing its pin cannot await
+    /// `end_cycle`, but the synchronous `release_policy_pin_sync` — what the
+    /// guard calls from `Drop` — must clear the pin just the same, so a
+    /// standalone workflow turn between cycles rebuilds against the live
+    /// override rather than a snapshot the abandoned cycle left behind.
+    #[tokio::test]
+    async fn a_sync_pin_release_restores_the_live_policy_axis() {
+        let live_store = Arc::new(LiveStore::default());
+        let mut rec = record();
+        rec.overlay_policy = Some(fp_entry_full(Some("supervised"), None, None, None));
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        let snapshot = rec.effective_policy();
+
+        // The cycle pins the strict snapshot, exactly as it does on entry.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("cycle ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // Mid-window PUT, then the cycle future is dropped without end_cycle:
+        // the release must come from the drop guard's sync path.
+        let mut edited = rec.clone();
+        edited.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
+        live_store.save(&edited).await.unwrap();
+        pool.release_policy_pin_sync(&rec.id);
+
+        pool.ensure(&rec, &fx.deps)
+            .await
+            .expect("post-drop ensure");
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(effective_policy_fingerprint(&edited.effective_policy())),
+            "after a sync release a plain ensure must adopt the live override"
+        );
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "the abandoned cycle's snapshot must not outlive its release"
+        );
+    }
+
     // --- Capability-budget freshness (issue #108) ---------------------------
 
     /// A manifest that grants every tool namespace, so the roster actually builds
