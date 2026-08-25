@@ -3259,8 +3259,7 @@ impl HarnessBrain {
                         responses.push(OutboundMessage {
                             message_id: None,
                             task_id: None,
-                            channel: crate::server::ops::language::DEFAULT_DESK
-                                .to_string(),
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
                             steps: Vec::new(),
@@ -3272,8 +3271,7 @@ impl HarnessBrain {
                         responses.push(OutboundMessage {
                             message_id: None,
                             task_id: None,
-                            channel: crate::server::ops::language::DEFAULT_DESK
-                                .to_string(),
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: spend_halt_notice(halt),
                             steps: Vec::new(),
@@ -3325,8 +3323,7 @@ impl HarnessBrain {
                         responses.push(OutboundMessage {
                             message_id: None,
                             task_id: None,
-                            channel: crate::server::ops::language::DEFAULT_DESK
-                                .to_string(),
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: notice,
                             steps: Vec::new(),
