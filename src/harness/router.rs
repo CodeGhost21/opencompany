@@ -271,6 +271,14 @@ impl RunTurn for HarnessRouter {
         self.record_warm_up(outcomes);
         Ok(())
     }
+
+    async fn end_cycle(&self, company: &CompanyId) {
+        // Fan the release out to every lane that pinned, so no engine's pool is
+        // left holding a stale snapshot after its cycle ends (issue #1455).
+        for (_harness, engine) in &self.engines {
+            engine.end_cycle(company).await;
+        }
+    }
 }
 
 #[cfg(test)]
