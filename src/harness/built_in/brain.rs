@@ -3766,9 +3766,11 @@ description = "Runs Acme."
             .expect("cycle runs");
 
         assert_eq!(result.channel_responses.len(), 3);
-        assert!(result.channel_responses[1]
-            .text
-            .contains("maximum number of steps"));
+        assert!(
+            result.channel_responses[1]
+                .text
+                .contains("maximum number of steps")
+        );
         assert!(result.channel_responses[2].text.contains("spend cap"));
         assert!(
             result
