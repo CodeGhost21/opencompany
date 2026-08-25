@@ -3113,6 +3113,54 @@ impl HarnessBrain {
                         channel_responses.push(message);
                     }
                 }
+                CompanyEvent::ScheduleFired { prompt, .. } => {
+                    let responder = self.responder_for(None);
+                    let run_turn = HarnessRunTurn::new(self.pool.clone(), self.deps.clone());
+                    let record = self.record();
+                    let turn = self
+                        .delegation_runner(&run_turn, &record)
+                        .handle_operator_message(&responder, prompt, None)
+                        .await?;
+                    let mut responses = vec![OutboundMessage {
+                        message_id: None,
+                        task_id: turn.spawned_task,
+                        channel: responder,
+                        agent: None,
+                        text: turn.reply,
+                        reply_to: None,
+                        steps: turn.steps,
+                        mentions: Vec::new(),
+                    }];
+                    responses.extend(turn.bubbles);
+                    if let Some(events) = self.deps.events.as_ref() {
+                        for response in &mut responses {
+                            match events
+                                .append(
+                                    &record.id,
+                                    CompanyEvent::AgentReply {
+                                        parent: None,
+                                        task_id: response.task_id.clone(),
+                                        chat_id: crate::server::ops::language::DEFAULT_DESK
+                                            .to_string(),
+                                        agent_id: response.channel.clone(),
+                                        text: response.text.clone(),
+                                        steps: response.steps.clone(),
+                                        mentions: Vec::new(),
+                                        mention_depth: 0,
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(seq) => response.message_id = Some(seq.value().to_string()),
+                                Err(err) => tracing::warn!(
+                                    error = %err,
+                                    "failed to journal a scheduled reply; the bubble has no durable id"
+                                ),
+                            }
+                        }
+                    }
+                    channel_responses.extend(responses);
+                }
                 _ => {}
             }
         }
@@ -3383,6 +3431,37 @@ description = "Runs Acme."
         assert_eq!(result.new_traces.len(), 1);
         // Single cost-accounting site: the cycle result carries no ledger delta.
         assert!(result.ledger_deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_gets_an_agent_reply() {
+        // A cron tick (`ScheduleFired`) must drive a real turn and surface its
+        // reply, not fall through the match and vanish — the same guarantee an
+        // operator message gets. Without this arm a scheduled prompt ran to
+        // nowhere: the turn produced an answer that was never journaled, so the
+        // desk history had no record it fired.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = brain_over_mock(dir.path());
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 1);
+        // The mock provider prefixes the routed prompt, proving the turn ran
+        // through the agent rather than falling through the match.
+        assert!(
+            result.channel_responses[0].text.contains("daily standup"),
+            "{:?}",
+            result.channel_responses[0].text
+        );
+        assert_eq!(result.new_traces.len(), 1);
     }
 
     #[tokio::test]
