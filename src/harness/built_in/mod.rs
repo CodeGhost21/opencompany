@@ -4950,7 +4950,9 @@ description = "Builds the product."
             .expect("seed the replacement store");
         let mut swapped = fixture();
         swapped.deps.context = replacement.clone();
-        pool.ensure(&rec, &swapped.deps).await.expect("ensure after swap");
+        pool.ensure(&rec, &swapped.deps)
+            .await
+            .expect("ensure after swap");
         let reply = pool
             .run(&rec.id, "ceo", query, &swapped.deps, None)
             .await
@@ -4978,7 +4980,9 @@ description = "Builds the product."
             0,
             "provider-built roster invalidated on the way back"
         );
-        pool.ensure(&rec, &fx.deps).await.expect("ensure after reverse swap");
+        pool.ensure(&rec, &fx.deps)
+            .await
+            .expect("ensure after reverse swap");
         let reply = pool
             .run(&rec.id, "ceo", query, &fx.deps, None)
             .await

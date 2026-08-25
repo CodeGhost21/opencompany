@@ -4396,8 +4396,7 @@ mod test {
             "the swap re-records the engine selection on the pool"
         );
         assert_ne!(
-            fp_b,
-            fp_a,
+            fp_b, fp_a,
             "a different engine must move the marker, or the pool cannot tell a swap from a no-op"
         );
         drop(swapped);
