@@ -188,11 +188,13 @@ pub async fn issue_password(
         },
     };
 
-    users.upsert_user(company, &user).await?;
     if !created {
         sessions.delete_for_user(company, &user.id).await?;
-        login_codes.delete_for_email(company, &user.email).await?;
     }
+    // Login codes can exist before the first account is materialized (a magic
+    // link request does not create a user), so revoke them for new accounts too.
+    login_codes.delete_for_email(company, &user.email).await?;
+    users.upsert_user(company, &user).await?;
     Ok(Issued {
         email,
         created,
