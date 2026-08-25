@@ -41,6 +41,32 @@ use oh::memory::{Memory, MemoryCategory, MemoryEntry, MemoryTaint, NamespaceSumm
 use crate::ports::ContextStore;
 use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};
 
+/// The one-time-secret URL path. Exact match: those URLs are lowercase.
+const SECRET_URL_MARKER: &str = "/secret/";
+/// The HTTP `Authorization` scheme, matched ASCII-case-insensitively (RFC
+/// 9110's auth-scheme ABNF is case-insensitive, so `bearer sk-...` and
+/// `BEARER sk-...` are credentials too).
+const BEARER_MARKER: &str = "bearer ";
+
+/// Byte offset of the next [`BEARER_MARKER`] occurrence, case-insensitively.
+/// The marker is pure ASCII, so a byte scan is safe and allocation-free.
+fn find_bearer_marker(text: &str) -> Option<usize> {
+    text.as_bytes()
+        .windows(BEARER_MARKER.len())
+        .position(|w| w.eq_ignore_ascii_case(BEARER_MARKER.as_bytes()))
+}
+
+/// The earliest marker in `rest`, as `(byte offset, marker)`. The marker
+/// string is only used for its byte length; the output always carries the
+/// caller's original casing.
+fn next_marker(rest: &str) -> Option<(usize, &'static str)> {
+    rest.find(SECRET_URL_MARKER)
+        .map(|p| (p, SECRET_URL_MARKER))
+        .into_iter()
+        .chain(find_bearer_marker(rest).map(|p| (p, BEARER_MARKER)))
+        .min_by_key(|(p, _)| *p)
+}
+
 /// Redacts secrets from text on its way into memory.
 ///
 /// Measured in a live deployment: chat messages of the form "here is the link
@@ -62,19 +88,13 @@ use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};
 pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
     // Two unambiguous shapes. A generic "anything that looks like a token"
     // regex would mangle ordinary prose.
-    const MARKERS: [&str; 2] = ["/secret/", "Bearer "];
-
-    if !MARKERS.iter().any(|m| text.contains(m)) {
+    if !text.contains(SECRET_URL_MARKER) && find_bearer_marker(text).is_none() {
         return std::borrow::Cow::Borrowed(text);
     }
 
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some((pos, marker)) = MARKERS
-        .iter()
-        .filter_map(|m| rest.find(m).map(|p| (p, *m)))
-        .min_by_key(|(p, _)| *p)
-    {
+    while let Some((pos, marker)) = next_marker(rest) {
         out.push_str(&rest[..pos + marker.len()]);
         let tail = &rest[pos + marker.len()..];
         // The MCP config trims the value after the marker, so extra whitespace
@@ -83,7 +103,17 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
         // credential verbatim.
         let value_start = tail.len() - tail.trim_start().len();
         out.push_str(&tail[..value_start]);
-        let value = &tail[value_start..];
+        let mut value = &tail[value_start..];
+        // Formatted chat can wrap a credential in Markdown backticks or quotes
+        // (`Bearer `sk-...``); skip one leading wrapper so the scan reaches the
+        // credential instead of stopping at length zero. The wrapper is kept in
+        // the output, and its closing mate stays in `rest`.
+        let wrapper_len = usize::from(matches!(
+            value.as_bytes().first(),
+            Some(b'`' | b'\'' | b'"')
+        ));
+        out.push_str(&value[..wrapper_len]);
+        value = &value[wrapper_len..];
         // The value runs up to the first character that cannot be part of a token.
         let end = value
             .find(|c: char| !is_token_char(c))
@@ -104,7 +134,7 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
             // ordinary text like "Bearer or not".
             out.push_str(&value[..end]);
         }
-        rest = &tail[end + value_start..];
+        rest = &tail[end + value_start + wrapper_len..];
     }
     out.push_str(rest);
     std::borrow::Cow::Owned(out)
