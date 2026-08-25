@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: why does the error element not render after reject?
+// Temporary diagnostic: reproduce the mode-B failure (error NEVER renders).
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { RunArtifactRow, WorkflowRunOutcome } from "@/api/workflows";
@@ -78,37 +78,59 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-});
+it("diag: 30 fresh runs of the reject-render path", async () => {
+  let misses = 0;
+  let timeouts = 0;
+  for (let i = 0; i < 30; i++) {
+    // fresh container/root per iteration, like beforeEach/afterEach
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
 
-it("diag: dump DOM after reject, with delays", async () => {
-  const deferred: {
-    resolve: (rows: RunArtifactRow[]) => void;
-    reject: (err: unknown) => void;
-  }[] = [];
-  const client = deferredFilesClient(deferred);
-  await renderPanel(completedRun("run-1"), client);
-  await expandFiles();
-  expect(deferred.length).toBe(1);
+    const deferred: {
+      resolve: (rows: RunArtifactRow[]) => void;
+      reject: (err: unknown) => void;
+    }[] = [];
+    const client = deferredFilesClient(deferred);
+    await renderPanel(completedRun("run-1"), client);
+    await expandFiles();
+    if (deferred.length !== 1) {
+      console.log(`iter ${i}: deferred.length=${deferred.length}`);
+      continue;
+    }
 
-  await act(async () => {
-    deferred[0].reject(new Error("boom"));
-  });
+    await act(async () => {
+      deferred[0].reject(new Error("boom"));
+    });
 
-  const dump = () =>
-    container.querySelector('[data-testid="workflow-run-files"]')?.innerHTML;
-  console.log("after reject act:", JSON.stringify(dump()));
-
-  await act(async () => {});
-  console.log("after 2nd empty act:", JSON.stringify(dump()));
-
-  await new Promise((r) => setTimeout(r, 50));
-  console.log("after 50ms macrotask:", JSON.stringify(dump()));
-
-  await act(async () => {});
-  console.log("after 3rd empty act:", JSON.stringify(dump()));
-
+    const errorEl = () =>
+      container.querySelector('[data-testid="workflow-run-files-error"]');
+    if (errorEl()) {
+      // immediate
+      continue;
+    }
+    misses++;
+    // poll with empty acts (the file's own idiom) up to 20 tries
+    let appeared = false;
+    for (let t = 0; t < 20; t++) {
+      await act(async () => {});
+      if (errorEl()) {
+        appeared = true;
+        break;
+      }
+    }
+    if (!appeared) {
+      timeouts++;
+      console.log(
+        `iter ${i}: error NEVER rendered after reject. DOM=${JSON.stringify(
+          container.querySelector('[data-testid="workflow-run-files"]')
+            ?.innerHTML,
+        )}`,
+      );
+    }
+  }
+  console.log(`misses=${misses} neverRendered=${timeouts}`);
   expect(true).toBe(true);
 });
