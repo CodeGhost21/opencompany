@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: compare miss rates across reject-sync strategies.
+// Temporary diagnostic: does awaiting the settled fetch promise inside the
+// reject act reliably render the error? Also try non-async client.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -12,19 +13,27 @@ import { RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 let container: HTMLDivElement;
 let root: Root;
 
-function deferredFilesClient(
-  deferred: {
-    resolve: (rows: RunArtifactRow[]) => void;
-    reject: (err: unknown) => void;
-  }[],
-): OpenCompanyClient {
+type DeferredEntry = {
+  promise: Promise<RunArtifactRow[]>;
+  resolve: (rows: RunArtifactRow[]) => void;
+  reject: (err: unknown) => void;
+};
+
+function deferredFilesClient(deferred: DeferredEntry[]): OpenCompanyClient {
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
-    get: async <T>(path: string): Promise<T> => {
-      return new Promise<T>((resolve, reject) => {
-        deferred.push({ resolve, reject });
+    get: <T>(path: string): Promise<T> => {
+      const promise = new Promise<T>((resolve, reject) => {
+        deferred.push({
+          promise: null as unknown as Promise<RunArtifactRow[]>,
+          resolve,
+          reject,
+        });
         void path;
       });
+      const entry = deferred[deferred.length - 1];
+      entry.promise = promise as Promise<RunArtifactRow[]>;
+      return promise;
     },
   } as unknown as OpenCompanyClient;
 }
@@ -78,53 +87,41 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-type Variant = "plain" | "ticks" | "macrotask";
-const VARIANTS: Variant[] = ["plain", "ticks", "macrotask"];
-const ITERATIONS = 20;
-
-async function runVariant(variant: Variant): Promise<number> {
+it("diag: 30 iterations awaiting the settled promise inside the reject act", async () => {
   let misses = 0;
-  for (let i = 0; i < ITERATIONS; i++) {
+  for (let i = 0; i < 30; i++) {
     await act(async () => root.unmount());
     container.remove();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
 
-    const deferred: {
-      resolve: (rows: RunArtifactRow[]) => void;
-      reject: (err: unknown) => void;
-    }[] = [];
+    const deferred: DeferredEntry[] = [];
     const client = deferredFilesClient(deferred);
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
-    if (deferred.length !== 1) continue;
+    if (deferred.length !== 1) {
+      console.log(`iter ${i}: deferred.length=${deferred.length}`);
+      continue;
+    }
 
     await act(async () => {
       deferred[0].reject(new Error("boom"));
-      if (variant === "ticks") {
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
-      } else if (variant === "macrotask") {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
+      await deferred[0].promise.catch(() => {});
     });
 
     if (
       !container.querySelector('[data-testid="workflow-run-files-error"]')
     ) {
       misses++;
+      console.log(
+        `iter ${i}: MISS. DOM=${JSON.stringify(
+          container.querySelector('[data-testid="workflow-run-files"]')
+            ?.innerHTML,
+        )}`,
+      );
     }
   }
-  return misses;
-}
-
-it("diag: miss rates per strategy", async () => {
-  for (const v of VARIANTS) {
-    const misses = await runVariant(v);
-    console.log(`variant=${v} misses=${misses}/${ITERATIONS}`);
-  }
-  expect(true).toBe(true);
+  console.log(`misses=${misses}/30`);
+  expect(misses).toBe(0);
 });
