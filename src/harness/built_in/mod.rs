@@ -1424,6 +1424,20 @@ impl HarnessPool {
         self.ensure_impl(company, deps, Some(policy)).await
     }
 
+    /// Release a cycle's policy pin, restoring the live-store policy axis for
+    /// plain [`ensure`](Self::ensure) calls.
+    ///
+    /// The pin exists to keep a cycle's in-flight roster on the snapshot the
+    /// native gate was re-applied from (see [`Self::ensure_with_policy`]); once
+    /// the cycle is over — success or error — nothing in flight needs the
+    /// snapshot any more. Without this release a stale pin would survive until
+    /// an unrelated cycle refreshed it, so a standalone workflow turn between
+    /// cycles would keep rebuilding against the last cycle's tier even after
+    /// the operator moved the store (issue #1455).
+    pub async fn end_cycle(&self, company: &CompanyId) {
+        self.pinned_policies.write().await.remove(company);
+    }
+
     async fn ensure_impl(
         &self,
         company: &CompanyRecord,
