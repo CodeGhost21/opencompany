@@ -142,14 +142,19 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
             if value.as_bytes().get(end) == Some(&b' ') {
                 let mut cursor = end;
                 while let Some(rel) = value[cursor..].find(' ') {
-                    cursor += rel + 1;
-                    let frag_end = value[cursor..]
+                    // Probe the fragment after this run of spaces without
+                    // consuming the space yet: if it clears the floor it is
+                    // part of the credential run, otherwise it is prose and
+                    // the space must survive into `rest`.
+                    let token_start = cursor + rel + 1;
+                    let frag_end = value[token_start..]
                         .find(|c: char| !is_token_char(c))
-                        .unwrap_or(value.len() - cursor);
+                        .unwrap_or(value.len() - token_start);
                     if frag_end == 0 {
-                        continue; // repeated spaces; keep looking ahead
+                        cursor = token_start; // repeated spaces; keep probing
+                        continue;
                     }
-                    let frag = &value[cursor..cursor + frag_end];
+                    let frag = &value[token_start..token_start + frag_end];
                     let floor = if frag.chars().any(|c| c.is_ascii_digit()) {
                         4
                     } else {
@@ -158,9 +163,9 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
                     if frag.chars().count() >= floor {
                         out.push(' ');
                         out.push_str("[REDACTED]");
-                        cursor += frag_end;
+                        cursor = token_start + frag_end;
                     } else {
-                        break;
+                        break; // cursor stays at the space before the prose
                     }
                 }
                 consumed = cursor;
