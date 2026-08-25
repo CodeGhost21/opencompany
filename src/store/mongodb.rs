@@ -5198,7 +5198,7 @@ mod test {
 
         // The winner still serves its bytes.
         let (_, stream) =
-            crate::ports::workspace::WorkspaceStore::read_bytes(&s, &company, "winner")
+            crate::ports::workspace::WorkspaceStore::read_bytes(&*s, &company, "winner")
                 .await
                 .unwrap()
                 .expect("the winner's payload is untouched by the refusal");
