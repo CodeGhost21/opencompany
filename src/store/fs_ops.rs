@@ -1503,6 +1503,10 @@ impl crate::ports::notifications::NotificationStore for FsOps {
             .collect();
         let mut out: Vec<_> = records
             .into_iter()
+            // Only what this person is addressed by. The rule lives on
+            // `Notification::visible_to` so all three backends read it from one
+            // place rather than each re-deriving it.
+            .filter(|n| n.visible_to(user))
             .map(|n| {
                 let read_at = mine.get(n.id.as_str()).copied();
                 crate::ports::notifications::NotificationView {
@@ -1546,7 +1550,14 @@ impl crate::ports::notifications::NotificationStore for FsOps {
                 .filter(|n| ids.iter().any(|i| i == &n.id))
                 .map(|n| n.id.as_str())
                 .collect(),
-            None => records.iter().map(|n| n.id.as_str()).collect(),
+            // Only what this person can see: a marker on a colleague's targeted
+            // row is inert, but writing one makes "mark all read" mean
+            // something different per backend.
+            None => records
+                .iter()
+                .filter(|n| n.visible_to(user))
+                .map(|n| n.id.as_str())
+                .collect(),
         };
         let now = crate::ports::now_millis();
         let mut changed = false;
@@ -1574,6 +1585,7 @@ impl crate::ports::notifications::NotificationStore for FsOps {
         // Still-unread count for this person: records with no marker of theirs.
         let unread = records
             .iter()
+            .filter(|n| n.visible_to(user))
             .filter(|n| {
                 !reads
                     .iter()

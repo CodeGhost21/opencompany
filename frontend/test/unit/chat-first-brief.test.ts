@@ -165,6 +165,9 @@ describe("the empty-channel first brief", () => {
         .find((button) => button.getAttribute("aria-label") === "Send")!
         .click();
     });
-    expect(onSend).toHaveBeenCalledWith("Help us get started.", "once", undefined);
+    // The composer always passes third (attachments, issue #1682) and fourth
+    // (mentions) arguments now — undefined here since this test never gives it
+    // `uploadAttachment` or a mention directory.
+    expect(onSend).toHaveBeenCalledWith("Help us get started.", "once", undefined, undefined);
   });
 });

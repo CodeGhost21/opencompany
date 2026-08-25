@@ -54,6 +54,12 @@ interface Props {
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
   /**
+   * Resolves a stored attachment's bytes to an object URL for the transcript
+   * (issue #1682). Threaded from the shell, which holds the authenticated
+   * client the blob route needs. Absent where nothing renders attachments.
+   */
+  resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
+  /**
    * Places a first brief into the composer on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
    */
@@ -116,6 +122,7 @@ export function MessageTimeline({
   onReact,
   onDismissCard,
   dismissingCardId,
+  resolveAttachmentUrl,
   onStartBrief,
   onAddPeople,
   now,
@@ -288,6 +295,7 @@ export function MessageTimeline({
                 onReact={onReact}
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
+                resolveAttachmentUrl={resolveAttachmentUrl}
               />
             </div>
           ) : (

@@ -24,6 +24,7 @@ import {
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useApprovalDeadline } from "@/hooks/use-approval-deadline";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { useStableList } from "@/hooks/use-stable-list";
 import {
@@ -130,6 +131,7 @@ export function ApprovalsView({
   chatChannelByThread,
   onDecideStart,
 }: Props) {
+  const approvalTtlHours = useApprovalDeadline(client, company);
   // Issue #373: in-flight state is per approval, not a single module-wide slot.
   //
   // Approving is not a quick write — the host mints a grant and re-dispatches
@@ -494,8 +496,8 @@ export function ApprovalsView({
           ) : (
             <>
               {/* #1427: the count and deadline rule orient every viewport, not
-                only the first one. The opaque background makes the header a
-                real reading boundary over cards that scroll beneath it. */}
+                  only the first one. The opaque background makes the header a
+                  real reading boundary over cards that scroll beneath it. */}
               <div className="sticky top-0 z-10 -mx-4 mb-3 border-b bg-background px-4 py-3">
                 <div className="flex items-baseline justify-between gap-3">
                   <h2 className="text-sm font-medium text-muted-foreground">
@@ -534,12 +536,11 @@ export function ApprovalsView({
                   )}
                 </div>
                 {/* #971: nothing may vanish unannounced. Requests now age out on
-                  their own, so the queue says so once, up front. Each card
-                  carries its own deadline; this is the sentence that stops
-                  that deadline being a surprise. */}
+                    their own, so the queue says so once, up front. Each card
+                    carries its own deadline; this is the sentence that stops
+                    that deadline being a surprise. */}
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Each one has a deadline. Anything still undecided by then is
-                  declined on its own, and the work behind it moves on.
+                  Each one has a deadline. — {approvalTtlHours} {approvalTtlHours === 1 ? "hour" : "hours"}. Anything still undecided by then is declined on its own, and the work behind it moves on.
                 </p>
               </div>
               <div className="flex flex-col gap-3">

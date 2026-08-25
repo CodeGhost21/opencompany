@@ -738,6 +738,39 @@ type Message {
 	cannot disagree about who was mentioned.
 	"""
 	mentions: [MessageMention!]!
+	"""
+	Files attached to this message (issue #1682), each a reference into the
+	company workspace with the store-computed name / mime / size. Empty on a
+	reply, a system pill, and every operator message journaled before the
+	field existed. Same [`MessageView`] field the REST route reads, so the
+	two surfaces carry the same rows (issue #65).
+	"""
+	attachments: [MessageAttachment!]!
+}
+
+"""
+One file attached to a history message (issue #1682). GraphQL mirror of the
+REST `attachments` array, so the two surfaces carry the same rows. Every
+field is store-authored metadata; the bytes are fetched separately through
+the hardened `GET …/workspace/blob/{nodeId}` route.
+"""
+type MessageAttachment {
+	"""
+	The workspace node id the payload is stored under.
+	"""
+	nodeId: ID!
+	"""
+	The stored file's display name.
+	"""
+	name: String!
+	"""
+	The stored payload's media type.
+	"""
+	mime: String!
+	"""
+	The stored payload's exact length in bytes.
+	"""
+	size: Float!
 }
 
 """
@@ -844,6 +877,16 @@ type Policy {
 	"""
 	alwaysApprove: [String!]!
 	"""
+	The spend cap actually in force — console override where one sets it,
+	the committed manifest otherwise. A higher cap is looser; `null` is the
+	strictest setting — no spend is auto-approved, so every spend parks.
+	"""
+	autoApproveUnderUsd: Float
+	"""
+	How long an undecided approval remains actionable, in hours.
+	"""
+	approvalTtlHours: Float!
+	"""
 	The manifest's tier, so a client can see what a reset would restore.
 	"""
 	manifestMode: String!
@@ -851,6 +894,17 @@ type Policy {
 	The manifest's always-ask list, for the same reason.
 	"""
 	manifestAlwaysApprove: [String!]!
+	"""
+	The manifest's spend cap, for the same reason — what a reset would
+	restore (a higher cap is looser; `null` is the strictest setting — no
+	spend is auto-approved, so every spend parks).
+	"""
+	manifestAutoApproveUnderUsd: Float
+	"""
+	The manifest's approval deadline, for the same reason — what a reset
+	would restore.
+	"""
+	manifestApprovalTtlHours: Float
 	"""
 	Whether an operator override is in force.
 	
@@ -1183,6 +1237,14 @@ type TeamMember {
 	range that would overflow GraphQL's `Int`, matching `Approval.atMillis`.
 	"""
 	budgetSetAtMillis: Float
+	"""
+	The face this teammate wears, when somebody has chosen one — a
+	`tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+	(`docs/spec/runtime/avatars.md`). Absent means **nobody has chosen**, and
+	the console draws the mascot it hashes from the id. Mirrors the REST
+	team DTO's `avatar`; both arms of the roster read answer the same way.
+	"""
+	avatar: String
 }
 
 """

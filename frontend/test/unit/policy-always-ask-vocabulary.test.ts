@@ -74,8 +74,12 @@ const KNOWN_TOOLS = [
 const STATUS: PolicyStatus = {
   mode: "auto",
   alwaysApprove: [],
+  autoApproveUnderUsd: null,
+  approvalTtlHours: 24,
   manifestMode: "auto",
   manifestAlwaysApprove: [],
+  manifestAutoApproveUnderUsd: null,
+  manifestApprovalTtlHours: null,
   overridden: false,
   takesEffect: "on the next turn",
   tiers: [

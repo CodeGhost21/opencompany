@@ -27,6 +27,7 @@ use super::{
     connections, finances, inbox, memory_facts, skills, tasks, usage, workflows, workspace,
 };
 use crate::company::runtime::CompanyRuntime;
+use crate::ports::types::Attachment;
 use crate::ports::types::CompanyId;
 use crate::ports::types::TurnStep;
 use crate::server::chat_history::{self, MentionView, MessageView, ReactionView, Viewer};
@@ -343,6 +344,11 @@ impl CompanyGql {
                 spent_today_usd: cap.and_then(|_| spent(id)),
                 budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
                 budget_set_at_millis: attribution.map(|entry| entry.at_millis as f64),
+                // Resolved through the record, like the caps: one override row
+                // answers for a manifest teammate and an overlay one alike, so
+                // both arms of the roster get the chosen face with no second
+                // lookup to keep in step (mirrored from the REST `list_team`).
+                avatar: record.effective_avatar(id),
             }
         };
         // Resolved through the record for the same reason the caps are: a
@@ -482,6 +488,12 @@ pub struct TeamMemberGql {
     /// When that cap was set (epoch millis). `Float` round-trips the full u64
     /// range that would overflow GraphQL's `Int`, matching `Approval.atMillis`.
     pub budget_set_at_millis: Option<f64>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+    /// (`docs/spec/runtime/avatars.md`). Absent means **nobody has chosen**, and
+    /// the console draws the mascot it hashes from the id. Mirrors the REST
+    /// team DTO's `avatar`; both arms of the roster read answer the same way.
+    pub avatar: Option<String>,
 }
 
 /// Internal desk projection shared between `chats` and `chat`.
@@ -608,6 +620,12 @@ pub struct MessageGql {
     /// Same [`MessageView`] field the REST route reads, so the two surfaces
     /// cannot disagree about who was mentioned.
     pub mentions: Vec<MessageMentionGql>,
+    /// Files attached to this message (issue #1682), each a reference into the
+    /// company workspace with the store-computed name / mime / size. Empty on a
+    /// reply, a system pill, and every operator message journaled before the
+    /// field existed. Same [`MessageView`] field the REST route reads, so the
+    /// two surfaces carry the same rows (issue #65).
+    pub attachments: Vec<MessageAttachmentGql>,
 }
 
 /// One mention on a history message. GraphQL mirror of the REST `mentions`
@@ -626,6 +644,36 @@ pub struct MessageMentionGql {
     pub mine: bool,
     /// Whether this mention renders but pings nobody.
     pub quiet: bool,
+}
+
+/// One file attached to a history message (issue #1682). GraphQL mirror of the
+/// REST `attachments` array, so the two surfaces carry the same rows. Every
+/// field is store-authored metadata; the bytes are fetched separately through
+/// the hardened `GET …/workspace/blob/{nodeId}` route.
+#[derive(SimpleObject)]
+#[graphql(name = "MessageAttachment")]
+pub struct MessageAttachmentGql {
+    /// The workspace node id the payload is stored under.
+    pub node_id: ID,
+    /// The stored file's display name.
+    pub name: String,
+    /// The stored payload's media type.
+    pub mime: String,
+    /// The stored payload's exact length in bytes.
+    pub size: f64,
+}
+
+impl From<Attachment> for MessageAttachmentGql {
+    fn from(attachment: Attachment) -> Self {
+        MessageAttachmentGql {
+            node_id: ID(attachment.node_id),
+            name: attachment.name,
+            mime: attachment.mime,
+            // GraphQL has no 64-bit integer; `Float` carries a byte count
+            // exactly up to 2^53, far past any file this route will store.
+            size: attachment.size as f64,
+        }
+    }
 }
 
 impl From<MentionView> for MessageMentionGql {
@@ -730,6 +778,11 @@ impl From<MessageView> for MessageGql {
                 .mentions
                 .into_iter()
                 .map(MessageMentionGql::from)
+                .collect(),
+            attachments: view
+                .attachments
+                .into_iter()
+                .map(MessageAttachmentGql::from)
                 .collect(),
         }
     }
