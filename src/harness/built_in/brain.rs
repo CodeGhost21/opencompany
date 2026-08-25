@@ -3766,15 +3766,15 @@ description = "Runs Acme."
             .expect("cycle runs");
 
         assert_eq!(result.channel_responses.len(), 3);
-        assert!(result.channel_responses[1]
-            .text
-            .contains("iteration limit"));
+        assert!(result.channel_responses[1].text.contains("iteration limit"));
         assert!(result.channel_responses[2].text.contains("spend cap"));
-        assert!(result
-            .channel_responses
-            .iter()
-            .skip(1)
-            .all(|response| response.agent.as_deref() == Some(crate::ports::SYSTEM_AUTHOR)));
+        assert!(
+            result
+                .channel_responses
+                .iter()
+                .skip(1)
+                .all(|response| response.agent.as_deref() == Some(crate::ports::SYSTEM_AUTHOR))
+        );
         let events = log
             .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
             .await
@@ -3818,7 +3818,11 @@ description = "Runs Acme."
 
         assert_eq!(result.channel_responses.len(), 2);
         let notice = &result.channel_responses[1];
-        assert!(notice.text.contains("further gated tool call"), "{}", notice.text);
+        assert!(
+            notice.text.contains("further gated tool call"),
+            "{}",
+            notice.text
+        );
         assert_eq!(notice.agent.as_deref(), Some(crate::ports::SYSTEM_AUTHOR));
         assert_eq!(requests.queued(), 0);
         let events = log
