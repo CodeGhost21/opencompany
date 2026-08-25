@@ -65,7 +65,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 use crate::company::workspace_links::file_with_backlinks;
-use crate::company::workspace_names::kebab_name_or;
+use crate::company::workspace_names::{MAX_NAME_BYTES, kebab_name_or};
 use crate::company::workspace_repair::{
     MergedFolder, RepairPlan, Residual, merge_duplicate_folders as merge_workspace_duplicates,
 };
