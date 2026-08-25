@@ -600,6 +600,19 @@ pub struct CompanyAgent {
     /// The embedded openhuman session. A [`Mutex`] because a `turn` takes
     /// `&mut self` and one agent must serialise its own turns.
     agent: Mutex<Agent>,
+    /// The chat/desk thread this pooled agent's in-memory history is currently
+    /// bound to (issue #1725).
+    ///
+    /// One `Agent` instance is reused for every chat of a `(company, agent_id)`
+    /// pair, so its `history` would otherwise carry one thread's transcript into
+    /// the next — the operator opens a new chat, types "hi", and the agent
+    /// replies against the prior task's transcript and goal. Before each turn
+    /// the pool compares the incoming `chat_id` to this value; on a switch it
+    /// clears the history and re-seeds it from the incoming thread's durable
+    /// transcript, so a thread only ever sees its own conversation. Guarded by
+    /// the same `agent` critical section (turns are already serialised), so the
+    /// pair cannot be read torn. `None` until the first bound turn.
+    bound_chat: Mutex<Option<String>>,
 }
 
 /// The graceful reply returned when a turn yields the transient empty-response
@@ -804,6 +817,11 @@ impl CompanyAgent {
         // live view and the final reply timeline are byte-identical. With `None`
         // (background turns, non-`openhuman` build) this is exactly the prior
         // buffer-only behaviour.
+        // The chat/desk thread this turn answers, captured before `stream` is
+        // moved into the collector task below — used for per-conversation history
+        // isolation (issue #1725). `None` for a background turn that streams
+        // nothing (a dispatched task card carries no operator chat to bind to).
+        let turn_chat_id: Option<String> = stream.as_ref().map(|ctx| ctx.chat_id.clone());
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
@@ -842,6 +860,57 @@ impl CompanyAgent {
 
         let mut agent = self.agent.lock().await;
         agent.set_on_progress(Some(tx));
+
+        // Per-conversation history isolation (issue #1725). One `Agent` is reused
+        // for every chat of this `(company, agent_id)` pair, so its in-memory
+        // `history` would otherwise replay a prior thread's transcript into an
+        // unrelated one — the operator opens a new chat, types "hi", and the
+        // reply is grounded in the previous task. Bind the agent to the incoming
+        // chat thread: on a switch, clear the history and re-seed it from that
+        // thread's own durable transcript (best-effort — a cold thread seeds
+        // nothing and starts fresh). Runs inside the `agent` critical section,
+        // which already serialises this agent's turns, so the bound-chat pair
+        // cannot be read torn.
+        if let Some(incoming) = turn_chat_id.as_deref() {
+            let mut bound = self.bound_chat.lock().await;
+            let switched = bound.as_deref() != Some(incoming);
+            if switched {
+                tracing::debug!(
+                    from = bound.as_deref().unwrap_or("<none>"),
+                    to = incoming,
+                    "[harness] chat switched — resetting agent history and re-seeding from the incoming thread transcript"
+                );
+                agent.clear_history();
+                // Seed the fresh history from the incoming thread's transcript so
+                // the same conversation continues, not a blank slate. No-op when
+                // no transcript exists yet for the thread.
+                let seeded = agent.seed_resume_from_thread_transcript(incoming);
+                tracing::debug!(
+                    chat = incoming,
+                    seeded,
+                    "[harness] thread-transcript re-seed result"
+                );
+                *bound = Some(incoming.to_string());
+            }
+        }
+
+        // Reduced-scope chat turn (issue #1725). When the delegation runner
+        // marked this turn chat-only (an explicit "Just chatting" or a
+        // high-confidence greeting — see `delegation::with_chat_only_hint`), run
+        // it as a cheap conversational reply: no tools to loop on, no pre-turn
+        // memory-agent retrieval, and no prior task's thread goal re-injected. The
+        // override is one-shot (openhuman resets it after the turn), so the next
+        // real turn has its full agentic scope back.
+        if crate::runtime::delegation::is_chat_only_turn() {
+            tracing::debug!(
+                "[harness] chat-only turn — running tool-less, memory-less, goal-less (fast path, #1725)"
+            );
+            agent.set_next_turn_overrides(oh::agent::harness::session::TurnOverrides {
+                suppress_active_goal: true,
+                suppress_tools: true,
+                suppress_memory_agent: true,
+            });
+        }
 
         // Two hooks, both fired by openhuman between tool-loop iterations:
         //
@@ -2566,6 +2635,7 @@ impl HarnessPool {
                 confinement,
                 deps,
             )?),
+            bound_chat: Mutex::new(None),
         };
 
         let stream_ctx = Some(crate::turn_stream::TurnStreamCtx {
@@ -2774,11 +2844,19 @@ impl HarnessPool {
         // Retrieve→inject: pull the top-K prior task outcomes relevant to this
         // message and prepend them as context. On a cold store this yields no
         // hits and the message is passed through unchanged.
-        let hits = deps
-            .context
-            .search(company, message, memory_loop::RETRIEVE_TOP_K)
-            .await?;
-        let augmented = memory_loop::inject(message, &hits);
+        //
+        // Skipped entirely for a chat-only turn (issue #1725): a greeting /
+        // "Just chatting" reply must not be grounded in prior task outcomes, and
+        // pulling them is the exact context leak the fast path exists to stop.
+        let augmented = if crate::runtime::delegation::is_chat_only_turn() {
+            message.to_string()
+        } else {
+            let hits = deps
+                .context
+                .search(company, message, memory_loop::RETRIEVE_TOP_K)
+                .await?;
+            memory_loop::inject(message, &hits)
+        };
 
         // Run the turn and record its real cost. `CompanyAgent::run` reads each
         // attempt's token/cost totals from openhuman's public `last_turn_usage()`
@@ -3560,6 +3638,7 @@ pub(crate) fn build_roster(
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
             agent: Mutex::new(agent),
+            bound_chat: Mutex::new(None),
         }));
     }
 
@@ -3630,6 +3709,7 @@ pub(crate) fn build_roster(
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
             agent: Mutex::new(agent),
+            bound_chat: Mutex::new(None),
         }));
     }
 

@@ -317,6 +317,7 @@ async fn company_agent(
         role: "Chief Executive".to_string(),
         budget_usd_daily,
         agent: tokio::sync::Mutex::new(agent),
+        bound_chat: tokio::sync::Mutex::new(None),
     }
 }
 
