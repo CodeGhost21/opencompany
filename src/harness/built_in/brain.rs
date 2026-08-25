@@ -3732,6 +3732,105 @@ description = "Runs Acme."
     }
 
     #[tokio::test]
+    async fn schedule_fired_journals_halt_notices() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let outcome = crate::harness::built_in::TurnOutcome {
+            reply: "checkpoint".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: true,
+            halted_for_spend: Some(crate::harness::SpendHalt {
+                agent: "ceo".to_string(),
+                spent_usd: 1.25,
+                cap_usd: 1.0,
+            }),
+        };
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome,
+                approval_requests: None,
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 3);
+        assert!(result.channel_responses[1]
+            .text
+            .contains("iteration limit"));
+        assert!(result.channel_responses[2].text.contains("spend cap"));
+        assert!(result
+            .channel_responses
+            .iter()
+            .skip(1)
+            .all(|response| response.agent.as_deref() == Some(crate::ports::SYSTEM_AUTHOR)));
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let replies: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, CompanyEvent::AgentReply { .. }))
+            .collect();
+        assert_eq!(replies.len(), 3, "all scheduled notices are durable");
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_journals_approval_overflow_notice() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let brain = brain_with_queue_and_events(dir.path(), requests.clone(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome: crate::harness::built_in::TurnOutcome {
+                    reply: "checkpoint".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: false,
+                    halted_for_spend: None,
+                },
+                approval_requests: Some(requests),
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 2);
+        let notice = &result.channel_responses[1];
+        assert!(notice.text.contains("further gated tool call"), "{}", notice.text);
+        assert_eq!(notice.agent.as_deref(), Some(crate::ports::SYSTEM_AUTHOR));
+        assert_eq!(requests.queued(), 0);
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        assert!(events.iter().any(|event| {
+            matches!(&event.event, CompanyEvent::AgentReply { text, .. } if text.contains("further gated tool call"))
+        }));
+    }
+
+    #[tokio::test]
     async fn no_events_still_acknowledges() {
         let dir = tempfile::tempdir().unwrap();
         let brain = brain_over_mock(dir.path());
