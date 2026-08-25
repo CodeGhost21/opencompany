@@ -482,6 +482,18 @@ pub struct RuntimeBuilder {
     /// overlay's ports must replace the outgoing engine's, never be outranked
     /// by them.
     memory_overlay_applied: bool,
+    /// The memory-engine selection this build's harness roster is bound to,
+    /// for `HarnessPool` invalidation on a live swap (issue #1113).
+    ///
+    /// `Some(fp)` when [`with_memory_overlay`](Self::with_memory_overlay)
+    /// bound a provider-backed engine — a fingerprint of its memory-family
+    /// ports — and `None` for the base backend: the two selections a company
+    /// can be rebuilt between. `build` compares this against the inherited
+    /// pool's recorded selection and drops the cached roster when they differ,
+    /// so a swap stops serving the deselected engine on the next turn instead
+    /// of at the next restart. Feature-gated with the harness pool it talks to.
+    #[cfg(feature = "openhuman")]
+    memory_engine: Option<u64>,
     tools: Option<Arc<dyn ToolProvider>>,
     channels: Option<Vec<Arc<dyn ChannelAdapter>>>,
     economy: Option<Arc<dyn AgentEconomy>>,
