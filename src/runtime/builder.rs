@@ -852,7 +852,8 @@ impl RuntimeBuilder {
     /// while an engine bound through the `MemoryProvider` contract covers all
     /// three ports. Taking whichever the overlay offers is what keeps one
     /// company's memory on one engine instead of split across two (issue #914).
-    pub fn with_memory_overlay(mut self, overlay: &crate::store::MemoryOverlay) -> Self {        // The engine selection is explicit here: on a live rebuild the overlay's
+    pub fn with_memory_overlay(mut self, overlay: &crate::store::MemoryOverlay) -> Self {
+        // The engine selection is explicit here: on a live rebuild the overlay's
         // ports must replace the outgoing engine's, never inherit them (see
         // `memory_overlay_applied`).
         self.memory_overlay_applied = true;
