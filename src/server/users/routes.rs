@@ -345,13 +345,10 @@ pub(crate) async fn bootstrap_admins(
 ///
 /// Split out so the invite listing can tell the two sources apart without
 /// reading the manifest twice.
-fn with_platform_admin(config: &AppConfig, mut admins: Vec<String>) -> Vec<String> {
-    if let Some(email) = config.bootstrap_admin()
-        && !admins.contains(&email)
-    {
-        admins.push(email);
-    }
-    admins
+fn with_platform_admin(config: &AppConfig, admins: Vec<String>) -> Vec<String> {
+    // Delegated so the host-side `issue-password` command and this route cannot
+    // come to different answers about who a company already admits (#1718).
+    super::bootstrap::standing_admins(&admins, config.bootstrap_admin().as_deref())
 }
 
 /// Whether `email` may hold an account in this company, and as what role.

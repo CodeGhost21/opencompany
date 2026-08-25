@@ -103,6 +103,43 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Issue a sign-in password for a company, from the host (#1718).
+    ///
+    /// The way in when a deployment cannot mail a sign-in link: the magic-link
+    /// code is minted and stored hashed, every admin route needs an admin that
+    /// does not exist yet, and the console's own advice — "an admin can issue
+    /// you one" — has nobody to ask on a first boot.
+    ///
+    /// Only for an address the company ALREADY admits: named in the manifest's
+    /// `[users] admins`, or injected as the deployment's bootstrap admin
+    /// (`OPENCOMPANY_ADMIN_EMAIL`). It makes a standing grant usable without
+    /// mail; it does not create one.
+    IssuePassword {
+        /// The company id, as `serve` registers it. In shared-database mode
+        /// this is the namespaced `<tenant>--<id>` form.
+        #[arg(long)]
+        company: String,
+        /// The address to issue for.
+        #[arg(long)]
+        email: String,
+        /// The password. Omit to read it from stdin, which keeps it out of
+        /// shell history and out of `ps` — argv is world-readable for the
+        /// lifetime of the exec, and this is a credential.
+        #[arg(long)]
+        password: Option<String>,
+        /// Do not require the holder to replace this password on first use.
+        ///
+        /// The default requires a change, matching an admin-issued temporary
+        /// password: whoever runs this knows the value, and usually conveys it
+        /// over a channel they do not control. Pass this when the operator and
+        /// the holder are the same person.
+        #[arg(long)]
+        no_change_required: bool,
+        /// Data root, for backends that resolve one. Defaults the same way
+        /// `serve` does.
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
     /// Report companies whose durable owner row is missing, and owner rows
     /// naming no company (issue #1077).
     ///
@@ -1055,6 +1092,190 @@ async fn run_export(
         "exported bundle for `{id}` to {} (build with --features export to produce a .tar)",
         dest.display()
     );
+    Ok(())
+}
+
+/// `opencompany issue-password` — the host-side way into a company whose
+/// deployment cannot mail a sign-in link (issue #1718).
+///
+/// Opens the configured storage directly rather than going through a running
+/// server, because the authority here is possession of the process and its
+/// data — which an operator has and an HTTP caller never does.
+async fn run_issue_password(
+    company: String,
+    email: String,
+    password: Option<String>,
+    require_change: bool,
+    home: Option<PathBuf>,
+) -> Result<()> {
+    use opencompany::ports::CompanyStore;
+    use opencompany::server::users::bootstrap;
+
+    // stdin when not passed, so the value stays out of shell history and out of
+    // `ps`. Deliberately not a TTY prompt: a pipe is the case that matters
+    // here — from a password manager, a secret file, or a provisioning script —
+    // and reading stdin serves an interactive operator too.
+    let password = match password {
+        Some(value) => value,
+        None => {
+            use std::io::Read as _;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                opencompany::error::OpenCompanyError::Config(format!(
+                    "could not read a password from stdin: {e}"
+                ))
+            })?;
+            // Only the trailing newline goes: a password may legitimately end
+            // in a space, and trimming both ends would silently change it.
+            buf.trim_end_matches(['\n', '\r']).to_string()
+        }
+    };
+
+    let home = resolve_home_migrated(home)?;
+    let settings = opencompany::store::StorageSettings::from_env()?;
+    // Serialize filesystem mutations with serve/import/export — but only for
+    // the filesystem store. `serve` holds this same root lock for its whole
+    // lifetime even on a MongoDB-backed tenant, so contending with it here
+    // would refuse this command in exactly the environment it exists for: a
+    // live hosted container that cannot mail a sign-in link. Those mutations
+    // go through the storage handles and never touch `home`, so the lock has
+    // nothing to protect there. The guard must outlive storage opening and
+    // the complete password operation.
+    let _home_lock = match settings.kind {
+        opencompany::store::StorageKind::Fs => Some(opencompany::store::lock::acquire(&home)?),
+        _ => None,
+    };
+    let config_root = opencompany::app::config::data_dir_from_env();
+    let config_file = ConfigFile::load(&config_root)?;
+    let fs_ops = Arc::new(opencompany::store::FsOps::new(home.clone()));
+    let handles = opencompany::store::open_storage(&settings, &home).await?;
+    let users: Arc<dyn opencompany::ports::users::UserStore> = handles
+        .as_ref()
+        .map(|handles| handles.users.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+    let sessions: Arc<dyn opencompany::ports::sessions::SessionStore> = handles
+        .as_ref()
+        .map(|handles| handles.sessions.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+    let login_codes: Arc<dyn opencompany::ports::login_codes::LoginCodeStore> = handles
+        .as_ref()
+        .map(|handles| handles.login_codes.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+
+    // In shared-single-DB mode the `--company` argument is also a tenant
+    // namespace carrier. Try the tenant-prefixed candidate first, because a
+    // bare company id may itself contain `--`; then accept an already-expanded
+    // id only when it carries this tenant's prefix. A different prefix is
+    // refused rather than allowing a caller to select another tenant.
+    let (id, record) = match std::env::var("OPENCOMPANY_TENANT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        None => {
+            let id = CompanyId::new(company);
+            let record = if let Some(handles) = handles.as_ref() {
+                handles.company.load(&id).await?
+            } else {
+                opencompany::store::FsCompanyStore::new(home.clone())
+                    .load(&id)
+                    .await?
+            };
+            (id, record)
+        }
+        Some(tenant) => {
+            if let Err(reason) = opencompany::app::validate_tenant_namespace(&tenant) {
+                return Err(opencompany::error::OpenCompanyError::Config(reason));
+            }
+            let prefix = format!("{tenant}--");
+            let (id, record) = if let Some(bare) = company.strip_prefix(&prefix) {
+                if bare.is_empty() {
+                    return Err(opencompany::error::OpenCompanyError::Config(format!(
+                        "company id `{company}` is only the `{tenant}--` namespace prefix; \
+                         it names no company"
+                    )));
+                }
+                let id = CompanyId::new(company);
+                let record = if let Some(handles) = handles.as_ref() {
+                    handles.company.load(&id).await?
+                } else {
+                    opencompany::store::FsCompanyStore::new(home.clone())
+                        .load(&id)
+                        .await?
+                };
+                (id, record)
+            } else {
+                let bare_id = CompanyId::new(format!("{prefix}{company}"));
+                let bare_record = if let Some(handles) = handles.as_ref() {
+                    handles.company.load(&bare_id).await?
+                } else {
+                    opencompany::store::FsCompanyStore::new(home.clone())
+                        .load(&bare_id)
+                        .await?
+                };
+                if let Some(record) = bare_record {
+                    (bare_id, Some(record))
+                } else if company.contains("--") {
+                    return Err(opencompany::error::OpenCompanyError::Config(format!(
+                        "company id `{company}` is namespaced for another tenant; this deployment is \
+                         `{tenant}`, whose ids take the `<tenant>--<name>` form"
+                    )));
+                } else {
+                    (bare_id, None)
+                }
+            };
+            (id, record)
+        }
+    };
+    let record = record.ok_or_else(|| {
+        opencompany::error::OpenCompanyError::Config(format!(
+            "no company `{}` in this storage. Check the id — in shared-database mode it is the \
+             namespaced `<tenant>--<id>` form.",
+            id.as_ref()
+        ))
+    })?;
+    let manifest_admins: Vec<String> = record.manifest.users.admins.clone();
+    let auth_mode = {
+        use std::str::FromStr as _;
+        let raw = std::env::var("OPENCOMPANY_AUTH_MODE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| config_file.as_ref().and_then(|c| c.auth_mode.clone()))
+            .unwrap_or_else(|| record.manifest.users.mode.clone());
+        opencompany::app::config::AuthMode::from_str(&raw)?
+    };
+    if !auth_mode.uses_email() {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "issue-password requires effective email auth mode, but the host is configured for `{auth_mode}`"
+        )));
+    }
+
+    // The same variable `serve` reads for the deployment's standing admin, read
+    // the same way. `standing_admins` normalizes and drops a blank, so this is
+    // the value `AppConfig::bootstrap_admin` would produce.
+    let bootstrap_admin = std::env::var("OPENCOMPANY_ADMIN_EMAIL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let issued = bootstrap::issue_password(
+        bootstrap::PasswordIssueContext {
+            users: &users,
+            sessions: &sessions,
+            login_codes: &login_codes,
+            company: &id,
+            manifest_admins: &manifest_admins,
+            bootstrap_admin: bootstrap_admin.as_deref(),
+        },
+        &email,
+        &password,
+        require_change,
+    )
+    .await?;
+
+    let verb = if issued.created { "created" } else { "updated" };
+    println!("{verb} {} in `{}`", issued.email, id.as_ref());
+    if issued.must_change_password {
+        println!("they will be asked to replace this password on first sign-in");
+    }
     Ok(())
 }
 
@@ -2127,6 +2348,13 @@ async fn async_main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::IssuePassword {
+            company,
+            email,
+            password,
+            no_change_required,
+            home,
+        }) => run_issue_password(company, email, password, !no_change_required, home).await,
         Some(Command::Orphans { home, json }) => run_orphans(home, json).await,
         Some(Command::Export {
             company,
