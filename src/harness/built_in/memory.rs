@@ -96,6 +96,14 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
     let mut rest = text;
     while let Some((pos, marker)) = next_marker(rest) {
         out.push_str(&rest[..pos + marker.len()]);
+        // The HTTP scheme marker is matched case-insensitively, but its casing
+        // changes how aggressive the redaction may be: the capital "Bearer "
+        // form is the unambiguous auth-header spelling, so a plain digit-free
+        // word after it like `secret` is still a credential; the lower-case
+        // form is also ordinary English prose ("ring bearer", "standard bearer
+        // candidate"), so a plain word there is only redacted once it is long
+        // enough that prose is implausible.
+        let aggressive = marker == SECRET_URL_MARKER || rest.as_bytes()[pos].is_ascii_uppercase();
         let tail = &rest[pos + marker.len()..];
         // The MCP config trims the value after the marker, so extra whitespace
         // (`Bearer   sk-...`) is legal. Keep it in the output but skip it here —
