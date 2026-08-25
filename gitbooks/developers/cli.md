@@ -70,7 +70,7 @@ a password may legitimately end in a space.
 
 | Flag | Purpose |
 | --- | --- |
-| `--company <ID>` | The company id as `serve` registers it. In shared-database mode this is the namespaced `<tenant>--<id>` form. |
+| `--company <ID>` | The company id as `serve` registers it. In shared-database mode a bare id is namespaced to the current `OPENCOMPANY_TENANT_ID`; the namespaced `<tenant>--<id>` form is also accepted, and an id carrying a different tenant's prefix is refused. |
 | `--email <ADDRESS>` | The address to issue for. It must already be a standing admin — a manifest `[users].admins` entry or the injected `OPENCOMPANY_ADMIN_EMAIL` — because the command makes a grant usable; it does not create one. |
 | `--password <VALUE>` | The password. Omit to read it from stdin. |
 | `--no-change-required` | Do not require a replacement on first sign-in. The default requires one, matching an admin-issued temporary password. |
