@@ -1987,6 +1987,12 @@ export function WorkflowsView({
     // lifetime; leaving one behind is how "this console watched that run" came
     // to outlive the console's view of it.
     liveRanRef.current = new Set();
+    // Issue #1704: and the copilot-fix state — both key off the global run `seq`,
+    // so a leftover fixing spinner or "could not fix" message would leak onto an
+    // unrelated workflow's run row that happens to share the same seq after a
+    // switch. Same category of stale-by-shared-id bug as the refs above.
+    setFixingRunSeq(null);
+    setFixReason(null);
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.
