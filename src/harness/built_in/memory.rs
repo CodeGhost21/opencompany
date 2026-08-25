@@ -416,7 +416,10 @@ mod tests {
         // text like "Bearer or not" is not mangled.
         assert_eq!(redact_secrets("Bearer or not"), "Bearer or not");
         // Dots do not turn a short prose word into a secret.
-        assert_eq!(redact_secrets("Bearer token. Please"), "Bearer token. Please");
+        assert_eq!(
+            redact_secrets("Bearer token. Please"),
+            "Bearer token. Please"
+        );
     }
 
     /// Minimal in-memory ContextStore for adapter isolation tests.
