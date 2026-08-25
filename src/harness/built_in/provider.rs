@@ -80,6 +80,39 @@ const OPENHUMAN_USAGE_META_KEY: &str = "openhuman_usage_meta";
 pub trait HarnessModel: ChatModel<()> {
     /// Stable provider slug attributed to usage samples (e.g. `managed`, `byok`).
     fn telemetry_provider_id(&self) -> String;
+
+    /// The model the most recent turn resolved to, folded onto the closed
+    /// [`ModelSlug`] vocabulary (issue #1749) — the model half of the same
+    /// attribution [`telemetry_provider_id`](Self::telemetry_provider_id)
+    /// answers the provider half of.
+    ///
+    /// A [`ModelSlug`] rather than a `String` because the model name on the
+    /// wire is operator-authored free text on any BYOK or `openai_compatible`
+    /// deployment; see the [`model`](crate::metering::model) module docs. The
+    /// raw name is classified **inside the implementation**, at the same place
+    /// it is put on the wire, and never leaves it.
+    ///
+    /// `None` before the first turn (nothing has been resolved yet) and for an
+    /// implementation with no model identity to give — which is why this has a
+    /// default: a test double that reports a provider has nothing useful to say
+    /// here, and `None` is the honest answer rather than a fabricated one.
+    ///
+    /// ## Read live, and therefore approximate under concurrency
+    ///
+    /// Read *after* the turn, exactly as `telemetry_provider_id` is, so a
+    /// console BYOK or model-table switch re-attributes the next turn without a
+    /// rebuild. The cost of that shape is the same one the provider slug already
+    /// pays and is worth stating plainly: one company's agents share one
+    /// provider, so when two agents on **different workload tiers** have turns
+    /// in flight at once, the sample recorded second can read the slug the first
+    /// one resolved. It mis-sorts tokens between two of that company's own
+    /// slugs; it never crosses a company boundary, never changes a total, and
+    /// never invents a model the company did not run. Making it exact needs the
+    /// turn's own requested tier carried from the roster to the cost hook, which
+    /// is a change to the agent record rather than to this seam.
+    fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+        None
+    }
 }
 
 /// Resolve a [`HostedProvider`] configuration (and its default model) from the
@@ -865,6 +898,14 @@ pub struct HostedProvider {
     client: reqwest::Client,
     product_identity: bool,
     telemetry_provider: &'static str,
+    /// The classified model of the most recent turn (issue #1749), so the
+    /// synchronous [`telemetry_model`](HarnessModel::telemetry_model) reports
+    /// what the last turn actually asked for.
+    ///
+    /// Behind an [`Arc`] because this type derives `Clone` and a clone is the
+    /// same provider — a cloned handle must see the same last-turn model, not a
+    /// private copy that never updates.
+    telemetry_model: Arc<RwLock<Option<crate::metering::ModelSlug>>>,
 }
 
 impl HostedProvider {
@@ -875,6 +916,7 @@ impl HostedProvider {
             client: reqwest::Client::new(),
             product_identity: true,
             telemetry_provider: "subscription",
+            telemetry_model: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -887,6 +929,7 @@ impl HostedProvider {
             client: reqwest::Client::new(),
             product_identity: false,
             telemetry_provider: inference::provider_slug(provider),
+            telemetry_model: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -908,6 +951,9 @@ impl ChatModel<()> for HostedProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         let messages = wire_messages(&request.messages);
         let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
+        // Classified here, where the model is chosen, so the raw string reaches
+        // the wire and the cost hook reaches only a vocabulary member (#1749).
+        *self.telemetry_model.write().unwrap() = Some(crate::metering::ModelSlug::classify(model));
         let temperature = request.temperature.unwrap_or(0.0);
 
         let mut body = serde_json::json!({
@@ -978,6 +1024,10 @@ impl HarnessModel for HostedProvider {
         // constructor carries the selected provider's slug for that one
         // unmetered roster-design call.
         self.telemetry_provider.to_string()
+    }
+
+    fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+        *self.telemetry_model.read().unwrap()
     }
 }
 
@@ -1139,6 +1189,13 @@ pub struct TenantProvider {
     /// the config the last turn actually used (cost attribution follows the
     /// switch).
     slug: RwLock<&'static str>,
+    /// The classified model of the most recently issued turn (issue #1749), so
+    /// the synchronous [`telemetry_model`](HarnessModel::telemetry_model)
+    /// reports the model the last turn actually resolved to — which on this
+    /// path means *after* the tenant `[inference].models` table has been
+    /// applied, so a BYOK tenant's table switch re-attributes the next turn for
+    /// the same reason `slug` does.
+    model: RwLock<Option<crate::metering::ModelSlug>>,
     /// Which harness's config and credential slots this provider resolves
     /// against. Two `built_in` harnesses on one company each get their own
     /// provider, differing only in this — which is what lets one ride the
@@ -1164,6 +1221,8 @@ impl TenantProvider {
             // Replaced by the resolved slug on the first turn; until then the
             // company is on the default it booted with.
             slug: RwLock::new("subscription"),
+            // No turn has been issued yet, so there is no model to name.
+            model: RwLock::new(None),
             scope: inference::HarnessScope::default(),
         }
     }
@@ -1233,6 +1292,13 @@ impl ChatModel<()> for TenantProvider {
         )
         .await
         .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
+        // Classified from `plan.model` — the exact string that goes on the wire,
+        // *after* the tenant `[inference].models` table has been applied — so
+        // the sample names what actually ran rather than the tier that was
+        // asked for. `plan.model` is operator-authored text on a BYOK or
+        // `openai_compatible` tenant and stops here: the only model identity
+        // that leaves this method is the vocabulary member (issue #1749).
+        *self.model.write().unwrap() = Some(crate::metering::ModelSlug::classify(&plan.model));
         let payload = send_plan(&self.client, &plan, decl.credential())
             .await
             .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
@@ -1243,6 +1309,10 @@ impl ChatModel<()> for TenantProvider {
 impl HarnessModel for TenantProvider {
     fn telemetry_provider_id(&self) -> String {
         (*self.slug.read().unwrap()).to_string()
+    }
+
+    fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+        *self.model.read().unwrap()
     }
 }
 
@@ -2435,6 +2505,91 @@ mod tests {
             second.text(),
             "reply-from-B",
             "the switch took effect next turn"
+        );
+    }
+
+    /// Issue #1749: the model half of the same live-attribution contract, and
+    /// the BYOK containment it exists for.
+    ///
+    /// A tenant `[inference].models` entry is **operator free text** — this one
+    /// is named after a customer, which is exactly the shape of the leak. The
+    /// provider must report a vocabulary member for it, and the raw name must
+    /// not appear anywhere in what the meter would persist.
+    #[tokio::test]
+    async fn a_tenant_model_is_reported_as_a_slug_and_never_as_the_operators_name() {
+        let url = spawn_stub("ok").await;
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url.clone());
+        let provider = TenantProvider::new(company.clone(), secrets.clone(), manifest, None);
+
+        assert_eq!(
+            provider.telemetry_model(),
+            None,
+            "no turn has run, so there is no model to name"
+        );
+
+        let save = |model: &str| {
+            let mut models = BTreeMap::new();
+            models.insert("chat-v1".to_string(), model.to_string());
+            let secrets = Arc::clone(&secrets);
+            let company = company.clone();
+            let url = url.clone();
+            async move {
+                inference::save_runtime_config(
+                    &company,
+                    secrets.as_ref(),
+                    &inference::RuntimeInference {
+                        provider: "openai_compatible".into(),
+                        base_url: Some(url),
+                        models,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        };
+
+        // A self-hosted model named after the customer it was built for.
+        save("northwind-legal-review-v2").await;
+        provider
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect("turn");
+        assert_eq!(
+            provider.telemetry_model(),
+            Some(crate::metering::ModelSlug::OTHER),
+            "a model this build cannot name reports the fallback"
+        );
+        let sample = crate::metering::inference_sample(
+            &crate::ports::types::TokenUsage {
+                input: 10,
+                output: 5,
+                cached_input: 0,
+                cost_usd: 0.01,
+            },
+            "ceo",
+            &provider.telemetry_provider_id(),
+            provider.telemetry_model(),
+        )
+        .expect("a real turn meters");
+        let persisted = serde_json::to_string(&sample).expect("serialize");
+        assert!(
+            !persisted.to_ascii_lowercase().contains("northwind"),
+            "the operator's model name reached what the meter persists: {persisted}"
+        );
+
+        // …and a model the vocabulary does know, through the same path.
+        save("anthropic/claude-sonnet-4-6").await;
+        provider
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect("turn");
+        assert_eq!(
+            provider.telemetry_model().map(|m| m.as_str()),
+            Some("anthropic-sonnet"),
+            "a table switch re-attributes the next turn, exactly as the provider slug does"
         );
     }
 

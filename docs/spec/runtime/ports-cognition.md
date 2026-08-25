@@ -26,6 +26,13 @@ pub struct Cognition {
     pub path: &'static str,
     /// Provider slug the path's cycle usage is metered under.
     pub provider: &'static str,
+    /// Which model the path's cycle usage is metered against, folded onto the
+    /// closed `ModelSlug` vocabulary (issue #1749). `None` when the path cannot
+    /// name one: an injected brain, `echo` (runs no model), `sidecar` (the
+    /// host's `InferenceClient` picks it), and `hosted` (Medulla picks it
+    /// upstream and the `orch:usage` frame does not carry it). The `harness`
+    /// path names its model **per turn** instead, off the live provider.
+    pub model: Option<ModelSlug>,
     pub metering: UsageMetering,
 }
 

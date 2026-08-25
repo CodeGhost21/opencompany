@@ -834,6 +834,7 @@ impl<'a> CycleRunner<'a> {
             usage,
             crate::metering::UNATTRIBUTED_AGENT,
             cognition.provider,
+            cognition.model,
             company,
             self.rt.store.as_ref(),
             self.rt.usage().as_ref(),
@@ -5139,6 +5140,7 @@ mod test {
             crate::ports::Cognition {
                 path: "test",
                 provider: "medulla",
+                model: None,
                 metering: self.metering,
             }
         }

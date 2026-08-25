@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::metering::ModelSlug;
 use crate::ports::types::{
     ApprovalId, ContextOp, ContextOpResult, CycleRequest, CycleResult, Effect, EffectDisposition,
     ToolCall, ToolResult,
@@ -60,6 +61,22 @@ pub struct Cognition {
     pub path: &'static str,
     /// The provider slug this path's cycle usage is metered under.
     pub provider: &'static str,
+    /// Which model this path's cycle usage is metered against, folded onto the
+    /// closed [`ModelSlug`] vocabulary (issue #1749).
+    ///
+    /// `None` when the path cannot name one — an injected brain, the offline
+    /// echo brain (which runs no model), the sidecar (whose model is the host
+    /// [`InferenceClient`](crate::ports::InferenceClient)'s business), and the
+    /// hosted Medulla path (where the model is chosen upstream and never
+    /// reaches this process). Reporting a guess would be worse than reporting
+    /// nothing: an operator reading a model name off the Usage view would have
+    /// no way to tell one that was observed from one that was assumed.
+    ///
+    /// The `openhuman` harness names its model per **turn** rather than here —
+    /// it meters [`UsageMetering::PerTurn`] and reports zero cycle usage, so
+    /// this field would never reach a sample on that path. See
+    /// `harness::built_in::provider::HarnessModel::telemetry_model`.
+    pub model: Option<ModelSlug>,
     /// Where this path's usage is metered.
     pub metering: UsageMetering,
 }
@@ -72,6 +89,7 @@ impl Default for Cognition {
             // name the provider that served it.
             path: "custom",
             provider: crate::metering::UNKNOWN_PROVIDER,
+            model: None,
             metering: UsageMetering::PerCycle,
         }
     }

@@ -2641,11 +2641,13 @@ impl HarnessPool {
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
+        let model_slug = deps.provider.telemetry_model();
         for turn_cost in &turn_costs {
             record_turn_cost(
                 turn_cost,
                 confine::CONFINED_AGENT_ID,
                 &provider_slug,
+                model_slug,
                 company,
                 deps.store.as_ref(),
                 deps.meter.as_deref(),
@@ -2898,11 +2900,16 @@ impl HarnessPool {
         // a console BYOK switch changes the slug between turns, so read it live
         // rather than trusting the static `deps.provider_slug` baked at build.
         let provider_slug = deps.provider.telemetry_provider_id();
+        // And to the model it actually resolved to, read live for the same
+        // reason and folded onto the closed vocabulary at the provider so no
+        // operator-authored model name reaches the meter (issue #1749).
+        let model_slug = deps.provider.telemetry_model();
         for turn_cost in &turn_costs {
             record_turn_cost(
                 turn_cost,
                 agent_id,
                 &provider_slug,
+                model_slug,
                 company,
                 deps.store.as_ref(),
                 deps.meter.as_deref(),
@@ -6921,6 +6928,7 @@ description = "Sets direction."
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -7094,6 +7102,7 @@ description = "Sets direction."
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -7184,6 +7193,7 @@ description = "Sets direction."
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -7290,6 +7300,7 @@ description = "Builds the product."
             cost_usd: usd,
             kind: crate::ports::SampleKind::Inference,
             run_id: None,
+            model: None,
         }
     }
 
