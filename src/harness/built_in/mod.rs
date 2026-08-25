@@ -1244,9 +1244,11 @@ pub struct HarnessPool {
     /// the cycle's pinned roster with a looser one before `run_inner` clones its
     /// agent, and running one turn with the harness gate auto-approving what the
     /// native gate still parks (issue #1455). A live `ensure` therefore rebuilds
-    /// the policy axis against the pin while one is active, and the pin is only
-    /// refreshed at the next cycle — the same boundary the native gate moves on,
-    /// so the two cannot drift.
+    /// the policy axis against the pin while one is active. The pin is released
+    /// when the cycle ends ([`Self::end_cycle`]), so it covers exactly the
+    /// cycle's own turns: a standalone workflow turn *between* cycles rebuilds
+    /// against the live store overlay, not a snapshot that would otherwise stay
+    /// stale until an unrelated cycle refreshed it.
     pinned_policies: RwLock<HashMap<CompanyId, Policy>>,
     /// Per-company fingerprint of the desk scoping a roster's grants resolve
     /// through — which desks exist, who sits on them, and each one's tool
