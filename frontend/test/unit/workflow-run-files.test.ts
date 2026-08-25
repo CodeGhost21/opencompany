@@ -455,14 +455,21 @@ describe("run row — files associated (issue #1684)", () => {
     expect(deferred.length).toBe(1);
 
     // The current-scope request fails: the error line appears and the latch
-    // clears so the next open retries.
+    // clears so the next open retries. The rejection travels through the
+    // async client wrapper and the `.then` pass-through before the `.catch`
+    // runs — several microtasks deeper than a resolve — so wait for the
+    // render rather than assert synchronously off the act flush, which
+    // intermittently lands the error element one commit too late (the flake
+    // that red the advisory `Console (current Node)` lane).
     await act(async () => {
       deferred[0].reject(new Error("boom"));
     });
-    expect(
-      container.querySelector('[data-testid="workflow-run-files-error"]')
-        ?.textContent,
-    ).toContain("Reopen to try again");
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="workflow-run-files-error"]')
+          ?.textContent,
+      ).toContain("Reopen to try again");
+    });
 
     // Collapse, then reopen: a second request fires and its success renders
     // the files, proving the retry latch reset.
