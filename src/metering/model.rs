@@ -12,10 +12,12 @@
 //! Two consequences follow, and they are the whole reason this type exists
 //! rather than a `model: String` field on [`UsageSample`]:
 //!
-//! * **Telemetry.** `docs/spec/runtime/analytics.md` requires every textual
-//!   property to be a `&'static str` written in this repository, precisely so a
-//!   runtime string cannot become a payload. A `String` on the sample would be
-//!   one `sample.model.clone()` away from an outbound body.
+//! * **Telemetry.** The product-analytics design (#1739, landing in #1751 as
+//!   `docs/spec/runtime/analytics.md`) requires every textual property to be a
+//!   `&'static str` written in this repository, precisely so a runtime string
+//!   cannot become a payload. A `String` on the sample would be one
+//!   `sample.model.clone()` away from an outbound body, and the metered event
+//!   that PR adds reads exactly this sample.
 //! * **Cardinality.** Samples are retained for
 //!   [`RETENTION_DAYS`](crate::ports::usage::RETENTION_DAYS) — 90 days on every
 //!   backend. A free-text column on every sample is unbounded-cardinality data
@@ -81,10 +83,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///
 /// The inner value is a private `&'static str`, so a `ModelSlug` **cannot** be
 /// constructed from runtime data except through [`ModelSlug::classify`], which
-/// only ever returns a compiled-in literal. That is the same construction
-/// argument `analytics::PropValue::Word` makes, and it is what makes "the raw
-/// model name never leaves the harness" a property of the type rather than a
-/// convention.
+/// only ever returns a compiled-in literal. That is what makes "the raw model
+/// name never leaves the harness" a property of the type rather than a
+/// convention a call site has to keep remembering — and it is the same
+/// construction argument the analytics payload vocabulary in #1751 makes, so
+/// [`as_str`](ModelSlug::as_str) drops straight into a `&'static str` property
+/// with no second classifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModelSlug(&'static str);
 

@@ -437,7 +437,8 @@ is a content leak, and as a stored column it is unbounded-cardinality data kept
 for 90 days. The raw name is classified inside the harness, at the same place it
 is put on the wire (`HarnessModel::telemetry_model`), and never leaves it; the
 vocabulary and the rule for extending it are documented in
-`src/metering/model.rs`. `ModelSlug`'s `Deserialize` re-classifies, so a stored
+`src/metering/model.rs`; `ModelSlug::as_str` returns a `&'static str`, so a
+telemetry payload can carry it directly without a second classifier. `ModelSlug`'s `Deserialize` re-classifies, so a stored
 row cannot smuggle raw text back into the process either. `None` means no model
 to name — an `OauthCall`/`SearchCall`, a path that cannot identify one, or a
 sample written before the field existed; the field is `#[serde(default,
