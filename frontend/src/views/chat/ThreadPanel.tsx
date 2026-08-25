@@ -38,6 +38,22 @@ interface Props {
    */
   channelMemberIds?: string[];
   /**
+   * Your own avatar reference, so your lines in this thread wear your face
+   * (issue #1729).
+   *
+   * `senderOf` seeds a face off the sender's *name* when it is given none, and
+   * a "you" line's name is the literal string "You" — so without this the panel
+   * drew whatever mascot `avatarFor("You")` hashes to, which is the agent's
+   * green one. Both participants then had the same face and a thread could not
+   * be read at all. The main timeline has always passed it (`buildTimeline`);
+   * only this panel resolved its senders without it.
+   *
+   * Absent until `loadViewer` has resolved who you are, exactly as in the main
+   * timeline — the tile falls back to the name-seeded mascot for that first
+   * render rather than showing nothing.
+   */
+  youAvatar?: string;
+  /**
    * Resolves an attachment's bytes to an object URL for preview/download
    * (issue #1682). Threaded from the parent ChatView like the main timeline's
    * `MessageRow` gets it, so a thread line can render the same chips — a
@@ -82,6 +98,7 @@ export function ThreadPanel({
   sending,
   mentionables,
   channelMemberIds,
+  youAvatar,
   resolveAttachmentUrl,
   onSend,
   onClose,
@@ -105,6 +122,7 @@ export function ThreadPanel({
           channel={channel}
           members={members}
           message={parent}
+          youAvatar={youAvatar}
           resolveAttachmentUrl={resolveAttachmentUrl}
         />
         <div className="flex items-center gap-2 px-4 py-2">
@@ -119,6 +137,7 @@ export function ThreadPanel({
             channel={channel}
             members={members}
             message={r}
+            youAvatar={youAvatar}
             resolveAttachmentUrl={resolveAttachmentUrl}
           />
         ))}
@@ -142,14 +161,16 @@ function Line({
   channel,
   members,
   message,
+  youAvatar,
   resolveAttachmentUrl,
 }: {
   channel: Channel;
   members: TeamMember[];
   message: ChatMessage;
+  youAvatar?: string;
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
 }) {
-  const sender = senderOf(message, channel, members);
+  const sender = senderOf(message, channel, members, youAvatar);
 
   if (sender.kind === "system") {
     return (
