@@ -44,6 +44,7 @@ use crate::harness::run_turn::HarnessRunTurn;
 use crate::harness::{HarnessDeps, HarnessPool};
 use crate::runtime::assignee;
 use crate::runtime::delegation::{self, DelegationRunner, RunTurn};
+use crate::server::ops::task_export;
 
 /// The most operator redirects honored within a single task dispatch (issue
 /// #111). A redirect re-runs the turn in-loop with the fresh instruction
@@ -59,6 +60,33 @@ const NO_TASK_STORE: &str = "this company has no task board wired, so the card c
 /// The `error` a dispatched attempt settles with when its card is gone by the
 /// time the cycle reaches it (deleted, or never persisted).
 const CARD_VANISHED: &str = "the card was gone by the time its dispatch ran";
+
+/// The stable, readable workspace-folder name for one task's deliverables.
+///
+/// [`task_export::slug`] supplies the shared title sanitization and the full-id
+/// fallback. A suffix from the host-minted card id keeps equal titles distinct
+/// while remaining identical on every publish of the same card.
+fn task_folder_name(title: &str, id: &str) -> String {
+    let title_slug = task_export::slug(title, id);
+    if !title
+        .chars()
+        .take(60)
+        .any(|character| character.is_ascii_alphanumeric())
+    {
+        return title_slug;
+    }
+
+    let short_id: String = id
+        .chars()
+        .rev()
+        .filter(|character| character.is_ascii_hexdigit())
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{title_slug}-{short_id}")
+}
 
 /// The system bubble appended when a turn paused at its tool-iteration cap
 /// (issue #926).
@@ -1930,9 +1958,10 @@ impl HarnessBrain {
             // is exactly what a pre-#552 record carries. The next publish of
             // the same source retries and heals it.
             if let Some(workspace) = self.deps.workspace.as_ref() {
+                let task_folder_name = task_folder_name(&card.title, &card.id);
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
-                    task_id: &card.id,
+                    task_id: &task_folder_name,
                     source: &pending.source,
                     payload: match &pending.payload {
                         crate::harness::publish::PublishPayload::Text(text) => {
@@ -3507,6 +3536,30 @@ description = "Runs Acme."
     // --- Task dispatch ------------------------------------------------------
 
     use crate::ports::TaskStore;
+
+    #[test]
+    fn task_folder_name_uses_the_title_and_a_stable_short_id() {
+        let id = "019fad5ada20-000000000003";
+        let name = task_folder_name("Prepare Q3 Market Report", id);
+
+        assert_eq!(name, "prepare-q3-market-report-00000003");
+        assert_ne!(name, id, "the raw minted id must not be the folder name");
+        assert_eq!(
+            task_folder_name("Prepare Q3 Market Report", id),
+            name,
+            "republishes of one card must resolve to the same folder"
+        );
+        assert_ne!(
+            task_folder_name("Prepare Q3 Market Report", "019fad5ada20-000000000004"),
+            name,
+            "equal task titles must remain distinct"
+        );
+        assert_eq!(
+            task_folder_name("", id),
+            id,
+            "an empty title falls back to the full minted id"
+        );
+    }
 
     /// A two-agent record so assignee routing has somewhere to route.
     fn record_two() -> CompanyRecord {
