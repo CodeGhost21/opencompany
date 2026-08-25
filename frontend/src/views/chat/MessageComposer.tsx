@@ -121,6 +121,24 @@ interface Props {
   deleteAttachment?: (nodeId: string) => void;
 }
 
+/**
+ * A staged attachment together with the scope-bound delete that must free it.
+ *
+ * `deleteAttachment` is re-bound when the surrounding view switches company or
+ * connection, while this composer stays mounted; the unmount cleanup below is
+ * mounted only once and captured the *first* callback. Holding the node alone
+ * would therefore delete the new company's node through the old company's
+ * callback (orphaning it) or an old node through the new callback (targeting
+ * the wrong workspace) once the scope moves mid-staging. Capturing the delete
+ * alongside the reference keeps every cleanup on the company that owns the
+ * upload (codex review finding on #1682).
+ */
+interface PendingAttachment {
+  reference: AttachmentDto;
+  /** Same optionality as the `deleteAttachment` prop it mirrors. */
+  delete?: (nodeId: string) => void;
+}
+
 /** The markdown a toolbar button wraps the selection in. */
 const WRAPS = [
   { icon: Bold, label: "Bold", mark: "**" },
@@ -196,11 +214,12 @@ export function MessageComposer({
   // The single file staged for the next send (issue #1682). v1 carries one
   // attachment per message, so a fresh pick replaces the last rather than
   // appending — the wire (`Vec<Attachment>`) already allows more when the UI
-  // grows to it.
-  const [pending, setPending] = useState<AttachmentDto | null>(null);
+  // grows to it. Held WITH the scope-bound delete that must clean it up (see
+  // `PendingAttachment`).
+  const [pending, setPending] = useState<PendingAttachment | null>(null);
   // Mirrors `pending` for the unmount cleanup below, which needs the latest
   // value inside a closure captured once at mount.
-  const pendingRef = useRef<AttachmentDto | null>(null);
+  const pendingRef = useRef<PendingAttachment | null>(null);
   // Whether this instance is still mounted, checked after every `await`
   // (issue #1682, codex review finding). Without it, an upload that lands
   // after the operator has already navigated away resolves into a
@@ -350,7 +369,10 @@ export function MessageComposer({
   // forever. Centralized here so every one of those paths — not just the
   // Remove button — clears the same way.
   function clearPending() {
-    if (pendingRef.current) deleteAttachment?.(pendingRef.current.nodeId);
+    // The node was created under the company whose delete is stored beside it
+    // (see `PendingAttachment`) — never the latest callback, which may already
+    // be bound to a scope this node does not belong to.
+    pendingRef.current?.delete?.(pendingRef.current.reference.nodeId);
     pendingRef.current = null;
     setPending(null);
   }
@@ -358,10 +380,12 @@ export function MessageComposer({
   // Unmounting still holding a pending attachment (closing the thread panel,
   // switching channels) is the same leak as clicking Remove — clean it up on
   // the way out. Reads through the ref rather than `pending` because an
-  // unmount-only cleanup must not re-run on every state change.
+  // unmount-only cleanup must not re-run on every state change. The delete
+  // comes from the stored pair, so a company switch while the composer stayed
+  // mounted still frees the node in the company that owns it.
   useEffect(() => {
     return () => {
-      if (pendingRef.current) deleteAttachment?.(pendingRef.current.nodeId);
+      pendingRef.current?.delete?.(pendingRef.current.reference.nodeId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only, see above
   }, []);
@@ -411,11 +435,14 @@ export function MessageComposer({
     setMentions([]);
     closePicker();
     setDraft("");
-    const inFlightNodeId = pendingRef.current?.nodeId;
+    // The pair, not just the node id: the reconciliation below must free a
+    // node the send failed to claim through the delete bound to the company
+    // that owns it (see `PendingAttachment`), whichever scope is current now.
+    const inFlight = pendingRef.current;
     const result = onSend(
       text,
       deliverableChoice ? intent : undefined,
-      pending ? [pending] : undefined,
+      pending ? [pending.reference] : undefined,
       // Preserve absent-versus-empty: a loaded directory that resolves no
       // spans intentionally sends [] to suppress host fallback extraction.
       mentionables ? sending : undefined,
@@ -435,9 +462,9 @@ export function MessageComposer({
     // drop, a timeout — the message may have landed anyway) and `true`
     // (definitely landed) both leave the node alone. A caller that returns
     // `void` has nothing to reconcile here.
-    if (inFlightNodeId && result instanceof Promise) {
+    if (inFlight && result instanceof Promise) {
       void result.then((sent) => {
-        if (sent === false) deleteAttachment?.(inFlightNodeId);
+        if (sent === false) inFlight.delete?.(inFlight.reference.nodeId);
       });
     }
   }
@@ -463,8 +490,12 @@ export function MessageComposer({
         deleteAttachment?.(reference.nodeId);
         return;
       }
-      pendingRef.current = reference;
-      setPending(reference);
+      // Store the delete bound to THIS render's scope beside the reference:
+      // the upload went to that company, so cleanup must target it too, even
+      // if the scope moves before the chip is cleared (see `PendingAttachment`).
+      const staged: PendingAttachment = { reference, delete: deleteAttachment };
+      pendingRef.current = staged;
+      setPending(staged);
     } catch (err) {
       if (!mountedRef.current) return;
       // The filename is operator content — the message says an upload failed
@@ -572,17 +603,17 @@ export function MessageComposer({
         {pending && (
           <div className="flex items-center gap-2 border-b px-3 py-1.5">
             <Paperclip className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-            <span className="min-w-0 truncate text-xs font-medium" title={pending.name}>
-              {pending.name}
+            <span className="min-w-0 truncate text-xs font-medium" title={pending.reference.name}>
+              {pending.reference.name}
             </span>
             <span className="shrink-0 text-2xs text-muted-foreground">
-              {formatBytes(pending.size)}
+              {formatBytes(pending.reference.size)}
             </span>
             <Button
               variant="ghost"
               size="icon"
               className="ml-auto size-6 shrink-0 text-muted-foreground"
-              aria-label={`Remove ${pending.name}`}
+              aria-label={`Remove ${pending.reference.name}`}
               title="Remove attachment"
               onClick={clearPending}
             >

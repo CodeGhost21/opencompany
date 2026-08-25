@@ -278,5 +278,66 @@ describe("composer paperclip (issue #1682)", () => {
 
       expect(del).toHaveBeenCalledExactlyOnceWith("node-1");
     });
+
+    // Codex review finding: `deleteAttachment` is re-bound by ChatView when
+    // the company or connection changes while this composer stays mounted, and
+    // the unmount-only cleanup captured the FIRST callback. A staged node must
+    // therefore be freed through the callback bound to the company that owns
+    // the upload — captured beside the reference at stage time — never through
+    // the mount-time one (wrong company) nor the latest one (wrong node).
+    describe("surviving a company switch", () => {
+      function renderAsCompanySwitch() {
+        // Re-render the same composer element with the NEW scope's callbacks —
+        // no key change, so React reconciles in place rather than remounting,
+        // exactly as ChatView behaves when the shell rebinds these props.
+        return act(async () => {
+          root.render(
+            createElement(MessageComposer, {
+              placeholder: "Message engineering",
+              onSend: sent,
+              uploadAttachment: upload,
+              deleteAttachment: second,
+            }),
+          );
+        });
+      }
+
+      let first: ReturnType<typeof vi.fn>;
+      let second: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        first = vi.fn();
+        second = vi.fn();
+        del = first;
+      });
+
+      it("unmounting after the switch frees the node through the callback of the company that staged it", async () => {
+        await render();
+        await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+
+        await renderAsCompanySwitch();
+        await act(async () => root.unmount());
+
+        // The node lives in the company whose upload created it — the first
+        // scope's callback must be the one that deletes it.
+        expect(first).toHaveBeenCalledExactlyOnceWith("node-1");
+        expect(second).not.toHaveBeenCalled();
+      });
+
+      it("removing a pre-switch staged upload after the switch uses the owning company's callback", async () => {
+        await render();
+        await pick(new File([new Uint8Array([1, 2, 3])], "diagram.png", { type: "image/png" }));
+
+        await renderAsCompanySwitch();
+        await act(async () => {
+          (
+            container.querySelector('[aria-label="Remove diagram.png"]') as HTMLButtonElement
+          ).click();
+        });
+
+        expect(first).toHaveBeenCalledExactlyOnceWith("node-1");
+        expect(second).not.toHaveBeenCalled();
+      });
+    });
   });
 });
