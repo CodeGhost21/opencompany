@@ -87,6 +87,7 @@ import {
   fromHistory,
   hostMessageId,
   liveReplyIdentity,
+  MAIN_THREAD_ID,
   makeMessage,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
