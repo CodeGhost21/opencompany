@@ -260,8 +260,15 @@ guarded the containers and nothing at all guarded serialization, so
 serde round-trip is deliberately asymmetric and yields `SecretValue("[redacted]")`,
 which fails closed at the point of use. Persistence is unaffected because it
 never used serde: every backend writes `value.expose()` and reads back through
-the `SecretValue` constructor. `expose()` is the single named door out, so
-`grep 'expose()'` enumerates every place a credential leaves the type.
+the `SecretValue` constructor.
+
+`expose()` is the *named* door out, not the only one: the field is `pub`, so
+`let SecretValue(raw) = value` reads the plaintext without it, and about ten
+production call sites already do. Audit with
+`grep -E 'expose\(|SecretValue\('`, not `grep 'expose()'` — the shorter search
+reads clean while missing them. Privatizing the field behind a constructor
+would close the gap and is deliberately left as separate work: it touches
+roughly 110 construction sites and is unrelated to the serialization guard.
 
 Credential-bearing fields hold a `SecretValue` rather than a `String` for the
 same reason (issue #1770): `SmtpCredentials::password`, `ImapCredentials::password`
