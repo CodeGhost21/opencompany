@@ -7268,8 +7268,11 @@ budget_usd_daily = 0.0
             (&["*"][..], true, false),
             (&["*"][..], false, true),
             (&["*"][..], true, true),
+            // `*` deliberately does not reach MCP (`grants_cover_server` treats
+            // it as an explicit opt-in), so a family grant is what wires the
+            // three bridge tools here — the same `mcp:*` a company would use.
             (
-                &["workspace", "search", "media", "composio"][..],
+                &["workspace", "search", "media", "composio", "mcp:*"][..],
                 false,
                 true,
             ),
