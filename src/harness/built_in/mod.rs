@@ -1249,7 +1249,13 @@ pub struct HarnessPool {
     /// cycle's own turns: a standalone workflow turn *between* cycles rebuilds
     /// against the live store overlay, not a snapshot that would otherwise stay
     /// stale until an unrelated cycle refreshed it.
-    pinned_policies: RwLock<HashMap<CompanyId, Policy>>,
+    ///
+    /// A `std::sync::Mutex` rather than a `tokio::sync::RwLock` like its
+    /// neighbours: every critical section is a single lookup / insert / remove
+    /// with no `await` in it, and the synchronous form is what lets a cycle's
+    /// drop guard release the pin on cancellation or panic — an async lock
+    /// could not be touched from `Drop` (issue #1455).
+    pinned_policies: std::sync::Mutex<HashMap<CompanyId, Policy>>,
     /// Per-company fingerprint of the desk scoping a roster's grants resolve
     /// through — which desks exist, who sits on them, and each one's tool
     /// ceiling.
