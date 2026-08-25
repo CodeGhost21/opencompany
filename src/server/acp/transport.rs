@@ -312,6 +312,9 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
         parent: None,
         deliverable: None,
         mentions,
+        // ACP prompts are text-only — the wire carries no file upload — so an
+        // ACP-sent message never has attachments (issue #1682).
+        attachments: vec![],
     };
     let message_seq = runtime
         .events()
