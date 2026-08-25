@@ -468,8 +468,15 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
 }
 
 /**
- * Fold one `chat/history` response into a live transcript (issue #1690).
- *
+ * Stable fields shared by an optimistic operator row and its history echo.
+ * Parent/message text and timestamp identify one local send without making
+ * unrelated repeated messages collapse together.
+ */
+function messageFingerprint(message: ChatMessage): string {
+  return JSON.stringify([message.from, message.text, message.parentId ?? null, message.at]);
+}
+
+
  * `chat/history` is the host's authoritative, **oldest-first** record for a
  * thread; a live transcript is that record plus whatever has not been
  * journaled yet — the operator's own optimistic bubbles, minted with
