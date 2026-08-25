@@ -1315,6 +1315,33 @@ enum LiveStream<'a> {
     On { chat_id: Option<&'a str> },
 }
 
+/// Per-company serialization of the roster's policy-axis decision through its
+/// publish ([`HarnessPool::ensure_impl`]), mirroring
+/// [`company_write_lock`](crate::ports::store::company_write_lock).
+///
+/// The window it closes (issue #1455): a plain `ensure` from the workflow
+/// runner can read the pool's pin map as empty *before* a concurrent cycle's
+/// `ensure_with_policy` installs its snapshot, then publish a roster rebuilt
+/// from the looser live policy *after* the cycle's pinned roster — running one
+/// turn with the harness gate auto-approving what the native gate still parks.
+/// Holding this lock from the pin read through the roster publish makes the
+/// two operations atomic per company, so a plain ensure either publishes
+/// before the cycle pins or reads the pin afterwards and rebuilds against it.
+/// Keyed globally rather than per pool because a company's cycle and its
+/// workflow ensure can arrive on different lanes of the same router; the extra
+/// serialization across lanes is harmless (ensures are idempotent warm-ups).
+static POLICY_AXIS_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<CompanyId, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Returns (or creates) the per-company policy-axis lock for `company`.
+fn policy_ensure_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = POLICY_AXIS_LOCKS.lock().expect("policy axis locks");
+    map.entry(company.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 impl HarnessPool {
     /// Builds an empty pool.
     pub fn new() -> Self {
