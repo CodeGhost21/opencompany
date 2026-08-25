@@ -462,36 +462,39 @@ describe("run row — files associated (issue #1684)", () => {
     // must render the error line, and the failure path's latch reset must let
     // a reopen retry — both reachable in production and neither asserted
     // anywhere else.
-    const deferred: {
-      resolve: (rows: RunArtifactRow[]) => void;
-      reject: (err: unknown) => void;
-    }[] = [];
-    const client = deferredFilesClient(deferred);
+    //
+    // The failure is an already-rejected promise fired by the expand toggle
+    // inside act, not a manually-rejected deferred: the latter lands several
+    // microtasks deeper (async wrapper adoption → `.then` pass-through →
+    // `.catch`) and intermittently escapes React's act flush, leaving the
+    // error line uncommitted and unrecoverable — the flake that red the
+    // advisory `Console (current Node)` lane. An already-rejected promise
+    // settles before the component attaches its handlers, so every reaction
+    // stays inside the act window. The mode flip then heals the client for
+    // the reopen, and assertions check outcomes rather than exact request
+    // counts because jsdom fires a native `toggle` asynchronously on
+    // `details.open = true` alongside the dispatched one — a second request
+    // may or may not land while the failure has cleared the latch, and the
+    // retry must pass either way.
+    const sink = { calls: [] as string[] };
+    const modes = { fail: true };
     const file: RunArtifactRow = { ...FILE, title: "Retried launch spec" };
+    const client = modeFilesClient([file], sink, modes);
 
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
-    expect(deferred.length).toBe(1);
 
-    // The current-scope request fails: the error line appears and the latch
-    // clears so the next open retries. The rejection travels through the
-    // async client wrapper and the `.then` pass-through before the `.catch`
-    // runs — several microtasks deeper than a resolve — so wait for the
-    // render rather than assert synchronously off the act flush, which
-    // intermittently lands the error element one commit too late (the flake
-    // that red the advisory `Console (current Node)` lane).
-    await act(async () => {
-      deferred[0].reject(new Error("boom"));
-    });
-    await vi.waitFor(() => {
-      expect(
-        container.querySelector('[data-testid="workflow-run-files-error"]')
-          ?.textContent,
-      ).toContain("Reopen to try again");
-    });
+    // The current-scope request failed: the error line appears, and the
+    // latch has cleared so the next open retries.
+    expect(
+      container.querySelector('[data-testid="workflow-run-files-error"]')
+        ?.textContent,
+    ).toContain("Reopen to try again");
+    expect(sink.calls.length).toBeGreaterThanOrEqual(1);
 
-    // Collapse, then reopen: a second request fires and its success renders
-    // the files, proving the retry latch reset.
+    // Collapse, then reopen with the client healed: a fresh request fires
+    // and its success renders the files, proving the retry latch reset.
+    modes.fail = false;
     const details = container.querySelector<HTMLDetailsElement>(
       '[data-testid="workflow-run-files"]',
     )!;
@@ -500,11 +503,8 @@ describe("run row — files associated (issue #1684)", () => {
       details.dispatchEvent(new Event("toggle", { bubbles: true }));
     });
     await expandFiles();
-    expect(deferred.length).toBe(2);
+    expect(sink.calls.length).toBeGreaterThanOrEqual(2);
 
-    await act(async () => {
-      deferred[1].resolve([file]);
-    });
     expect(
       container.querySelector('[data-testid="workflow-run-files-error"]'),
     ).toBeNull();
