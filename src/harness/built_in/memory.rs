@@ -127,14 +127,50 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
         // if weak digit-free credential like `secret` does not.
         let has_digit = value[..end].chars().any(|c| c.is_ascii_digit());
         let threshold = if has_digit { 4 } else { 6 };
+        let mut consumed = end;
         if end >= threshold {
             out.push_str("[REDACTED]");
+            // The MCP config keeps the whole trimmed remainder as the bearer
+            // value, so a credential can be several space-separated fragments
+            // (`Bearer firstpart secondpart`). Once the first fragment looked
+            // credential-like, keep redacting the run — but only fragments
+            // that themselves clear a floor, so trailing prose ("please", "the
+            // token was rotated") survives. The digit-free floor is higher for
+            // continuation so a short prose word cannot enter the run. Only a
+            // space stop triggers this: a wrapper or punctuation stop means the
+            // credential was a single token.
+            if value.as_bytes().get(end) == Some(&b' ') {
+                let mut cursor = end;
+                while let Some(rel) = value[cursor..].find(' ') {
+                    cursor += rel + 1;
+                    let frag_end = value[cursor..]
+                        .find(|c: char| !is_token_char(c))
+                        .unwrap_or(value.len() - cursor);
+                    if frag_end == 0 {
+                        continue; // repeated spaces; keep looking ahead
+                    }
+                    let frag = &value[cursor..cursor + frag_end];
+                    let floor = if frag.chars().any(|c| c.is_ascii_digit()) {
+                        4
+                    } else {
+                        8
+                    };
+                    if frag.chars().count() >= floor {
+                        out.push(' ');
+                        out.push_str("[REDACTED]");
+                        cursor += frag_end;
+                    } else {
+                        break;
+                    }
+                }
+                consumed = cursor;
+            }
         } else {
             // Too short to be a secret: leave it, or this function would mangle
             // ordinary text like "Bearer or not".
             out.push_str(&value[..end]);
         }
-        rest = &tail[end + value_start + wrapper_len..];
+        rest = &tail[consumed + value_start + wrapper_len..];
     }
     out.push_str(rest);
     std::borrow::Cow::Owned(out)
