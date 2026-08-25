@@ -817,6 +817,13 @@ mod test {
         assert!(gate.is_emergency());
         assert_eq!(gate.ttl_millis(), 2 * 60 * 60 * 1000);
         assert_eq!(
+            gate.policy(),
+            Policy {
+                approval_ttl_hours: Some(2),
+                ..policy("full", None)
+            }
+        );
+        assert_eq!(
             decide(&gate, &effect("misc.do", EffectGroup::Other)).await,
             PolicyDecision::Allow
         );
