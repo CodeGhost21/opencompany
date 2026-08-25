@@ -91,10 +91,12 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
         // Long values are always a secret. A short value is still redacted when
         // it is token-shaped — it contains a digit, which prose after a marker
         // does not — so a valid short bearer credential like `s3cret` (the MCP
-        // config accepts any non-empty bearer value) does not slip through, while
-        // a plain word such as "or" in "Bearer or not" is left alone.
+        // config accepts any non-empty bearer value) does not slip through. A
+        // digit-free short value is redacted once it reaches six characters:
+        // prose after a marker ("or", "token") stays shorter, while a genuine
+        // if weak digit-free credential like `secret` does not.
         let has_digit = value[..end].chars().any(|c| c.is_ascii_digit());
-        let threshold = if has_digit { 4 } else { 8 };
+        let threshold = if has_digit { 4 } else { 6 };
         if end >= threshold {
             out.push_str("[REDACTED]");
         } else {
