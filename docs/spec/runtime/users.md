@@ -172,8 +172,10 @@ the standing grants above — a manifest `[users].admins` entry or
 create one. Committing revokes the user's existing sessions and pending login
 codes first, and by default flags the password for replacement, matching the
 admin temporary-password route ([Passwords](#passwords)). It requires the
-effective email auth mode, takes the company id in the namespaced
-`<tenant>--<id>` form in shared-database mode, reads the password from stdin to
+effective email auth mode, takes a company id in the bare or namespaced
+`<tenant>--<id>` form in shared-database mode — a bare id is namespaced to the
+current `OPENCOMPANY_TENANT_ID`, and one carrying a different tenant's prefix is
+refused — reads the password from stdin to
 keep it out of argv, and on the filesystem store holds the same data-root lock
 as `serve`, so it fails cleanly if a server is running on that root. See the
 [CLI reference](../../../gitbooks/developers/cli.md) for the full semantics.
