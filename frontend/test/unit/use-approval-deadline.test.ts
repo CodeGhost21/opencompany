@@ -175,14 +175,13 @@ describe("useApprovalDeadline", () => {
     expect(hours()).toBe(72);
   });
 
-  it("discards an out-of-order response from a slower poll", async () => {
+  it("serializes refreshes and runs the queued tick after a slow read settles", async () => {
     vi.useFakeTimers();
-    // Two reads started, two deferred responses. A is the older request, B the
-    // newer one, and they resolve in the reverse order they were issued — a
-    // poll that takes longer than the interval, or a visibility-triggered
-    // refresh racing a request started just before the tab hid.
+    // A is the first read, deferred. The second read is what the queued tick
+    // starts once A settles — the two must never be in flight together, or a
+    // poll that outlives its interval would either flood the host or let the
+    // older response repaint the header after the newer one landed.
     let resolveA!: (v: unknown) => void;
-    let resolveB!: (v: unknown) => void;
     const get = vi
       .fn()
       .mockReturnValueOnce(
@@ -190,11 +189,7 @@ describe("useApprovalDeadline", () => {
           resolveA = res;
         }),
       )
-      .mockReturnValueOnce(
-        new Promise((res) => {
-          resolveB = res;
-        }),
-      );
+      .mockResolvedValue({ approvalTtlHours: 72, mode: "supervised" });
     const client = {
       scopeFor: () => "/api/v1/acme",
       get,
@@ -208,22 +203,17 @@ describe("useApprovalDeadline", () => {
     await flush();
     expect(hours()).toBe(24);
 
-    // The next poll tick starts B.
+    // The poll tick while A is in flight must not start a second read — the
+    // hook serializes refreshes, so a slow host is never flooded and a stale
+    // response cannot race a newer one.
     await act(async () => {
       vi.advanceTimersByTime(5000);
     });
     await flush();
+    expect(get).toHaveBeenCalledTimes(1);
 
-    // B — the newer read — lands first with the raised deadline.
-    await act(async () => {
-      resolveB({ approvalTtlHours: 72, mode: "supervised" });
-    });
-    await flush();
-    expect(hours()).toBe(72);
-
-    // A — the older read — resolves last with the stale deadline. The hook must
-    // discard it: the header already advertises what the host enforces, and
-    // letting A land would repaint a stale TTL until the next poll corrects it.
+    // A settles with the old deadline; the queued tick then fetches the raised
+    // deadline, so the header ends up advertising what the host now enforces.
     await act(async () => {
       resolveA({ approvalTtlHours: 24, mode: "supervised" });
     });
