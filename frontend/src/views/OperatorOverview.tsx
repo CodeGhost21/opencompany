@@ -5,7 +5,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listRuns, RUN_STATUS_LABEL, type RunSummary } from "@/api/runs";
 import type { LocalScope } from "@/connections/types";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { readOverviewVisit, writeOverviewVisit } from "@/lib/overview-visit";
+import { openOverviewVisit } from "@/lib/overview-visit";
 import { chatHref } from "@/lib/run-source";
 
 interface Props {
@@ -52,7 +52,23 @@ export function OperatorOverview({
   scope,
   attemptEventTick,
 }: Props) {
-  const [previousVisit] = useState(() => readOverviewVisit(scope));
+  /**
+   * The boundary the panel below compares against, fixed for this page load
+   * (issue #1700).
+   *
+   * [`openOverviewVisit`](overview-visit) owns both halves — it hands back the
+   * previous open and records this one in the same call — so a remount cannot
+   * advance the boundary under the operator. Navigating to Chat and back
+   * unmounts this view, and when the read and the write were separate that
+   * round trip re-anchored "since you last opened" to a few seconds ago.
+   *
+   * The effect is for the case a mount cannot cover: `scope` is a connection
+   * plus a company, and switching company changes it while this component stays
+   * mounted. Without it the panel would keep comparing against the *previous*
+   * company's boundary and label the answer with the new company's name.
+   */
+  const [previousVisit, setPreviousVisit] = useState(() => openOverviewVisit(scope));
+  useEffect(() => setPreviousVisit(openOverviewVisit(scope)), [scope]);
   const [stoppedRuns, setStoppedRuns] = useState<RunSummary[]>([]);
   const [failedRuns, setFailedRuns] = useState<RunSummary[]>([]);
   const [runLoad, setRunLoad] = useState<RunLoad>("loading");
@@ -160,10 +176,6 @@ export function OperatorOverview({
         /* the current lists stay; the next event or reload re-reads */
       });
   }, [attemptEventTick, fetchRuns]);
-
-  useEffect(() => {
-    writeOverviewVisit(scope, Date.now());
-  }, [scope]);
 
   const stopped = useMemo(
     () => stoppedRuns.filter((run) => run.status === "paused" || run.status === "failed"),
