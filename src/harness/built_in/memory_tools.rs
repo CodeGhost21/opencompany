@@ -528,7 +528,10 @@ mod test {
         assert!(!stored.text().contains("sk-longsecret"), "{}", stored.text());
 
         let addr = addr_from(&stored.text());
-        let peeked = context.peek(&company, &addr, None).await.unwrap();
+        let peeked = context
+            .peek(&company, &ChunkAddr::new(addr), None)
+            .await
+            .unwrap();
         assert!(
             peeked.contains("Bearer [REDACTED]"),
             "stored title must be redacted: {peeked}"
