@@ -1130,6 +1130,20 @@ async fn run_issue_password(
         ))
     })?;
     let manifest_admins: Vec<String> = record.manifest.users.admins.clone();
+    let auth_mode = {
+        use std::str::FromStr as _;
+        let raw = std::env::var("OPENCOMPANY_AUTH_MODE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| config_file.as_ref().and_then(|c| c.auth_mode.clone()))
+            .unwrap_or_else(|| record.manifest.users.mode.clone());
+        opencompany::app::config::AuthMode::from_str(&raw)?
+    };
+    if !auth_mode.uses_email() {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "issue-password requires effective email auth mode, but the host is configured for `{auth_mode}`"
+        )));
+    }
 
     // The same variable `serve` reads for the deployment's standing admin, read
     // the same way. `standing_admins` normalizes and drops a blank, so this is
