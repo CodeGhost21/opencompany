@@ -520,6 +520,15 @@ export function mergeHistoryInOrder(
     (m) => isHostMessageId(m.id) && !historyIds.has(m.id),
   );
   const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
+  const liveDurable = existing.filter(
+    (m) => isHostMessageId(m.id) && !historyIds.has(m.id),
+  );
+  const evictedDurable = liveDurable.filter((m) =>
+    hydrated.length === 0 || m.at <= hydrated[0].at,
+  );
+  const postSnapshotDurable = liveDurable.filter((m) =>
+    hydrated.length > 0 && m.at > hydrated[hydrated.length - 1].at,
+  );
   const optimistic = existing.filter((m) => {
     if (isHostMessageId(m.id) || historyIds.has(m.id)) return false;
     const matches = durableByFingerprint.get(messageFingerprint(m));
