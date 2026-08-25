@@ -279,6 +279,15 @@ impl RunTurn for HarnessRouter {
             engine.end_cycle(company).await;
         }
     }
+
+    fn release_policy_pin_sync(&self, company: &CompanyId) {
+        // The synchronous fan-out for a cycle's drop guard: a cancelled or
+        // panicked cycle cannot await `end_cycle`, but must still release the
+        // pin it installed on every lane (issue #1455).
+        for (_harness, engine) in &self.engines {
+            engine.release_policy_pin_sync(company);
+        }
+    }
 }
 
 #[cfg(test)]
