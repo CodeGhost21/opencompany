@@ -56,7 +56,7 @@ function AttachmentItem({
   resolveUrl,
 }: {
   attachment: AttachmentDto;
-  resolveUrl?: (nodeId: string) => Promise<string>;
+  resolveUrl?: (nodeId: string, signal?: AbortSignal) => Promise<string>;
 }) {
   const image = isPreviewableImage(attachment.mime);
   const [previewUrl, setPreviewUrl] = useState<string>();
