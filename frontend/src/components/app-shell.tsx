@@ -945,7 +945,9 @@ export function AppShell({
             // own oldest-first order, and local rows the host has not
             // persisted yet stay at the tail — so a row the live SSE path
             // missed lands where the host says it belongs, gap or tail
-            // (issue #1690).
+            // (issue #1690). Durable rows outside the newest page remain in
+            // their existing prefix, while only browser-local rows are tail
+            // optimistic sends.
             setThreads((ts) =>
               ts.map((t) => {
                 if (t.id !== threadId) return t;
