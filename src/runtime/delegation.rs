@@ -155,6 +155,22 @@ pub trait RunTurn: Send + Sync {
     async fn end_cycle(&self, _company: &CompanyId) {
         // no-op
     }
+
+    /// The synchronous half of [`end_cycle`](Self::end_cycle), for a cycle's
+    /// drop guard.
+    ///
+    /// A cycle whose future is cancelled or unwinds through a panic after
+    /// [`ensure_with_policy`](Self::ensure_with_policy) installed its pin never
+    /// reaches the async `end_cycle` — the `await` that would have called it is
+    /// exactly where the future is dropped, so the pin would otherwise outlive
+    /// the cycle and keep a standalone workflow turn between cycles on a stale
+    /// snapshot until an unrelated cycle replaced it (issue #1455). A guard
+    /// releases from `Drop`, so it cannot await; this synchronous removal is
+    /// what lets it. Defaults to a no-op exactly like `end_cycle`; the built-in
+    /// harness and the router fan-out override it.
+    fn release_policy_pin_sync(&self, _company: &CompanyId) {
+        // no-op
+    }
 }
 
 // `desk_lead` is the brain-agnostic desk-lead resolver — it moved to
