@@ -8348,7 +8348,7 @@ members = ["eng1", "eng2"]
                         reason: "test approval".to_string(),
                         effect: Effect {
                             kind: "test_tool".to_string(),
-                            group: crate::ports::types::EffectGroup::External,
+                            group: crate::ports::types::EffectGroup::Other,
                             amount_usd: None,
                             established_thread: false,
                             first_time_counterparty: false,
