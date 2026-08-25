@@ -569,4 +569,180 @@ mod test {
         assert!(standing_admins(&[], Some("   ")).is_empty());
         assert!(standing_admins(&[], None).is_empty());
     }
+
+    /// A session store whose `delete_for_user` always fails, so the reset flow
+    /// can be proven to stop before the password commit when a revocation
+    /// cannot complete. Everything else delegates to the real filesystem store.
+    struct SessionRevocationFailure(Arc<FsOps>);
+
+    impl crate::ports::sessions::SessionStore for SessionRevocationFailure {
+        async fn create(
+            &self,
+            company: &CompanyId,
+            session: &crate::ports::sessions::SessionRecord,
+        ) -> crate::Result<()> {
+            self.0.create(company, session).await
+        }
+        async fn find_by_token_hash(
+            &self,
+            company: &CompanyId,
+            token_hash: &str,
+        ) -> crate::Result<Option<crate::ports::sessions::SessionRecord>> {
+            self.0.find_by_token_hash(company, token_hash).await
+        }
+        async fn list_for_user(
+            &self,
+            company: &CompanyId,
+            user_id: &str,
+        ) -> crate::Result<Vec<crate::ports::sessions::SessionRecord>> {
+            self.0.list_for_user(company, user_id).await
+        }
+        async fn delete(&self, company: &CompanyId, id: &str) -> crate::Result<bool> {
+            self.0.delete(company, id).await
+        }
+        async fn delete_for_user(&self, _company: &CompanyId, _user_id: &str) -> crate::Result<u64> {
+            Err(OpenCompanyError::Config(
+                "injected session revocation failure".into(),
+            ))
+        }
+        async fn purge_expired(&self, company: &CompanyId, now_millis: u64) -> crate::Result<u64> {
+            self.0.purge_expired(company, now_millis).await
+        }
+    }
+
+    /// A login-code store whose `delete_for_email` always fails; same proof for
+    /// the second revocation in the reset flow.
+    struct LoginCodeRevocationFailure(Arc<FsOps>);
+
+    impl crate::ports::login_codes::LoginCodeStore for LoginCodeRevocationFailure {
+        async fn create(
+            &self,
+            company: &CompanyId,
+            code: &crate::ports::login_codes::LoginCodeRecord,
+        ) -> crate::Result<()> {
+            self.0.create(company, code).await
+        }
+        async fn latest_for_email(
+            &self,
+            company: &CompanyId,
+            email: &str,
+        ) -> crate::Result<Option<crate::ports::login_codes::LoginCodeRecord>> {
+            self.0.latest_for_email(company, email).await
+        }
+        async fn consume(
+            &self,
+            company: &CompanyId,
+            code_hash: &str,
+            now_millis: u64,
+        ) -> crate::Result<Option<crate::ports::login_codes::LoginCodeRecord>> {
+            self.0.consume(company, code_hash, now_millis).await
+        }
+        async fn delete_for_email(&self, _company: &CompanyId, _email: &str) -> crate::Result<u64> {
+            Err(OpenCompanyError::Config(
+                "injected login-code revocation failure".into(),
+            ))
+        }
+        async fn purge_expired(&self, company: &CompanyId, now_millis: u64) -> crate::Result<u64> {
+            self.0.purge_expired(company, now_millis).await
+        }
+    }
+
+    /// The reset revokes sessions before committing the new password, so a
+    /// revocation that cannot complete must abort the reset and leave the old
+    /// password the only working credential.
+    #[tokio::test]
+    async fn a_session_revocation_failure_prevents_the_password_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ops = Arc::new(FsOps::new(dir.path().to_path_buf()));
+        let users: Arc<dyn UserStore> = ops.clone();
+        let sessions: Arc<dyn crate::ports::sessions::SessionStore> =
+            Arc::new(SessionRevocationFailure(ops.clone()));
+        let login_codes: Arc<dyn crate::ports::login_codes::LoginCodeStore> = ops.clone();
+        let company = CompanyId::new("acme");
+
+        issue_password(
+            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            "ada@acme.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect("first issue");
+
+        let error = issue_password(
+            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            "ada@acme.test",
+            "a replacement long password",
+            false,
+        )
+        .await
+        .expect_err("the reset must abort when session revocation fails");
+        assert!(
+            error
+                .to_string()
+                .contains("injected session revocation failure"),
+            "{error}"
+        );
+
+        let user = users
+            .find_user_by_email(&company, "ada@acme.test")
+            .await
+            .expect("read")
+            .expect("still there");
+        let hash = user.password_hash.expect("hash");
+        assert!(password::verify(GOOD, &hash), "the old password still works");
+        assert!(
+            !password::verify("a replacement long password", &hash),
+            "the new password must not have been committed"
+        );
+    }
+
+    /// Same proof for the login-code revocation, which runs after the session
+    /// one and also precedes the password commit.
+    #[tokio::test]
+    async fn a_login_code_revocation_failure_prevents_the_password_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ops = Arc::new(FsOps::new(dir.path().to_path_buf()));
+        let users: Arc<dyn UserStore> = ops.clone();
+        let sessions: Arc<dyn crate::ports::sessions::SessionStore> = ops.clone();
+        let login_codes: Arc<dyn crate::ports::login_codes::LoginCodeStore> =
+            Arc::new(LoginCodeRevocationFailure(ops.clone()));
+        let company = CompanyId::new("acme");
+
+        issue_password(
+            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            "ada@acme.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect("first issue");
+
+        let error = issue_password(
+            context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+            "ada@acme.test",
+            "a replacement long password",
+            false,
+        )
+        .await
+        .expect_err("the reset must abort when login-code revocation fails");
+        assert!(
+            error
+                .to_string()
+                .contains("injected login-code revocation failure"),
+            "{error}"
+        );
+
+        let user = users
+            .find_user_by_email(&company, "ada@acme.test")
+            .await
+            .expect("read")
+            .expect("still there");
+        let hash = user.password_hash.expect("hash");
+        assert!(password::verify(GOOD, &hash), "the old password still works");
+        assert!(
+            !password::verify("a replacement long password", &hash),
+            "the new password must not have been committed"
+        );
+    }
 }
