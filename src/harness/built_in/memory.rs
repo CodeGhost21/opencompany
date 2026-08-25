@@ -54,10 +54,12 @@ use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};
 /// understand what happened. Only the secret value itself is removed.
 ///
 /// openhuman's [`redact_text`](oh::agent::experience::redact_text) does the same
-/// for its own experience records; this is the opencompany-side of that rule,
-/// because every [`Memory::store`] passes through here, not just the experience
-/// capture.
-fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
+/// for its own experience records; this is the opencompany-side of that rule.
+/// `pub(crate)` because the outcome-chunk store path
+/// ([`memory_loop::outcome_chunk`](crate::harness::built_in::memory_loop::outcome_chunk))
+/// writes operator text directly to the [`ContextStore`], bypassing
+/// [`Memory::store`], and must apply the same redaction.
+pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
     // Two unambiguous shapes. A generic "anything that looks like a token"
     // regex would mangle ordinary prose.
     const MARKERS: [&str; 2] = ["/secret/", "Bearer "];
