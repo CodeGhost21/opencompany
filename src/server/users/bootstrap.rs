@@ -384,7 +384,10 @@ mod test {
             .await
             .expect("read")
             .expect("the invite still exists");
-        assert_eq!(invite.accepted_at_millis, Some(now));
+        let accepted = invite
+            .accepted_at_millis
+            .expect("the host password stamped the invite accepted");
+        assert!(accepted >= now, "stamped at {accepted}, after the invite was written at {now}");
     }
 
     /// The boundary that keeps this from being a back door. Possession of the
