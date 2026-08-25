@@ -530,11 +530,10 @@ mod test {
         let addr = addr_from(&stored.text());
         let peeked = context.peek(&company, &addr, None).await.unwrap();
         assert!(
-            peeked.body.contains("Bearer [REDACTED]"),
-            "stored title must be redacted: {}",
-            peeked.body
+            peeked.contains("Bearer [REDACTED]"),
+            "stored title must be redacted: {peeked}"
         );
-        assert!(!peeked.body.contains("sk-longsecret"), "{}", peeked.body);
+        assert!(!peeked.contains("sk-longsecret"), "{peeked}");
     }
 
     #[tokio::test]
