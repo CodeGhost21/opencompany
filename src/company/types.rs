@@ -247,7 +247,7 @@ pub fn grants_hosting_explicit(grants: &[String]) -> bool {
 /// that grant none of these. A non-empty return is the allow-list minus the
 /// withheld namespaces, materialised so the stored teammate carries its own
 /// narrowed line rather than inheriting a ceiling that later widens.
-pub fn creation_default_grants(allow: &[String]) -> Vec<String> {
+pub fn creation_default_grants(allow: &[String]) -> CreationGrant {
     let withheld = |grant: &String| {
         let one = std::slice::from_ref(grant);
         grants_chargebee_explicit(one)
@@ -255,9 +255,36 @@ pub fn creation_default_grants(allow: &[String]) -> Vec<String> {
             || grants_hosting_explicit(one)
     };
     if !allow.iter().any(withheld) {
-        return Vec::new();
+        return CreationGrant::Standard;
     }
-    allow.iter().filter(|g| !withheld(g)).cloned().collect()
+    let kept: Vec<String> = allow.iter().filter(|g| !withheld(g)).cloned().collect();
+    if kept.is_empty() {
+        return CreationGrant::NothingLeft;
+    }
+    CreationGrant::Narrowed(kept)
+}
+
+/// What [`creation_default_grants`] decided for a teammate created with no
+/// stated `tools`.
+///
+/// Three cases rather than a `Vec`, because a `Vec` cannot express the third
+/// one: an empty list is already spoken for — it means "the standard company
+/// grant" — so returning the filtered-to-nothing result as `vec![]` would hand
+/// back the exact capability the filter just removed. The orchestrator's
+/// `add_agent` refuses on the same reasoning when narrowing a requested scope
+/// yields nothing, and this mirrors it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreationGrant {
+    /// Nothing was withheld. Store an empty line, which keeps tracking
+    /// `[tools].allow` the way an unstated grant always has.
+    Standard,
+    /// Store this narrowed line: the allow-list minus the withheld namespaces.
+    Narrowed(Vec<String>),
+    /// The company's whole belt is withheld namespaces (`allow = ["chargebee"]`
+    /// and nothing else). There is no safe line to store — empty would read
+    /// back as inheritance — so the caller refuses and asks for an explicit
+    /// grant instead.
+    NothingLeft,
 }
 
 /// Whether a tool-grant list **explicitly** grants the `paypal` namespace

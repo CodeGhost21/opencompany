@@ -453,21 +453,43 @@ fn a_wildcard_never_confers_a_billing_namespace() {
 /// carries `chargebee`, silently included billing.
 #[test]
 fn a_teammate_created_with_no_grant_never_inherits_billing() {
-    use super::creation_default_grants;
+    use super::{CreationGrant, creation_default_grants};
+
+    let narrowed = |allow: &[String]| match creation_default_grants(allow) {
+        CreationGrant::Narrowed(list) => list,
+        other => panic!("expected a narrowed line for {allow:?}, got {other:?}"),
+    };
 
     // The overwhelming majority: nothing withheld, so the inherit-everything
     // contract is untouched and the stored teammate stays empty.
     let plain = Tools::default().allow;
-    assert!(
-        creation_default_grants(&plain).is_empty(),
+    assert_eq!(
+        creation_default_grants(&plain),
+        CreationGrant::Standard,
         "a company granting no BYO money namespace must keep `empty = standard`"
     );
+
+    // The degenerate belt: filtering removes everything, and an empty line
+    // would read back as "inherit the whole company grant" — handing over the
+    // exact namespace the filter just removed. It must be refusable instead.
+    for only_money in [
+        vec!["chargebee"],
+        vec!["paypal"],
+        vec!["chargebee", "paypal", "hosting"],
+    ] {
+        let allow: Vec<String> = only_money.iter().map(|g| (*g).to_string()).collect();
+        assert_eq!(
+            creation_default_grants(&allow),
+            CreationGrant::NothingLeft,
+            "an all-withheld belt must not decode as inheritance: {allow:?}"
+        );
+    }
 
     // A company that named `chargebee` for one teammate does not hand it to the
     // next one somebody types into the console.
     let mut billing = plain.clone();
     billing.push("chargebee".to_string());
-    let defaulted = creation_default_grants(&billing);
+    let defaulted = narrowed(&billing);
     assert!(
         !grants_chargebee_explicit(&defaulted),
         "a new teammate must not inherit `chargebee`: {defaulted:?}"
@@ -484,7 +506,7 @@ fn a_teammate_created_with_no_grant_never_inherits_billing() {
     for money in ["paypal", "hosting"] {
         let mut allow = plain.clone();
         allow.push(money.to_string());
-        let defaulted = creation_default_grants(&allow);
+        let defaulted = narrowed(&allow);
         assert!(
             !defaulted.iter().any(|g| g == money),
             "a new teammate must not inherit `{money}`: {defaulted:?}"
@@ -494,7 +516,7 @@ fn a_teammate_created_with_no_grant_never_inherits_billing() {
     // `media`/`composio`/`search` ship in the default belt (#1674) and are NOT
     // withheld — doing so would re-create that issue's complaint for every new
     // teammate.
-    let defaulted = creation_default_grants(&billing);
+    let defaulted = narrowed(&billing);
     assert!(grants_media_explicit(&defaulted), "{defaulted:?}");
     assert!(grants_composio_explicit(&defaulted), "{defaulted:?}");
     assert!(grants_search_explicit(&defaulted), "{defaulted:?}");

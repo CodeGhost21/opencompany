@@ -551,7 +551,22 @@ async fn add_member(
     // line. Narrowing at read time instead would silently re-widen the day an
     // operator edited the teammate for an unrelated reason.
     if tools.is_empty() {
-        tools = crate::company::creation_default_grants(&record.manifest.tools.allow);
+        match crate::company::creation_default_grants(&record.manifest.tools.allow) {
+            crate::company::CreationGrant::Standard => {}
+            crate::company::CreationGrant::Narrowed(narrowed) => tools = narrowed,
+            // Nothing safe to store: see `CreationGrant::NothingLeft`. Refusing
+            // is the honest answer and the operator can still create the
+            // teammate by naming its tools.
+            crate::company::CreationGrant::NothingLeft => {
+                return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
+                    "this company grants only billing namespaces, so a teammate created with no \
+                     `tools` would inherit them. State the teammate's tools explicitly."
+                        .to_string(),
+                ))
+                .into_response()
+                .into());
+            }
+        }
     }
     let agent = OverlayAgent {
         // A readable id derived from the name, unique against the roster this

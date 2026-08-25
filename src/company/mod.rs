@@ -164,7 +164,7 @@ pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{
     ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,
     Company, CompanyManifest, ComposioTools, Connection, ContextAccess, ContextEntry,
-    DEFAULT_ALWAYS_APPROVE, DEFAULT_HARNESS_KIND, DEFAULT_MAX_DELEGATION_DEPTH,
+    CreationGrant, DEFAULT_ALWAYS_APPROVE, DEFAULT_HARNESS_KIND, DEFAULT_MAX_DELEGATION_DEPTH,
     DEFAULT_MAX_IN_FLIGHT_RUNS, DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES, GroupChat,
     HARNESS_KINDS, Harness, IMPLICIT_HARNESS_ID, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference,
     KNOWN_CHANNELS, LedgerAccess, LedgerGrant, MAX_DELEGATION_DEPTH_BOUNDS, McpServer,
