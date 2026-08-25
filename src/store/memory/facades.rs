@@ -922,7 +922,16 @@ mod test {
             .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
             .finish();
-        tracing::subscriber::with_default(subscriber, body);
+        let dispatch = tracing::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || {
+            // `tracing` caches each callsite's interest globally. A different
+            // test can first register this warning callsite under the no-op
+            // subscriber, caching `Interest::never` before this scoped
+            // subscriber is installed. Rebuild while this thread's subscriber
+            // is active so the warning assertion remains order-independent.
+            tracing::callsite::rebuild_interest_cache();
+            body();
+        });
         let bytes = sink.lock().expect("warning sink").clone();
         String::from_utf8(bytes).expect("warnings are utf-8")
     }
