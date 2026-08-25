@@ -950,6 +950,12 @@ async fn live_ports(
         open_memory_overlay, open_storage,
     };
     let settings = StorageSettings::from_env()?;
+    // Layer the instance's own `config.toml` `[memory]` section under the
+    // environment, the same resolution `serve` uses: a self-hosted operator's
+    // console selection lives only in that file, and a bundle must read and
+    // write the engine the host actually remembers with. The env still owns
+    // the choice when it names one (`with_memory_config`).
+    let settings = layer_config_memory(settings, &opencompany::app::config::data_dir_from_env())?;
     // Every refusal lives in the lib (`store::select::refuse_bundle_env`)
     // where the feature lanes execute its tests; the bin only reports.
     opencompany::store::refuse_bundle_env(&settings, home_was_flagged)?;
