@@ -103,18 +103,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Report companies whose durable owner row is missing, and owner rows
-    /// naming no company (issue #1077).
-    ///
-    /// Read-only. A company with no owner row is unreachable by its own tenant
-    /// — every tenant-scoped request for it answers 403 — and nothing else in
-    /// the product will tell you it exists. Repairing one is deliberately not
-    /// offered: adopting it means guessing its tenant, and a wrong guess hands
-    /// one tenant's company to another.
-    ///
-    /// Separate from `doctor` on purpose: `doctor` explains configuration and
-    /// needs no database, and making it open storage would leave it unable to
-    /// answer at all when the backend is the thing that is broken.
     /// Issue a sign-in password for a company, from the host (#1718).
     ///
     /// The way in when a deployment cannot mail a sign-in link: the magic-link
