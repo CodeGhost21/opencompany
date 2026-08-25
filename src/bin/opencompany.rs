@@ -1084,21 +1084,6 @@ async fn run_issue_password(
     let settings = opencompany::store::StorageSettings::from_env()?;
     let config_root = opencompany::app::config::data_dir_from_env();
     let config_file = ConfigFile::load(&config_root)?;
-    let auth_mode = {
-        use std::str::FromStr as _;
-        let raw = std::env::var("OPENCOMPANY_AUTH_MODE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| config_file.as_ref().and_then(|c| c.auth_mode.clone()));
-        raw.map(|value| opencompany::app::config::AuthMode::from_str(&value))
-            .transpose()?
-            .unwrap_or(opencompany::app::config::AuthMode::Email)
-    };
-    if !auth_mode.uses_email() {
-        return Err(opencompany::error::OpenCompanyError::Config(format!(
-            "issue-password requires effective email auth mode, but the host is configured for `{auth_mode}`"
-        )));
-    }
     let fs_ops = Arc::new(opencompany::store::FsOps::new(home.clone()));
     let handles = opencompany::store::open_storage(&settings, &home).await?;
     let users: Arc<dyn opencompany::ports::users::UserStore> = handles
