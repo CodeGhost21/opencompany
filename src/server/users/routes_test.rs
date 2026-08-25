@@ -1083,6 +1083,46 @@ async fn suspending_a_user_kills_their_session_at_once() {
     assert_eq!(request_dev_code(&state, "bob@example.com").await, None);
 }
 
+/// The same bound the self-service route enforces, on the admin route too: an
+/// over-long name written for somebody else would render on every surface that
+/// shows them and ride in every roster payload.
+#[tokio::test]
+async fn an_admin_cannot_set_an_over_long_display_name() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) = state_with_mail(&home).await;
+    let admin = login_via_link(&state, &sender, "ada@example.com").await;
+
+    let app = router(state.clone());
+    app.oneshot(post_with_cookie(
+        "/api/v1/companies/acme/users/invites",
+        serde_json::json!({ "email": "bob@example.com" }),
+        &admin,
+    ))
+    .await
+    .unwrap();
+    login_via_link(&state, &sender, "bob@example.com").await;
+    let bob_id = user_id(&state, &admin, "bob@example.com").await;
+
+    let long = "A".repeat(crate::server::users::MAX_DISPLAY_NAME_CHARS + 1);
+    let app = router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/companies/acme/users/{bob_id}"))
+                .header("content-type", "application/json")
+                .header("cookie", &admin)
+                .body(Body::from(
+                    serde_json::json!({ "display_name": long }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn the_last_admin_cannot_be_demoted() {
     let home_dir = home();
@@ -1268,6 +1308,25 @@ async fn a_temporary_password_is_a_boundary_not_a_suggestion() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
+    // The read stays open, the write does not: a temporary password must not be
+    // spendable on the account's public name or face before it is replaced —
+    // the admin who reset it knows the value and conveyed it over a channel
+    // they do not control.
+    let app = router(state.clone());
+    let response = app
+        .oneshot(patch_with_cookie(
+            "/api/v1/companies/acme/auth/me",
+            serde_json::json!({ "displayName": "Bob the Temp" }),
+            &temp_cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(response).await["code"],
+        "password_change_required"
+    );
 
     let app = router(state.clone());
     let response = app
@@ -1833,9 +1892,11 @@ async fn inviting_someone_mails_them_a_credential_free_invitation() {
         "the mail must carry no login code: {}",
         mail.body
     );
-    // The inviter is named by local part, never by full address.
+    // The inviter is named from the local part, never by full address — and
+    // through `UserRecord::display_label`, so the name in this mail is the one
+    // the invitee will meet in the console a minute later.
     assert!(
-        mail.body.contains("ada"),
+        mail.body.contains("Ada"),
         "the mail must name who invited them: {}",
         mail.body
     );
@@ -2063,4 +2124,157 @@ async fn a_refused_invite_mails_nobody() {
         after_first,
         "a rejected address must mail nobody"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The profile: naming yourself and choosing your own face
+// (docs/spec/runtime/avatars.md)
+// ---------------------------------------------------------------------------
+
+fn patch_with_cookie(uri: &str, body: serde_json::Value, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn patch_me(
+    state: &AppState,
+    cookie: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = router(state.clone())
+        .oneshot(patch_with_cookie(
+            "/api/v1/companies/acme/auth/me",
+            body,
+            cookie,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, body_json(response).await)
+}
+
+/// A person names themselves and picks a face, without an admin in the loop.
+/// The whole reason this route exists beside the admin one: your own identity
+/// in a company should not be something you have to ask for.
+#[tokio::test]
+async fn a_person_can_name_themselves_and_pick_a_face() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    let (status, me) = patch_me(
+        &state,
+        &cookie,
+        serde_json::json!({"displayName": "Ada L.", "avatar": "tiny:violet"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(me["displayName"], "Ada L.", "{me}");
+    assert_eq!(me["avatar"], "tiny:violet", "{me}");
+
+    // Persisted, not just echoed.
+    let response = router(state.clone())
+        .oneshot(get_with_cookie("/api/v1/companies/acme/auth/me", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let reread = body_json(response).await;
+    assert_eq!(reread["displayName"], "Ada L.", "{reread}");
+    assert_eq!(reread["avatar"], "tiny:violet", "{reread}");
+}
+
+/// A partial save leaves the field it did not mention alone — the reason both
+/// fields are double options. Without it, saving a name wipes the face.
+#[tokio::test]
+async fn editing_one_field_of_a_profile_leaves_the_other() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    patch_me(&state, &cookie, serde_json::json!({"avatar": "tiny:rose"})).await;
+    let (_, named) = patch_me(&state, &cookie, serde_json::json!({"displayName": "Ada"})).await;
+    assert_eq!(named["avatar"], "tiny:rose", "{named}");
+
+    // And each is individually resettable: `null` — or a blanked input, which is
+    // the same intent typed — goes back to the default.
+    let (_, unnamed) = patch_me(&state, &cookie, serde_json::json!({"displayName": "  "})).await;
+    assert!(
+        unnamed.get("displayName").is_none(),
+        "a blank name is not a name: {unnamed}"
+    );
+    assert_eq!(unnamed["avatar"], "tiny:rose", "{unnamed}");
+    let (_, bare) = patch_me(&state, &cookie, serde_json::json!({"avatar": null})).await;
+    assert!(
+        bare.get("avatar").is_none(),
+        "a reset is absent, not empty: {bare}"
+    );
+}
+
+/// The grammar's rule, on this route too: an avatar names something this host
+/// holds, never a URL the console would fetch on this person's behalf.
+#[tokio::test]
+async fn a_profile_avatar_may_not_be_a_url() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    for hostile in [
+        "https://tracker.example/beacon.gif",
+        "javascript:alert(1)",
+        "blob:01NOSUCHNODE",
+    ] {
+        let (status, refused) =
+            patch_me(&state, &cookie, serde_json::json!({"avatar": hostile})).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{hostile} was accepted: {refused}"
+        );
+    }
+}
+
+/// A display name is a bounded field: it renders on every surface that shows a
+/// person and rides in every roster payload, so a page of text parked in it
+/// would be served to everyone. The bound is a `400`, not a truncation.
+#[tokio::test]
+async fn a_profile_name_may_not_exceed_the_bound() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    let long = "A".repeat(crate::server::users::MAX_DISPLAY_NAME_CHARS + 1);
+    let (status, refused) =
+        patch_me(&state, &cookie, serde_json::json!({"displayName": long})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Nothing was persisted, and a subsequent normal save still works.
+    let (status, _) = patch_me(
+        &state,
+        &cookie,
+        serde_json::json!({"displayName": "Ada L."}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// No session, no profile. There is no `user_id` in the path to point at
+/// somebody else, so this is the whole of the route's authority check.
+#[tokio::test]
+async fn a_profile_edit_needs_a_session() {
+    let home = home();
+    let (state, _sender) = state_with_mail(home.path()).await;
+    let response = router(state.clone())
+        .oneshot(patch_with_cookie(
+            "/api/v1/companies/acme/auth/me",
+            serde_json::json!({"displayName": "Nobody"}),
+            "oc_session_acme=not-a-session",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

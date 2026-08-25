@@ -14,11 +14,14 @@
 //! require being an admin.
 //!
 //! The answer is a second, much narrower read rather than a relaxation of the
-//! first. This route hands out **an id and a label**, and nothing else — no
-//! email, no role, no status, no last-seen. That is the same discipline
+//! first. This route hands out **an id, a label, and the person's chosen face**,
+//! and nothing else — no email, no role, no status, no last-seen. The avatar is
+//! already a collaboration-facing identity asset: it is shown beside that
+//! person's messages to the same members. That is the same discipline
 //! [`author_labels`](crate::server::chat_history) already enforces on every
-//! message a member reads, so this widens nothing: a person who has ever posted
-//! is already named to their colleagues by exactly this label.
+//! message a member reads, so this widens nothing sensitive: a person who has
+//! ever posted is already named to their colleagues by exactly this label and
+//! face.
 //!
 //! # Signed-in humans only
 //!
@@ -60,8 +63,8 @@ struct MentionableAgentDto {
 
 /// One person the composer can offer.
 ///
-/// **Id and label only.** See the module note: this is deliberately not the
-/// admin user record, and must not grow toward it.
+/// **Id, label, and chosen face only.** See the module note: this is
+/// deliberately not the admin user record, and must not grow toward it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MentionablePersonDto {
@@ -70,6 +73,11 @@ struct MentionablePersonDto {
     /// How this person is named to their colleagues — the same label their
     /// messages are attributed with.
     label: String,
+    /// The person's collaboration-facing avatar reference, when they chose
+    /// one. This carries no login or contact identity and is already shown in
+    /// chat alongside the person's authored messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     /// A short typable alias, disambiguated across the company.
     ///
     /// **Not a handle and not stored.** Recomputed on every read, so a rename
@@ -212,6 +220,7 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
         .map(|(u, slug)| MentionablePersonDto {
             id: u.id.clone(),
             label: user_label(u),
+            avatar: u.avatar.clone(),
             slug,
         })
         .collect();
@@ -428,7 +437,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            vec!["harness-member"],
+            vec!["Harness Member"],
             "the caller's own row is dropped and the other person's is offered: {labels:?}"
         );
     }
@@ -467,6 +476,7 @@ mod tests {
                     id: "gone".to_string(),
                     email: "gone@acme.test".to_string(),
                     display_name: Some("Gone Guy".to_string()),
+                    avatar: None,
                     role: UserRole::Member,
                     status: UserStatus::Suspended,
                     password_hash: None,
@@ -512,6 +522,7 @@ mod tests {
             description: None,
             tools: None,
             instructions: None,
+            avatar: None,
             ..Default::default()
         });
         store.save(&record).await.expect("save");

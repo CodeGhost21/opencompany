@@ -16,6 +16,9 @@
 //! compiled only under the `oauth` feature and 404 otherwise.
 
 pub mod artifacts;
+/// Avatar uploads (`docs/spec/runtime/avatars.md`): the custom-image half of
+/// choosing a face for a teammate or for yourself.
+pub mod avatars;
 pub mod billing;
 pub mod capabilities;
 pub mod company_key;
@@ -50,6 +53,9 @@ pub mod memory_ingest;
 /// The `@` picker's directory: every teammate, person, desk and broadcast token
 /// a mention can name, in one member-safe read. See [`mentions`].
 pub mod mentions;
+/// The notification feed, and the mention badge it backs. The first consumer
+/// of `NotificationStore`. See [`notifications`].
+pub mod notifications;
 pub mod pages;
 pub mod policy;
 /// Who is here and who is typing: heartbeat, clean disconnect, typing ping.
@@ -203,6 +209,7 @@ pub fn router() -> Router<AppState> {
         .merge(task_export::router())
         .merge(runs::router())
         .merge(artifacts::router())
+        .merge(avatars::router())
         .merge(memory::router())
         .merge(memory_engine::router())
         .merge(memory_ingest::router())
@@ -213,6 +220,7 @@ pub fn router() -> Router<AppState> {
         .merge(mcp_config::router())
         .merge(mcp_registry::router())
         .merge(read_state::router())
+        .merge(notifications::router())
         .merge(presence::router())
         .merge(mentions::router())
         .merge(inference::router())

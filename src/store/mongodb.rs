@@ -3265,6 +3265,13 @@ impl crate::ports::notifications::NotificationStore for MongoStore {
                     "subject_id": notification.subject.id.as_str(),
                     "title": notification.title.as_str(),
                     "created_ms": notification.created_at as i64,
+                    // Absent (not null) for a company-wide row, so a document
+                    // written before this field and one written after it read
+                    // back identically.
+                    "audience": notification.audience.as_ref().map(|a| {
+                        a.iter().map(|id| mongodb::bson::Bson::String(id.clone())).collect::<Vec<_>>()
+                    }),
+                    "context": notification.context.as_deref(),
                 }},
             )
             .with_options(UpdateOptions::builder().upsert(true).build())
@@ -3319,10 +3326,22 @@ impl crate::ports::notifications::NotificationStore for MongoStore {
                     },
                     created_at: d.get_i64("created_ms").unwrap_or_default() as u64,
                     title: get_str(&d, "title")?,
+                    audience: d.get_array("audience").ok().map(|a| {
+                        a.iter()
+                            .filter_map(|b| b.as_str().map(str::to_string))
+                            .collect()
+                    }),
+                    context: d.get_str("context").ok().map(str::to_string),
                 },
                 read_at,
             });
         }
+        // Filtered here rather than in the query, so the audience rule lives in
+        // exactly one place (`Notification::visible_to`) across all three
+        // backends. A company's feed is small; if that stops being true, the
+        // server-side form is `{$or: [{audience: {$exists: false}}, {audience: user}]}`
+        // and must be introduced *with* a conformance case, not instead of one.
+        out.retain(|view| view.notification.visible_to(user));
         Ok(out)
     }
 
@@ -3350,18 +3369,13 @@ impl crate::ports::notifications::NotificationStore for MongoStore {
                 }
                 present
             }
-            None => {
-                let mut cursor = self
-                    .collection("notifications")
-                    .find(doc! {"company_id": company.as_ref()})
-                    .await
-                    .map_err(mongo_err)?;
-                let mut all = Vec::new();
-                while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
-                    all.push(get_str(&d, "id")?);
-                }
-                all
-            }
+            // Only what this person can see. Reuses the same projection `list`
+            // does, so "mark all read" and "what is listed" cannot disagree.
+            None => crate::ports::notifications::NotificationStore::list(self, company, user)
+                .await?
+                .into_iter()
+                .map(|v| v.notification.id)
+                .collect(),
         };
         for id in &targets {
             // `$setOnInsert` is the latch: it seeds `read_ms` only when the

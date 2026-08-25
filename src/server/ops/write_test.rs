@@ -4701,7 +4701,7 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(withdrawn["redacted"], true);
     assert_eq!(
-        withdrawn["redactedBy"], "harness-admin",
+        withdrawn["redactedBy"], "Harness Admin",
         "a withdrawal nobody's name is on is a message that can vanish quietly"
     );
     assert_eq!(
@@ -4716,9 +4716,9 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(thread.len(), 2, "the row is withdrawn, not deleted: {body}");
     assert_eq!(thread[0]["seq"], seq);
     assert_eq!(thread[0]["redacted"], true);
-    assert_eq!(thread[0]["redactedBy"], "harness-admin");
+    assert_eq!(thread[0]["redactedBy"], "Harness Admin");
     assert_eq!(
-        thread[0]["author"], "harness-admin",
+        thread[0]["author"], "Harness Admin",
         "the poster is still named"
     );
     assert_eq!(
@@ -4947,7 +4947,7 @@ async fn task_discussion_posts_persist_and_are_scoped_to_their_card() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(posted["text"], "blocked on the API key");
-    assert_eq!(posted["author"], "harness-admin");
+    assert_eq!(posted["author"], "Harness Admin");
 
     for (task, text) in [
         ("t-1", "unblocked, the key was rotated"),

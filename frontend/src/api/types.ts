@@ -873,6 +873,15 @@ export interface TeamMemberDto {
   role: string;
   description?: string;
   /**
+   * The face somebody chose for this teammate (`lib/avatar.ts`) — a
+   * `tiny:<flavour>` mascot or a `blob:<nodeId>` upload.
+   *
+   * Absent means **nobody has chosen**, which is not "no face": the console
+   * draws the mascot it hashes from the id. Never default it to a flavour — the
+   * distinction is what makes "reset to the default face" offerable.
+   */
+  avatar?: string;
+  /**
    * Whether this teammate has an enabled inbox, as the host's `InboxStore` sees
    * it. Absent on hosts predating the field; the console reads that as `false`.
    */
@@ -1061,6 +1070,11 @@ export interface AgentDetailDto {
   tools: AgentToolsDto;
   desks: AgentDeskDto[];
   inboxEnabled: boolean;
+  /**
+   * The face somebody chose for this teammate, absent when nobody has — the
+   * same field and the same contract as `TeamMemberDto.avatar`.
+   */
+  avatar?: string;
   /** The cap in force and its attribution; same absent-means-uncapped contract as `TeamMemberDto`. */
   budgetUsdDaily?: number;
   spentTodayUsd?: number;
@@ -1129,7 +1143,20 @@ export interface EditAgentInput {
    * persona the operator did not touch.
    */
   instructions?: string | null;
-  /** The teammate's own model override. */
+  /**
+   * The face this teammate wears, three-state exactly like `instructions`:
+   * `undefined` leaves it alone, `null` resets it to the mascot the console
+   * hashes from the id, and a reference (`tiny:<flavour>` / `blob:<nodeId>`)
+   * sets it. See `lib/avatar.ts`.
+   */
+  avatar?: string | null;
+  /**
+   * The teammate's own model override (issue #1245's per-agent follow-up).
+   * Same double-option shape as `description`: absent leaves it alone, `null`
+   * clears it back to the harness's own default, and a string sets it.
+   * Admin-only on the host, alongside `tools` — a member's `PATCH` carrying
+   * this key gets a `403`.
+   */
   model?: string | null;
   /** Which declared harness this teammate runs on. */
   harness?: string | null;
@@ -1836,6 +1863,40 @@ export interface ReadStateResponse {
   markers: ReadMarker[];
 }
 
+/** Response of `GET {scope}/notifications`. */
+export interface NotificationFeedResponse {
+  /** Newest first, and only what this person is addressed by. */
+  notifications: NotificationDto[];
+  /** How many are still unread for this person — what the badge renders. */
+  unread: number;
+}
+
+/** One notification, as the person it is for reads it. */
+export interface NotificationDto {
+  id: string;
+  /** A free-form tag — `"mention"` today. */
+  kind: string;
+  /** `task` / `run` / `approval` / `workflow` / `message`. */
+  subjectKind: string;
+  /** The subject's id in its own space; a chat message id for `message`. */
+  subjectId: string;
+  title: string;
+  createdAt: number;
+  /** When this person read it; absent while unread for them. */
+  readAt?: number;
+  /**
+   * The console channel this belongs to, so a badge lands without the
+   * transcript being loaded.
+   */
+  context?: string;
+}
+
+/** Response of `PUT {scope}/notifications`. */
+export interface MarkNotificationsReadResponse {
+  /** Still unread for this person after the mark. */
+  unread: number;
+}
+
 /** Response of `GET {scope}/presence`. */
 export interface PresenceListResponse {
   /**
@@ -1879,13 +1940,15 @@ export interface MentionableAgentDto {
 /**
  * One person the picker can offer.
  *
- * Id and label only, by design — this is deliberately not the admin user
- * record, and must not grow toward it.
+ * Id, label, and chosen face only, by design — this is deliberately not the
+ * admin user record, and must not grow toward it.
  */
 export interface MentionablePersonDto {
   id: string;
   /** How this person is named to colleagues; never their login identity. */
   label: string;
+  /** The collaboration-facing face chosen by this person, when any. */
+  avatar?: string;
   /** A short typable alias, disambiguated company-wide. Not a handle. */
   slug: string;
 }

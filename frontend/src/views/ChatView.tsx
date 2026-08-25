@@ -47,8 +47,10 @@ import {
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
+import { personAvatar, personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
+import { useIsDesktop } from "@/hooks/use-mobile";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
@@ -90,6 +92,19 @@ import {
   type HistoryHydration,
   type Transcripts,
 } from "./chat/model";
+
+/**
+ * The stable empty transcript fallback.
+ *
+ * `transcripts[channel.id]` can be absent for a channel with no history yet —
+ * a newly opened DM, or a desk whose history came back empty. Falling back to a
+ * fresh `[]` would give `messages` a new identity on every render, which
+ * recomputes the `replyParents`/`loadedMessageIds` memos and re-runs the
+ * channel-view effect on every render — and that effect's state write
+ * re-renders the shell, closing a render loop. One shared empty array keeps the
+ * identity stable until a transcript entry actually lands.
+ */
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 interface Props {
   client: OpenCompanyClient;
@@ -205,12 +220,41 @@ interface Props {
   /** Channel id → unread count, for the rail's badges. Owned by the shell. */
   unread?: Record<string, number>;
   /**
+   * Channel id → unread mentions of this person there.
+   *
+   * A separate badge from `unread`, not a subset of it: unread is derived in
+   * this browser, a mention is a durable host-side fact about *you*. See
+   * `ChannelRail`'s prop docs for why merging them would be a loss.
+   */
+  mentions?: Record<string, number>;
+  mentionFeedRevision?: number;
+  /**
    * Reports the channel actually on screen — which the hash need not name,
    * since it may have been resolved by the first-channel fallback. The shell
    * clears that channel's unread count and remembers it as where an
    * unaddressed line belongs after this view is gone (issue #368).
+   *
+   * The second argument is whether *this* channel's history is still on the
+   * wire. A mention is durable and there is no older-history pagination to
+   * recover one — so the shell must not clear a mention for a message it
+   * cannot yet prove is on screen, which is exactly the case where this is
+   * `true`.
    */
-  onChannelViewed?: (channelId: string) => void;
+  onChannelViewed?: (
+    channelId: string,
+    historyPending: boolean,
+    mentionFeedRevision?: number,
+    /**
+     * The loaded transcript's thread replies (`reply id → parent id`), so the
+     * reader can defer a thread-reply mention until its thread is open.
+     */
+    replyParents?: ReadonlyMap<string, string>,
+    /** The thread panel currently open, or `null`. */
+    openThreadId?: string | null,
+    /** All loaded message ids for this channel, so the reader can defer a
+     * mention whose subject is outside the history window. */
+    loadedMessageIds?: ReadonlySet<string>,
+  ) => void;
   /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
@@ -282,6 +326,8 @@ export function ChatView({
   openTurns,
   liveStepsByThread,
   unread,
+  mentions,
+  mentionFeedRevision,
   onChannelViewed,
   approvals,
   chatChannelByThread,
@@ -318,6 +364,13 @@ export function ChatView({
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
+  // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
+  // transcript share the viewport (`hidden lg:flex`), so it is visible even
+  // while `mobilePane` says "rail"; below that the pane toggle is the whole
+  // story. Mention clearing is gated on this so a mention cannot be marked
+  // read while only the rail is showing (codex P1 review).
+  const isDesktop = useIsDesktop();
+  const chatPaneVisible = mobilePane === "chat" || isDesktop;
   const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
   // Section disclosure is shared by the desktop and sub-`lg` rail instances
   // (codex P2 review): each instance would otherwise keep its own fold state,
@@ -332,6 +385,8 @@ export function ChatView({
   // fix for the rail's issue #1340 focus review).
   const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  /** Your own avatar reference, once `loadViewer` has resolved who you are. */
+  const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
   // the attribution line degrades to "an admin" rather than disappearing.
@@ -389,12 +444,29 @@ export function ChatView({
    * showing an operator a control they cannot use is the only thing this
    * prevents.
    */
+  // Only the newest load may write, exactly as `loadDesks` guards its own runs.
+  // `fetchMe` and `listPeople` can overlap — a scope change while a request is
+  // merely slow — and a stale answer landing last would wear the previous
+  // company's face on your own lines. The face is cleared *before* the fetch so
+  // a slow request can never pin an old avatar across a scope change; the
+  // timeline falls back to the name-seeded mascot meanwhile.
+  const viewerRun = useRef(0);
   const loadViewer = useCallback(async () => {
+    const run = ++viewerRun.current;
+    setYouAvatar(undefined);
     let admin = false;
     try {
-      admin = (await fetchMe(client, company)).role === "admin";
+      const who = await fetchMe(client, company);
+      if (run !== viewerRun.current) return;
+      admin = who.role === "admin";
+      // Your own face, so your lines in a busy channel are yours at a glance.
+      // Read from the same call that resolves your role — there is no second
+      // round trip for it, and no way for the two to disagree about who you are.
+      setYouAvatar(personAvatar(who));
     } catch {
-      // No user plane on this host, or not signed in — treat as non-admin.
+      if (run !== viewerRun.current) return;
+      // No user plane on this host, or not signed in — treat as non-admin, and
+      // leave the composer's own lines on the name-seeded fallback.
     }
     setIsAdmin(admin);
     if (!admin) {
@@ -402,8 +474,11 @@ export function ChatView({
       return;
     }
     try {
-      setPeople(await listPeople(client, company));
+      const people = await listPeople(client, company);
+      if (run !== viewerRun.current) return;
+      setPeople(people);
     } catch {
+      if (run !== viewerRun.current) return;
       // Attribution falls back to "an admin"; not worth a toast.
       setPeople([]);
     }
@@ -418,7 +493,7 @@ export function ChatView({
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
     const person = people.find((p) => p.id === userId);
-    return person?.displayName?.trim() || person?.email || "an admin";
+    return person ? personName(person) : "an admin";
   }
 
   const budgetError = (error: unknown, fallback: string): string => {
@@ -706,7 +781,10 @@ export function ChatView({
     return members.filter((m) => !inside.has(m.id));
   }, [inChannel, members]);
 
-  const messages = channel ? (transcripts[channel.id] ?? []) : [];
+  const messages = useMemo(
+    () => (channel ? (transcripts[channel.id] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES),
+    [transcripts, channel?.id],
+  );
   /**
    * Whether this channel's history is still on the wire.
    *
@@ -720,9 +798,26 @@ export function ChatView({
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
   const entries = useMemo(
-    () => (channel ? buildTimeline(messages, channel, members) : []),
-    [messages, channel, members],
+    () => (channel ? buildTimeline(messages, channel, members, youAvatar) : []),
+    [messages, channel, members, youAvatar],
   );
+  /**
+   * The open channel's thread replies, for the mention-clearing gate: a reply
+   * is folded out of the main timeline (`buildTimeline`), so a mention inside
+   * one must not clear on channel-open alone — only once the thread panel
+   * actually renders it. Keyed by the console's `h<seq>` id, the namespace
+   * `subjectId` on a mention notification meets through `hostMessageId`.
+   */
+  const replyParents = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of messages) {
+      if (m.parentId) map.set(m.id, m.parentId);
+    }
+    return map;
+  }, [messages]);
+
+  /** All loaded message ids in this channel, for the mention-clearing gate. */
+  const loadedMessageIds = useMemo(() => new Set(messages.map((m) => m.id)), [messages]);
 
   /**
    * The approvals raised in the channel on screen (#379).
@@ -786,10 +881,37 @@ export function ChatView({
   // Whoever owns the unread counts needs to know what is actually being looked
   // at. Re-runs as the open channel's transcript grows, not only on a switch:
   // a reply that lands while you are reading the channel is read, and should
-  // not leave a badge on the channel you are sitting in.
+  // not leave a badge on the channel you are sitting in. It also re-runs when
+  // a thread opens or closes: opening a thread renders its replies, so the
+  // replies' mentions — which the channel-open alone must not clear — clear
+  // the moment the thread makes them visible.
+  //
+  // Gated on the transcript actually being on screen: below `lg`, `mobilePane
+  // === "rail"` hides the pane, and a mention that lands while the operator is
+  // only looking at the channel rail must not be marked read behind their back.
+  // The gate itself is a dependency, so re-opening the pane from the rail
+  // re-runs the report and clears whatever is newly visible.
   useEffect(() => {
-    if (channel) onChannelViewed?.(channel.id);
-  }, [channel?.id, messages.length, onChannelViewed]);
+    if (channel && chatPaneVisible)
+      onChannelViewed?.(
+        channel.id,
+        historyPending,
+        mentionFeedRevision,
+        replyParents,
+        openThreadId,
+        loadedMessageIds,
+      );
+  }, [
+    channel?.id,
+    messages.length,
+    historyPending,
+    mentionFeedRevision,
+    onChannelViewed,
+    replyParents,
+    openThreadId,
+    loadedMessageIds,
+    chatPaneVisible,
+  ]);
 
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
@@ -1410,6 +1532,7 @@ export function ChatView({
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
+        mentions={mentions}
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
@@ -1421,6 +1544,7 @@ export function ChatView({
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
+        mentions={mentions}
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}

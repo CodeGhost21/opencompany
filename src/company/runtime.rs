@@ -2012,6 +2012,206 @@ impl CompanyRuntime {
             .then_some(parent)
     }
 
+    /// The console channel id a mention in `desk` belongs to.
+    ///
+    /// A desk channel's id is its own thread id, so the context is the desk id
+    /// unchanged. A DM's thread id is the bare roster teammate id, while the
+    /// console's channel id for the same DM is `dm:<teammate-id>` — and the
+    /// console addresses a DM with that bare id (ChatView sends
+    /// `active.member.id`). So a mention in a DM has to be re-keyed into the
+    /// console's channel-id space or the rail has no row to badge, and opening
+    /// the DM can never match or clear the notification.
+    ///
+    /// The roster check goes through [`crate::runtime::assignee::resolve`] for
+    /// its desk-first ordering: the same one `responder_for` uses, so a desk
+    /// whose id happens to match a teammate id still stores the desk id, and a
+    /// desk literally named `dm:<…>` keeps that id instead of being displaced
+    /// by the `dm:`-stripped retry. The human user directory is deliberately
+    /// consulted **only** when the store will not answer — never ahead of that
+    /// resolution, or a desk id matching a human id would be misclassified as
+    /// `dm:<id>`. The resolution carries the **canonical** id (issue #214), so
+    /// a key typed as a display name — `chat: "Engineering"` for a desk whose
+    /// id is `engineering` — stores the canonical id, which is what the rail's
+    /// channel ids are built from. A `dm:`-prefixed key is tried **as sent**
+    /// first and only split for the retry when it names nothing — so a
+    /// noncanonical address — `dm:BACKEND_ENGINEER`, `dm:<display name>` —
+    /// still stores `dm:<canonical-agent-id>` and badges the rail's real DM
+    /// channel rather than one that does not exist.
+    pub(crate) async fn mention_context(
+        &self,
+        id: &CompanyId,
+        users: &[crate::ports::users::UserRecord],
+        desk: &str,
+    ) -> String {
+        // The key is tried **as sent** first, exactly as the routing does: a
+        // desk or teammate literally named `dm:x` resolves today, and an
+        // unconditional prefix-strip would let `dm:x` claim it
+        // ([`crate::runtime::assignee::dm_key`] documents that ordering). The
+        // stripped retry below is only for a `dm:`-prefixed key that names
+        // nothing as sent.
+        let Ok(Some(record)) = self.store().load(id).await else {
+            // Store will not answer; best-effort, same as the callers. A
+            // canonical `dm:<teammate-id>` still badges through the raw key,
+            // and a *noncanonical* roster key is re-keyed through the
+            // directory. This runs only on the store-down path, never ahead of
+            // `assignee::resolve`: a desk id that happens to match a human id
+            // must still file under the desk when the store answers, or a
+            // mention aimed at that desk would badge a nonexistent `dm:<id>`
+            // channel.
+            if users.iter().any(|u| u.id == desk) {
+                return format!("dm:{desk}");
+            }
+            if let Some(bare) = crate::runtime::assignee::dm_key(desk)
+                && users.iter().any(|u| u.id == bare)
+            {
+                return format!("dm:{bare}");
+            }
+            return desk.to_string();
+        };
+        let bare = crate::runtime::assignee::dm_key(desk);
+        match crate::runtime::assignee::resolve(&record, desk) {
+            // A bare teammate key files under the console's DM channel id,
+            // canonicalized (issue #214) — as does a teammate literally named
+            // `dm:<…>`, whose DM channel id is `dm:dm:<…>` in the same space.
+            crate::runtime::assignee::AssigneeResolution::Agent(agent) => format!("dm:{agent}"),
+            // A desk with no member to work it is still a real desk with a real
+            // rail channel, so it files under the same canonical id as one with
+            // a lead — a memberless `"Sales"` still has to badge `#sales`.
+            crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. }
+            | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => desk_id,
+            // Unassigned, unknown, or ambiguous. A `dm:`-prefixed key that
+            // names nothing as sent can still be the console's DM channel for a
+            // *noncanonical* address — `dm:BACKEND_ENGINEER`,
+            // `dm:<display name>` — which the routing resolves
+            // case-insensitively, so the stored context has to carry the
+            // canonical agent id the rail's channel ids are keyed by. Storing
+            // the raw key files the badge under a channel that does not exist,
+            // and opening the actual DM can never clear it. Split the prefix
+            // off and run the bare half through the same resolution as an
+            // un-prefixed desk, re-applying the prefix only when it names a
+            // teammate.
+            _ => {
+                if let Some(bare) = bare {
+                    match crate::runtime::assignee::resolve(&record, bare) {
+                        crate::runtime::assignee::AssigneeResolution::Agent(agent) => {
+                            return format!("dm:{agent}");
+                        }
+                        crate::runtime::assignee::AssigneeResolution::Desk {
+                            desk: desk_id,
+                            ..
+                        }
+                        | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => {
+                            return desk_id;
+                        }
+                        _ => {}
+                    }
+                }
+                // A general-chat spelling — `"General"` (the default for an
+                // unaddressed message), `"main"`, or `""` — still names the
+                // General desk, the console's default thread, so it has to file
+                // under the console's canonical main-thread id, which the rail
+                // aliases onto its first rendered desk channel
+                // ([`crate::server::chat_history::is_general_chat`], issue #65).
+                // Anything else is honestly the string as written: it may badge
+                // nowhere, but it is not a lie.
+                let probe = bare.unwrap_or(desk);
+                if crate::server::chat_history::is_general_chat(Some(probe)) {
+                    crate::server::chat_history::MAIN_THREAD_ID.to_string()
+                } else {
+                    desk.to_string()
+                }
+            }
+        }
+    }
+
+    /// Files a durable mention notification for the people `mentions` names in
+    /// `desk` (the console's channel-id space), for the journaled message at
+    /// `message_seq`.
+    ///
+    /// **One row, many recipients** — not one row each. Read state is already
+    /// per `(company, user, notification)`, so a single row carrying an
+    /// audience gives every recipient independent read state for free, and the
+    /// feed does not grow by the size of the room every time somebody types
+    /// `@everyone`. Teammates produce no notification: an agent has no inbox to
+    /// badge and no person to interrupt; a mention of one is already handled by
+    /// routing.
+    ///
+    /// Shared by the operator `/chat` path and the approval-continuation path,
+    /// so an `@user` an agent types back badges and notifies whoever it names
+    /// whichever journaling surface wrote the reply. Without this, a
+    /// continuation's mentions rendered as chips and nothing else — the badge
+    /// and the notification both silently missing for exactly the person they
+    /// are meant to reach: offline when the reply lands.
+    pub(crate) async fn notify_mentions(
+        &self,
+        id: &CompanyId,
+        mentions: &[Mention],
+        message_seq: &EventSeq,
+        by: Option<&Actor>,
+        desk: &str,
+    ) {
+        let users = match self.users().list_users(id).await {
+            Ok(users) => users,
+            Err(err) => {
+                tracing::warn!(
+                    company = %id,
+                    error = %err,
+                    "[mentions] the user directory could not be read; this message badges nobody"
+                );
+                return;
+            }
+        };
+        let users: Vec<_> = users
+            .into_iter()
+            .filter(|u| u.status == crate::ports::users::UserStatus::Active)
+            .collect();
+        let mut audience = crate::runtime::mentions::mentioned_users(&users, mentions);
+        // Never notify the author, even when they wrote `@everyone`. `normalize`
+        // already drops a direct self-mention, but a broadcast expands to the
+        // whole company *after* that, so this is the only place the author can
+        // be removed from one.
+        if let Some(Actor {
+            kind: ActorKind::User,
+            id: author,
+        }) = by
+        {
+            audience.retain(|u| u != author);
+        }
+        if audience.is_empty() {
+            return;
+        }
+
+        let who = by
+            .filter(|a| a.kind == ActorKind::User)
+            .and_then(|a| users.iter().find(|u| u.id == a.id))
+            .map(crate::runtime::mentions::user_label)
+            .unwrap_or_else(|| "Someone".to_string());
+        let note = crate::ports::notifications::Notification {
+            id: crate::ports::generate_id(),
+            kind: "mention".to_string(),
+            subject: crate::ports::notifications::Subject {
+                kind: crate::ports::notifications::SubjectKind::Message,
+                id: message_seq.value().to_string(),
+            },
+            created_at: crate::ports::now_millis(),
+            title: format!("{who} mentioned you in {desk}"),
+            audience: Some(audience),
+            // The console's channel-id space, so a badge lands without the
+            // browser having loaded that transcript. Whether the thread is a DM
+            // is a question about the roster, not the human user directory —
+            // see [`Self::mention_context`].
+            context: Some(self.mention_context(id, &users, desk).await),
+        };
+        if let Err(err) = self.notifications().append(id, &note).await {
+            tracing::warn!(
+                company = %id,
+                error = %err,
+                "[mentions] a mention could not be recorded; the message still lands and \
+                 still renders, but nobody is badged for it"
+            );
+        }
+    }
+
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
         let conversation = self
             .journal
@@ -2053,7 +2253,7 @@ impl CompanyRuntime {
                     &self.id,
                     CompanyEvent::AgentReply {
                         parent,
-                        chat_id,
+                        chat_id: chat_id.clone(),
                         // Issue #885: the author, not the destination. Same
                         // fallback as the `/chat` path — a producer that names
                         // no agent keeps the pre-#885 behaviour exactly.
@@ -2064,7 +2264,7 @@ impl CompanyRuntime {
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
-                        mentions: reply_mentions,
+                        mentions: reply_mentions.clone(),
                         // Zero, and stays zero: no reply's mentions reach
                         // dispatch, so no reply is ever a mention hop.
                         mention_depth: 0,
@@ -2072,7 +2272,19 @@ impl CompanyRuntime {
                 )
                 .await
             {
-                Ok(seq) => response.message_id = Some(seq.value().to_string()),
+                Ok(seq) => {
+                    response.message_id = Some(seq.value().to_string());
+                    // The durable half of a reply's mention, same as an operator
+                    // message's and the `/chat` path's. Without this an `@user`
+                    // the agent types back renders as a chip and nothing else —
+                    // the badge and the notification both silently missing for
+                    // whoever it named, which is worst for exactly the person it
+                    // is meant to reach: offline when the reply lands.
+                    if !reply_mentions.is_empty() {
+                        self.notify_mentions(&self.id, &reply_mentions, &seq, None, &chat_id)
+                            .await;
+                    }
+                }
                 Err(err) => tracing::warn!(
                     company = %self.id,
                     approval_id = %approval_id,

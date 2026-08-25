@@ -20,6 +20,7 @@ import {
   type ApprovalSummary,
   type CompanyStatus,
   type GrantScope,
+  type NotificationDto,
   type TurnStep,
   type Verdict,
 } from "@/api/types";
@@ -62,6 +63,12 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
+import {
+  mentionCountsByChannel,
+  mentionsToClear,
+  threadViewAdvancesChannel,
+  threadsToReReadForMentions,
+} from "@/lib/mention-badge";
 import { usePresence } from "@/hooks/use-presence";
 import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
@@ -80,13 +87,17 @@ import {
   fromHistory,
   hostMessageId,
   liveReplyIdentity,
+  MAIN_THREAD_ID,
   makeMessage,
+  mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
+import { ProfileRow } from "@/components/profile-row";
+import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
@@ -381,6 +392,7 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
+  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
   for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
@@ -542,6 +554,13 @@ export function AppShell({
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
   const [transcripts, setTranscripts] = useState<Transcripts>({});
+  // The latest transcripts, readable from the stable `refreshMentions`
+  // callback without rebuilding it on every channel that lands a line (the
+  // same reason `mentionFeedRef` and `chatChannelByThreadRef` exist).
+  const transcriptsRef = useRef(transcripts);
+  useEffect(() => {
+    transcriptsRef.current = transcripts;
+  }, [transcripts]);
   // How far each channel's history rehydration has got. Kept beside
   // `transcripts` rather than inside it because an empty transcript is a
   // legitimate final answer, and the timeline has to tell that apart from not
@@ -831,6 +850,7 @@ export function AppShell({
   // the operator's first message on a fresh page load.
   useEffect(() => {
     let cancelled = false;
+    let disposeRehydratePolling: (() => void) | undefined;
     const requestCompany = company;
     // Another company's channel ids are another namespace. Drop this one's
     // addressing up front rather than routing the next company's events into
@@ -887,62 +907,111 @@ export function AppShell({
     setDecidingApprovals(new Map());
     setFailedApprovals({});
 
-    const hydrate = (threadId: string) => {
-      client
-        .getChatHistory(threadId, company)
-        .then((entries) => {
-          if (cancelled || requestCompany !== company || entries.length === 0) return;
-          const hydrated = fromHistory(entries);
-          setThreads((ts) =>
-            ts.map((t) => {
-              if (t.id !== threadId) return t;
-              const known = new Set(t.messages.map((m) => m.id));
-              const fresh = hydrated.filter((m) => !known.has(m.id));
-              return fresh.length === 0 ? t : { ...t, messages: [...fresh, ...t.messages] };
-            }),
-          );
-        })
-        .catch(() => {
-          /* host without `/chat/history`, or offline — thread stays empty */
-        });
-    };
+    // How far each channel's cold hydration has got, and which thread's
+    // request is still in flight, so the 5-second poll below (`rehydrateAll`
+    // reused as both the mount-time call and the recurring one) can tell a
+    // cold load from a recovery tick. A cold load marks each channel
+    // `"loading"` before its first request — the gap between "this channel
+    // exists" and "its history is in flight" is precisely the window the
+    // timeline used to fill with the empty-channel copy — and a poll tick
+    // must not: the channel is already `"ready"`, and cycling it back through
+    // `"loading"` every five seconds is what forced `MessageTimeline` to
+    // re-anchor to the bottom on the same cadence (its scroll-to-bottom
+    // effect is keyed on `historyPending`), yanking an operator reading
+    // scrollback back down every poll even though nothing new arrived.
+    //
+    // A channel counts as hydrated only once its cold read has *settled*, not
+    // when it merely started: a first request still in flight when the timer
+    // fires must not be treated as a poll, and a transient failure must not
+    // make the next tick fold the whole persisted history in as new tail data.
+    const hydratedChannels = new Set<string>();
+    const inFlight = new Set<string>();
 
-    // Same rehydration, into `transcripts` instead of `threads` — the Chat
-    // workspace's own transcript store. Chat's channel id and the host's
-    // thread id agree for a desk (`deskFromDto` keeps `DeskDto.id`
-    // untouched), but not for a DM: the channel id is the console-local
-    // `dmChannelId`, while the thread id `getChatHistory`/`chat` read is the
-    // roster agent id (see `ChatView`'s `send`) — so this takes both.
+    // Same status again — a poll tick re-reading history that changed nothing —
+    // must not mint a new object: it re-renders every consumer of hydration
+    // state on a five-second cadence for no change. Returning `h` unchanged
+    // lets React bail out.
     const markHistory = (channelId: string, status: HistoryStatus) =>
-      setHydration((h) => ({ ...h, byChannel: { ...h.byChannel, [channelId]: status } }));
+      setHydration((h) => {
+        if (h.byChannel[channelId] === status) return h;
+        return { ...h, byChannel: { ...h.byChannel, [channelId]: status } };
+      });
 
-    const hydrateChannel = (channelId: string, threadId: string) => {
-      // Marked before the request, not after: the gap between "this channel
-      // exists" and "its history is in flight" is precisely the window the
-      // timeline used to fill with the empty-channel copy.
-      markHistory(channelId, "loading");
+    // One history fetch per thread, fanned into both transcript stores. The
+    // Chat workspace keeps `transcripts` keyed by channel id, and the parked
+    // Conversation keeps `threads` keyed by thread id; a desk's channel id *is*
+    // its thread id, and a DM's channel id is the console-local `dmChannelId`
+    // while its thread id is the roster agent id (see `ChatView`'s `send`).
+    // Fetching per unique thread instead of per store means a thread that
+    // renders as both a thread and a channel is read once, not twice, on every
+    // tick (issue #1690).
+    const hydrateThread = (threadId: string, channels: readonly { channelId: string }[]) => {
+      // Serialize: a tick that fires while the cold read is still in flight
+      // does not fire a second request for the same thread (issue #1690).
+      if (inFlight.has(threadId)) return;
+      inFlight.add(threadId);
+      channels.forEach(({ channelId }) => {
+        if (!hydratedChannels.has(channelId)) markHistory(channelId, "loading");
+      });
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
           if (cancelled || requestCompany !== company) return;
-          if (entries.length === 0) {
-            // An empty answer is still an answer, and the only thing that ever
-            // makes the "start of your direct message" copy true.
-            markHistory(channelId, "ready");
-            return;
-          }
           const hydrated = fromHistory(entries);
-          setTranscripts((t) => {
-            const known = new Set((t[channelId] ?? []).map((m) => m.id));
-            const fresh = hydrated.filter((m) => !known.has(m.id));
-            return fresh.length === 0 ? t : { ...t, [channelId]: [...fresh, ...(t[channelId] ?? [])] };
-          });
-          markHistory(channelId, "ready");
+          if (hydrated.length > 0) {
+            // Both folds use the same rule: persisted rows take the history's
+            // own oldest-first order, and local rows the host has not
+            // persisted yet stay at the tail — so a row the live SSE path
+            // missed lands where the host says it belongs, gap or tail
+            // (issue #1690). Durable rows outside the newest page remain in
+            // their existing prefix, while only browser-local rows are tail
+            // optimistic sends.
+            setThreads((ts) =>
+              ts.map((t) => {
+                if (t.id !== threadId) return t;
+                const messages = mergeHistoryInOrder(t.messages, hydrated);
+                return messages === t.messages ? t : { ...t, messages };
+              }),
+            );
+            channels.forEach(({ channelId }) => {
+              setTranscripts((t) => {
+                const merged = mergeHistoryInOrder(t[channelId] ?? [], hydrated);
+                return merged === (t[channelId] ?? []) ? t : { ...t, [channelId]: merged };
+              });
+            });
+          }
+          channels.forEach(({ channelId }) => markHistory(channelId, "ready"));
         })
         .catch(() => {
-          /* host without `/chat/history`, or offline — channel stays empty */
-          if (!cancelled) markHistory(channelId, "ready");
+          /* host without `/chat/history`, or offline — stores stay as they are */
+          if (!cancelled) channels.forEach(({ channelId }) => markHistory(channelId, "ready"));
+        })
+        .finally(() => {
+          inFlight.delete(threadId);
+          // Settled — success or failure — is the moment a channel stops being
+          // a cold load and starts being a poll target. Not the moment the
+          // request was *sent* (issue #1690).
+          channels.forEach(({ channelId }) => hydratedChannels.add(channelId));
         });
+    };
+
+    const rehydrateTargets = (
+      threadIds: readonly string[],
+      channels: readonly { channelId: string; threadId: string }[],
+    ) => {
+      const channelsByThread = new Map<string, { channelId: string }[]>();
+      for (const { channelId, threadId } of channels) {
+        const list = channelsByThread.get(threadId);
+        if (list) list.push({ channelId });
+        else channelsByThread.set(threadId, [{ channelId }]);
+      }
+      // Every resolved thread gets its own fetch, even when nothing renders as
+      // a channel — the main line is a thread with no Chat channel. And every
+      // channel's backing thread is in `threadIds`, so the union is the full
+      // set, each exactly once (issue #1690).
+      [...new Set([...threadIds, ...channelsByThread.keys()])].forEach((threadId) =>
+        hydrateThread(threadId, channelsByThread.get(threadId) ?? []),
+      );
     };
 
     client
@@ -969,15 +1038,22 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        resolved.forEach((t) => hydrate(t.id));
-
         const chatDesks = desks.length ? desks.map(deskFromDto) : defaultDesks();
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
         setFirstDeskChannelId(chatDesks[0]?.id ?? null);
-        chatDesks.forEach((d) => hydrateChannel(d.id, d.id));
-        roster.forEach((m) => hydrateChannel(dmChannelId(m), m.id));
+        const threadIds = resolved.map((t) => t.id);
+        const channels = [
+          ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+          ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+        ];
+        const rehydrateAll = () => rehydrateTargets(threadIds, channels);
+        // SSE remains the fast path. This catches a persisted channel message
+        // whose live frame arrived during a disconnect or before its thread
+        // mapping existed, and pauses automatically while the tab is hidden.
+        rehydrateAll();
+        disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
         // Every channel this pass will hydrate now has a status, so a channel
         // with none is one nothing is coming for.
         setHydration((h) => ({ ...h, discovered: true }));
@@ -988,10 +1064,13 @@ export function AppShell({
         // rehydration attempt (it's the one every deployment has).
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
-        defaultThreads().forEach((t) => hydrate(t.id));
         setChatChannelByThread(channelMap(fallbackDesks, []));
         setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
-        fallbackDesks.forEach((d) => hydrateChannel(d.id, d.id));
+        const threadIds = defaultThreads().map((t) => t.id);
+        const channels = fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id }));
+        const rehydrateAll = () => rehydrateTargets(threadIds, channels);
+        rehydrateAll();
+        disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
         if (!cancelled) setHydration((h) => ({ ...h, discovered: true }));
       });
 
@@ -1024,6 +1103,7 @@ export function AppShell({
 
     return () => {
       cancelled = true;
+      disposeRehydratePolling?.();
     };
   }, [client, company]);
 
@@ -1298,9 +1378,174 @@ export function AppShell({
    * again as the open channel's transcript grows so a line read as it lands
    * doesn't leave a badge behind.
    */
+  /**
+   * This person's unread mentions.
+   *
+   * Polled rather than streamed, deliberately: the company SSE feed has **no
+   * per-viewer projection**, which is the documented reason `ReactionToggled`
+   * is dropped from it entirely — a mention frame would have to carry either
+   * everyone's user ids or nobody's. So the feed is refetched on the same
+   * cadence the console already polls, on each reply, and on window focus.
+   *
+   * A host without the route leaves this empty, so no mention badges render and
+   * nothing else changes.
+   */
+  const [mentionFeed, setMentionFeed] = useState<NotificationDto[]>([]);
+  const mentionFeedRevision = useRef(0);
+  const mentionFeedVersion = mentionFeedRevision.current;
+  // Mention subject ids this session has already asked the shell to re-read a
+  // thread for. One re-read per mention, not one per poll: a re-read that
+  // fails (offline) is retried by the next reload rather than hammered.
+  const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
+  const refreshMentions = useCallback(() => {
+    const requestCompany = company;
+    const revision = ++mentionFeedRevision.current;
+    void client
+      .notifications(requestCompany)
+      // A host that answers this route with something other than the documented
+      // shape must not take the console down with it. `?? []` rather than a
+      // trusted `feed.notifications`: an older or proxied host can return a bare
+      // array, or `null`, and iterating that throws during render — which blanks
+      // the whole app, not just the badge. The badge is the least important
+      // thing on the screen and must fail like it.
+      .then((feed) => {
+        if (
+          revision !== mentionFeedRevision.current ||
+          requestCompany !== scopeRef.current.company
+        )
+          return;
+        const next = Array.isArray(feed?.notifications) ? feed.notifications : [];
+        setMentionFeed(next);
+        // A mention posted by another operator never reaches this tab through
+        // SSE (`OperatorMessage` is dropped from the projection), and the
+        // transcripts are otherwise re-read only when a turn this tab is
+        // *watching* settles — a turn another operator's message opened is not
+        // one it watches. So a newly polled mention whose message is absent
+        // from the loaded transcript would leave its badged channel with
+        // nothing to show and the `loadedMessageIds` gate unable to clear it
+        // (Codex). Re-read the host thread so the mentioned message lands.
+        const loadedByChannel: Record<string, ReadonlySet<string>> = {};
+        for (const [channelId, rows] of Object.entries(transcriptsRef.current)) {
+          loadedByChannel[channelId] = new Set(rows.map((m) => m.id));
+        }
+        const { threadIds, subjects } = threadsToReReadForMentions(
+          next,
+          loadedByChannel,
+          chatChannelByThreadRef.current,
+          firstDeskChannelId ?? undefined,
+          mentionReReadSubjectsRef.current,
+        );
+        if (threadIds.length > 0) {
+          // Guard first, then re-read: the fold `reReadSettledThread` runs is
+          // idempotent, but the poll that noticed the mention keeps firing, so
+          // without the guard every tick would re-read the same threads.
+          subjects.forEach((s) => mentionReReadSubjectsRef.current.add(s));
+          threadIds.forEach((threadId) => reReadSettledThread(threadId));
+        }
+      })
+      .catch(() => {
+        // A transient refresh failure must not erase the last successful feed:
+        // keeping it is safer than making durable unread mentions disappear.
+        // The next successful refresh reconciles the optimistic snapshot.
+      });
+  }, [client, company, firstDeskChannelId, reReadSettledThread]);
+
+  useEffect(() => {
+    mentionFeedRevision.current++;
+    mentionReReadSubjectsRef.current = new Set();
+    setMentionFeed([]);
+    refreshMentions();
+    const onFocus = () => refreshMentions();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshMentions]);
+
+  // Ride the existing company poll rather than adding a second timer.
+  useEffect(() => {
+    refreshMentions();
+  }, [feed.now, refreshMentions]);
+
+  const mentionCounts = useMemo(() => {
+    // `main` may be undefined while the desks/roster effect has not resolved —
+    // passing a fabricated `""` would file every legacy "General"/"main"
+    // mention under a channel the rail never has, invisible and unclearable.
+    // The lib drops those rows when there is no rendered main channel.
+    return mentionCountsByChannel(
+      mentionFeed,
+      firstDeskChannelId ?? undefined,
+      new Set(Object.values(chatChannelByThread)),
+    );
+  }, [mentionFeed, firstDeskChannelId, chatChannelByThread]);
+  const mentionFeedRef = useRef(mentionFeed);
+  mentionFeedRef.current = mentionFeed;
+  /**
+   * The same feed, readable from a callback that must not be rebuilt when it
+   * changes.
+   *
+   * `onChannelViewed` is handed to `ChatView` and is deliberately stable — it
+   * is called on every channel view and on every transcript growth, and adding
+   * the feed to its dependencies would rebuild it on every poll. But it also
+   * has to clear *this* channel's mentions, which means reading the current
+   * feed. A ref is how both hold: the callback stays stable and still sees the
+   * latest value, instead of capturing the empty array it was created with.
+   */
   const onChannelViewed = useCallback(
-    (channelId: string) => {
+    (
+      channelId: string,
+      historyPending: boolean,
+      mentionFeedRevision?: number,
+      replyParents?: ReadonlyMap<string, string>,
+      openThreadId?: string | null,
+      loadedMessageIds?: ReadonlySet<string>,
+      advanceChannelRead = true,
+    ) => {
       activeChatChannelRef.current = channelId;
+      if (mentionFeedRevision === undefined) return;
+      // Clear only THIS channel's mentions, and only once its history is
+      // actually on screen. A mention is durable and there is no
+      // older-history pagination to recover one, so clearing it before the
+      // named message has loaded — or while hydration is still failing —
+      // would lose the summons for good with nothing left to notice it by.
+      // The effect above re-fires once `historyPending` goes false, so this
+      // simply waits rather than dropping the clear.
+      const clearing = historyPending
+        ? []
+        : mentionsToClear(
+            mentionFeedRef.current,
+            channelId,
+            // Same undefined-means-none signal as the count memo: with no
+            // rendered main channel the general-chat arm matches nothing.
+            firstDeskChannelId ?? undefined,
+            new Set(
+              Object.keys(chatChannelByThread).filter(
+                (threadId) => chatChannelByThread[threadId] === channelId,
+              ),
+            ),
+            new Set(Object.values(chatChannelByThread)),
+            replyParents ?? new Map(),
+            openThreadId ?? null,
+            loadedMessageIds,
+          );
+      if (clearing.length > 0) {
+        // Optimistic, so the badge goes at once; the next poll reconciles.
+        setMentionFeed((current) =>
+          current.map((n) =>
+            clearing.includes(n.id) ? { ...n, readAt: Date.now() } : n,
+          ),
+        );
+        void client.markNotificationsRead(clearing, company).catch(() => {
+          // Older host, or offline. The next poll restores the true state
+          // rather than leaving a badge permanently wrong.
+          refreshMentions();
+        });
+      }
+      // A Conversation thread view that aliases `main` onto a real desk shows
+      // the legacy General transcript, not the desk's own (see `onThreadViewed`).
+      // The mention clear above is still owed — the thread's loaded ids prove
+      // the summoning message is on screen — but the channel-read side effects
+      // are not: advancing the desk's floor here would permanently un-badge
+      // unread lines the operator never saw.
+      if (!advanceChannelRead) return;
       const at = Date.now();
       setLastViewedChannel((v) => ({ ...v, [channelId]: at }));
       // The durable half (issue #755). Fire-and-forget on purpose: the local
@@ -1317,7 +1562,54 @@ export function AppShell({
       // exactly one of the trips that has to survive.
       writeLastChannel(scope, channelId);
     },
-    [scope, client, company],
+    // The whole map, not just `.main`: the callback reads every key and value
+    // (`Object.keys`/`Object.values` for the rendered and visible thread sets),
+    // and a company switch whose first desk id matches the previous company's
+    // leaves `.main` unchanged while the rest of the map — the DM channels for
+    // a different roster — moves. Rebuilding the callback on the whole map is
+    // cheap: it changes on desk load and company switch, never per poll (the
+    // `mentionFeedRef` comment above is what keeps the *feed* out of the deps).
+    [scope, client, company, chatChannelByThread],
+  );
+
+  /**
+   * The Conversation surface's own view report, mapped onto the Chat rail.
+   *
+   * Conversation renders the `main` thread (and every desk thread) that the
+   * rail maps to a channel, but it is a different store with its own view
+   * lifecycle — ChatView's `onChannelViewed` never fires for it. For a company
+   * with real desks the `main` conversation lives *only* here, so a mention
+   * whose subject sits in that thread could never clear: the rail channel it
+   * badges hydrates the first desk's own thread, whose loaded messages can
+   * never contain the main-thread subject. Reporting the view through the same
+   * channel id, gated by the *thread's* loaded ids, gives the badge its read
+   * path while keeping the clear honest — it still only fires once the named
+   * message is actually on screen.
+   *
+   * The mention clear is not the whole of `onChannelViewed`, though. A desk or
+   * DM thread view maps to the channel that owns that same transcript, so its
+   * ordinary channel-view side effects (advancing the unread floor and the
+   * persisted read marker) are correct. The `main` view is different: `main`
+   * aliases the first desk's channel for *badging*, but its transcript is the
+   * legacy General conversation, not the desk's own — so marking that desk read
+   * would permanently un-badge unread lines the operator never saw. That view
+   * reports the mention clear only ([`threadViewAdvancesChannel`]).
+   */
+  const onThreadViewed = useCallback(
+    (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
+      const channelId = chatChannelByThreadRef.current[threadId];
+      if (!channelId) return;
+      onChannelViewed(
+        channelId,
+        false,
+        mentionFeedVersion,
+        undefined,
+        null,
+        loadedMessageIds,
+        threadViewAdvancesChannel(threadId, channelId),
+      );
+    },
+    [onChannelViewed, mentionFeedVersion],
   );
 
   const setThreadMessages = (
@@ -1440,12 +1732,12 @@ export function AppShell({
         // reply can only be matched by content.
         //
         // It is no longer the ONLY guard, and issue #483 is why. This line now
-        // carries the host's id (below), so `hydrateChannel`'s id dedupe can
-        // recognise it — which the content check could never do from the other
-        // side, because hydration prepends history rather than appending to the
-        // recent tail this scans. Live-then-hydrate was the one route neither
-        // guard covered, and it doubled every reply that arrived while its
-        // channel was closed.
+        // carries the host's id (below), so `mergeHistoryInOrder`'s id dedupe
+        // can recognise it — which the content check could never do from the
+        // other side, because hydration folds the persisted rows in the
+        // history's own order rather than appending to the recent tail this
+        // scans. Live-then-hydrate was the one route neither guard covered,
+        // and it doubled every reply that arrived while its channel was closed.
         const dup = existing
           .slice(-8)
           .some((m) => m.from === "company" && m.text === event.text);
@@ -1459,7 +1751,7 @@ export function AppShell({
               taskId: event.taskId,
               mentions: event.mentions,
               // Issue #483: same identity as the thread store above. This is
-              // the store `hydrateChannel` writes into, so this is where the
+              // the store `hydrateThread` folds into, so this is where the
               // duplicate was visible.
               ...liveReplyIdentity(event),
               // Issue #364: a reply to a thread joins that thread live, instead
@@ -2097,19 +2389,25 @@ export function AppShell({
   });
 
   return (
-    // `SidebarProvider` paints the chrome layer itself — see its own note on
-    // why that fill lives there and not here (issue #1178).
-    <SidebarProvider className="h-svh overflow-hidden">
-      <a
-        href={`#${MAIN_CONTENT_ID}`}
-        className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
-        onClick={(event) => {
-          event.preventDefault();
-          document.getElementById(MAIN_CONTENT_ID)?.focus();
-        }}
-      >
-        Skip to content
-      </a>
+    // The ambient `(client, company)` for the leaves that have to fetch and are
+    // drawn from too many parents to thread props to — today, the avatar tile,
+    // which fetches an uploaded face through the client because an `<img>`
+    // cannot carry a credential. See `lib/console-context.tsx` for why this is
+    // deliberately not a general escape from props.
+    <ConsoleProvider client={client} company={company}>
+      {/* `SidebarProvider` paints the chrome layer itself — see its own note on
+          why that fill lives there and not here (issue #1178). */}
+      <SidebarProvider className="h-svh overflow-hidden">
+        <a
+          href={`#${MAIN_CONTENT_ID}`}
+          className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
+          onClick={(event) => {
+            event.preventDefault();
+            document.getElementById(MAIN_CONTENT_ID)?.focus();
+          }}
+        >
+          Skip to content
+        </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -2140,20 +2438,24 @@ export function AppShell({
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-            <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
-          </SidebarContent>
-          <SidebarFooter>
-            <SidebarControls
-              lifecycleState={feed.status.lifecycle}
-              emergencyPaused={feed.status.emergency_paused}
-              companies={companies}
-              activeCompany={company}
-              onSwitchCompany={onSwitchCompany}
-              onBackToPicker={onBackToPicker}
-              view={view}
-              onNavigate={setView}
-            />
-          </SidebarFooter>
+          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
+        </SidebarContent>
+        <SidebarFooter>
+          {/* Who you are signed in as, above the controls that act on the
+              company. It renders nothing where there is nobody to name — a host
+              with no sign-in, or a session that has just gone. */}
+          <ProfileRow client={client} company={company} />
+          <SidebarControls
+            lifecycleState={feed.status.lifecycle}
+            emergencyPaused={feed.status.emergency_paused}
+            companies={companies}
+            activeCompany={company}
+            onSwitchCompany={onSwitchCompany}
+            onBackToPicker={onBackToPicker}
+            view={view}
+            onNavigate={setView}
+          />
+        </SidebarFooter>
         </nav>
         <SidebarRail />
       </Sidebar>
@@ -2250,6 +2552,8 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
+              mentionFeedRevision={mentionFeedVersion}
+              mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
               now={feed.now}
@@ -2268,6 +2572,7 @@ export function AppShell({
               threads={threads}
               activeId={activeThreadId}
               onSelect={setActiveThreadId}
+              onThreadViewed={onThreadViewed}
               setMessages={setThreadMessages}
               onReply={() => void feed.refresh()}
               taskEventTick={taskEventTick}
@@ -2607,6 +2912,7 @@ export function AppShell({
         hold={setupOpen}
         suppressWelcome={setupCompleted}
       />
-    </SidebarProvider>
+      </SidebarProvider>
+    </ConsoleProvider>
   );
 }
