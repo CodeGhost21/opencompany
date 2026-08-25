@@ -6047,7 +6047,10 @@ name = "Design"
             setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(delegation::desk_lead(&brain.record(), "design"), Some("engineer".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "design"),
+            Some("engineer".to_string())
+        );
         assert_eq!(brain.responder_for(Some("design")), "engineer");
     }
 
@@ -6115,7 +6118,10 @@ members = ["eng1", "eng2"]
             setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(delegation::desk_lead(&brain.record(), "eng"), Some("cto".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "eng"),
+            Some("cto".to_string())
+        );
     }
 
     /// Regression for the builder seeding path (#133): a desk-order change written

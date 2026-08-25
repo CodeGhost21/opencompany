@@ -304,6 +304,9 @@ fn single_agent(events: &[(Option<EventSeq>, CompanyEvent)]) -> Option<String> {
 ///   which is narrower than the triage's greeting list, and excludes every
 ///   acknowledgement, because "yes" answering *"shall I ship it?"* is an
 ///   instruction.
+/// * **Somebody to say it.** A company whose roster resolves to nobody has no
+///   voice to answer in, and an unattributed bubble is journaled under the
+///   operator (issue #885).
 fn small_talk_result(record: &CompanyRecord, events: &[CompanyEvent]) -> Option<CycleResult> {
     let [
         CompanyEvent::OperatorMessage {
@@ -330,22 +333,27 @@ fn small_talk_result(record: &CompanyRecord, events: &[CompanyEvent]) -> Option<
 
     // Who speaks. The same resolution the harness brain's `responder_for` runs,
     // so the greeting comes back in the voice the turn it replaced would have
-    // used — and never as `agent: None`, which the reply journaling reads as
-    // the destination channel and would file the company's own words under the
-    // operator (issue #885).
+    // used.
+    //
+    // A company with nobody to speak as declines the fast path rather than
+    // answering anonymously: `agent: None` is read by `journal_chat_replies` as
+    // the destination channel, so an unattributed bubble on the operator
+    // channel is filed as though the operator had written it — permanently, and
+    // in the transcript rather than only on screen (issue #885). Better to run
+    // the turn a roster-less company was always going to run.
     let responder = chat
         .as_deref()
         .and_then(|chat| chat_responder(record, chat))
         .or_else(|| {
             crate::company::orchestrator_id(&record.effective_agents()).map(str::to_string)
-        });
+        })?;
 
     Some(CycleResult {
         channel_responses: vec![OutboundMessage {
             message_id: None,
             task_id: None,
             channel: OPERATOR_CHANNEL.to_string(),
-            agent: responder,
+            agent: Some(responder),
             text: talk.reply().to_string(),
             // No tool ran, so the timeline is empty rather than the "1 step"
             // the console showed for a greeting.
@@ -3351,6 +3359,13 @@ members = ["writer"]
             .is_none()
         );
         assert!(small_talk_result(&record, &[]).is_none());
+
+        // A company with nobody on the roster has no voice to answer in, so it
+        // declines rather than journaling an unattributed bubble (issue #885).
+        let mut empty = record.clone();
+        empty.manifest.agents.clear();
+        empty.manifest.group_chats.clear();
+        assert!(small_talk_result(&empty, &[hi(None)]).is_none());
     }
 
     /// Issue #845, the wiring: the briefing actually reaches the brain.

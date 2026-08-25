@@ -4765,7 +4765,10 @@ mode = "full"
                     .uri("/api/v1/company/chat")
                     .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"text":"hi"}"#))
+                    // Issue #1725: not "hi". A bare pleasantry is answered by
+                    // the runtime without a turn, so it would reach no brain at
+                    // all — which is the opposite of what this asserts.
+                    .body(Body::from(r#"{"text":"ship the landing page"}"#))
                     .unwrap(),
             )
             .await
@@ -4776,15 +4779,18 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let text = value["responses"][0]["text"].as_str().unwrap();
         // The mock provider's `mock: ` prefix proves the message went through an
-        // openhuman agent turn; the trailing `hi` is the operator message the
-        // agent forwarded (the agent prepends a date/time context line). Crucially
-        // it is NOT the echo brain's `"You said: hi"`.
+        // openhuman agent turn; the trailing words are the operator message the
+        // agent forwarded (the agent prepends a date/time context line).
+        // Crucially it is NOT the echo brain's `"You said: …"`.
         assert!(text.starts_with("mock: "), "not an agent reply: {text:?}");
         assert!(
-            text.trim_end().ends_with("hi"),
+            text.trim_end().ends_with("ship the landing page"),
             "message not forwarded: {text:?}"
         );
-        assert_ne!(text, "You said: hi", "still routing through the echo brain");
+        assert_ne!(
+            text, "You said: ship the landing page",
+            "still routing through the echo brain"
+        );
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 

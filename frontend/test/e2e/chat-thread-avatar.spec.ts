@@ -49,9 +49,9 @@ function yourThreadTile(page: Page): Locator {
  *
  * Matched by "not yours" rather than by `thread-avatar-agent`, because who the
  * company side reads as depends on the channel: a desk channel with a tone is
- * an `agent`, and the main line with none is the `company`. The claim under
- * test is that the two participants are drawn differently, which holds either
- * way.
+ * an `agent` and wears a mascot, while the harness company's desks read as the
+ * `company` and wear the brand mark — which has no `img` at all. So this is
+ * only ever asked "are you there and are you not me", never for a `src`.
  */
 function otherThreadTile(page: Page): Locator {
   return page
@@ -85,10 +85,6 @@ test("your own line wears your own face in the thread panel too", async ({ page 
 
   const timelineFace = await faceOf(mine);
   expect(timelineFace, "the main timeline already drew your own face").not.toBe("");
-  expect(
-    await faceOf(theirs),
-    "and the two voices are already distinguishable there",
-  ).not.toBe(timelineFace);
 
   // Open a thread off your own message and reply in it, so the panel holds
   // both voices: your line and the agent's answer to it.
@@ -106,13 +102,16 @@ test("your own line wears your own face in the thread panel too", async ({ page 
   await expect(thread.getByText("and here is a reply")).toBeVisible({ timeout: 30_000 });
   await expect(otherThreadTile(page)).toBeVisible({ timeout: 30_000 });
 
-  // The bug: your line's face was the mascot hashed from the literal "You",
-  // which is the agent's — both participants wore one face and the thread
-  // could not be read.
+  // The bug: your line's face was the mascot hashed from the literal string
+  // "You", not the face you actually have — so it could (and on the reported
+  // company did) come out as the agent's, and the thread could not be read.
+  //
+  // Equality with the timeline is the assertion, not "the face is flavour X":
+  // it states the property the issue is about — the same person is drawn the
+  // same way in both places — and it cannot pass by hash coincidence.
   const mineInThread = await faceOf(yourThreadTile(page));
-  const theirsInThread = await faceOf(otherThreadTile(page));
   expect(mineInThread, "the thread must show the same face the timeline does").toBe(timelineFace);
-  expect(mineInThread, "and it must not be the other participant's").not.toBe(theirsInThread);
+  expect(mineInThread, "and it must actually be a face").not.toBe("");
 
   // Evidence for the issue: the panel with a human author beside an agent one,
   // in both themes.
