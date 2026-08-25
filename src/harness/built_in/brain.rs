@@ -2702,7 +2702,17 @@ impl Brain for HarnessBrain {
         // returned early used to leave its entries for the *next* cycle to
         // park; now the window is the claim's lifetime and nothing outlives it.
         let claim = self.deps.approval_requests.claim(ApprovalScope::Cycle);
-        claim.scoped(self.run_cycle_scoped(req, host)).await
+        let company_id = req.company_id.clone();
+        let result = claim.scoped(self.run_cycle_scoped(req, host)).await;
+        // Issue #1455: release the cycle's policy pin now that the cycle body is
+        // over — success or error. The pin's whole job was to keep the in-flight
+        // roster on the snapshot the native gate was re-applied from for the
+        // cycle's own turns; a standalone workflow turn between cycles must
+        // instead rebuild against the live store overlay, and a pin left behind
+        // would keep the roster on a snapshot that only an unrelated cycle could
+        // refresh.
+        self.pool.end_cycle(&company_id).await;
+        result
     }
 
     /// The harness meters itself per turn in [`HarnessPool::run`], against the
