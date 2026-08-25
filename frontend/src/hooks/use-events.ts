@@ -349,6 +349,16 @@ export type CompanyStreamEvent =
       seq: number;
       agentId?: string;
       chatId?: string;
+      /**
+       * The workflow run this frame belongs to (issue #1702) — present instead
+       * of `chatId` when the turn is a workflow agent node rather than a chat
+       * turn. The run-trace sheet keys its live tool timeline on this so a
+       * node's in-flight frames append to the right run.
+       */
+      workflowRunId?: string;
+      /** The workflow node inside that run (issue #1702), so the sheet groups a
+       * run's live frames under the node the durable trace attributes them to. */
+      nodeId?: string;
       toolCallId?: string;
       label?: string;
       status?: string;
@@ -358,6 +368,10 @@ export type CompanyStreamEvent =
       seq: number;
       agentId?: string;
       chatId?: string;
+      /** See {@link CompanyStreamEvent} `tool_call.workflowRunId` (issue #1702). */
+      workflowRunId?: string;
+      /** See {@link CompanyStreamEvent} `tool_call.nodeId` (issue #1702). */
+      nodeId?: string;
       toolCallId?: string;
       label?: string;
       detail?: string;

@@ -240,6 +240,27 @@ impl RunTurn for HarnessRouter {
             .await
     }
 
+    async fn run_background_workflow(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        run_sink: Option<Arc<RunTraceSink>>,
+        workflow_run_id: &str,
+        node_id: &str,
+    ) -> Result<TurnOutcome> {
+        self.engine_for(agent_id)?
+            .run_background_workflow(
+                company,
+                agent_id,
+                message,
+                run_sink,
+                workflow_run_id,
+                node_id,
+            )
+            .await
+    }
+
     async fn ensure(&self, company: &CompanyRecord) -> Result<()> {
         // Warm every engine's roster before the first turn, recording each
         // lane's failure rather than stopping at the first: one bad lane must

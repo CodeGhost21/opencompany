@@ -123,6 +123,32 @@ pub trait RunTurn: Send + Sync {
         self.run(company, agent_id, message, None).await
     }
 
+    /// Like [`run_background`](Self::run_background) but streams the node's live
+    /// tool-call frames onto the turn-stream bus tagged with the workflow
+    /// `run_id`/`node_id` (issue #1702), so the console's run-trace sheet can
+    /// render a workflow agent node's tool calls *live* — the one dimension the
+    /// merged snapshot trace does not carry.
+    ///
+    /// Defaults to [`run_background`](Self::run_background) so the sentinel and
+    /// every test double inherit the existing un-streamed behaviour unchanged;
+    /// only the streaming harness engines override it to actually publish the
+    /// live frames.
+    async fn run_background_workflow(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        run_sink: Option<Arc<RunTraceSink>>,
+        workflow_run_id: &str,
+        node_id: &str,
+    ) -> Result<TurnOutcome> {
+        // The default cannot stream (it has no turn-stream seam), so the ids are
+        // unused and the turn runs exactly as an un-streamed background node.
+        let _ = (workflow_run_id, node_id);
+        self.run_background(company, agent_id, message, run_sink)
+            .await
+    }
+
     /// Warms whatever roster this engine caches before the first turn. The
     /// default is a no-op; a harness that builds its roster lazily behind a
     /// pool overrides it so a caller can ensure every lane before dispatch.
