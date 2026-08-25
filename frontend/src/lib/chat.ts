@@ -475,8 +475,9 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
 function messageFingerprint(message: ChatMessage): string {
   return JSON.stringify([message.from, message.text, message.parentId ?? null, message.at]);
 }
-
-
+/**
+ * Fold one `chat/history` response into a live transcript (issue #1690).
+ *
  * `chat/history` is the host's authoritative, **oldest-first** record for a
  * thread; a live transcript is that record plus whatever has not been
  * journaled yet — the operator's own optimistic bubbles, minted with
