@@ -1455,11 +1455,19 @@ impl HarnessAgentRunner {
         // first spawning run without these.
         let turn = Box::pin(async {
             let outcome = claim
-                .scoped(Box::pin(self.turn.run_background(
+                .scoped(Box::pin(self.turn.run_background_workflow(
                     &self.company,
                     agent_ref,
                     &message,
                     run_sink.clone(),
+                    // The workflow run + node this turn belongs to (issue #1702):
+                    // its live tool-call frames stream tagged with these so the
+                    // console's run-trace sheet appends them under the right run
+                    // while the node is still executing. `lineage_node` is the
+                    // resolved node id (graph node, else the agent ref) — the
+                    // same id the durable trace attributes the node's steps to.
+                    &self.run_id,
+                    &lineage_node,
                 )))
                 .await;
             // Drained on BOTH arms, deliberately. A turn that errored may still have
