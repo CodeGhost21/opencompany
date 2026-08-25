@@ -525,7 +525,7 @@ async fn add_member(
     // host-side instead — the belt table lives in `src/company/setup.rs`, and
     // the console has no business choosing a permission boundary. An unreadable
     // focus fails closed to the Writing belt (`tools_for_focus`), never wider.
-    let tools: Vec<String> = match body.focus.as_deref().map(str::trim) {
+    let mut tools: Vec<String> = match body.focus.as_deref().map(str::trim) {
         Some(focus) if !focus.is_empty() => {
             crate::company::setup::tools_for_focus(AgentFocus::from_wire(focus))
         }
@@ -537,6 +537,22 @@ async fn add_member(
             .collect(),
     };
     let mut record = load_record(&company).await?;
+    // A teammate created with no stated grant does not inherit the BYO
+    // real-money namespaces (#788/#789), even though "empty" otherwise means
+    // the standard company-wide grant. A company holds `chargebee` because
+    // somebody named it so that ONE teammate could invoice; the next teammate
+    // an operator types into the console is not that teammate, and silence is
+    // not consent to bill a customer. `creation_default_grants` returns empty
+    // — leaving the inherit-everything contract untouched — for every company
+    // that grants none of them, which is all but a handful.
+    //
+    // Deliberately here rather than in the roster build: this materialises the
+    // narrowed list ONCE, at creation, so the stored teammate carries its own
+    // line. Narrowing at read time instead would silently re-widen the day an
+    // operator edited the teammate for an unrelated reason.
+    if tools.is_empty() {
+        tools = crate::company::creation_default_grants(&record.manifest.tools.allow);
+    }
     let agent = OverlayAgent {
         // A readable id derived from the name, unique against the roster this
         // record already holds (issue #686). Minted here rather than pushed and

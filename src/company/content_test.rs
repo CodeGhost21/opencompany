@@ -446,6 +446,60 @@ fn a_wildcard_never_confers_a_billing_namespace() {
     }
 }
 
+/// Issue #788 follow-up, raised in review of the template ceilings: narrowing
+/// the *manifest* teammates does not protect a teammate an operator adds at
+/// runtime. `POST …/team` with no `tools` and no `focus` stores an empty grant,
+/// and empty means "the standard company-wide grant" — which, on a company that
+/// carries `chargebee`, silently included billing.
+#[test]
+fn a_teammate_created_with_no_grant_never_inherits_billing() {
+    use super::creation_default_grants;
+
+    // The overwhelming majority: nothing withheld, so the inherit-everything
+    // contract is untouched and the stored teammate stays empty.
+    let plain = Tools::default().allow;
+    assert!(
+        creation_default_grants(&plain).is_empty(),
+        "a company granting no BYO money namespace must keep `empty = standard`"
+    );
+
+    // A company that named `chargebee` for one teammate does not hand it to the
+    // next one somebody types into the console.
+    let mut billing = plain.clone();
+    billing.push("chargebee".to_string());
+    let defaulted = creation_default_grants(&billing);
+    assert!(
+        !grants_chargebee_explicit(&defaulted),
+        "a new teammate must not inherit `chargebee`: {defaulted:?}"
+    );
+    // ...and loses nothing else on the way.
+    for inherited in &plain {
+        assert!(
+            defaulted.contains(inherited),
+            "withholding billing dropped the inherited `{inherited}`: {defaulted:?}"
+        );
+    }
+
+    // The same for the other two namespaces `*` refuses to confer.
+    for money in ["paypal", "hosting"] {
+        let mut allow = plain.clone();
+        allow.push(money.to_string());
+        let defaulted = creation_default_grants(&allow);
+        assert!(
+            !defaulted.iter().any(|g| g == money),
+            "a new teammate must not inherit `{money}`: {defaulted:?}"
+        );
+    }
+
+    // `media`/`composio`/`search` ship in the default belt (#1674) and are NOT
+    // withheld — doing so would re-create that issue's complaint for every new
+    // teammate.
+    let defaulted = creation_default_grants(&billing);
+    assert!(grants_media_explicit(&defaulted), "{defaulted:?}");
+    assert!(grants_composio_explicit(&defaulted), "{defaulted:?}");
+    assert!(grants_search_explicit(&defaulted), "{defaulted:?}");
+}
+
 #[test]
 fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
     assert!(grants_chargebee_explicit(&["chargebee".to_string()]));
