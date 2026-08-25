@@ -293,6 +293,7 @@ mod tests {
     struct SpyEngine {
         label: String,
         seen: Mutex<Vec<String>>,
+        cycle_ends: Mutex<Vec<CompanyId>>,
     }
 
     impl SpyEngine {
@@ -300,6 +301,7 @@ mod tests {
             Arc::new(Self {
                 label: label.to_string(),
                 seen: Mutex::new(Vec::new()),
+                cycle_ends: Mutex::new(Vec::new()),
             })
         }
     }
