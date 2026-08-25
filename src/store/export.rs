@@ -364,9 +364,6 @@ impl BundleContents {
                 port.upsert(&self.id, fact).await?;
             }
         }
-        // Restore the idempotent archive tier before any append-only writes.
-        // An inspection-only scope may reject this operation; failing here
-        // avoids leaving a partial import whose retry duplicates history.
         if let Some(scopes) = scopes {
             scopes
                 .restore_archived_traces(&self.id, &self.archived_traces)
