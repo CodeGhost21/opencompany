@@ -4035,7 +4035,7 @@ fn build_networked_brain(
 mod test {
     use super::*;
     use crate::openhuman::MockOpenHumanRpc;
-    use crate::ports::types::{CompanyId, CompressedTrace, ToolCall};
+    use crate::ports::types::{AgentOverride, CompanyId, CompressedTrace, ToolCall};
     use crate::runtime::journal::ExecutedEffect;
 
     #[derive(Clone)]
