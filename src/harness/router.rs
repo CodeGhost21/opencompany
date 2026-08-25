@@ -252,24 +252,6 @@ impl RunTurn for HarnessRouter {
         self.record_warm_up(outcomes);
         Ok(())
     }
-
-    /// Records each lane's warm-up outcome: a failure is remembered with its
-    /// reason, a success clears any earlier one. Shared by [`ensure`](Self::ensure)
-    /// and [`ensure_with_policy`](Self::ensure_with_policy) so the two lanes
-    /// cannot drift apart.
-    fn record_warm_up(&self, outcomes: Vec<(String, Result<()>)>) {
-        let mut failures = self.failures.lock().expect("router failures");
-        for (harness, result) in outcomes {
-            match result {
-                Ok(()) => {
-                    failures.remove(&harness);
-                }
-                Err(err) => {
-                    failures.insert(harness, err.to_string());
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
