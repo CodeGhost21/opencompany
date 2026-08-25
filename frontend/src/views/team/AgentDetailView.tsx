@@ -1867,7 +1867,7 @@ function Section({
 }) {
   return (
     <Card>
-      <CardContent className="space-y-3 py-4">
+      <CardContent className="space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div className="space-y-1">
             <h3 className="font-medium">{title}</h3>
@@ -1883,8 +1883,8 @@ function Section({
 
 function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <Card>
-      <CardContent className="space-y-1 py-8 text-center">
+    <Card className="[--card-spacing:--spacing(8)]">
+      <CardContent className="space-y-1 text-center">
         <p className="font-medium">{title}</p>
         <p className="text-sm text-muted-foreground">{body}</p>
       </CardContent>

@@ -150,7 +150,7 @@ export function FeedbackView({ client, company }: Props) {
         )}
 
         <Card className="overflow-hidden">
-          <CardContent className="flex flex-col items-start gap-4 py-6 sm:flex-row sm:items-center sm:justify-between">
+          <CardContent className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">
               {/* Discord's own blurple, via the named token — see
                   `--brand-discord` in index.css for why it stays a fixed hex. */}

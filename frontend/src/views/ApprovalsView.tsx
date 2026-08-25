@@ -742,8 +742,8 @@ export function StandingPermissions({
           const busy = revoking.has(g.id);
           const expired = g.expires_at_millis <= now;
           return (
-            <Card key={g.id}>
-              <CardContent className="flex flex-wrap items-center gap-3 py-3">
+            <Card key={g.id} size="sm">
+              <CardContent className="flex flex-wrap items-center gap-3">
                 <div className="min-w-0 flex-1">
                   {/* Phrased, never the raw identifier — the glossary rule. */}
                   <p className="truncate text-sm font-medium">
@@ -888,7 +888,7 @@ export function ApprovalCard({
   // business, and treating it as such is the visual half of the #373 bug.
   return (
     <Card data-approval-id={a.id}>
-      <CardContent className="flex flex-col gap-3 py-4">
+      <CardContent className="flex flex-col gap-3">
         {/* Issue #1406: the headline no longer carries the decide buttons.
             Approve and Decline used to sit here, level with the title and above
             everything an operator reads to decide — the payload, and the scope

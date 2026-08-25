@@ -657,7 +657,7 @@ function Kpi({
 }) {
   return (
     <Card>
-      <CardContent className="space-y-2 py-5">
+      <CardContent className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium text-muted-foreground">{label}</span>
           <Icon className="size-4 text-muted-foreground" />

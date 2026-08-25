@@ -408,7 +408,7 @@ function HealthStrip({
   ];
   return (
     <Card data-testid="memory-health">
-      <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-3 py-4">
+      <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-3">
         {tiles.map((t) => (
           <div key={t.label} className="space-y-0.5">
             <p className="text-xs text-muted-foreground">{t.label}</p>
@@ -436,7 +436,7 @@ function MemoryCard({ entry, onDelete }: { entry: MemoryEntry; onDelete: () => v
   const badge = entryBadge(entry);
   return (
     <Card className="group" data-testid="memory-card">
-      <CardContent className="space-y-2 py-4">
+      <CardContent className="space-y-2">
         <div className="flex items-start justify-between gap-2">
           <p className="font-medium leading-snug">{entry.title}</p>
           <Badge variant="outline" className={cn("shrink-0 capitalize", badge.style)}>

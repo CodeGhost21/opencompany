@@ -233,7 +233,7 @@ export function WalletView({ client, company }: Props) {
               .sort((a, b) => Number(b.primary) - Number(a.primary))
               .map((balance) => (
                 <Card key={balance.currency_code}>
-                  <CardContent className="space-y-1 py-4">
+                  <CardContent className="space-y-1">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-muted-foreground">
                         {balance.currency_code}
@@ -255,7 +255,7 @@ export function WalletView({ client, company }: Props) {
         ) : null}
 
         <Card>
-          <CardContent className="space-y-4 py-4">
+          <CardContent className="space-y-4">
             <div className="flex flex-wrap items-end gap-3">
               <div className="space-y-1">
                 <label className="text-xs text-muted-foreground" htmlFor="tx-since">

@@ -621,7 +621,7 @@ function MemberCard({
       data-testid="team-card"
       className="transition-colors"
     >
-      <CardContent className="flex h-full flex-col gap-3 py-4">
+      <CardContent className="flex h-full flex-col gap-3">
         <div className="flex items-start gap-3">
           {/*
             The shared chat avatar, not a hand-rolled tile (issue #1181). This

@@ -169,8 +169,8 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
           </div>
         ) : (
           ordered.map((held) => (
-            <Card key={held.slug}>
-              <CardContent className="flex flex-wrap items-center justify-between gap-3 py-2">
+            <Card key={held.slug} size="sm">
+              <CardContent className="flex flex-wrap items-center justify-between gap-3">
                 <a
                   href={withHostParam(`ledgers/${held.slug}`)}
                   data-testid={`managed-ledger-${held.slug}`}

@@ -228,7 +228,7 @@ export function SearchView({ client, company }: Props) {
         ) : null}
 
         <Card>
-          <CardContent className="space-y-4 pt-6">
+          <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="space-y-1">
                 <p className="text-sm font-medium">

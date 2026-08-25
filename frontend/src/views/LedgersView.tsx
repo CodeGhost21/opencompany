@@ -1322,7 +1322,7 @@ function EntryCard({
       }}
     >
       <CardContent
-        className="space-y-2 p-4"
+        className="space-y-2"
         data-testid={`ledger-entry-${entry.id}`}
       >
         <div className="flex flex-wrap items-start gap-2">

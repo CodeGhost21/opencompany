@@ -370,7 +370,7 @@ function ColorSection() {
           Text hierarchy
         </h3>
         <Card>
-          <CardContent className="space-y-1 py-4">
+          <CardContent className="space-y-1">
             <p className="text-sm text-ink-primary">
               ink-primary — active labels, channel headers. 16.5:1
             </p>
@@ -476,7 +476,7 @@ function StatusSection() {
       hint="Five states, five colours, used identically wherever a run appears. Each ships a mark weight, an accessible text weight, and a soft background — one value cannot do all three jobs."
     >
       <Card>
-        <CardContent className="space-y-4 py-5">
+        <CardContent className="space-y-4">
           <div className="flex flex-wrap gap-2">
             {STATUSES.map((s) => (
               <span
@@ -554,7 +554,7 @@ function ToneSection() {
       hint="A categorical palette for who, not what state. Assigned by hash, so a name keeps its colour — and carrying no meaning beyond 'not the other one'."
     >
       <Card>
-        <CardContent className="space-y-4 py-5">
+        <CardContent className="space-y-4">
           <div className="flex flex-wrap gap-2">
             {TONES.map((t, i) => (
               <span
@@ -614,7 +614,7 @@ function TypeSection() {
       hint="Geist Variable for everything the operator reads. Mono only for values that change in place — ids, durations, token counts — so digits do not reflow."
     >
       <Card>
-        <CardContent className="divide-y divide-border py-0">
+        <CardContent className="divide-y divide-border">
           {TYPE_STEPS.map((t) => (
             <div
               key={t.cls}
@@ -736,7 +736,7 @@ function MotionSection() {
       hint="Three durations, two curves, and that is the whole vocabulary. Reduced-motion is honoured globally in the base layer, not per component."
     >
       <Card>
-        <CardContent className="space-y-4 py-5">
+        <CardContent className="space-y-4">
           <div className="flex items-center gap-3">
             <Switch checked={on} onCheckedChange={setOn} id="sg-motion" />
             <Label htmlFor="sg-motion" className="text-sm">

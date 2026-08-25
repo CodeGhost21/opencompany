@@ -164,7 +164,7 @@ export function InvoicingView({ client, company }: Props) {
         </ConnectionPanel>
 
         <Card>
-          <CardContent className="space-y-4 py-4">
+          <CardContent className="space-y-4">
             <div className="flex flex-wrap items-end gap-3">
               <div className="space-y-1">
                 <label className="text-xs text-muted-foreground" htmlFor="inv-filter">

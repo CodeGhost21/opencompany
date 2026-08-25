@@ -309,7 +309,7 @@ function InstalledCard({
 }) {
   return (
     <Card data-testid="installed-card" className={cn(!skill.enabled && "opacity-70")}>
-      <CardContent className="space-y-2 py-4">
+      <CardContent className="space-y-2">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
             <Sparkles className="size-4 text-muted-foreground" />
@@ -358,7 +358,7 @@ function RegistryCard({
 }) {
   return (
     <Card data-testid="registry-card">
-      <CardContent className="space-y-2 py-4">
+      <CardContent className="space-y-2">
         <div className="flex items-center gap-2">
           <Sparkles className="size-4 text-muted-foreground" />
           <p className="font-medium">{skill.name}</p>
