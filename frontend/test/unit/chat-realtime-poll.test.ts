@@ -100,8 +100,7 @@ describe("chat channel history polling", () => {
     expect(merged).toEqual([persisted]);
     expect(merged).not.toContain(optimistic);
   });
-
-
+  it("keeps rows the host has not persisted yet at the tail", () => {
     // The operator's optimistic bubble is minted with a browser-local `m<seq>`
     // id the host does not know, so history does not name it. It must survive
     // the fold as the newest line, after every persisted row.
