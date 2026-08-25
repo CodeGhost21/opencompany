@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: after a miss, does the error EVER appear if we just
-// wait real time? Distinguishes "slow" from "stuck".
+// Temporary diagnostic: in the stuck case, did the .catch run at all?
+// Reopen after a miss: if requested.current was reset, a 2nd fetch fires.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -79,8 +79,9 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("diag: distinguish slow vs stuck", async () => {
-  let stuck = 0;
+it("diag: reopen-after-miss -> did the latch reset?", async () => {
+  let latchReset = 0;
+  let latchStuck = 0;
   for (let i = 0; i < 20; i++) {
     await act(async () => root.unmount());
     container.remove();
@@ -100,19 +101,30 @@ it("diag: distinguish slow vs stuck", async () => {
       deferred[0].reject(new Error("boom"));
     });
 
-    const errorEl = () =>
-      container.querySelector('[data-testid="workflow-run-files-error"]');
-    if (errorEl()) continue;
+    const errorEl = container.querySelector(
+      '[data-testid="workflow-run-files-error"]',
+    );
+    if (errorEl) continue; // rendered, not the flake case
 
-    // Wait a real 200ms macrotask with no act.
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    if (!errorEl()) {
-      stuck++;
-      console.log(`iter ${i}: STILL absent after 200ms real time`);
+    // Miss. Reopen: does a 2nd fetch fire (latch reset) or not (catch never ran)?
+    const details = container.querySelector<HTMLDetailsElement>(
+      '[data-testid="workflow-run-files"]',
+    )!;
+    await act(async () => {
+      details.open = false;
+      details.dispatchEvent(new Event("toggle", { bubbles: true }));
+    });
+    await expandFiles();
+    if (deferred.length === 2) {
+      latchReset++;
+      console.log(`iter ${i}: latch RESET (catch ran) but render stuck`);
     } else {
-      console.log(`iter ${i}: appeared after 200ms real time`);
+      latchStuck++;
+      console.log(
+        `iter ${i}: latch NOT reset (deferred.length=${deferred.length})`,
+      );
     }
   }
-  console.log(`stuck=${stuck}`);
+  console.log(`latchReset=${latchReset} latchStuck=${latchStuck}`);
   expect(true).toBe(true);
 });
