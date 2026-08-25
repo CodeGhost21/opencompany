@@ -335,8 +335,12 @@ export function RunHistoryPanel({
  *
  * Clicking it overlays that run's node states on the canvas (issue #371) —
  * which is what makes a scheduled run's failure point visible, the case the
- * live canvas by definition cannot cover because nobody was watching. */
-function RunHistoryRow({
+ * live canvas by definition cannot cover because nobody was watching.
+ *
+ * Exported for {@link RunTraceSheet}, which renders the same row inside the
+ * traces-list transcript sheet — a run must read identically whether it's
+ * opened from a workflow's own history or from the company-wide list. */
+export function RunHistoryRow({
   client,
   company,
   run,
