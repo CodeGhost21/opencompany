@@ -38,6 +38,7 @@ import { workflowHref } from "@/lib/task-output";
 import { RunHistoryRow, useRunningClock } from "./RunHistoryPanel";
 import { isRunning } from "./run-health";
 import { parseRunNodes } from "./run-output";
+import { useLiveNodeActivity, type LiveNode } from "./run-live-activity";
 
 /** One past run's output fetch, keyed by run id so a second sheet open for a
  * DIFFERENT run cannot paint a stale record over it while its own request is
@@ -71,6 +72,20 @@ export function RunTraceSheet({
   // this flips from `false` to `true` in place as the SAME run finishes —
   // rather than only ever being read once at mount.
   const runSettled = run !== null && !isRunning(run);
+
+  // Issue #1702: the live delta on top of #596's snapshot. While the run is in
+  // flight, fold this run's `tool_call`/`tool_result` frames (tagged with the
+  // workflow run + node) into a per-node tool timeline, so a workflow agent
+  // node's tool calls appear *as they happen* rather than only as output text
+  // once the run settles. The hook keeps the stream open only while running and
+  // retains what it collected after the run finishes, so the live trace stays
+  // beside the durable snapshot instead of vanishing on settle.
+  const liveActivity = useLiveNodeActivity(
+    client,
+    company,
+    runId,
+    run !== null && isRunning(run),
+  );
 
   // Issue #596's durable snapshot. A run journaled before output capture, a
   // dry run (persists nothing), or a hard-aborted run 404s — settled to
@@ -154,6 +169,18 @@ export function RunTraceSheet({
                   }}
                 />
 
+                {/* Issue #1702: the live tool timeline, shown once any frame
+                    has arrived for this run. Additive — it sits above the
+                    durable node output and never replaces it. */}
+                {liveActivity.length > 0 && (
+                  <div className="space-y-2" data-testid="run-trace-live-activity">
+                    <p className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Live activity
+                    </p>
+                    <LiveActivityList nodes={liveActivity} live={!runSettled} />
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <p className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                     Node output
@@ -172,6 +199,85 @@ export function RunTraceSheet({
       </SheetContent>
     </Sheet>
   );
+}
+
+/** The live tool timeline (issue #1702): a workflow agent node's `tool_call`/
+ * `tool_result` frames as they stream, grouped by node. Complements — never
+ * replaces — the durable {@link NodeOutputList}: this shows *what the node did*
+ * as it happens, that shows *what it produced* once it settles. */
+function LiveActivityList({ nodes, live }: { nodes: LiveNode[]; live: boolean }) {
+  return (
+    <div className="space-y-3" data-testid="run-trace-live">
+      {nodes.map((node) => (
+        <div
+          key={node.nodeId}
+          className="rounded-lg border bg-background/40 p-2"
+          data-testid="run-trace-live-node"
+        >
+          <p className="mb-1 text-2xs font-medium">{node.nodeId}</p>
+          <ul className="space-y-1">
+            {node.rows.map((row) => (
+              <li
+                key={row.key}
+                className="flex items-center gap-2 text-2xs"
+                data-testid="run-trace-live-row"
+              >
+                <Badge
+                  variant="outline"
+                  className={`font-normal ${liveStatusClass(row.status)}`}
+                >
+                  {liveStatusWord(row.status, live)}
+                </Badge>
+                <span className="truncate">{row.label}</span>
+                {row.detail && (
+                  <span className="truncate text-muted-foreground">
+                    {row.detail}
+                  </span>
+                )}
+                {typeof row.elapsedMs === "number" && (
+                  <span className="ml-auto shrink-0 text-muted-foreground">
+                    {row.elapsedMs} ms
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** The badge tint for a live tool row's status, reusing the run-status tokens so
+ * a live row reads the same as the folded step it becomes. */
+function liveStatusClass(status: string): string {
+  switch (status) {
+    case "ok":
+      return "border-status-done/40 bg-status-done-soft";
+    case "error":
+      return "border-status-failed/40 bg-status-failed-soft";
+    case "awaiting_approval":
+      return "border-status-blocked/40 bg-status-blocked-soft";
+    default:
+      return "border-status-running/40 bg-status-running-soft";
+  }
+}
+
+/** The word a live status shows. A still-`running` row reads "running" only
+ * while the run itself is live; once the run settles, an unfinished row is one
+ * the stream never closed, so it reads "incomplete" rather than implying it is
+ * still going. */
+function liveStatusWord(status: string, live: boolean): string {
+  switch (status) {
+    case "ok":
+      return "ok";
+    case "error":
+      return "error";
+    case "awaiting_approval":
+      return "awaiting approval";
+    default:
+      return live ? "running" : "incomplete";
+  }
 }
 
 /** What each node in the run produced, read from the durable output snapshot —
