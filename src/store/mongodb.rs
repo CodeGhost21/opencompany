@@ -5256,6 +5256,108 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// A same-id `create_binary` race must not reclaim the winning payload.
+    ///
+    /// Two callers racing the same fresh node id both pass the `contains_key`
+    /// pre-check (neither document is visible when the reads land), both upload
+    /// a GridFS payload under that id, and the node-document insert then loses
+    /// on the unique `(company_id, node_id)` index for exactly one of them.
+    /// The loser's conflict cleanup used to sweep *every* blob for the id —
+    /// including the winner's, the bytes its live node now points at — leaving
+    /// the download irrecoverable on hosted MongoDB deployments. The cleanup
+    /// must name and delete only the upload this losing call made.
+    ///
+    /// Spawned rather than staged: the whole point is the interleaving, and the
+    /// runtime guarantees it here — each racer awaits a database read before
+    /// either inserts, so both `contains_key` checks necessarily see the empty
+    /// tree regardless of which document insert finally wins.
+    #[tokio::test]
+    async fn a_same_id_race_preserves_the_winning_payload() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("dupe-race-co");
+
+        let node = crate::ports::workspace::WorkspaceNode {
+            id: "dupe".to_string(),
+            name: "dupe.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+
+        let racer_a = {
+            let s = s.clone();
+            let company = company.clone();
+            let node = node.clone();
+            tokio::spawn(async move {
+                crate::ports::workspace::WorkspaceStore::create_binary(
+                    &s, &company, &node, b"payload-a",
+                )
+                .await
+            })
+        };
+        let racer_b = {
+            let s = s.clone();
+            let company = company.clone();
+            let node = node.clone();
+            tokio::spawn(async move {
+                crate::ports::workspace::WorkspaceStore::create_binary(
+                    &s, &company, &node, b"payload-b",
+                )
+                .await
+            })
+        };
+
+        let (outcome_a, outcome_b) = (racer_a.await.unwrap(), racer_b.await.unwrap());
+        assert_eq!(
+            outcome_a.is_ok() as u8 + outcome_b.is_ok() as u8,
+            1,
+            "exactly one same-id caller wins the insert; the other must be a Conflict"
+        );
+
+        // The survivor's node still serves its bytes: the loser's cleanup
+        // deleted only its own upload, never the winner's.
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&s, &company, "dupe")
+                .await
+                .unwrap()
+                .expect("the winning payload survives the same-id race");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert!(
+            got == b"payload-a" || got == b"payload-b",
+            "the surviving payload is exactly one racer's, not a mix: {got:?}"
+        );
+
+        // And exactly one blob remains for the id — the losing upload is gone,
+        // the winner's is untouched.
+        let files = s
+            .blobs()
+            .find(MongoStore::blob_filter(&company, "dupe"))
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            files.len(),
+            1,
+            "the losing upload is reclaimed without touching the winner's"
+        );
+
+        drop_db(&s).await;
+    }
+
     /// Issue #1077: the orphan report composes `list()` and `owners()`
     /// correctly against a real server.
     ///
