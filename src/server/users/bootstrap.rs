@@ -133,6 +133,16 @@ pub async fn issue_password(
 
     let existing = users.find_user_by_email(company, &email).await?;
 
+    // Existing accounts may only be reset while retaining their administrative
+    // role. A removed standing grant does not erase historical admin status.
+    if let Some(existing) = existing.as_ref()
+        && existing.role != UserRole::Admin
+    {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "{email} is not an admin account and cannot receive a host password reset"
+        )));
+    }
+
     // Eligibility is only consulted when there is no account yet. An address
     // that already holds one keeps it even if the manifest later stops naming
     // them: removing someone is `status`, not a silent inability to reset.
