@@ -26,6 +26,7 @@ import {
   RotateCw,
   Square,
   Trash2,
+  Workflow as WorkflowIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -113,6 +114,8 @@ import {
 } from "@/views/workflows/RevealSelectedNode";
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
+import { RunTracesList } from "@/views/workflows/RunTracesList";
+import { RunTraceSheet } from "@/views/workflows/RunTraceSheet";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
 import { classifyRunError } from "@/views/workflows/run-error";
 import { runFailureFrom, type RunFailure } from "@/views/workflows/run-failure";
@@ -580,6 +583,14 @@ export function WorkflowsView({
   // Which rendering the index uses, remembered across sessions — an operator
   // who prefers one has no reason to re-pick it every visit.
   const [indexMode, setIndexMode] = useState<IndexMode>(readIndexMode);
+  // Issue #1697: the index's other axis — the company's workflows, or their
+  // runs. Same remembered-preference treatment as `indexMode`.
+  const [indexTab, setIndexTab] = useState<IndexTab>(readIndexTab);
+  // Issue #1697: the run whose transcript sheet is open, or `null` when it's
+  // closed. Holds the run itself (not just an id) because the traces list
+  // already has the full `WorkflowRunOutcome` in hand — the sheet needs
+  // nothing this view would otherwise have to re-fetch just to open it.
+  const [traceRun, setTraceRun] = useState<WorkflowRunOutcome | null>(null);
   // Issue #303: the company-wide run page behind the index's health readings.
   //
   // Deliberately SEPARATE from `runs`, which is the selected workflow's history
@@ -1212,6 +1223,11 @@ export function WorkflowsView({
     };
   }, [client, company, detailOpen, runsTick, runEventTick]);
 
+  useEffect(() => {
+    if (detailOpen || !indexRuns.some((run) => run.running)) return;
+    return startVisiblePolling(() => setRunsTick((n) => n + 1), 2_000);
+  }, [detailOpen, indexRuns]);
+
   // A company switch invalidates the whole page — another company's runs must
   // never be folded onto this one's cards, and `indexRunsLoaded` has to go back
   // to false so the cards say "Loading runs…" rather than "No recent runs"
@@ -1219,6 +1235,12 @@ export function WorkflowsView({
   useEffect(() => {
     setIndexRuns([]);
     setIndexRunsLoaded(false);
+    setTraceRun(null);
+    // Issue #1697: the open transcript names a run of the company being
+    // left. Left up, its header resolves `workflowId` against the NEW
+    // company's workflows — ids are not unique across companies — and its
+    // output fetch 404s against a run the new company's host never held.
+    setTraceRun(null);
   }, [company]);
 
   // The run page grouped by workflow, newest first.
@@ -1234,6 +1256,20 @@ export function WorkflowsView({
     }
     return byId;
   }, [indexRuns]);
+
+  // The traces sheet's run, kept LIVE (issue #1697 review): `traceRun` names
+  // which run is open by its `seq`, and this re-resolves that seq against the
+  // freshest `indexRuns` page on every render. Without it the sheet held the
+  // snapshot from the moment it was opened, so a run still in flight when
+  // clicked stayed "running" in the sheet forever — the index around it kept
+  // refreshing and settling, but the sheet never saw it. Falls back to the
+  // held snapshot when the run has aged off the capped page, which is the
+  // same degradation `indexRuns` itself already accepts.
+  const liveTraceRun = useMemo(
+    () =>
+      traceRun ? (indexRuns.find((r) => r.seq === traceRun.seq) ?? traceRun) : null,
+    [traceRun, indexRuns],
+  );
 
   // `input` is the trigger payload for THIS dispatch (issue #1204), handed in by
   // whichever control fired rather than read out of `request` state. The toolbar's
@@ -2614,10 +2650,41 @@ export function WorkflowsView({
              act on the list rather than on any workflow in it. */
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <h1 className="text-sm font-semibold">Workflows</h1>
-              <Badge variant="secondary">{workflows.length}</Badge>
+              <h1 className="text-sm font-semibold">
+                {indexTab === "runs" ? "Runs" : "Workflows"}
+              </h1>
+              <Badge variant="secondary">
+                {indexTab === "runs" ? indexRuns.length : workflows.length}
+              </Badge>
             </div>
             <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              {/* Issue #1697: the graphs, or their runs — the index's other
+                  axis, alongside Cards/List. Segmented for the same reason
+                  that toggle is: one question, two answers. */}
+              <div className="flex items-center gap-1 rounded-lg border p-0.5">
+                {(
+                  [
+                    { value: "workflows", label: "Workflows", Icon: WorkflowIcon },
+                    { value: "runs", label: "Runs", Icon: History },
+                  ] as const
+                ).map(({ value, label, Icon }) => (
+                  <Button
+                    key={value}
+                    size="sm"
+                    variant={indexTab === value ? "secondary" : "ghost"}
+                    className="h-7 px-2"
+                    onClick={() => {
+                      setIndexTab(value);
+                      writeIndexTab(value);
+                    }}
+                    aria-pressed={indexTab === value}
+                    data-testid={`workflow-index-tab-${value}`}
+                  >
+                    <Icon className="mr-1.5 size-3.5" />
+                    {label}
+                  </Button>
+                ))}
+              </div>
               {/* Issue #1110: the index's Cards/List toggle, in the tab's one
                   toolbar. It used to sit in a header the index drew for itself,
                   which was fine while the index was a panel over the canvas and
@@ -2626,8 +2693,12 @@ export function WorkflowsView({
                   the duplicate.
 
                   Segmented rather than two loose buttons, because the pair is one
-                  question with two answers and reads as a switch. */}
-              {workflows.length > 0 && (
+                  question with two answers and reads as a switch.
+
+                  Issue #1697: only meaningful for the Workflows tab — the Runs
+                  tab is always a table, so this toggle would offer a choice it
+                  does not act on. */}
+              {indexTab === "workflows" && workflows.length > 0 && (
                 <div className="flex items-center gap-1 rounded-lg border p-0.5">
                   {(
                     [
@@ -2805,7 +2876,21 @@ export function WorkflowsView({
           accident, because the slot it would mount in does not exist there. */}
       {!detailOpen ? (
         <div className="relative flex-1 min-h-0">
-          {!loadingList && workflows.length === 0 ? (
+          {indexTab === "runs" ? (
+            // Issue #1697: the company-wide run page, unscoped by workflow —
+            // the same request `runsByWorkflow` folds for the card health
+            // strips, read here as its own table instead. `loading` follows
+            // `indexRunsLoaded` rather than `loadingList`: the workflow list
+            // and the run page are two different requests, and a company
+            // with its workflows already loaded can still be waiting on runs.
+            <RunTracesList
+              runs={indexRuns}
+              workflows={workflows}
+              company={company}
+              loading={!indexRunsLoaded}
+              onSelectRun={setTraceRun}
+            />
+          ) : !loadingList && workflows.length === 0 ? (
             // Issue #813's on-ramp, which used to live behind the canvas's
             // empty selection. An empty company now lands here instead, so this
             // is where it has to be — and it is shown INSTEAD of the index
@@ -2875,6 +2960,8 @@ export function WorkflowsView({
           leftRail={
             historyOpen && historySupported ? (
               <RunHistoryPanel
+                client={client}
+                company={company}
                 runs={historyRows}
                 graph={graph}
                 workflowName={selected?.name ?? selectedId ?? ""}
@@ -3161,6 +3248,23 @@ export function WorkflowsView({
         onConflict={setConflict}
         prefilledDraft={prefilledDraft}
       />
+
+      {/* Issue #1697: the traces list's transcript sheet. Top-level rather
+          than nested inside the `!detailOpen` branch — it is opened only from
+          the Runs tab, but keeping it mounted regardless of which index tab
+          is showing means switching tabs while it's open doesn't unmount it
+          out from under the operator. */}
+      <RunTraceSheet
+        client={client}
+        company={company}
+        run={liveTraceRun}
+        workflowName={
+          (liveTraceRun && workflows.find((w) => w.id === liveTraceRun.workflowId)?.name) ??
+          liveTraceRun?.workflowId ??
+          ""
+        }
+        onClose={() => setTraceRun(null)}
+      />
     </div>
   );
 }
@@ -3185,6 +3289,35 @@ function readIndexMode(): IndexMode {
 function writeIndexMode(mode: IndexMode): void {
   try {
     window.localStorage.setItem(INDEX_MODE_KEY, mode);
+  } catch {
+    // A preference that cannot be saved is not an error worth surfacing.
+  }
+}
+
+/** Which index the Workflows tab shows: the graphs, or their runs (issue
+ * #1697). Local state rather than a hash segment, same as {@link IndexMode} —
+ * `readWorkflowHash`'s two-segment-plus-query contract is deliberately narrow
+ * (see its own comment), and a preference this small does not need a
+ * shareable URL to earn a spot in it. */
+type IndexTab = "workflows" | "runs";
+
+/** Where the index's Workflows-or-Runs preference is remembered. */
+const INDEX_TAB_KEY = "oc.workflows.indexTab";
+
+/** The remembered tab, defaulting to the graphs — same best-effort guard as
+ * {@link readIndexMode}. */
+function readIndexTab(): IndexTab {
+  try {
+    return window.localStorage.getItem(INDEX_TAB_KEY) === "runs" ? "runs" : "workflows";
+  } catch {
+    return "workflows";
+  }
+}
+
+/** Remembers the index tab. Best-effort, for the same reason. */
+function writeIndexTab(tab: IndexTab): void {
+  try {
+    window.localStorage.setItem(INDEX_TAB_KEY, tab);
   } catch {
     // A preference that cannot be saved is not an error worth surfacing.
   }

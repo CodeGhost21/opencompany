@@ -188,8 +188,8 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk,
-    OverlayDeskMember, PolicyOverride, TurnStep,
+    Actor, ActorKind, AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent,
+    OverlayDesk, OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
@@ -1233,6 +1233,29 @@ pub struct HarnessPool {
     /// restart. Without this axis the override persists and is silently ignored:
     /// `ApprovalPolicy` is built once per roster, not once per call.
     policy_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// The last cycle-start policy snapshot pinned to a company's roster via
+    /// [`ensure_with_policy`](Self::ensure_with_policy), keyed by company.
+    ///
+    /// A cycle holds the runtime's serial lock, so its own `ensure_with_policy`
+    /// install and the dispatch that follows cannot be interleaved by another
+    /// cycle. The workflow runner is not a cycle caller: it drives turns from a
+    /// spawned task with a plain live [`ensure`](Self::ensure), so without this
+    /// pin it could adopt a mid-cycle console override a turn early — replacing
+    /// the cycle's pinned roster with a looser one before `run_inner` clones its
+    /// agent, and running one turn with the harness gate auto-approving what the
+    /// native gate still parks (issue #1455). A live `ensure` therefore rebuilds
+    /// the policy axis against the pin while one is active. The pin is released
+    /// when the cycle ends ([`Self::end_cycle`]), so it covers exactly the
+    /// cycle's own turns: a standalone workflow turn *between* cycles rebuilds
+    /// against the live store overlay, not a snapshot that would otherwise stay
+    /// stale until an unrelated cycle refreshed it.
+    ///
+    /// A `std::sync::Mutex` rather than a `tokio::sync::RwLock` like its
+    /// neighbours: every critical section is a single lookup / insert / remove
+    /// with no `await` in it, and the synchronous form is what lets a cycle's
+    /// drop guard release the pin on cancellation or panic — an async lock
+    /// could not be touched from `Drop` (issue #1455).
+    pinned_policies: std::sync::Mutex<HashMap<CompanyId, Policy>>,
     /// Per-company fingerprint of the desk scoping a roster's grants resolve
     /// through — which desks exist, who sits on them, and each one's tool
     /// ceiling.
@@ -1258,6 +1281,24 @@ pub struct HarnessPool {
     /// A company with no workspace store wired, or whose roles route nothing,
     /// keeps a stable fingerprint and never rebuilds on this axis.
     context_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// The memory-engine selection the company's cached roster was built
+    /// against, keyed by company (issue #1113).
+    ///
+    /// `Some(fp)` for a provider-backed engine — a fingerprint of its
+    /// memory-family ports — and `None` for the base backend. Recorded by
+    /// [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build) on every
+    /// build that re-applies the engine selection so the next rebuild can tell
+    /// a live engine swap from a no-op;
+    /// [`ensure`](Self::ensure) does not know the selection, so the pool needs
+    /// this bookkeeping of its own.
+    ///
+    /// Missing on the boot path and when no build has run yet, `None` is also
+    /// the base backend's marker — `get(company).copied().flatten()` makes an
+    /// absent row and a recorded `None` indistinguishable, which is correct: a
+    /// roster built over the base backend must be dropped exactly when a swap
+    /// binds a provider engine, and a build that re-applies the base backend
+    /// must keep it.
+    memory_engine: RwLock<HashMap<CompanyId, Option<u64>>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
@@ -1292,6 +1333,33 @@ enum LiveStream<'a> {
     On { chat_id: Option<&'a str> },
 }
 
+/// Per-company serialization of the roster's policy-axis decision through its
+/// publish ([`HarnessPool::ensure_impl`]), mirroring
+/// [`company_write_lock`](crate::ports::store::company_write_lock).
+///
+/// The window it closes (issue #1455): a plain `ensure` from the workflow
+/// runner can read the pool's pin map as empty *before* a concurrent cycle's
+/// `ensure_with_policy` installs its snapshot, then publish a roster rebuilt
+/// from the looser live policy *after* the cycle's pinned roster — running one
+/// turn with the harness gate auto-approving what the native gate still parks.
+/// Holding this lock from the pin read through the roster publish makes the
+/// two operations atomic per company, so a plain ensure either publishes
+/// before the cycle pins or reads the pin afterwards and rebuilds against it.
+/// Keyed globally rather than per pool because a company's cycle and its
+/// workflow ensure can arrive on different lanes of the same router; the extra
+/// serialization across lanes is harmless (ensures are idempotent warm-ups).
+static POLICY_AXIS_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<CompanyId, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Returns (or creates) the per-company policy-axis lock for `company`.
+fn policy_ensure_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = POLICY_AXIS_LOCKS.lock().expect("policy axis locks");
+    map.entry(company.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 impl HarnessPool {
     /// Builds an empty pool.
     pub fn new() -> Self {
@@ -1306,8 +1374,10 @@ impl HarnessPool {
             budget_fingerprints: RwLock::new(HashMap::new()),
             override_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
+            pinned_policies: std::sync::Mutex::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
             context_fingerprints: RwLock::new(HashMap::new()),
+            memory_engine: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -1385,6 +1455,62 @@ impl HarnessPool {
     /// rebuilding the roster *is* the enforcement update. That is what makes
     /// "no restart, no redeploy" a property of the design rather than a claim.
     pub async fn ensure(&self, company: &CompanyRecord, deps: &HarnessDeps) -> crate::Result<()> {
+        self.ensure_impl(company, deps, None).await
+    }
+
+    /// [`ensure`](Self::ensure) with the policy axis pinned to an explicit
+    /// cycle-start snapshot instead of the live store overlay.
+    ///
+    /// The runtime's native gate is re-applied from the record loaded at the
+    /// top of a cycle, and this is the same snapshot: a console policy override
+    /// that lands mid-turn (after that load, before the harness's own refresh)
+    /// must reach *neither* gate until the next cycle boundary. Letting the
+    /// roster pick it up early would run one turn with the harness
+    /// auto-approving what the native gate parks (issue #1455).
+    pub async fn ensure_with_policy(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        policy: &Policy,
+    ) -> crate::Result<()> {
+        self.ensure_impl(company, deps, Some(policy)).await
+    }
+
+    /// Release a cycle's policy pin, restoring the live-store policy axis for
+    /// plain [`ensure`](Self::ensure) calls.
+    ///
+    /// The pin exists to keep a cycle's in-flight roster on the snapshot the
+    /// native gate was re-applied from (see [`Self::ensure_with_policy`]); once
+    /// the cycle is over — success or error — nothing in flight needs the
+    /// snapshot any more. Without this release a stale pin would survive until
+    /// an unrelated cycle refreshed it, so a standalone workflow turn between
+    /// cycles would keep rebuilding against the last cycle's tier even after
+    /// the operator moved the store (issue #1455).
+    pub async fn end_cycle(&self, company: &CompanyId) {
+        self.pinned_policies.lock().unwrap().remove(company);
+    }
+
+    /// The synchronous half of [`end_cycle`](Self::end_cycle), for a cycle's
+    /// drop guard.
+    ///
+    /// A cycle whose future is cancelled or unwinds through a panic after
+    /// [`ensure_with_policy`](Self::ensure_with_policy) installed its pin never
+    /// reaches the async `end_cycle` — the `await` that would have called it is
+    /// exactly where the future is dropped. The pin would then outlive the
+    /// cycle and keep a standalone workflow turn between cycles on a stale
+    /// snapshot until an unrelated cycle replaced it. Releasing here is a
+    /// synchronous map removal, so the guard can do it from `Drop` (issue
+    /// #1455). Idempotent with `end_cycle`; callers may run either or both.
+    pub fn release_policy_pin_sync(&self, company: &CompanyId) {
+        self.pinned_policies.lock().unwrap().remove(company);
+    }
+
+    async fn ensure_impl(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        policy_snapshot: Option<&Policy>,
+    ) -> crate::Result<()> {
         // Re-resolve + fingerprint the effective MCP set (cheap; no rebuild yet).
         let effective_mcp = self.resolve_effective_mcp(company, deps).await;
         let mcp_fp = mcp_fingerprint(&effective_mcp);
@@ -1400,7 +1526,60 @@ impl HarnessPool {
         // roster, so an edit unseen by any fingerprint would not reach the
         // system prompt until a restart.
         let override_fp = override_fingerprint(&overlay.agent_edits);
-        let policy_fp = policy_fingerprint(overlay.policy.as_ref());
+        // The policy axis. A cycle pins it to the snapshot the native gate was
+        // re-applied from (so a mid-turn override reaches neither gate), and the
+        // pin is released when the cycle ends. A plain `ensure` — the workflow
+        // runner's cadence — reuses that pin while one is active, so a spawned
+        // workflow turn cannot adopt a live override a turn early (issue #1455);
+        // between cycles, no pin is active and the live overlay applies. Either
+        // way the fingerprint covers the effective mode/list/cap values — not a
+        // relative override — so a manifest `[policy]` edit moves the cache key
+        // even when no override is stored (or a redundant one was carried and
+        // cleared), and the roster cannot keep an `ApprovalPolicy` built under a
+        // tier the native gate no longer enforces.
+        //
+        // Issue #1455: the pin decision and the roster publish below must be
+        // mutually exclusive with every other ensure for this company. A plain
+        // `ensure` that read no pin *before* the cycle installed one could
+        // otherwise finish rebuilding the shared roster from the looser live
+        // policy *after* the cycle's pinned ensure had published the strict
+        // roster — leaving the harness gate auto-approving what the native gate
+        // still parks. The per-company lock closes that window: either the plain
+        // ensure publishes first and the cycle's strict roster supersedes it, or
+        // it runs after the pin is installed and rebuilds against the pin.
+        let _policy_axis_lock = policy_ensure_lock(&company.id);
+        let _policy_axis_guard = _policy_axis_lock.lock().await;
+        let (effective_snapshot, pin_to_store) = match policy_snapshot {
+            Some(policy) => (Some(policy.clone()), Some(policy.clone())),
+            None => {
+                let pin = self
+                    .pinned_policies
+                    .lock()
+                    .unwrap()
+                    .get(&company.id)
+                    .cloned();
+                (pin, None)
+            }
+        };
+        if let Some(pin) = pin_to_store {
+            self.pinned_policies
+                .lock()
+                .unwrap()
+                .insert(company.id.clone(), pin);
+        }
+        let policy_fp = match &effective_snapshot {
+            Some(policy) => effective_policy_fingerprint(policy),
+            None => {
+                // No cycle has pinned this company yet (a fresh pool before the
+                // first cycle turn, or a company the cycle has not reached). Build
+                // against the live effective policy — the manifest `[policy]`
+                // folded with the operator override from the store read above —
+                // which is exactly what the overlay installed below reflects.
+                let mut live_company = company.clone();
+                live_company.overlay_policy = overlay.policy.clone();
+                effective_policy_fingerprint(&live_company.effective_policy())
+            }
+        };
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
         // a console desk-ceiling edit — or seating a teammate on a restricted
@@ -1572,7 +1751,16 @@ impl HarnessPool {
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
         // the next turn runs on.
-        fresh_company.overlay_policy = overlay.policy;
+        //
+        // A cycle's `ensure_with_policy` installs the snapshot instead — and so
+        // does a plain `ensure` while that snapshot is pinned — because the
+        // override synthesized below reproduces exactly the policy the native
+        // gate is evaluating this turn against, so the roster's ApprovalPolicy
+        // and the gate cannot disagree about which tier is live.
+        fresh_company.overlay_policy = match &effective_snapshot {
+            Some(policy) => Some(policy_override_for(policy, &company.manifest.policy)),
+            None => overlay.policy.clone(),
+        };
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
         //
@@ -1591,6 +1779,14 @@ impl HarnessPool {
         // read that can only ever find its work already done.
         let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas, &routed_context)?;
 
+        // Keep the policy snapshot and the roster together for the entire turn.
+        // `ensure_with_policy` pins the snapshot on the pool (above), so a
+        // concurrent plain `ensure` — the workflow runner, a spawned task outside
+        // the cycle serial lock — rebuilds the policy axis against that same pin
+        // instead of a live override it could otherwise adopt a turn early. The
+        // serial lock already serializes cycle callers; the pin is what keeps a
+        // direct caller from regressing a pinned roster before `run_inner` clones
+        // its agent.
         let mut agents = self.agents.write().await;
         agents.insert(company.id.clone(), roster);
         self.mcp_fingerprints
@@ -1638,6 +1834,73 @@ impl HarnessPool {
             .await
             .insert(company.id.clone(), context_fp);
         Ok(())
+    }
+
+    /// The memory-engine selection the company's cached roster was built
+    /// against, if any (issue #1113). `None` for the base backend.
+    ///
+    /// Recorded by [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build);
+    /// an absent row is indistinguishable from a recorded base-backend `None`,
+    /// which is correct (see the field doc).
+    pub async fn memory_engine(&self, company: &CompanyId) -> Option<u64> {
+        self.memory_engine
+            .read()
+            .await
+            .get(company)
+            .copied()
+            .flatten()
+    }
+
+    /// Records the engine selection `engine` as the one the company's roster is
+    /// now bound to, dropping the cached roster when it differs from what was
+    /// recorded before (a live swap, issue #1113).
+    ///
+    /// Returns `true` when the selection is unchanged and the roster survived —
+    /// the ordinary issue #290 rebuild fast path — and `false` when the roster
+    /// was invalidated and the next [`ensure`](Self::ensure) will rebuild it
+    /// over the replacement memory-family ports.
+    ///
+    /// The pool only ever compares selections recorded on a previous `build`;
+    /// it cannot itself know whether an engine swap happened, because the new
+    /// engine's ports arrive on the builder, not here. The builder is therefore
+    /// the only caller: it records the selection on every build that
+    /// re-applies the engine (`with_memory_overlay` / `with_memory_overlay_cleared`),
+    /// boot included, so the first rebuild has a recorded selection to differ
+    /// from. A rebuild about something else inherits the handover's ports
+    /// unchanged (issue #290) and does not call this — its selection is the
+    /// recorded one by construction.
+    pub async fn rebind_memory_engine(&self, company: &CompanyId, engine: Option<u64>) -> bool {
+        let recorded = self.memory_engine.write().await;
+        if recorded.get(company).copied().flatten() == engine {
+            return true;
+        }
+        drop(recorded);
+        self.invalidate_roster(company).await;
+        self.memory_engine
+            .write()
+            .await
+            .insert(company.clone(), engine);
+        false
+    }
+
+    /// Drops every cached artifact for one company, so the next `ensure`
+    /// rebuilds its roster from scratch. The memory-engine bookkeeping is a
+    /// cached artifact like any fingerprint — the caller re-records the new
+    /// selection after invalidating.
+    async fn invalidate_roster(&self, company: &CompanyId) {
+        self.agents.write().await.remove(company);
+        self.mcp_fingerprints.write().await.remove(company);
+        self.overlay_fingerprints.write().await.remove(company);
+        self.capability_fingerprints.write().await.remove(company);
+        self.composio_fingerprints.write().await.remove(company);
+        self.billing_fingerprints.write().await.remove(company);
+        self.skill_fingerprints.write().await.remove(company);
+        self.budget_fingerprints.write().await.remove(company);
+        self.override_fingerprints.write().await.remove(company);
+        self.policy_fingerprints.write().await.remove(company);
+        self.desk_fingerprints.write().await.remove(company);
+        self.context_fingerprints.write().await.remove(company);
+        self.memory_engine.write().await.remove(company);
     }
 
     /// Re-resolves the company's capability filter (issue #108): with a plan
@@ -2042,6 +2305,14 @@ impl HarnessPool {
             .await
             .get(company)
             .copied()
+    }
+
+    /// The current policy fingerprint for a company (test-only), so a
+    /// policy-freshness test can assert the roster was rebuilt against the
+    /// cycle-start snapshot and not against a mid-turn store edit (issue #1455).
+    #[cfg(test)]
+    pub async fn policy_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.policy_fingerprints.read().await.get(company).copied()
     }
 
     /// The current billing-connection fingerprint for a company (test-only), so
@@ -2703,6 +2974,28 @@ async fn refresh_oauth_decls(
 ) {
 }
 
+/// Whether an override row is purely a face — `avatar` set and nothing the
+/// harness reads set. Such a row must not move a fingerprint: the fingerprints
+/// hash what a teammate *is* (name, role, description, toolbelt, persona,
+/// model, harness), and an avatar is none of those. A row that changed only the
+/// face would otherwise count itself and its `agent_id` into the hash, rebuild
+/// the roster, and drop every live agent session for a cosmetic change — issue
+/// #1676's review note.
+///
+/// An explicit `Some(vec![])` tool list, `Some("")` instructions and `Some("")`
+/// model/harness (the stored form of "cleared") stay real overrides ("the
+/// company's standard grant" / "cleared" / "the blueprint's model and harness"),
+/// so only the all-`None` row is filtered, not the emptied one.
+fn is_avatar_only(edit: &crate::ports::types::AgentOverride) -> bool {
+    edit.name.is_none()
+        && edit.role.is_none()
+        && edit.description.is_none()
+        && edit.tools.is_none()
+        && edit.instructions.is_none()
+        && edit.model.is_none()
+        && edit.harness.is_none()
+}
+
 /// A stable fingerprint of the roster overlay — the operator-added teammates
 /// (issue #71) **and** the operator's edits of the manifest-declared ones —
 /// used to detect a teammate add/remove/edit between [`HarnessPool::ensure`]
@@ -2715,6 +3008,10 @@ async fn refresh_oauth_decls(
 /// roster, so a console rename that moved no fingerprint would persist, read
 /// back correctly on the Team page, and be invisible to every turn the teammate
 /// took until the process restarted.
+///
+/// Avatar-only rows ([`is_avatar_only`]) are excluded: the face a teammate
+/// wears is display data resolved at render time, never part of the persona the
+/// harness builds, so a choice of face must not discard live agent sessions.
 fn overlay_fingerprint(
     agents: &[OverlayAgent],
     edits: &[crate::ports::types::AgentOverride],
@@ -2736,14 +3033,26 @@ fn overlay_fingerprint(
     // Hashed in stored order, which `upsert_agent_override` keeps stable: it
     // replaces an existing entry in place and only ever appends a new one, so a
     // repeated edit of one teammate does not permute the list and drop every
-    // live session for a change that touched nobody else.
-    edits.len().hash(&mut hasher);
-    for edit in edits {
+    // live session for a change that touched nobody else. Avatar-only rows are
+    // skipped (`is_avatar_only`): they carry no persona, so they must not move
+    // the fingerprint.
+    let persona_edits: Vec<_> = edits.iter().filter(|edit| !is_avatar_only(edit)).collect();
+    persona_edits.len().hash(&mut hasher);
+    for edit in persona_edits {
         edit.agent_id.hash(&mut hasher);
         edit.name.hash(&mut hasher);
         edit.role.hash(&mut hasher);
         edit.description.hash(&mut hasher);
         edit.tools.hash(&mut hasher);
+        // A routing override changes the harness binding the roster must build,
+        // so it has to move this fingerprint too — otherwise re-binding one
+        // teammate to another model/harness would persist and be silently
+        // ignored until the next process restart (issue #1676 review note).
+        // Hashed as `Option`s, so the stored `Some("")` "cleared" form stays
+        // distinct from `None` ("never edited"), the same discriminant the
+        // resolver's reset-to-blueprint contract depends on.
+        edit.model.hash(&mut hasher);
+        edit.harness.hash(&mut hasher);
     }
     agents.len().hash(&mut hasher);
     for agent in agents {
@@ -2758,23 +3067,43 @@ fn overlay_fingerprint(
         // order (an operator's own list), length folded in first via the slice
         // length above so `["a","b"]` cannot collide with `["ab"]`.
         agent.tools.hash(&mut hasher);
+        // The overlay's own routing binding (`overlay_agent_to_manifest` carries
+        // both straight through), so a model/harness change on an overlay
+        // teammate invalidates the cached roster exactly as an edit of a
+        // manifest one does.
+        agent.model.hash(&mut hasher);
+        agent.harness.hash(&mut hasher);
     }
     hasher.finish()
 }
 
-/// A stable hash of the operator's `[policy]` override, so a console tier change
-/// rebuilds the roster on the company's next `ensure` (issue #562).
+/// A stable hash of the effective `[policy]`, so a console tier change or a
+/// manifest `[policy]` edit rebuilds the roster on the company's next `ensure`
+/// (issue #562).
 ///
 /// # Why this axis has to exist at all
 ///
 /// `ApprovalPolicy` is constructed in [`build_roster`], **once per roster
 /// build** — not once per call. The roster is cached and rebuilt only when one
 /// of the fingerprints in the staleness check moves. So without this function a
-/// console tier change would be written, persisted, and then **silently ignored
+/// policy change would be written, persisted, and then **silently ignored
 /// until the process restarted**: the write route would return `204`, the
 /// console would show the new tier, and every agent would keep running the old
 /// one. That is the same failure the skill-delta fingerprint above exists to
 /// prevent, and it is invisible from the outside.
+///
+/// # Why it hashes the effective values, not a stored override
+///
+/// The input is the effective policy — the manifest `[policy]` block as
+/// reconciled with any operator override — because the roster is built from
+/// that effective view (`CompanyRecord::effective_policy`). A relative-override
+/// fingerprint is the empty value whenever effective == manifest, which is
+/// exactly the case after a manifest `[policy]` edit that stores no override:
+/// the write is persisted, the native gate is re-applied, and yet the cache key
+/// never moves — so the next `ensure` reuses the roster (with its old
+/// `ApprovalPolicy`) and harness tool calls keep running under the pre-edit
+/// tier while the native gate already enforces the new one. Hashing the
+/// effective values closes that gap.
 ///
 /// # What is hashed, and what deliberately is not
 ///
@@ -2784,43 +3113,68 @@ fn overlay_fingerprint(
 ///   independent rows, so a reorder is a real edit rather than a spurious
 ///   difference. Its length is folded in first so `["a","b"]` cannot collide
 ///   with `["ab"]`.
-/// - The `Some`/`None` distinction is hashed for both fields, because "not
-///   overridden" and "overridden to the manifest's current value" must stay
-///   apart: the manifest can change under a rebuild, and collapsing them would
-///   pin the override to a value the operator never chose.
-/// - **Attribution (`set_by`, `at_millis`) is deliberately NOT hashed**, for the
-///   same reason the budget fingerprint omits it: who set the tier and when
-///   changes nothing an agent can act on, and folding it in would rebuild the
-///   roster — dropping live agent sessions — on a save that re-set the same tier.
-fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
+/// - The `Some`/`None` distinction of `auto_approve_under_usd` is hashed, so a
+///   cap change moves the key whether it flips between numbers or to/from
+///   `None` (the strictest setting).
+/// - **The TTL is deliberately NOT hashed**, for the same reason it was excluded
+///   from the old override fingerprint: it is enforced by the live gate, not the
+///   roster snapshot, so a deadline-only change must not trigger a roster
+///   rebuild.
+/// - **Attribution is structurally absent from `Policy`**, so re-saving the same
+///   tier can never rebuild the roster the way hashing an override's `set_by`
+///   would.
+fn effective_policy_fingerprint(policy: &Policy) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    match override_ {
-        None => 0u8.hash(&mut hasher),
-        Some(entry) => {
+    policy.mode.hash(&mut hasher);
+    policy.always_approve.len().hash(&mut hasher);
+    for kind in &policy.always_approve {
+        kind.hash(&mut hasher);
+    }
+    match policy.auto_approve_under_usd {
+        Some(amount) => {
             1u8.hash(&mut hasher);
-            match &entry.mode {
-                Some(mode) => {
-                    1u8.hash(&mut hasher);
-                    mode.hash(&mut hasher);
-                }
-                None => 0u8.hash(&mut hasher),
-            }
-            match &entry.always_approve {
-                Some(kinds) => {
-                    1u8.hash(&mut hasher);
-                    kinds.len().hash(&mut hasher);
-                    for kind in kinds {
-                        kind.hash(&mut hasher);
-                    }
-                }
-                None => 0u8.hash(&mut hasher),
-            }
+            amount.to_bits().hash(&mut hasher);
         }
+        None => 0u8.hash(&mut hasher),
     }
     hasher.finish()
+}
+
+/// Synthesizes the override that makes `manifest ⊕ result == policy`.
+///
+/// `ensure_with_policy` pins the roster's policy axis to the cycle-start
+/// snapshot the native gate was re-applied from, and `build_roster` only knows
+/// how to read a policy through `CompanyRecord::effective_policy` — so this is
+/// the inverse of that merge: for each field, override it iff the snapshot
+/// differs from the manifest. The attribution fields are transient (never
+/// persisted, and neither `effective_policy_fingerprint` nor `build_roster`
+/// reads them), so a synthetic system actor is honest about what they are.
+fn policy_override_for(policy: &Policy, manifest: &Policy) -> PolicyOverride {
+    PolicyOverride {
+        mode: (policy.mode != manifest.mode).then(|| policy.mode.clone()),
+        always_approve: (policy.always_approve != manifest.always_approve)
+            .then(|| policy.always_approve.clone()),
+        auto_approve_under_usd: (policy.auto_approve_under_usd != manifest.auto_approve_under_usd)
+            .then_some(policy.auto_approve_under_usd),
+        // The TTL is a bare `Option` whose `None` falls through the merge, so
+        // the override reproduces a differing value by naming it directly and
+        // reproduces an equal one by saying nothing. (Inert on the roster —
+        // `ApprovalPolicy` carries no TTL — and absent from the fingerprint,
+        // so this arm only keeps the synthesis honest.)
+        approval_ttl_hours: if policy.approval_ttl_hours != manifest.approval_ttl_hours {
+            policy.approval_ttl_hours
+        } else {
+            None
+        },
+        set_by: Actor {
+            kind: ActorKind::System,
+            id: "harness".to_string(),
+        },
+        at_millis: 0,
+    }
 }
 
 /// The live overlay state one roster rebuild is resolved against.
@@ -2973,11 +3327,19 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
 /// instructions text is hashed as an `Option` discriminant plus its bytes, so a
 /// stored `Some("")` stays distinct from `None` — the same distinction the
 /// resolver's reset-to-blueprint contract depends on.
+///
+/// Avatar-only rows ([`is_avatar_only`]) are excluded here exactly as in
+/// [`overlay_fingerprint`]: a face is resolved at render time, never part of the
+/// persona the harness builds, so choosing or clearing one must not rebuild the
+/// roster.
 fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let mut ordered: Vec<&AgentOverride> = overrides.iter().collect();
+    let mut ordered: Vec<&AgentOverride> = overrides
+        .iter()
+        .filter(|entry| !is_avatar_only(entry))
+        .collect();
     ordered.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
 
     let mut hasher = DefaultHasher::new();
@@ -2991,6 +3353,14 @@ fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
             }
             None => 0u8.hash(&mut hasher),
         }
+        // A routing override changes the harness binding the roster must build,
+        // so it has to move this fingerprint too — a model/harness change on a
+        // teammate who already has a persona override would otherwise be ignored
+        // until the next process restart (issue #1676 review note). Hashed as
+        // `Option`s so the stored `Some("")` "cleared" form stays distinct from
+        // `None` ("never edited").
+        entry.model.hash(&mut hasher);
+        entry.harness.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -3420,16 +3790,34 @@ mod tests {
     // resolves identically to what shipped before desks could scope tools.
     use crate::runtime::builder::agent_effective_grants;
 
-    fn fp_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
+    fn fp_entry_full(
+        mode: Option<&str>,
+        always: Option<Vec<&str>>,
+        cap: Option<Option<f64>>,
+        ttl: Option<u64>,
+    ) -> PolicyOverride {
         use crate::ports::types::{Actor, ActorKind};
         PolicyOverride {
             mode: mode.map(str::to_string),
             always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            auto_approve_under_usd: cap,
+            approval_ttl_hours: ttl,
             set_by: Actor {
                 kind: ActorKind::User,
                 id: "user-1".to_string(),
             },
             at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// An effective `[policy]` block for fingerprint tests — what the roster is
+    /// actually built from (`CompanyRecord::effective_policy`).
+    fn fp_policy(mode: &str, always: &[&str], cap: Option<f64>, ttl: Option<u64>) -> Policy {
+        Policy {
+            mode: mode.to_string(),
+            always_approve: always.iter().map(|k| (*k).to_string()).collect(),
+            auto_approve_under_usd: cap,
+            approval_ttl_hours: ttl,
         }
     }
 
@@ -3443,18 +3831,12 @@ mod tests {
     /// other test in this change would still pass.
     #[test]
     fn the_policy_fingerprint_moves_when_the_tier_does() {
-        let none = policy_fingerprint(None);
-        let supervised = policy_fingerprint(Some(&fp_entry(Some("supervised"), None)));
-        let full = policy_fingerprint(Some(&fp_entry(Some("full"), None)));
+        let supervised = effective_policy_fingerprint(&fp_policy("supervised", &[], None, None));
+        let full = effective_policy_fingerprint(&fp_policy("full", &[], None, None));
 
         assert_ne!(
             supervised, full,
             "a tier change must move the fingerprint or the roster is never rebuilt"
-        );
-        assert_ne!(
-            none, supervised,
-            "setting an override must move the fingerprint even when it names the \
-             tier the manifest already had — the manifest can change under a rebuild"
         );
     }
 
@@ -3466,33 +3848,76 @@ mod tests {
     /// console shows, depending on the edit.
     #[test]
     fn the_policy_fingerprint_moves_when_the_always_ask_list_does() {
-        let absent = policy_fingerprint(Some(&fp_entry(Some("auto"), None)));
-        let empty = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec![]))));
-        let one = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["payment.send"]))));
-        let two = policy_fingerprint(Some(&fp_entry(
-            Some("auto"),
-            Some(vec!["payment.send", "filing.submit"]),
-        )));
+        let empty = effective_policy_fingerprint(&fp_policy("auto", &[], None, None));
+        let one = effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], None, None));
+        let two = effective_policy_fingerprint(&fp_policy(
+            "auto",
+            &["payment.send", "filing.submit"],
+            None,
+            None,
+        ));
 
-        assert_ne!(
-            absent, empty,
-            "clearing the list is not the same as not overriding it"
-        );
-        assert_ne!(empty, one);
-        assert_ne!(one, two);
+        assert_ne!(empty, one, "adding an entry must move the fingerprint");
+        assert_ne!(one, two, "a second entry must move it again");
 
         // Order is part of the value: the list is the operator's own, not an
         // accumulation of independent rows, so a reorder is a real edit.
-        let reordered = policy_fingerprint(Some(&fp_entry(
-            Some("auto"),
-            Some(vec!["filing.submit", "payment.send"]),
-        )));
+        let reordered = effective_policy_fingerprint(&fp_policy(
+            "auto",
+            &["filing.submit", "payment.send"],
+            None,
+            None,
+        ));
         assert_ne!(two, reordered);
 
         // Length is folded in, so concatenation cannot collide.
-        let split = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["a", "b"]))));
-        let joined = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["ab"]))));
+        let split = effective_policy_fingerprint(&fp_policy("auto", &["a", "b"], None, None));
+        let joined = effective_policy_fingerprint(&fp_policy("auto", &["ab"], None, None));
         assert_ne!(split, joined);
+    }
+
+    /// A deadline-only change has no roster fingerprint.
+    ///
+    /// The TTL is enforced by the live gate, not the roster snapshot
+    /// (`ApprovalPolicy` carries no TTL), so a deadline-only edit must not
+    /// discard live agent sessions for a rebuild that could not apply it.
+    #[test]
+    fn a_deadline_only_change_has_no_roster_fingerprint() {
+        let no_deadline = effective_policy_fingerprint(&fp_policy("auto", &[], None, None));
+        let deadline = effective_policy_fingerprint(&fp_policy("auto", &[], None, Some(72)));
+        assert_eq!(no_deadline, deadline);
+    }
+
+    /// A spend-cap edit moves it too — the third axis a console save can touch
+    /// without touching the tier or the list.
+    ///
+    /// `ApprovalPolicy` is built once per roster, so a cap-only edit that left
+    /// the fingerprint stable would keep the harness gate enforcing the old
+    /// threshold until restart. `auto_approve_under_usd`'s `Some`/`None` are
+    /// both states: an explicit no-cap (`None`) and a finite cap must each be
+    /// distinct. The deadline is deliberately NOT in the fingerprint — the
+    /// roster snapshot carries no TTL, and the deadline lives in the live gate,
+    /// so a deadline-only edit must not discard agent sessions for a rebuild
+    /// that could not apply it.
+    #[test]
+    fn the_policy_fingerprint_moves_when_the_cap_does() {
+        let base = effective_policy_fingerprint(&fp_policy("auto", &[], None, None));
+        let finite = effective_policy_fingerprint(&fp_policy("auto", &[], Some(25.0), None));
+        let tighter = effective_policy_fingerprint(&fp_policy("auto", &[], Some(10.0), None));
+        let deadline = effective_policy_fingerprint(&fp_policy("auto", &[], None, Some(72)));
+
+        assert_ne!(base, finite, "a finite cap must rebuild");
+        assert_ne!(finite, tighter, "a different cap value must rebuild");
+        assert_eq!(
+            base, deadline,
+            "a deadline-only edit must NOT rebuild: the roster snapshot carries no TTL, \
+             so a rebuild could not apply it and would only discard live agent sessions"
+        );
+        // Re-setting the same cap is a no-op, like re-setting the same tier.
+        assert_eq!(
+            finite,
+            effective_policy_fingerprint(&fp_policy("auto", &[], Some(25.0), None))
+        );
     }
 
     /// Issue #661 / L5: an overlay teammate's own `tools` grant flows into the
@@ -3610,6 +4035,54 @@ mod tests {
         );
     }
 
+    /// An overlay teammate's routing binding has to move the same axis: a
+    /// model/harness change is not a persona edit, but the roster the harness
+    /// builds consumes it (`overlay_agent_to_manifest` carries both straight
+    /// through), so a re-bind that moved nothing would be ignored until the
+    /// process restarted (issue #1676 review note).
+    #[test]
+    fn overlay_fingerprint_moves_on_a_model_or_harness_change() {
+        let one = |model: Option<&str>, harness: Option<&str>| {
+            vec![OverlayAgent {
+                id: "a".into(),
+                name: "A".into(),
+                role: "r".into(),
+                description: None,
+                tools: Vec::new(),
+                model: model.map(str::to_string),
+                harness: harness.map(str::to_string),
+            }]
+        };
+        let none = one(None, None);
+        let model = one(Some("chat-v2"), None);
+        let model_again = one(Some("chat-v2"), None);
+        let harness = one(None, Some("acp"));
+        let cleared = one(Some(""), None);
+
+        assert_ne!(
+            overlay_fingerprint(&none, &[], &[]),
+            overlay_fingerprint(&model, &[], &[]),
+            "binding an overlay to a model must move the fingerprint or the re-bind is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&model, &[], &[]),
+            overlay_fingerprint(&harness, &[], &[]),
+            "binding an overlay to a harness must move the fingerprint too"
+        );
+        // The stored `Some("")` "cleared" form is a distinct routing state from
+        // `None` ("never edited"), the same discriminant the resolver uses.
+        assert_ne!(
+            overlay_fingerprint(&none, &[], &[]),
+            overlay_fingerprint(&cleared, &[], &[]),
+            "an explicit clear must not hash like an untouched overlay"
+        );
+        // The same binding twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            overlay_fingerprint(&model, &[], &[]),
+            overlay_fingerprint(&model_again, &[], &[])
+        );
+    }
+
     /// An edit of a **manifest** teammate has to move the same axis, and for the
     /// same reason: a persona is assembled once per roster, so a rename that
     /// moved nothing would read back correctly on the Team page and be invisible
@@ -3643,6 +4116,127 @@ mod tests {
         );
     }
 
+    /// A **routing** edit of a manifest teammate — a model or harness re-bind —
+    /// has to move the same axis for the same reason: the roster the harness
+    /// builds reads the override's routing fields, so a re-bind that moved
+    /// nothing would be silently ignored until the process restarted (issue
+    /// #1676 review note). `Some("")` (the stored "cleared" form) is a distinct
+    /// routing state from `None` ("never edited"), mirroring the resolver's
+    /// reset-to-blueprint contract.
+    #[test]
+    fn overlay_fingerprint_moves_on_a_model_or_harness_edit_of_a_manifest_teammate() {
+        use crate::ports::types::AgentOverride;
+        let edit = |model: Option<&str>, harness: Option<&str>| {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                model: model.map(str::to_string),
+                harness: harness.map(str::to_string),
+                ..Default::default()
+            }]
+        };
+        let none: Vec<AgentOverride> = Vec::new();
+
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            "a model re-bind must move the fingerprint or it is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            overlay_fingerprint(&[], &edit(None, Some("acp")), &[]),
+            "a harness re-bind must move it too"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edit(Some(""), None), &[]),
+            "an explicit model clear must not hash like an untouched teammate"
+        );
+        // The same edit twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[]),
+            overlay_fingerprint(&[], &edit(Some("chat-v2"), None), &[])
+        );
+    }
+
+    /// Choosing or clearing a face writes an `AgentOverride` row whose only set
+    /// field is `avatar` (a teammate with no other override). The fingerprints
+    /// hash what a teammate *is*, never its face, so such a row must not move
+    /// either fingerprint — otherwise a purely cosmetic change would rebuild the
+    /// roster and drop every live agent session (issue #1676 review note).
+    #[test]
+    fn overlay_fingerprint_ignores_an_avatar_only_edit() {
+        use crate::ports::types::AgentOverride;
+        let avatar_only = |avatar: &str| {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                avatar: Some(avatar.to_string()),
+                ..Default::default()
+            }]
+        };
+        let none: Vec<AgentOverride> = Vec::new();
+
+        // Choosing a face for a teammate with no other override writes a row
+        // whose only set field is `avatar`. That is not a persona change — the
+        // harness reads nothing from the face — so it must not move the
+        // fingerprint.
+        assert_eq!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &avatar_only("tiny:robot"), &[]),
+            "an avatar-only row must not move the fingerprint"
+        );
+        // Clearing the face drops the row entirely (`clear_agent_avatar` →
+        // `retain_nonempty_agent_edits`), which must not move it either.
+        assert_eq!(
+            overlay_fingerprint(&[], &avatar_only("tiny:robot"), &[]),
+            overlay_fingerprint(&[], &none, &[]),
+            "clearing an avatar-only row must not move the fingerprint"
+        );
+        // The filter is narrow: a real persona edit still moves the
+        // fingerprint, even when the same teammate also carries a face.
+        let edited = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some("Chief".into()),
+                avatar: Some("tiny:robot".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edited(), &[]),
+            "a real persona edit must still move the fingerprint"
+        );
+        // The filter is narrow the other way too: a row that changed only the
+        // routing — `model` or `harness` with nothing else set — is not a face
+        // change. The harness reads those fields when it binds a teammate, so
+        // such a row must move the fingerprint or the old binding survives
+        // until restart (codex review note).
+        let routing = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                model: Some("claude-opus-4-5".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &routing(), &[]),
+            "a routing-only edit must still move the fingerprint"
+        );
+        let harness_routing = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                harness: Some("external".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &harness_routing(), &[]),
+            "a harness-only edit must still move the fingerprint"
+        );
+    }
+
     /// A removal has to move the same axis: a retired teammate left in a cached
     /// roster would keep taking turns and keep receiving delegations after the
     /// console said it was gone — the sharpest form of the staleness this axis
@@ -3667,28 +4261,21 @@ mod tests {
         );
     }
 
-    /// Attribution is deliberately NOT hashed.
+    /// Re-setting the same tier does not rebuild the roster.
     ///
-    /// Re-setting the same tier writes a fresh `set_by`/`at_millis`. If those
-    /// moved the fingerprint, every such save would rebuild the roster and drop
-    /// live agent sessions for a change no agent can observe — the same reason
-    /// `budget_fingerprint` omits them.
+    /// Attribution is structurally absent from `Policy` — a re-save of the same
+    /// tier writes the same effective values, so the fingerprint cannot move
+    /// and live agent sessions are not dropped for a change no agent can
+    /// observe (the same reason `budget_fingerprint` omits attribution). The
+    /// inverted guard lives in `a_manifest_policy_edit_rebuilds_the_roster_with_no_override`
+    /// below: a manifest `[policy]` edit with no override in between MUST move
+    /// the key.
     #[test]
     fn re_setting_the_same_tier_does_not_rebuild_the_roster() {
-        use crate::ports::types::{Actor, ActorKind};
-        let first = fp_entry(Some("auto"), Some(vec!["payment.send"]));
-        let second = PolicyOverride {
-            set_by: Actor {
-                kind: ActorKind::User,
-                id: "a-different-admin".to_string(),
-            },
-            at_millis: 1_900_000_000_000,
-            ..first.clone()
-        };
         assert_eq!(
-            policy_fingerprint(Some(&first)),
-            policy_fingerprint(Some(&second)),
-            "attribution must not move the fingerprint"
+            effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], Some(25.0), None)),
+            effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], Some(25.0), None)),
+            "re-setting the same tier must not move the fingerprint"
         );
     }
 
@@ -4563,6 +5150,131 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("first ensure");
         pool.ensure(&rec, &fx.deps).await.expect("second ensure");
         assert_eq!(pool.resident_companies().await, 1);
+    }
+
+    /// Issue #1113: a live memory-engine swap must not leave the cached roster
+    /// reading/writing the deselected engine until a restart.
+    ///
+    /// The pool cannot see a swap itself — the replacement ports arrive on the
+    /// builder — so [`RuntimeBuilder::build`] calls
+    /// [`rebind_memory_engine`](Self::rebind_memory_engine) on every build. This
+    /// test drives that contract directly: an unchanged selection keeps the
+    /// roster (the ordinary issue #290 fast path), a changed one drops it, and
+    /// the next [`ensure`](Self::ensure) folds the replacement context store
+    /// into the rebuilt roster's agents — which a turn then demonstrably reads.
+    #[tokio::test]
+    async fn a_swapped_memory_engine_drops_the_roster_and_reads_the_replacement_store() {
+        let fx = fixture();
+        let pool = HarnessPool::new();
+        let rec = record();
+
+        // Boot: the company is on the base backend (`None`), and the roster is
+        // built over the boot-time context store.
+        assert!(
+            pool.rebind_memory_engine(&rec.id, None).await,
+            "first record has nothing to differ from"
+        );
+        pool.ensure(&rec, &fx.deps).await.expect("boot ensure");
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "roster resident after boot"
+        );
+        assert_eq!(
+            pool.memory_engine(&rec.id).await,
+            None,
+            "selection recorded as the base backend"
+        );
+
+        // A rebuild that re-applies the same engine selection is a no-op (the
+        // issue #290 fast path): the roster survives, conversation intact.
+        assert!(
+            pool.rebind_memory_engine(&rec.id, None).await,
+            "unchanged selection keeps the roster"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "roster survives a no-op rebuild"
+        );
+
+        // A live swap to a provider engine: the selection changes, so the cached
+        // roster must drop for the next `ensure` to rebuild over the replacement
+        // ports — otherwise the agents keep reading the deselected engine.
+        assert!(
+            !pool.rebind_memory_engine(&rec.id, Some(0x1113_0001)).await,
+            "changed selection drops the roster"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            0,
+            "roster invalidated on swap"
+        );
+
+        // Seed the replacement context store and ensure over it: the rebuilt
+        // agent must read the new engine, not the deselected one.
+        let replacement = Arc::new(MockContext::default());
+        let query = "who approved the overtime";
+        replacement
+            .put(
+                &rec.id,
+                ContextChunk {
+                    label: "prior/outcome".into(),
+                    body: format!("REPLACEMENT-ENGINE: {query} on Tuesday"),
+                },
+            )
+            .await
+            .expect("seed the replacement store");
+        let mut swapped = fixture();
+        swapped.deps.context = replacement.clone();
+        pool.ensure(&rec, &swapped.deps)
+            .await
+            .expect("ensure after swap");
+        let reply = pool
+            .run(&rec.id, "ceo", query, &swapped.deps, None)
+            .await
+            .expect("turn after swap")
+            .reply;
+        assert!(
+            reply.contains("REPLACEMENT-ENGINE"),
+            "the rebuilt roster reads the replacement store, not the deselected one; got: {reply}"
+        );
+        assert_eq!(
+            pool.memory_engine(&rec.id).await,
+            Some(0x1113_0001),
+            "selection recorded as the provider engine"
+        );
+
+        // And the reverse swap (back to the base backend — the
+        // `with_memory_overlay_cleared` path): the provider-built roster must
+        // drop the same way, and the next ensure must read the boot store again.
+        assert!(
+            !pool.rebind_memory_engine(&rec.id, None).await,
+            "reverse swap also drops the roster"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            0,
+            "provider-built roster invalidated on the way back"
+        );
+        pool.ensure(&rec, &fx.deps)
+            .await
+            .expect("ensure after reverse swap");
+        let reply = pool
+            .run(&rec.id, "ceo", query, &fx.deps, None)
+            .await
+            .expect("turn after reverse swap")
+            .reply;
+        assert!(
+            !reply.contains("REPLACEMENT-ENGINE"),
+            "the rebuilt roster reads the boot store again, not the deselected provider; got: {reply}"
+        );
+        // Sanity: the boot store itself has no seed for this query, so the
+        // absence above is meaningful rather than a hit-free query.
+        assert!(
+            !reply.contains("SECRET-PAYROLL-REVIEW"),
+            "sanity: the boot store holds no marker for this query"
+        );
     }
 
     #[tokio::test]
@@ -5721,6 +6433,256 @@ description = "Builds the product."
         assert_eq!(pool.overlay_fingerprint_of(&rec.id).await, Some(after));
     }
 
+    /// Issue #1455: the roster's approval policy is pinned to the cycle-start
+    /// snapshot the native gate was re-applied from, so a console override that
+    /// lands mid-turn (after the runtime's store load, before the harness's own
+    /// refresh) cannot reach the harness gate a turn early. The override is not
+    /// lost — it moves the fingerprint on the NEXT cycle, the same boundary the
+    /// native gate moves on.
+    #[tokio::test]
+    async fn a_cycle_policy_snapshot_wins_over_a_mid_turn_store_edit() {
+        let live_store = Arc::new(LiveStore::default());
+        let mut rec = record();
+        rec.overlay_policy = Some(fp_entry_full(Some("supervised"), None, None, None));
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        // The snapshot the runtime loads at the top of the cycle and re-applies
+        // to the native gate.
+        let snapshot = rec.effective_policy();
+
+        // First cycle: the roster builds against the snapshot.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("first ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // A redundant ensure with the same snapshot is a no-op — the stability
+        // direction the mid-turn assertion below is read against.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("redundant ensure");
+        assert_eq!(pool.policy_fingerprint_of(&rec.id).await, Some(pinned));
+
+        // Mid-window PUT: the store now holds a `full` override. The brain's
+        // refresh picks this record up, but the cycle still carries the old
+        // snapshot — so the roster must not rebuild against `full` a turn early.
+        let mut edited = rec.clone();
+        edited.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
+        live_store.save(&edited).await.unwrap();
+
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("mid-turn ensure");
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "a mid-turn store edit must not reach the roster while the cycle still \
+             carries the old snapshot"
+        );
+
+        // The NEXT cycle captures the new policy: the fingerprint moves, the
+        // roster rebuilds — deferred to the same boundary the native gate moves
+        // on, so the change is applied, just not a turn early.
+        let next = edited.effective_policy();
+        pool.ensure_with_policy(&rec, &fx.deps, &next)
+            .await
+            .expect("next cycle");
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "the new policy must reach the roster on the next cycle"
+        );
+    }
+
+    /// The codex P1 regression (commit 11a1f12ed): a manifest `[policy]` edit
+    /// with no stored override must still move the roster's policy fingerprint.
+    ///
+    /// `ensure_with_policy` previously fingerprinted the *synthesized relative
+    /// override* against the manifest. When effective == manifest — the
+    /// no-override case, or a redundant override a rebuild carried and then
+    /// cleared — that synthesis is all-`None`, the empty fingerprint, so the
+    /// cache key never moved and the next `ensure` reused the cached roster
+    /// (with its old `ApprovalPolicy`) while the native gate already enforced
+    /// the new tier. Fingerprinting the effective policy values closes it.
+    #[tokio::test]
+    async fn a_manifest_policy_edit_rebuilds_the_roster_with_no_override() {
+        let live_store = Arc::new(LiveStore::default());
+        let rec = record();
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        // First cycle: manifest `[policy] mode = "full"`, no override. The
+        // snapshot equals the manifest's own policy.
+        let snapshot = rec.effective_policy();
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("first ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // A redundant ensure with the same snapshot is a no-op — the stability
+        // direction the manifest edit below is read against.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("redundant ensure");
+        assert_eq!(pool.policy_fingerprint_of(&rec.id).await, Some(pinned));
+
+        // Version control edits the manifest tier to `readonly`. No override is
+        // stored, so the effective policy IS the manifest itself.
+        let mut edited = rec.clone();
+        edited.manifest.policy.mode = "readonly".to_string();
+        live_store.save(&edited).await.unwrap();
+
+        // The next cycle captures the new effective policy: the fingerprint
+        // must move, or the cached roster's `ApprovalPolicy` (still `full`)
+        // keeps governing harness tool calls while the native gate already
+        // enforces `readonly`.
+        let next = edited.effective_policy();
+        pool.ensure_with_policy(&edited, &fx.deps, &next)
+            .await
+            .expect("next cycle");
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "a manifest [policy] edit must move the fingerprint even with no override"
+        );
+    }
+
+    /// The workflow-runner regression (issue #1455): a plain `ensure` while a
+    /// cycle snapshot is pinned cannot adopt a mid-turn console override a turn
+    /// early.
+    ///
+    /// A cycle pins the roster to the policy snapshot the native gate was
+    /// re-applied from. The workflow runner drives turns from a spawned task
+    /// outside the cycle serial lock and calls plain `ensure`, so without the
+    /// pool remembering the pin it would re-resolve the live store, see the
+    /// mid-window `full` override, and rebuild the roster against it — running
+    /// one turn with the harness gate auto-approving what the native gate still
+    /// parks. The pin is what keeps the plain ensure on the cycle's cadence.
+    #[tokio::test]
+    async fn a_live_ensure_cannot_clobber_a_pinned_cycle_snapshot() {
+        let live_store = Arc::new(LiveStore::default());
+        let mut rec = record();
+        rec.overlay_policy = Some(fp_entry_full(Some("supervised"), None, None, None));
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        let snapshot = rec.effective_policy();
+
+        // Cycle 1: the roster pins the strict snapshot.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("cycle ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // Mid-window PUT: the store now holds a `full` override, still unseen
+        // by the cycle's snapshot.
+        let mut edited = rec.clone();
+        edited.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
+        live_store.save(&edited).await.unwrap();
+
+        // The workflow runner's plain ensure fires while the pin is active. It
+        // must rebuild against the pin, not the live `full` override.
+        pool.ensure(&rec, &fx.deps).await.expect("workflow ensure");
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "a plain ensure must not adopt a mid-cycle override a turn early"
+        );
+
+        // The NEXT cycle captures the new policy: the fingerprint moves, the
+        // roster rebuilds — the change lands, just at the native gate's own
+        // boundary.
+        let next = edited.effective_policy();
+        pool.ensure_with_policy(&rec, &fx.deps, &next)
+            .await
+            .expect("next cycle");
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "the new policy must reach the roster on the next cycle"
+        );
+
+        // Cycle 2 ends: the pin is released, so a standalone workflow turn
+        // between cycles rebuilds against the live override the store already
+        // holds instead of a snapshot that would otherwise outlive its cycle.
+        pool.end_cycle(&rec.id).await;
+        pool.ensure(&rec, &fx.deps)
+            .await
+            .expect("post-cycle ensure");
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(effective_policy_fingerprint(&edited.effective_policy())),
+            "after end_cycle a plain ensure must adopt the live override"
+        );
+    }
+
+    /// The drop-guard half of the release (issue #1455): a cycle cancelled or
+    /// unwound through a panic after installing its pin cannot await
+    /// `end_cycle`, but the synchronous `release_policy_pin_sync` — what the
+    /// guard calls from `Drop` — must clear the pin just the same, so a
+    /// standalone workflow turn between cycles rebuilds against the live
+    /// override rather than a snapshot the abandoned cycle left behind.
+    #[tokio::test]
+    async fn a_sync_pin_release_restores_the_live_policy_axis() {
+        let live_store = Arc::new(LiveStore::default());
+        let mut rec = record();
+        rec.overlay_policy = Some(fp_entry_full(Some("supervised"), None, None, None));
+        live_store.save(&rec).await.unwrap();
+
+        let mut fx = fixture();
+        fx.deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        let snapshot = rec.effective_policy();
+
+        // The cycle pins the strict snapshot, exactly as it does on entry.
+        pool.ensure_with_policy(&rec, &fx.deps, &snapshot)
+            .await
+            .expect("cycle ensure");
+        let pinned = pool
+            .policy_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // Mid-window PUT, then the cycle future is dropped without end_cycle:
+        // the release must come from the drop guard's sync path.
+        let mut edited = rec.clone();
+        edited.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
+        live_store.save(&edited).await.unwrap();
+        pool.release_policy_pin_sync(&rec.id);
+
+        pool.ensure(&rec, &fx.deps).await.expect("post-drop ensure");
+        assert_eq!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(effective_policy_fingerprint(&edited.effective_policy())),
+            "after a sync release a plain ensure must adopt the live override"
+        );
+        assert_ne!(
+            pool.policy_fingerprint_of(&rec.id).await,
+            Some(pinned),
+            "the abandoned cycle's snapshot must not outlive its release"
+        );
+    }
+
     // --- Capability-budget freshness (issue #108) ---------------------------
 
     /// A manifest that grants every tool namespace, so the roster actually builds
@@ -6570,6 +7532,87 @@ description = "Builds the product."
         );
     }
 
+    /// A routing edit — a model or harness re-bind — has to move the persona
+    /// fingerprint too: the roster the harness builds reads those fields, so a
+    /// re-bind that moved nothing would be silently ignored until the process
+    /// restarted (issue #1676 review note). The `Some("")` "cleared" form stays
+    /// distinct from `None` ("never edited"), the same discriminant the
+    /// reset-to-blueprint contract depends on.
+    #[test]
+    fn override_fingerprint_moves_on_a_model_or_harness_change() {
+        use crate::ports::types::AgentOverride;
+        let entry = |model: Option<&str>, harness: Option<&str>| AgentOverride {
+            agent_id: "ceo".into(),
+            model: model.map(str::to_string),
+            harness: harness.map(str::to_string),
+            ..Default::default()
+        };
+
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            "a model override must move the fingerprint or the re-bind is ignored until restart"
+        );
+        assert_ne!(
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            override_fingerprint(&[entry(None, Some("acp"))]),
+            "a harness override must move the fingerprint too"
+        );
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry(Some(""), None)]),
+            "an explicit model clear must not hash like an untouched teammate"
+        );
+        // The same override twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            override_fingerprint(&[entry(Some("chat-v2"), None)])
+        );
+    }
+
+    /// The persona-override fingerprint is filtered the same way as the overlay
+    /// one: a row carrying only a face has no persona text to hash, so choosing
+    /// or clearing an avatar for a teammate with no other override must not
+    /// rebuild the roster (issue #1676 review note).
+    #[test]
+    fn override_fingerprint_ignores_an_avatar_only_row() {
+        use crate::ports::types::AgentOverride;
+        let avatar_only = AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:robot".into()),
+            ..Default::default()
+        };
+        let persona = AgentOverride {
+            agent_id: "ceo".into(),
+            instructions: Some("speak plainly".into()),
+            avatar: Some("tiny:robot".into()),
+            ..Default::default()
+        };
+
+        // A row carrying only a face hashes like no row at all.
+        assert_eq!(
+            override_fingerprint(&[]),
+            override_fingerprint(std::slice::from_ref(&avatar_only)),
+            "an avatar-only row must not move the fingerprint"
+        );
+        // A persona edit still moves it, with or without a face riding along.
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(std::slice::from_ref(&persona)),
+            "a persona edit must still move the fingerprint"
+        );
+        // Two rows differing only in their face hash alike — no spurious rebuild
+        // when an operator changes one teammate's avatar.
+        assert_eq!(
+            override_fingerprint(std::slice::from_ref(&persona)),
+            override_fingerprint(std::slice::from_ref(&AgentOverride {
+                avatar: Some("tiny:fox".into()),
+                ..persona
+            })),
+            "the face must not be part of the fingerprint"
+        );
+    }
+
     /// A persona override written through the store reaches the roster on the
     /// next dispatch — the cache-invalidation the whole feature turns on (#1530).
     /// The pool is never reconstructed (`resident_companies()` stays 1), so the
@@ -6958,8 +8001,11 @@ budget_usd_daily = 0.0
             (&["*"][..], true, false),
             (&["*"][..], false, true),
             (&["*"][..], true, true),
+            // `*` deliberately does not reach MCP (`grants_cover_server` treats
+            // it as an explicit opt-in), so a family grant is what wires the
+            // three bridge tools here — the same `mcp:*` a company would use.
             (
-                &["workspace", "search", "media", "composio"][..],
+                &["workspace", "search", "media", "composio", "mcp:*"][..],
                 false,
                 true,
             ),

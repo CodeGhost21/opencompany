@@ -42,8 +42,8 @@ use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
 use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::{
-    ChunkAddr, ChunkMeta, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
-    EventSeq, LedgerEntry, SecretValue, TemplateProvenance,
+    Attachment, ChunkAddr, ChunkMeta, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
+    ContextChunk, EventSeq, LedgerEntry, SecretValue, TemplateProvenance,
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
@@ -143,6 +143,8 @@ fn sample_policy_override() -> crate::ports::types::PolicyOverride {
     PolicyOverride {
         mode: Some("auto".to_string()),
         always_approve: Some(vec!["payment.send".to_string()]),
+        auto_approve_under_usd: Some(Some(25.0)),
+        approval_ttl_hours: Some(48),
         set_by: Actor {
             kind: ActorKind::User,
             id: "user-conformance".to_string(),
@@ -230,10 +232,10 @@ fn sample_overlay_desk_members() -> Vec<crate::ports::types::OverlayDeskMember> 
 }
 
 /// The operator's edits of a manifest-declared teammate: a renamed role, a
-/// cleared description (the empty-string form) and a narrowed tool scope, so a
-/// backend that drops the field — or that collapses "cleared" back into "not
-/// overridden" — is caught by the round-trip rather than in a console that
-/// silently re-inherits the blueprint after a restart.
+/// cleared description (the empty-string form), a narrowed tool scope and a
+/// chosen face, so a backend that drops the field — or that collapses "cleared"
+/// back into "not overridden" — is caught by the round-trip rather than in a
+/// console that silently re-inherits the blueprint after a restart.
 fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
     vec![crate::ports::types::AgentOverride {
         agent_id: "ceo".to_string(),
@@ -242,6 +244,10 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         description: Some(String::new()),
         tools: Some(vec!["docs.*".to_string()]),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
+        // A dropped avatar reads as "nobody has chosen", so the teammate's face
+        // would silently revert to the hashed default on the next restart — the
+        // same class of loss as re-inheriting the blueprint role.
+        avatar: Some("tiny:violet".to_string()),
         // Set rather than defaulted: this fixture exists to prove a store
         // round-trips the whole override, so every field it gains needs a real
         // value here or the new ones are covered by nothing.
@@ -338,6 +344,7 @@ pub async fn assert_isolation_by_company(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -573,6 +580,7 @@ pub async fn assert_append_only_event_and_ledger(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -587,6 +595,7 @@ pub async fn assert_append_only_event_and_ledger(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -607,6 +616,7 @@ pub async fn assert_append_only_event_and_ledger(
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -643,6 +653,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -661,6 +672,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -706,6 +718,7 @@ pub async fn assert_event_subscription_surfaces_gap(events: Arc<dyn EventLog>) {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -741,6 +754,7 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
                         by: None,
                         chat: None,
                         deliverable: None,
+                        attachments: Vec::new(),
                     },
                 )
                 .await
@@ -1006,6 +1020,23 @@ pub async fn assert_export_totality(
 
     let mut appended = Vec::new();
     for i in 0..4 {
+        // Issue #1682: one fixture carries a populated attachment so the
+        // totality round-trip can catch a backend that drops the field —
+        // every empty-`Vec::new()` fixture above would still pass one, since
+        // an empty list is indistinguishable from a missing one after
+        // deserialization. Event 2 keeps the exact metadata (including the
+        // server-extracted text) so the byte-identical replay below pins it.
+        let attachments = if i == 2 {
+            vec![Attachment {
+                node_id: "node-attach-0".to_string(),
+                name: "Q3-report.pdf".to_string(),
+                mime: "application/pdf".to_string(),
+                size: 48_932,
+                extracted_text: Some("Q3 revenue grew 12% year over year.".to_string()),
+            }]
+        } else {
+            Vec::new()
+        };
         let ev = CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
             parent: None,
@@ -1013,6 +1044,7 @@ pub async fn assert_export_totality(
             by: None,
             chat: None,
             deliverable: None,
+            attachments,
         };
         events.append(&id, ev.clone()).await.unwrap();
         appended.push(ev);
@@ -1134,6 +1166,23 @@ pub async fn assert_export_totality(
     for (i, stored) in read.iter().enumerate() {
         assert_eq!(stored.seq, EventSeq::new(i as u64));
         assert_eq!(stored.event, appended[i]);
+    }
+    // Issue #1682: the populated-attachment event's metadata survives the
+    // round-trip explicitly, not just as an equality side-effect — a backend
+    // that drops `attachments` (or loses the extracted text) fails here.
+    match &appended[2] {
+        CompanyEvent::OperatorMessage { attachments, .. } => {
+            assert_eq!(attachments.len(), 1);
+            assert_eq!(attachments[0].node_id, "node-attach-0");
+            assert_eq!(attachments[0].name, "Q3-report.pdf");
+            assert_eq!(attachments[0].mime, "application/pdf");
+            assert_eq!(attachments[0].size, 48_932);
+            assert_eq!(
+                attachments[0].extracted_text.as_deref(),
+                Some("Q3 revenue grew 12% year over year.")
+            );
+        }
+        _ => unreachable!("fixture event 2 is an OperatorMessage"),
     }
 
     // All traces round-trip, newest last.
@@ -1522,6 +1571,10 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         id: id.to_string(),
         email: email.to_string(),
         display_name: Some(format!("name {id}")),
+        // Non-`None` so a backend that drops the column is caught here: a lost
+        // avatar reads as "never chose one", so the person's face would revert
+        // to the hashed default on the next read with nothing reporting it.
+        avatar: Some("tiny:indigo".to_string()),
         role: UserRole::Member,
         status: UserStatus::Active,
         password_hash: None,
@@ -1548,6 +1601,13 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
     let list = users.list_users(&alpha).await.unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].id, "u2");
+    // The whole record round-trips, not only the columns each backend happened
+    // to think of: a dropped display name or avatar silently reverts a person
+    // to the console's derived name and hashed face.
+    assert_eq!(
+        users.get_user(&alpha, "u1").await.unwrap().as_ref(),
+        Some(&user("u1", "ada@example.com", 1))
+    );
     assert_eq!(users.list_users(&beta).await.unwrap().len(), 1);
 
     // A user of one company is invisible to another, by id and by email.
@@ -3482,6 +3542,11 @@ pub async fn assert_notification_store(notes: Arc<dyn NotificationStore>) {
         },
         created_at,
         title: format!("notification {id}"),
+        // Company-wide, which is what every row written before the field
+        // existed means — so the whole suite above this line is also the
+        // regression guard for that reading.
+        audience: None,
+        context: None,
     };
 
     // Empty: nobody has anything.
@@ -3621,6 +3686,103 @@ pub async fn assert_notification_store(notes: Arc<dyn NotificationStore>) {
         notes.list(&alpha, "ada").await.unwrap().len(),
         4,
         "beta's write must not change alpha"
+    );
+
+    // ---- Targeted rows: an audience is a boundary, not a hint ----
+    //
+    // A mention notification names the people it is for. Every backend must
+    // enforce that identically, or one storage choice silently shows a person
+    // a message they were never addressed by.
+    let targeted = |id: &str, created_at: u64, audience: Option<Vec<&str>>| Notification {
+        id: id.to_string(),
+        kind: "mention".to_string(),
+        subject: Subject {
+            kind: SubjectKind::Message,
+            id: "42".to_string(),
+        },
+        created_at,
+        title: format!("someone mentioned you ({id})"),
+        audience: audience.map(|a| a.into_iter().map(str::to_string).collect()),
+        context: Some("engineering".to_string()),
+    };
+
+    let gamma = CompanyId::new("gamma");
+    notes
+        .append(&gamma, &targeted("for-ada", 100, Some(vec!["ada"])))
+        .await
+        .unwrap();
+    notes
+        .append(&gamma, &targeted("for-grace", 200, Some(vec!["grace"])))
+        .await
+        .unwrap();
+    notes
+        .append(&gamma, &targeted("for-everyone", 300, None))
+        .await
+        .unwrap();
+
+    // Each person sees their own row plus the company-wide one, and nobody
+    // else's.
+    let ada = notes.list(&gamma, "ada").await.unwrap();
+    let ada_ids: Vec<&str> = ada.iter().map(|v| v.notification.id.as_str()).collect();
+    assert_eq!(ada_ids, vec!["for-everyone", "for-ada"]);
+    let grace = notes.list(&gamma, "grace").await.unwrap();
+    let grace_ids: Vec<&str> = grace.iter().map(|v| v.notification.id.as_str()).collect();
+    assert_eq!(grace_ids, vec!["for-everyone", "for-grace"]);
+
+    // A person named by nothing still sees the company-wide row — an audience
+    // narrows, it does not opt anyone out of what was addressed to everybody.
+    let stranger = notes.list(&gamma, "stranger").await.unwrap();
+    assert_eq!(stranger.len(), 1);
+    assert_eq!(stranger[0].notification.id, "for-everyone");
+
+    // The context rides through, so a badge can be placed without the console
+    // having loaded that channel's transcript.
+    assert_eq!(ada[0].notification.context.as_deref(), Some("engineering"));
+    assert_eq!(
+        ada[1].notification.audience.as_deref(),
+        Some(&["ada".to_string()][..])
+    );
+
+    // The unread count is per person AND per audience: Ada has two visible
+    // rows, not three, so a badge built from this cannot count a colleague's
+    // mention.
+    let ada_unread = notes
+        .mark_read(&gamma, "ada", Some(&["for-ada".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        ada_unread, 1,
+        "the company-wide row is still unread for Ada"
+    );
+
+    // Marking everything read is scoped the same way: it must not reach into
+    // Grace's targeted row, and Grace must be unaffected.
+    let ada_unread = notes.mark_read(&gamma, "ada", None).await.unwrap();
+    assert_eq!(ada_unread, 0);
+    let grace = notes.list(&gamma, "grace").await.unwrap();
+    assert!(
+        grace.iter().all(|v| v.read_at.is_none()),
+        "Ada marking all read must not touch Grace's own rows"
+    );
+
+    // And a person cannot mark somebody else's row read by naming its id.
+    let stranger_unread = notes
+        .mark_read(&gamma, "stranger", Some(&["for-grace".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        stranger_unread, 1,
+        "the stranger's own unread count is the company-wide row alone"
+    );
+    let grace = notes.list(&gamma, "grace").await.unwrap();
+    assert!(
+        grace
+            .iter()
+            .find(|v| v.notification.id == "for-grace")
+            .expect("grace still sees her row")
+            .read_at
+            .is_none(),
+        "naming another person's notification must not mark it read for them"
     );
 }
 

@@ -309,6 +309,8 @@ export interface SetupRoster {
    * Why this is the curated team, when it is. Absent on the `model` path.
    *
    * `"no_model"` — no credential was reachable, so no design pass ran.
+   * `"model_unreachable"` — a credential is wired, but its provider did not
+   * answer in time.
    * `"not_designable"` — a model answered and the answer was unusable: too thin,
    * unreadable, or the reference team handed back unchanged. In practice, the
    * answers were too sparse to design from.
@@ -318,7 +320,7 @@ export interface SetupRoster {
    * falsehood in the second case — and it pointed the operator at adding a key
    * when what they actually needed was to say more about their business.
    */
-  reason?: "no_model" | "not_designable";
+  reason?: "no_model" | "model_unreachable" | "not_designable";
 }
 
 /**

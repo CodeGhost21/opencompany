@@ -21,6 +21,8 @@ import {
   type BoardVote,
   type ReadMarker,
   type ChatMentionInput,
+  type MarkNotificationsReadResponse,
+  type NotificationFeedResponse,
   type MentionablesResponse,
   type PresenceListResponse,
   type ReadStateResponse,
@@ -279,7 +281,7 @@ export class OpenCompanyClient {
    * lifetime — an object URL leaks until it is revoked, and only the component
    * holding it knows when that is.
    */
-  async getBlob(path: string): Promise<Blob> {
+  async getBlob(path: string, signal?: AbortSignal): Promise<Blob> {
     const headers: Record<string, string> = {};
     Object.assign(headers, this.authHeaders());
 
@@ -289,8 +291,14 @@ export class OpenCompanyClient {
         method: "GET",
         headers,
         credentials: "include",
+        signal,
       });
-    } catch {
+    } catch (err) {
+      // An aborted fetch is the caller's own doing — a preview that scrolled
+      // out of view tore the request down deliberately — not a connection
+      // failure. Let the `AbortError` through so the caller can tell
+      // "cancelled" from "couldn't reach the host" (codex review finding).
+      if (err instanceof Error && err.name === "AbortError") throw err;
       throw new ApiError(
         0,
         "network_error",
@@ -482,6 +490,17 @@ export class OpenCompanyClient {
      */
     detach?: boolean,
     /**
+     * Workspace node ids of files attached to this message (issue #1682).
+     *
+     * Ids only — each was returned by `uploadChatAttachment` after the file's
+     * bytes were uploaded. The host re-resolves every id within this company's
+     * own workspace and takes the name / mime / size from the store, so the
+     * client neither can nor needs to send those. Sent only when non-empty, so
+     * a message with no attachment keeps the exact pre-#1682 body shape — the
+     * same omitted-field rule `deliverable` and `detach` follow.
+     */
+    attachments?: string[],
+    /**
      * Who this message names, as the picker resolved them.
      *
      * Sent only when the picker actually resolved something, so an ordinary
@@ -500,6 +519,7 @@ export class OpenCompanyClient {
       parent?: string;
       deliverable?: MessageIntent;
       detach?: boolean;
+      attachments?: string[];
       mentions?: ChatMentionInput[];
     } = {
       text,
@@ -510,6 +530,7 @@ export class OpenCompanyClient {
     // Sent only when asked for, so an ordinary post keeps the exact body shape
     // it had before #983 — the same omitted-field rule `deliverable` follows.
     if (detach) body.detach = detach;
+    if (attachments && attachments.length > 0) body.attachments = attachments;
     // `undefined` means the client has no directory and asks the host to
     // extract mentions. An explicit empty list means the loaded directory
     // resolved none and must suppress fallback extraction.
@@ -646,6 +667,43 @@ export class OpenCompanyClient {
    */
   readState(company?: string | null): Promise<ReadStateResponse> {
     return this.request<ReadStateResponse>("GET", `${this.scope(company)}/chat/read-state`);
+  }
+
+  /**
+   * This person's notification feed — today, their mentions.
+   *
+   * The durable half of a mention: the live feed only reaches an open browser,
+   * so a mention that landed overnight is here and nowhere else.
+   *
+   * A host that predates this route answers 404; callers treat that as an empty
+   * feed and simply show no mention badges, rather than throwing on load.
+   */
+  notifications(company?: string | null): Promise<NotificationFeedResponse> {
+    return this.request<NotificationFeedResponse>(
+      "GET",
+      `${this.scope(company)}/notifications`,
+    );
+  }
+
+  /**
+   * Mark notifications read for this person.
+   *
+   * Omitting `ids` marks everything they can see — what "clear the badge"
+   * means. An explicitly empty array marks nothing, which is a different
+   * instruction and is honoured as one.
+   *
+   * Answers with what is *actually* still unread rather than what the caller
+   * expects, because marking is a latch and two tabs race constantly.
+   */
+  markNotificationsRead(
+    ids?: string[],
+    company?: string | null,
+  ): Promise<MarkNotificationsReadResponse> {
+    return this.request<MarkNotificationsReadResponse>(
+      "PUT",
+      `${this.scope(company)}/notifications`,
+      ids ? { ids } : {},
+    );
   }
 
   /**

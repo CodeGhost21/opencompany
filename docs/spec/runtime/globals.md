@@ -172,7 +172,7 @@ companies and no existing one.
 `Agent::global` also travels to the console, on every `GET …/team` row. That is
 not decoration: because the baseline is merged into every company, "is this
 roster empty?" is false everywhere, and the console's first-run gate asked
-exactly that — so [company setup](company-setup.md) could not open on any
+exactly that — so [company setup](company-setup/overview.md) could not open on any
 company, including the fixture built to reach it (issue #1404). The gate now
 asks whether any teammate is *not* from the baseline, which is a question only
 the provenance marker can answer. A console re-deriving it from a copied list of

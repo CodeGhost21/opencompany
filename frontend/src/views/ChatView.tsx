@@ -17,9 +17,12 @@ import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type MessageIntent } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
+import { uploadChatAttachment } from "@/api/chat";
+import { deleteNode, fetchBlobUrl } from "@/api/workspace";
 import {
   ApiError,
   type ApprovalSummary,
+  type AttachmentDto,
   type GrantScope,
   type TeamMemberDto,
   type TurnStep,
@@ -44,8 +47,10 @@ import {
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
+import { personAvatar, personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
+import { useIsDesktop } from "@/hooks/use-mobile";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
@@ -87,6 +92,19 @@ import {
   type HistoryHydration,
   type Transcripts,
 } from "./chat/model";
+
+/**
+ * The stable empty transcript fallback.
+ *
+ * `transcripts[channel.id]` can be absent for a channel with no history yet —
+ * a newly opened DM, or a desk whose history came back empty. Falling back to a
+ * fresh `[]` would give `messages` a new identity on every render, which
+ * recomputes the `replyParents`/`loadedMessageIds` memos and re-runs the
+ * channel-view effect on every render — and that effect's state write
+ * re-renders the shell, closing a render loop. One shared empty array keeps the
+ * identity stable until a transcript entry actually lands.
+ */
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 interface Props {
   client: OpenCompanyClient;
@@ -202,12 +220,41 @@ interface Props {
   /** Channel id → unread count, for the rail's badges. Owned by the shell. */
   unread?: Record<string, number>;
   /**
+   * Channel id → unread mentions of this person there.
+   *
+   * A separate badge from `unread`, not a subset of it: unread is derived in
+   * this browser, a mention is a durable host-side fact about *you*. See
+   * `ChannelRail`'s prop docs for why merging them would be a loss.
+   */
+  mentions?: Record<string, number>;
+  mentionFeedRevision?: number;
+  /**
    * Reports the channel actually on screen — which the hash need not name,
    * since it may have been resolved by the first-channel fallback. The shell
    * clears that channel's unread count and remembers it as where an
    * unaddressed line belongs after this view is gone (issue #368).
+   *
+   * The second argument is whether *this* channel's history is still on the
+   * wire. A mention is durable and there is no older-history pagination to
+   * recover one — so the shell must not clear a mention for a message it
+   * cannot yet prove is on screen, which is exactly the case where this is
+   * `true`.
    */
-  onChannelViewed?: (channelId: string) => void;
+  onChannelViewed?: (
+    channelId: string,
+    historyPending: boolean,
+    mentionFeedRevision?: number,
+    /**
+     * The loaded transcript's thread replies (`reply id → parent id`), so the
+     * reader can defer a thread-reply mention until its thread is open.
+     */
+    replyParents?: ReadonlyMap<string, string>,
+    /** The thread panel currently open, or `null`. */
+    openThreadId?: string | null,
+    /** All loaded message ids for this channel, so the reader can defer a
+     * mention whose subject is outside the history window. */
+    loadedMessageIds?: ReadonlySet<string>,
+  ) => void;
   /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
@@ -279,6 +326,8 @@ export function ChatView({
   openTurns,
   liveStepsByThread,
   unread,
+  mentions,
+  mentionFeedRevision,
   onChannelViewed,
   approvals,
   chatChannelByThread,
@@ -315,6 +364,13 @@ export function ChatView({
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
+  // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
+  // transcript share the viewport (`hidden lg:flex`), so it is visible even
+  // while `mobilePane` says "rail"; below that the pane toggle is the whole
+  // story. Mention clearing is gated on this so a mention cannot be marked
+  // read while only the rail is showing (codex P1 review).
+  const isDesktop = useIsDesktop();
+  const chatPaneVisible = mobilePane === "chat" || isDesktop;
   const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
   // Section disclosure is shared by the desktop and sub-`lg` rail instances
   // (codex P2 review): each instance would otherwise keep its own fold state,
@@ -329,6 +385,8 @@ export function ChatView({
   // fix for the rail's issue #1340 focus review).
   const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  /** Your own avatar reference, once `loadViewer` has resolved who you are. */
+  const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
   // the attribution line degrades to "an admin" rather than disappearing.
@@ -386,12 +444,29 @@ export function ChatView({
    * showing an operator a control they cannot use is the only thing this
    * prevents.
    */
+  // Only the newest load may write, exactly as `loadDesks` guards its own runs.
+  // `fetchMe` and `listPeople` can overlap — a scope change while a request is
+  // merely slow — and a stale answer landing last would wear the previous
+  // company's face on your own lines. The face is cleared *before* the fetch so
+  // a slow request can never pin an old avatar across a scope change; the
+  // timeline falls back to the name-seeded mascot meanwhile.
+  const viewerRun = useRef(0);
   const loadViewer = useCallback(async () => {
+    const run = ++viewerRun.current;
+    setYouAvatar(undefined);
     let admin = false;
     try {
-      admin = (await fetchMe(client, company)).role === "admin";
+      const who = await fetchMe(client, company);
+      if (run !== viewerRun.current) return;
+      admin = who.role === "admin";
+      // Your own face, so your lines in a busy channel are yours at a glance.
+      // Read from the same call that resolves your role — there is no second
+      // round trip for it, and no way for the two to disagree about who you are.
+      setYouAvatar(personAvatar(who));
     } catch {
-      // No user plane on this host, or not signed in — treat as non-admin.
+      if (run !== viewerRun.current) return;
+      // No user plane on this host, or not signed in — treat as non-admin, and
+      // leave the composer's own lines on the name-seeded fallback.
     }
     setIsAdmin(admin);
     if (!admin) {
@@ -399,8 +474,11 @@ export function ChatView({
       return;
     }
     try {
-      setPeople(await listPeople(client, company));
+      const people = await listPeople(client, company);
+      if (run !== viewerRun.current) return;
+      setPeople(people);
     } catch {
+      if (run !== viewerRun.current) return;
       // Attribution falls back to "an admin"; not worth a toast.
       setPeople([]);
     }
@@ -415,7 +493,7 @@ export function ChatView({
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
     const person = people.find((p) => p.id === userId);
-    return person?.displayName?.trim() || person?.email || "an admin";
+    return person ? personName(person) : "an admin";
   }
 
   const budgetError = (error: unknown, fallback: string): string => {
@@ -703,7 +781,10 @@ export function ChatView({
     return members.filter((m) => !inside.has(m.id));
   }, [inChannel, members]);
 
-  const messages = channel ? (transcripts[channel.id] ?? []) : [];
+  const messages = useMemo(
+    () => (channel ? (transcripts[channel.id] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES),
+    [transcripts, channel?.id],
+  );
   /**
    * Whether this channel's history is still on the wire.
    *
@@ -717,9 +798,26 @@ export function ChatView({
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
   const entries = useMemo(
-    () => (channel ? buildTimeline(messages, channel, members) : []),
-    [messages, channel, members],
+    () => (channel ? buildTimeline(messages, channel, members, youAvatar) : []),
+    [messages, channel, members, youAvatar],
   );
+  /**
+   * The open channel's thread replies, for the mention-clearing gate: a reply
+   * is folded out of the main timeline (`buildTimeline`), so a mention inside
+   * one must not clear on channel-open alone — only once the thread panel
+   * actually renders it. Keyed by the console's `h<seq>` id, the namespace
+   * `subjectId` on a mention notification meets through `hostMessageId`.
+   */
+  const replyParents = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of messages) {
+      if (m.parentId) map.set(m.id, m.parentId);
+    }
+    return map;
+  }, [messages]);
+
+  /** All loaded message ids in this channel, for the mention-clearing gate. */
+  const loadedMessageIds = useMemo(() => new Set(messages.map((m) => m.id)), [messages]);
 
   /**
    * The approvals raised in the channel on screen (#379).
@@ -783,10 +881,80 @@ export function ChatView({
   // Whoever owns the unread counts needs to know what is actually being looked
   // at. Re-runs as the open channel's transcript grows, not only on a switch:
   // a reply that lands while you are reading the channel is read, and should
-  // not leave a badge on the channel you are sitting in.
+  // not leave a badge on the channel you are sitting in. It also re-runs when
+  // a thread opens or closes: opening a thread renders its replies, so the
+  // replies' mentions — which the channel-open alone must not clear — clear
+  // the moment the thread makes them visible.
+  //
+  // Gated on the transcript actually being on screen: below `lg`, `mobilePane
+  // === "rail"` hides the pane, and a mention that lands while the operator is
+  // only looking at the channel rail must not be marked read behind their back.
+  // The gate itself is a dependency, so re-opening the pane from the rail
+  // re-runs the report and clears whatever is newly visible.
   useEffect(() => {
-    if (channel) onChannelViewed?.(channel.id);
-  }, [channel?.id, messages.length, onChannelViewed]);
+    if (channel && chatPaneVisible)
+      onChannelViewed?.(
+        channel.id,
+        historyPending,
+        mentionFeedRevision,
+        replyParents,
+        openThreadId,
+        loadedMessageIds,
+      );
+  }, [
+    channel?.id,
+    messages.length,
+    historyPending,
+    mentionFeedRevision,
+    onChannelViewed,
+    replyParents,
+    openThreadId,
+    loadedMessageIds,
+    chatPaneVisible,
+  ]);
+
+  // Upload one attachment's bytes for the composer (issue #1682). Bound to the
+  // active connection's client/company so the composer stays agnostic of both.
+  // Must live above the early returns: a hook after them is skipped on the
+  // loading render and present on the next, which is a Rules-of-Hooks crash
+  // ("Rendered more hooks than during the previous render").
+  const uploadAttachment = useCallback(
+    (file: File) => uploadChatAttachment(client, company, file),
+    [client, company],
+  );
+
+  // Fetch a stored attachment's bytes as an object URL for the transcript
+  // (issue #1682). The blob route needs the client's bearer, which an `<img>`
+  // or a bare link cannot carry — so the row resolves through this and the
+  // caller revokes the URL when done. Reuses the hardened `/workspace/blob`
+  // serve untouched. The optional `signal` lets a preview that scrolls out of
+  // view cancel its in-flight download (codex review finding).
+  const resolveAttachmentUrl = useCallback(
+    (nodeId: string, signal?: AbortSignal) =>
+      fetchBlobUrl(client, company, nodeId, signal),
+    [client, company],
+  );
+
+  /**
+   * Delete an uploaded-but-never-sent attachment's workspace node (issue
+   * #1682, codex review finding).
+   *
+   * A staged file is uploaded (and charged against the workspace quota) the
+   * moment it lands, before the operator has sent anything — replacing it,
+   * removing it, or leaving the composer used to just drop the local
+   * reference, leaving the binary node on the server forever. Bound the same
+   * way `uploadAttachment` is; best-effort, since a failed cleanup here must
+   * never block the operator from continuing to compose.
+   */
+  const deleteAttachment = useCallback(
+    (nodeId: string) => {
+      void deleteNode(client, company, nodeId).catch(() => {
+        // Best-effort: an orphaned node here is a quota nuisance, not a
+        // correctness bug, and the operator has already moved on.
+      });
+    },
+    [client, company],
+  );
 
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
@@ -877,14 +1045,33 @@ export function ChatView({
    * dropped from the request rather than sent as a local counter the host
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
+   *
+   * Returns whether the POST reached the host and journaled (codex review
+   * round 4, on top of round 2's naive version): `true` for every outcome
+   * where `client.chat` itself resolved (a normal reply, a detached turn, or
+   * a stale response the caller discards) — the host answered, so the
+   * journal write is a fact. `undefined` when the request THREW, because a
+   * throw is genuinely ambiguous: `accept_chat_turn` journals the message
+   * before the turn's cycle is spawned onto its own task, and a synchronous
+   * (non-detached) send then awaits that task — so a failure surfacing from
+   * deep in cycle execution reaches this `catch` looking identical to one
+   * that never reached the journal at all. There is no `false` this function
+   * ever returns: nothing observable here tells "refused before journal"
+   * and "journaled, then the turn itself failed" apart. The composer treats
+   * `undefined` as "unknown — leave it alone", never as "not sent"; see
+   * `deleteAttachment` and `MessageComposer.send`.
    */
   async function send(
     text: string,
     intent?: MessageIntent,
     parentId?: string,
+    attachments?: AttachmentDto[],
     mentions?: Mention[],
-  ) {
-    if (sending) return;
+  ): Promise<boolean | undefined> {
+    // The one genuinely safe `false`: another send is already in flight, so
+    // this call's own text/attachments were never handed to `client.chat` at
+    // all — no server round trip happened for them, no ambiguity possible.
+    if (sending) return false;
     const scopeAtSend = {
       connection: scope.connection,
       company: scope.company,
@@ -892,6 +1079,10 @@ export function ChatView({
     };
     const target = active.id;
     const chatId = activeThreadId;
+    // The optimistic bubble carries the attachments too, so the operator sees
+    // the file on their own message the instant they send (issue #1682) — the
+    // SSE echo / reload copy then matches it, projected from the same durable
+    // references the host resolved.
 
     // Warn about @-mentioning a teammate who is not on this channel.
     if (mentions?.length && inChannel) {
@@ -930,6 +1121,7 @@ export function ChatView({
     });
     const local = makeMessage("you", text, {
       parentId,
+      attachments,
       mentions: localMentions?.length ? localMentions : undefined,
     });
     append(target, local);
@@ -957,6 +1149,10 @@ export function ChatView({
         // field ignores this and answers synchronously, which is why the branch
         // below reads the response's shape and never this argument.
         true,
+        // Node ids only (issue #1682): the host re-resolves each against this
+        // company's workspace and takes the name/mime/size from the store, so
+        // the client neither sends nor is trusted for that metadata.
+        attachments?.map((a) => a.nodeId),
         // Who the picker resolved. The host re-validates every entry and
         // demotes what no longer exists, so this is a suggestion; omitting it
         // asks the host to extract from the text instead.
@@ -978,7 +1174,10 @@ export function ChatView({
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
-        return;
+        // The POST itself succeeded and journaled — this branch only
+        // discards the reply because the scope moved on, so anything the
+        // request carried (an attachment among them) is durably claimed.
+        return true;
       }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
@@ -997,7 +1196,7 @@ export function ChatView({
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
         if (chatId) onSendDetached?.(chatId, answer.turnId);
-        return;
+        return true;
       }
       const reply = answer;
       const replies = reply.responses.length
@@ -1054,6 +1253,7 @@ export function ChatView({
           });
       }
       onReply?.();
+      return true;
     } catch (err) {
       outcome = "failed";
       const latestScope = scopeRef.current;
@@ -1065,7 +1265,10 @@ export function ChatView({
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
-        return;
+        // Unlike the try-block's stale branch above, the request THREW here —
+        // whether it journaled before failing is unknown, not "no" (see this
+        // function's doc comment), so this is `undefined`, not `false`.
+        return undefined;
       }
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
@@ -1074,6 +1277,8 @@ export function ChatView({
       // the turn goes on to produce.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
+      // Ambiguous, not a confirmed non-send — see this function's doc comment.
+      return undefined;
     } finally {
       // A detached turn ends when its row settles, not when this POST resolves.
       // Calling `onSendEnd` here would clear the live step timeline and take the
@@ -1332,6 +1537,7 @@ export function ChatView({
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
+        mentions={mentions}
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
@@ -1343,6 +1549,7 @@ export function ChatView({
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
+        mentions={mentions}
         onSelect={selectChannel}
         openSections={railOpenSections}
         onToggleSection={toggleRailSection}
@@ -1398,6 +1605,7 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              resolveAttachmentUrl={resolveAttachmentUrl}
               onStartBrief={() =>
                 setComposerPrefill((current) => ({
                   text: FIRST_TEAM_BRIEF,
@@ -1429,9 +1637,19 @@ export function ChatView({
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
               prefill={composerPrefill ?? undefined}
-              onSend={(text, intent, mentions) =>
-                void send(text, intent, undefined, mentions)
+              // Not voided (unlike the thread composer below): the composer
+              // awaits this to know whether an attachment it carried actually
+              // journaled, so it can clean up one that did not (codex review
+              // finding on #1682) — see `deleteAttachment` and `send`'s doc.
+              onSend={(text, intent, attachments, mentions) =>
+                send(text, intent, undefined, attachments, mentions)
               }
+              // Issue #1682: only the channel/DM composer attaches — the paperclip
+              // is present exactly because this prop is.
+              uploadAttachment={uploadAttachment}
+              // Cleans up a staged upload that never got sent (codex review
+              // finding on #1682) — see `deleteAttachment`.
+              deleteAttachment={deleteAttachment}
               // Every keystroke asks; the hook throttles to one ping per
               // channel per few seconds and skips entirely while the event
               // stream is down.
@@ -1456,8 +1674,9 @@ export function ChatView({
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
-              onSend={(text, _intent, mentions) =>
-                void send(text, undefined, parent.id, mentions)
+              resolveAttachmentUrl={resolveAttachmentUrl}
+              onSend={(text, _intent, _attachments, mentions) =>
+                void send(text, undefined, parent.id, undefined, mentions)
               }
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}

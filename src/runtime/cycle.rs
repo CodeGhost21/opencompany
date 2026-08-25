@@ -230,6 +230,37 @@ pub struct CycleRunner<'a> {
     rt: &'a CompanyRuntime,
 }
 
+/// The single agent this cycle is addressed to, if there is exactly one.
+///
+/// `None` means "touches the whole company" and yields the company-wide
+/// [`serial`](crate::company::runtime::CompanyRuntime::serial) lock. That is the
+/// safe side: better to serialize a cycle that could have run beside another
+/// than to let two turns that write each other's state overlap.
+///
+/// A batch naming two different agents is deliberately whole-company — that one
+/// cycle runs both turns, so it must serialize against each of them.
+fn single_agent(events: &[(Option<EventSeq>, CompanyEvent)]) -> Option<String> {
+    let mut found: Option<&str> = None;
+    for (_, event) in events {
+        let chat = match event {
+            CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref(),
+            // Any other event kind may touch the whole company and so takes the
+            // wide lock. If a second per-agent event kind is ever added, it
+            // belongs here explicitly.
+            _ => return None,
+        };
+        // A message with no `chat` is routed to the orchestrator, which may
+        // drive the whole company.
+        let name = chat?;
+        match found {
+            None => found = Some(name),
+            Some(prev) if prev == name => {}
+            Some(_) => return None,
+        }
+    }
+    found.map(str::to_owned)
+}
+
 impl<'a> CycleRunner<'a> {
     /// Binds a runner to a runtime.
     pub fn new(rt: &'a CompanyRuntime) -> Self {
@@ -337,7 +368,36 @@ impl<'a> CycleRunner<'a> {
             );
         }
 
-        let guard = self.rt.serial.lock().await;
+        // Which agent is this cycle addressed to?
+        //
+        // If it is exactly one, take only that agent's slot so two operators
+        // talking to two different agents run side by side. If the cycle touches
+        // the whole company (a scheduler tick, an unaddressed message routed to
+        // the orchestrator, or a batch naming more than one agent), take
+        // `serial` and serialize against everything — including every in-flight
+        // agent turn.
+        //
+        // The per-agent slot is looked up (or created) under a short-lived lock
+        // on the map, which is released immediately: holding the map for the
+        // whole turn would reintroduce exactly the serialization this lifts. The
+        // guard chosen below outlives the bracket close, so neither lock can be
+        // released before the critical section it describes ends.
+        // Both branches yield the same guard type — an owned guard over an
+        // `Arc<tokio::sync::Mutex<()>>` — so the choice of which lock to hold does not
+        // leak into the rest of this function.
+        let guard = match single_agent(&events) {
+            Some(agent) => {
+                let slot = {
+                    let mut slots = self.rt.per_agent.lock().await;
+                    slots
+                        .entry(agent)
+                        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                        .clone()
+                };
+                slot.lock_owned().await
+            }
+            None => self.rt.serial.clone().lock_owned().await,
+        };
         let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
@@ -451,6 +511,25 @@ impl<'a> CycleRunner<'a> {
         // still written below — only the read was dead.
         let record = self.rt.store.load(&company).await?;
 
+        // Issue #1455: a console policy PUT/DELETE persisted the override but
+        // must not reach the live native gate mid-turn — an in-flight turn
+        // finishes under the snapshot it started with. The start of a cycle,
+        // holding the serial lock with the freshly-loaded record in hand, is
+        // that safe boundary: re-apply the effective policy (mode, always-ask
+        // list, spend cap) so this turn's native effects evaluate against what
+        // the console reports, even on a company that has not been rebuilt. The
+        // deadline half is immediate already (the ops handler writes the TTL
+        // right after save); re-applying it here costs nothing and keeps a
+        // boot/rebuild-created runtime consistent. A test-injected gate carries
+        // its own policy on purpose and is exempt.
+        if !self.rt.gate_injected
+            && let Some(record) = &record
+        {
+            self.rt
+                .approval_gate
+                .apply_effective_policy(record.effective_policy());
+        }
+
         // Issue #176 (handed-task awareness): when an operator message is
         // addressed to a desk/agent that already has open work handed to it,
         // fold a briefing of that work into the message the brain sees — so a
@@ -482,6 +561,21 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
+            // The same snapshot the native gate was re-applied from above: the
+            // harness rebuilds its roster against it, so a console override
+            // that lands mid-turn (between this load and the harness's own
+            // refresh) reaches neither gate until the next cycle boundary.
+            //
+            // A test-injected gate carries its own policy on purpose — the
+            // reason the re-apply above is exempted — so the roster must pin
+            // THAT policy, not the persisted record's effective one, or the
+            // harness gate and the native gate would disagree about which tier
+            // is live (issue #1455).
+            policy: if self.rt.gate_injected {
+                Some(self.rt.approval_gate.policy())
+            } else {
+                record.as_ref().map(|record| record.effective_policy())
+            },
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
@@ -2775,6 +2869,57 @@ impl CycleHost for CycleHostImpl<'_> {
 mod test {
     use super::*;
 
+    /// `single_agent` picks an agent slot only when the batch is one addressed
+    /// operator message, and falls back to the whole-company lock otherwise —
+    /// the invariant the per-agent lock leans on (issue: parallel agent turns).
+    #[test]
+    fn single_agent_picks_one_addressee_and_falls_back_otherwise() {
+        fn op(chat: Option<&str>) -> (Option<EventSeq>, CompanyEvent) {
+            (
+                None,
+                CompanyEvent::OperatorMessage {
+                    text: "hi".to_string(),
+                    by: None,
+                    chat: chat.map(str::to_string),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                },
+            )
+        }
+
+        // One message addressed to one agent -> that agent's slot.
+        assert_eq!(
+            single_agent(&[op(Some("frits"))]),
+            Some("frits".to_string())
+        );
+        // Several messages, all the same agent -> still that agent's slot.
+        assert_eq!(
+            single_agent(&[op(Some("frits")), op(Some("frits"))]),
+            Some("frits".to_string())
+        );
+        // Two different agents in one batch -> whole company.
+        assert_eq!(single_agent(&[op(Some("frits")), op(Some("sjaan"))]), None);
+        // Unaddressed message (routed to the orchestrator) -> whole company.
+        assert_eq!(single_agent(&[op(None)]), None);
+        // A non-operator event in the batch -> whole company.
+        assert_eq!(
+            single_agent(&[(
+                None,
+                CompanyEvent::TurnStarted {
+                    turn_id: "t1".to_string(),
+                    chat_id: "frits".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )]),
+            None
+        );
+        // Empty batch -> whole company.
+        assert_eq!(single_agent(&[]), None);
+    }
+
     /// Issue #845: a `workflow` message reaches the brain carrying the builder
     /// briefing, and nothing else does.
     ///
@@ -2798,6 +2943,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable,
+            attachments: Vec::new(),
         };
         let text_of = |event: &CompanyEvent| match event {
             CompanyEvent::OperatorMessage { text, .. } => text.clone(),
@@ -2882,6 +3028,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable,
+            attachments: Vec::new(),
         };
 
         let workflow = rt
@@ -3137,6 +3284,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -3677,6 +3825,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -3714,6 +3863,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -3747,6 +3897,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }
         );
 
@@ -3826,6 +3977,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -3888,6 +4040,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -3954,6 +4107,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4267,6 +4421,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4313,6 +4468,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4646,6 +4802,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4727,6 +4884,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4785,6 +4943,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -4847,6 +5006,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4919,6 +5079,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -5011,6 +5172,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -5297,6 +5459,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
             "operator-message"
         );
@@ -5325,6 +5488,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
             two.run_cycle(vec![CompanyEvent::OperatorMessage {
                 mentions: Vec::new(),
@@ -5333,6 +5497,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
         );
         assert_eq!(ra.unwrap().responses.len(), 1);
@@ -5385,6 +5550,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -5710,6 +5876,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         // The company's own machinery stays Internal, event by event: a
         // payment landing is the company's ledger speaking, not third-party
@@ -5741,6 +5908,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(cycle_is_external(&[a2a()]));
         assert!(cycle_is_external(&[operator(), a2a()]));
@@ -6379,6 +6547,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
 
         // A dispatch names the card outright.
@@ -6586,6 +6755,7 @@ mod test {
             by: None,
             chat: Some(chat.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let unaddressed = || CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
@@ -6594,6 +6764,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -6804,6 +6975,7 @@ mod test {
             by: None,
             chat: Some(chat.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -7267,6 +7439,7 @@ mod test {
             by: None,
             chat: Some("Engineering".into()),
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7280,6 +7453,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7342,6 +7516,7 @@ mod test {
             by: None,
             chat: Some("eng".into()),
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7422,6 +7597,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -7458,6 +7634,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -7943,6 +8120,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -8171,6 +8349,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let messages = |stored: &[crate::ports::types::StoredEvent]| -> Vec<String> {
             stored
@@ -8264,6 +8443,7 @@ mod test {
                     chat: None,
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -8278,6 +8458,7 @@ mod test {
                     chat: None,
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )],
             Some("turn-1".to_string()),

@@ -169,13 +169,24 @@ that read as one utterance is worse than an extra avatar.
 
 ## One face per teammate
 
-`TeammateAvatar` (`@/components/teammate-avatar`) draws its mascot from an
-`avatar` key seeded on the teammate's **id** — `TeamMember.avatar`, computed
-once by `fromDto` in `lib/team.ts` — so a rename never changes anyone's face
-(issue #1185). It falls back to hashing the `name` it is given only when no
-`avatar` prop is passed, which is the honest answer for a voice with no
-roster entry behind it (a channel, a cross-posted agent line `senderOf`
-couldn't match against the roster).
+`TeammateAvatar` (`@/components/teammate-avatar`) draws its face from an
+`avatar` **reference** — the one this teammate was given, or the mascot hashed
+from its **id** when nobody has chosen (`TeamMember.avatar`, resolved once by
+`fromDto` in `lib/team.ts`, see `docs/spec/runtime/avatars.md`). Seeding on the
+id is why a rename never changes anyone's face (issue #1185), and carrying the
+chosen face through the *same* field is why setting an icon changes it
+everywhere at once rather than on the page it was set from. It falls back to
+hashing the `name` it is given only when no `avatar` prop is passed, which is
+the honest answer for a voice with no roster entry behind it (a channel, a
+cross-posted agent line `senderOf` couldn't match against the roster).
+
+An uploaded face (`blob:<nodeId>`) is fetched through the authenticated client
+rather than put straight in an `src` — the blob route needs a credential an
+`<img>` cannot carry — so it arrives a render late and is cached module-wide.
+That is the whole reason the tile keeps a tone-tinted square with initials
+underneath: the gutter is never empty while an image is in flight, and a face
+whose bytes were deleted degrades to a coloured tile rather than to a broken
+image.
 
 A DM is where seeding it wrong bites hardest: the rail row and `ChatHeader`
 sit on screen together, and seeding them differently would put two faces on
@@ -186,6 +197,12 @@ there and wear a glyph (`#`, `Lock`, `CircleDot`) instead, because neither has
 one person behind it. The header draws its tile at 24px, the floor below
 which `TeammateAvatar`'s `markOnly` says a mascot is a smudge and the bare
 tone tile is the honest mark.
+
+Your own lines carry your own face too: `buildTimeline` takes a `youAvatar`,
+which `ChatView` reads from the same `auth/me` call that resolves your role.
+The name stays "You" — in your own transcript the second person is what
+identifies the line, and your name there would read as somebody else — so only
+the face is yours, which is the half you actually pick your lines out by.
 
 The main timeline's `senderOf(message, channel, members)` carries the same
 seed for a message whose `channel` field names a distinct originating voice:

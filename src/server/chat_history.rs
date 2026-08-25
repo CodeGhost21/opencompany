@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
-    Actor, ActorKind, CompanyEvent, CompanyRecord, EventSeq, Mention, MentionTarget, StoredEvent,
-    TurnStep,
+    Actor, ActorKind, Attachment, CompanyEvent, CompanyRecord, EventSeq, Mention, MentionTarget,
+    StoredEvent, TurnStep,
 };
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
@@ -244,6 +244,19 @@ pub struct MessageView {
     /// Empty for a message that mentions nobody, which is every message
     /// journaled before mentions existed.
     pub mentions: Vec<MentionView>,
+    /// Files attached to this message (issue #1682), each a durable reference
+    /// into the company workspace with the store-computed name / mime / size.
+    ///
+    /// Projected straight from the stored [`Attachment`] rows — the name and
+    /// mime are already the store's, resolved server-side at send time, so this
+    /// surface adds no viewer-scoping the way [`MentionView`] does: an
+    /// attachment names a file the operator themself put in this company's own
+    /// workspace, reachable by the same person through the blob route.
+    ///
+    /// Empty on an [`AgentReply`](CompanyEvent::AgentReply), a system pill, and
+    /// every operator message journaled before this field existed — the shared
+    /// [`MessageView`], so REST and GraphQL carry the same rows (issue #65).
+    pub attachments: Vec<Attachment>,
 }
 
 /// One mention inside one message, as a reader sees it.
@@ -421,12 +434,16 @@ impl MessageView {
                 parent_id: parent.map(|seq| seq.value().to_string()),
                 reactions: Vec::new(),
                 mentions: project_mentions(&mentions, authors, viewer),
+                // A reply is the company's own voice and carries no operator
+                // upload (issue #1682).
+                attachments: Vec::new(),
             },
             CompanyEvent::OperatorMessage {
                 text,
                 by,
                 parent,
                 mentions,
+                attachments,
                 ..
             } => {
                 let (author, mine) = match &by {
@@ -455,6 +472,10 @@ impl MessageView {
                     parent_id: parent.map(|seq| seq.value().to_string()),
                     reactions: Vec::new(),
                     mentions: project_mentions(&mentions, authors, viewer),
+                    // Issue #1682: the operator's attached files, carried
+                    // through so a reload renders the same chips the live send
+                    // showed.
+                    attachments,
                 }
             }
             // The dispatch terminal (issue #377), as the channel marker a
@@ -491,6 +512,7 @@ impl MessageView {
                 parent_id: None,
                 reactions: Vec::new(),
                 mentions: Vec::new(),
+                attachments: Vec::new(),
             },
             // `owns` never admits other variants into a history.
             other => MessageView {
@@ -505,6 +527,7 @@ impl MessageView {
                 parent_id: None,
                 reactions: Vec::new(),
                 mentions: Vec::new(),
+                attachments: Vec::new(),
             },
         }
     }
@@ -695,9 +718,11 @@ pub async fn channel_attributed_replies(
 
 /// Loads roster display labels for a company: user id → label.
 ///
-/// Prefers a display name, and falls back to the email's *local part* rather
-/// than the whole address: a desk history is read by every member, and it
-/// should not hand each of them everyone else's email.
+/// Prefers a display name, and falls back to one derived from the email's
+/// local part rather than the whole address: a desk history is read by every
+/// member, and it should not hand each of them everyone else's email. The
+/// ladder is [`UserRecord::display_label`] — the same one the profile pane and
+/// the mention picker use, so the same person reads the same way everywhere.
 pub async fn author_labels(
     runtime: &CompanyRuntime,
 ) -> Result<HashMap<String, String>, OpenCompanyError> {
@@ -705,13 +730,9 @@ pub async fn author_labels(
     Ok(users
         .into_iter()
         .map(|user| {
-            let label = user.display_name.unwrap_or_else(|| {
-                user.email
-                    .split('@')
-                    .next()
-                    .unwrap_or("someone")
-                    .to_string()
-            });
+            let label = user
+                .display_label()
+                .unwrap_or_else(|| "someone".to_string());
             (user.id, label)
         })
         .collect())
@@ -955,6 +976,7 @@ mod test {
             by: None,
             chat: chat.map(str::to_string),
             deliverable: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -1043,6 +1065,7 @@ mod test {
             }),
             chat: Some(MAIN_THREAD_ID.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
@@ -1059,6 +1082,7 @@ mod test {
             by: None,
             chat: Some(MAIN_THREAD_ID.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         // The console queries the main thread with desk = ("main", "main").
         assert!(owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -1077,6 +1101,7 @@ mod test {
             by: None,
             chat: Some("strategy".to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(owns("strategy", "Strategy desk", &event));
         assert!(!owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -1200,6 +1225,7 @@ mod test {
             by: None,
             chat: Some("studio".to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -1372,6 +1398,7 @@ mod test {
                     by: None,
                     chat: Some("studio".to_string()),
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             ),
             &Viewer::Operator,
@@ -1414,6 +1441,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
@@ -1790,6 +1818,7 @@ mod test {
                             chat: None,
                             parent: None,
                             deliverable: None,
+                            attachments: Vec::new(),
                         },
                     ),
                     reply(2, "operator"),

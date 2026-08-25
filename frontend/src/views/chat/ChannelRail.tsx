@@ -23,6 +23,8 @@ interface Props {
   activeId: string | null;
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
+  /** Channel id → how many unread mentions name this person there. */
+  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
   collapsed?: boolean;
   onExpand?: () => void;
@@ -49,6 +51,7 @@ export function ChannelRail({
   sections,
   activeId,
   unread,
+  mentions,
   onSelect,
   collapsed = false,
   onExpand,
@@ -100,6 +103,7 @@ export function ChannelRail({
               channel={channel}
               active={channel.id === activeId}
               unread={unread[channel.id] ?? 0}
+              mentions={mentions?.[channel.id] ?? 0}
               onSelect={onSelect}
             />
           ))}
@@ -144,6 +148,7 @@ export function ChannelRail({
           section={section}
           activeId={activeId}
           unread={unread}
+          mentions={mentions}
           onSelect={onSelect}
           open={resolvedOpenSections[section.id] ?? true}
           onToggle={() => toggleSection(section.id)}
@@ -157,14 +162,17 @@ function CompactChannelRow({
   channel,
   active,
   unread,
+  mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
   unread: number;
+  mentions: number;
   onSelect: (id: string) => void;
 }) {
   const hasUnread = unread > 0 && !active;
+  const hasMentions = mentions > 0;
 
   return (
     <button
@@ -176,7 +184,13 @@ function CompactChannelRow({
       // collapsing the rail must not strip the same fact from the screen-reader
       // tree. The dot itself stays a sighted-hover-only cue.
       aria-label={
-        hasUnread ? `${channel.name}, ${unread > 99 ? "99+" : unread} unread` : channel.name
+        [
+          channel.name,
+          hasMentions && `${mentions > 99 ? "99+" : mentions} mention${mentions === 1 ? "" : "s"}`,
+          hasUnread && `${unread > 99 ? "99+" : unread} unread`,
+        ]
+          .filter(Boolean)
+          .join(", ")
       }
       title={channel.name}
       className={cn(
@@ -187,10 +201,20 @@ function CompactChannelRow({
       )}
     >
       <ChannelIcon channel={channel} />
+      {hasMentions && (
+        <span
+          data-testid="channel-mentions"
+          title={`${mentions} ${mentions === 1 ? "mention" : "mentions"} of you here`}
+          className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-destructive"
+        />
+      )}
       {hasUnread && (
         <span
           title={UNREAD_IS_LOCAL}
-          className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary"
+          className={cn(
+            "absolute -right-0.5 size-2 rounded-full bg-primary",
+            hasMentions ? "-bottom-0.5" : "-top-0.5",
+          )}
         />
       )}
     </button>
@@ -201,6 +225,7 @@ function Section({
   section,
   activeId,
   unread,
+  mentions,
   onSelect,
   open,
   onToggle,
@@ -208,12 +233,16 @@ function Section({
   section: ChannelSection;
   activeId: string | null;
   unread: Record<string, number>;
+  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
   open: boolean;
   onToggle: () => void;
 }) {
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
+    : 0;
+  const hiddenMentions = !open
+    ? section.channels.reduce((n, c) => n + (mentions?.[c.id] ?? 0), 0)
     : 0;
 
   return (
@@ -229,12 +258,25 @@ function Section({
           aria-hidden
         />
         <span className="truncate">{section.label}</span>
-        {hiddenUnread > 0 && (
-          <span
-            title={UNREAD_IS_LOCAL}
-            className="ml-auto rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
-          >
-            {hiddenUnread > 99 ? "99+" : hiddenUnread}
+        {(hiddenMentions > 0 || hiddenUnread > 0) && (
+          <span className="ml-auto flex items-center gap-1">
+            {hiddenMentions > 0 && (
+              <span
+                data-testid="section-mentions"
+                title={`${hiddenMentions} ${hiddenMentions === 1 ? "mention" : "mentions"} of you in this section`}
+                className="rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
+              >
+                @{hiddenMentions > 99 ? "99+" : hiddenMentions}
+              </span>
+            )}
+            {hiddenUnread > 0 && (
+              <span
+                title={UNREAD_IS_LOCAL}
+                className="rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
+              >
+                {hiddenUnread > 99 ? "99+" : hiddenUnread}
+              </span>
+            )}
           </span>
         )}
       </button>
@@ -247,6 +289,7 @@ function Section({
                 channel={channel}
                 active={channel.id === activeId}
                 unread={unread[channel.id] ?? 0}
+                mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
               />
             </li>
@@ -264,14 +307,17 @@ function ChannelRow({
   channel,
   active,
   unread,
+  mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
   unread: number;
+  mentions: number;
   onSelect: (id: string) => void;
 }) {
   const hasUnread = unread > 0 && !active;
+  const hasMentions = mentions > 0;
 
   return (
     <button
@@ -294,6 +340,15 @@ function ChannelRow({
     >
       <ChannelIcon channel={channel} />
       <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+      {hasMentions && (
+        <span
+          data-testid="channel-mentions"
+          title={mentions === 1 ? "1 mention of you here" : `${mentions} mentions of you here`}
+          className="shrink-0 rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
+        >
+          @{mentions > 99 ? "99+" : mentions}
+        </span>
+      )}
       {hasUnread && (
         <span
           data-testid="channel-unread"

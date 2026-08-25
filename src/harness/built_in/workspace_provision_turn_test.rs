@@ -349,6 +349,7 @@ fn dispatch(task_id: &str) -> CycleRequest {
             run_id: None,
         }],
         event_seqs: Vec::new(),
+        policy: None,
     }
 }
 

@@ -70,6 +70,23 @@ describe("collapsed ChannelRail unread labels", () => {
     ]);
   });
 
+  it("includes mention and unread counts in the compact accessible name", () => {
+    act(() =>
+      root.render(
+        createElement(ChannelRail, {
+          sections: SECTIONS,
+          activeId: null,
+          unread: { "front-desk": 3 },
+          mentions: { "front-desk": 2 },
+          onSelect: () => {},
+          collapsed: true,
+        }),
+      ),
+    );
+
+    expect(channelButtons()[0].getAttribute("aria-label")).toBe("Front desk, 2 mentions, 3 unread");
+    expect(container.querySelectorAll('[data-testid="channel-mentions"]')).toHaveLength(1);
+  });
   it("caps a huge count the way the expanded badge does", () => {
     act(() =>
       root.render(

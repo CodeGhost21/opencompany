@@ -276,6 +276,8 @@ async fn policy_field_reports_the_override_not_the_manifest() {
     record.overlay_policy = Some(crate::ports::types::PolicyOverride {
         mode: Some("readonly".to_string()),
         always_approve: Some(vec!["deploy.production".to_string()]),
+        auto_approve_under_usd: Some(Some(4.0)),
+        approval_ttl_hours: Some(48),
         set_by: crate::ports::types::Actor {
             kind: crate::ports::types::ActorKind::Operator,
             id: "ada@example.com".to_string(),
@@ -286,7 +288,7 @@ async fn policy_field_reports_the_override_not_the_manifest() {
 
     let value = query(
         router(state),
-        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove manifestMode manifestAlwaysApprove overridden setBy setAtMillis } } }"}"#,
+        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove autoApproveUnderUsd approvalTtlHours manifestMode manifestAlwaysApprove manifestAutoApproveUnderUsd manifestApprovalTtlHours overridden setBy setAtMillis } } }"}"#,
     )
     .await;
     let policy = &value["data"]["company"]["policy"];
@@ -313,6 +315,10 @@ async fn policy_field_reports_the_override_not_the_manifest() {
          either from the other being returned twice: {value}"
     );
     assert_eq!(policy["overridden"], true, "{value}");
+    assert_eq!(policy["autoApproveUnderUsd"], 4.0, "{value}");
+    assert_eq!(policy["approvalTtlHours"], 48.0, "{value}");
+    assert!(policy["manifestAutoApproveUnderUsd"].is_null(), "{value}");
+    assert!(policy["manifestApprovalTtlHours"].is_null(), "{value}");
     assert_eq!(policy["setBy"], "ada@example.com", "{value}");
     assert_eq!(
         policy["setAtMillis"], 1_700_000_000_000_f64,
@@ -1033,6 +1039,63 @@ async fn chat_history_projects_threads_and_reactions() {
         0,
         "an un-reacted message carries no rows: {threaded}"
     );
+}
+
+/// Issue #1682 + #65: an operator message's attachments project on the GraphQL
+/// history surface with the same store-authored metadata the REST route
+/// returns, from the one shared `MessageView`. The console downloads over REST,
+/// but a transcript hydrated through either door must name the same files —
+/// the drift #65 exists to prevent.
+#[tokio::test]
+async fn chat_history_projects_attachments() {
+    use crate::ports::types::{Attachment, CompanyEvent};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    runtime
+        .events()
+        .append(
+            runtime.id(),
+            CompanyEvent::OperatorMessage {
+                text: "here is the file".to_string(),
+                by: None,
+                chat: Some("General".to_string()),
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: vec![Attachment {
+                    node_id: "node-42".to_string(),
+                    name: "diagram.png".to_string(),
+                    mime: "image/png".to_string(),
+                    size: 2048,
+                    extracted_text: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let app = router(state);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 10) { items { text attachments { nodeId name mime size } } } } } }"}"#,
+    )
+    .await;
+    let items = value["data"]["company"]["chat"]["history"]["items"]
+        .as_array()
+        .unwrap();
+    let msg = items
+        .iter()
+        .find(|m| m["text"] == "here is the file")
+        .expect("the operator message is in history");
+    let attachments = msg["attachments"].as_array().expect("attachments project");
+    assert_eq!(attachments.len(), 1, "exactly one attachment: {msg}");
+    assert_eq!(attachments[0]["nodeId"], "node-42");
+    assert_eq!(attachments[0]["name"], "diagram.png");
+    assert_eq!(attachments[0]["mime"], "image/png");
+    assert_eq!(attachments[0]["size"], 2048.0);
 }
 
 #[tokio::test]
