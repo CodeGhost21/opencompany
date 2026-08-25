@@ -436,4 +436,55 @@ describe("run row — files associated (issue #1684)", () => {
         ?.textContent,
     ).toContain("Globex launch spec");
   });
+
+  it("shows the error for a current-scope failure and retries on reopen (issue #1693)", async () => {
+    // The superseded-scope tests prove the guard drops STALE outcomes; this
+    // one covers the in-flight request for the CURRENT scope. Its failure
+    // must render the error line, and the failure path's latch reset must let
+    // a reopen retry — both reachable in production and neither asserted
+    // anywhere else.
+    const deferred: {
+      resolve: (rows: RunArtifactRow[]) => void;
+      reject: (err: unknown) => void;
+    }[] = [];
+    const client = deferredFilesClient(deferred);
+    const file: RunArtifactRow = { ...FILE, title: "Retried launch spec" };
+
+    await renderPanel(completedRun("run-1"), client);
+    await expandFiles();
+    expect(deferred.length).toBe(1);
+
+    // The current-scope request fails: the error line appears and the latch
+    // clears so the next open retries.
+    await act(async () => {
+      deferred[0].reject(new Error("boom"));
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-run-files-error"]')
+        ?.textContent,
+    ).toContain("Reopen to try again");
+
+    // Collapse, then reopen: a second request fires and its success renders
+    // the files, proving the retry latch reset.
+    const details = container.querySelector<HTMLDetailsElement>(
+      '[data-testid="workflow-run-files"]',
+    )!;
+    await act(async () => {
+      details.open = false;
+      details.dispatchEvent(new Event("toggle", { bubbles: true }));
+    });
+    await expandFiles();
+    expect(deferred.length).toBe(2);
+
+    await act(async () => {
+      deferred[1].resolve([file]);
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-run-files-error"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-run-file"]')
+        ?.textContent,
+    ).toContain("Retried launch spec");
+  });
 });
