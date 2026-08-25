@@ -2025,13 +2025,26 @@ async fn extracted_attachment_text(
         .ok()
         .flatten()?;
     let bytes = drain_bounded(stream, MAX_ATTACHMENT_EXTRACT_BYTES).await?;
-    match crate::ingest::extract(&node.name, node.mime.as_deref(), &bytes) {
-        crate::ingest::Extracted::Text(text) => Some(crate::ledger::budget::truncate(
-            &text,
-            MAX_ATTACHMENT_EXTRACT_CHARS,
-        )),
-        crate::ingest::Extracted::Empty | crate::ingest::Extracted::Unsupported(_) => None,
-    }
+    // The extraction pipeline is synchronous CPU work — PDF/DOCX/PPTX/XLSX
+    // parsing — that can run for a while on a document near the size cap, and
+    // this runs inline in the `/chat` POST. Dispatch it to the blocking pool
+    // rather than stalling a Tokio worker (codex review finding). The owned
+    // pieces are cloned out of the borrowed node first: `spawn_blocking`
+    // requires its closure's captures to be `'static`.
+    let name = node.name.clone();
+    let mime = node.mime.clone();
+    tokio::task::spawn_blocking(move || {
+        match crate::ingest::extract(&name, mime.as_deref(), &bytes) {
+            crate::ingest::Extracted::Text(text) => Some(crate::ledger::budget::truncate(
+                &text,
+                MAX_ATTACHMENT_EXTRACT_CHARS,
+            )),
+            crate::ingest::Extracted::Empty | crate::ingest::Extracted::Unsupported(_) => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Drains a [`BlobStream`](crate::ports::workspace::BlobStream) into a

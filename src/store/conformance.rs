@@ -42,8 +42,8 @@ use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
 use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::{
-    ChunkAddr, ChunkMeta, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
-    EventSeq, LedgerEntry, SecretValue, TemplateProvenance,
+    Attachment, ChunkAddr, ChunkMeta, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
+    ContextChunk, EventSeq, LedgerEntry, SecretValue, TemplateProvenance,
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
@@ -1014,6 +1014,23 @@ pub async fn assert_export_totality(
 
     let mut appended = Vec::new();
     for i in 0..4 {
+        // Issue #1682: one fixture carries a populated attachment so the
+        // totality round-trip can catch a backend that drops the field —
+        // every empty-`Vec::new()` fixture above would still pass one, since
+        // an empty list is indistinguishable from a missing one after
+        // deserialization. Event 2 keeps the exact metadata (including the
+        // server-extracted text) so the byte-identical replay below pins it.
+        let attachments = if i == 2 {
+            vec![Attachment {
+                node_id: "node-attach-0".to_string(),
+                name: "Q3-report.pdf".to_string(),
+                mime: "application/pdf".to_string(),
+                size: 48_932,
+                extracted_text: Some("Q3 revenue grew 12% year over year.".to_string()),
+            }]
+        } else {
+            Vec::new()
+        };
         let ev = CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
             parent: None,
@@ -1021,7 +1038,7 @@ pub async fn assert_export_totality(
             by: None,
             chat: None,
             deliverable: None,
-            attachments: Vec::new(),
+            attachments,
         };
         events.append(&id, ev.clone()).await.unwrap();
         appended.push(ev);
@@ -1143,6 +1160,23 @@ pub async fn assert_export_totality(
     for (i, stored) in read.iter().enumerate() {
         assert_eq!(stored.seq, EventSeq::new(i as u64));
         assert_eq!(stored.event, appended[i]);
+    }
+    // Issue #1682: the populated-attachment event's metadata survives the
+    // round-trip explicitly, not just as an equality side-effect — a backend
+    // that drops `attachments` (or loses the extracted text) fails here.
+    match &appended[2] {
+        CompanyEvent::OperatorMessage { attachments, .. } => {
+            assert_eq!(attachments.len(), 1);
+            assert_eq!(attachments[0].node_id, "node-attach-0");
+            assert_eq!(attachments[0].name, "Q3-report.pdf");
+            assert_eq!(attachments[0].mime, "application/pdf");
+            assert_eq!(attachments[0].size, 48_932);
+            assert_eq!(
+                attachments[0].extracted_text.as_deref(),
+                Some("Q3 revenue grew 12% year over year.")
+            );
+        }
+        _ => unreachable!("fixture event 2 is an OperatorMessage"),
     }
 
     // All traces round-trip, newest last.

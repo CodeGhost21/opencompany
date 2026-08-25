@@ -67,12 +67,17 @@ function AttachmentItem({
   // channel open.
   const [inView, setInView] = useState(false);
 
-  // Arms `inView` once, via IntersectionObserver where the runtime has one.
-  // Without it (a test environment, an old embedded webview) this falls back
-  // to eager — the pre-existing behavior — rather than a preview that can
-  // never load.
+  // Arms `inView` once an image chip nears the viewport, and disarms it when
+  // the chip scrolls back out (codex review finding): visibility is two-way,
+  // not a latch, so the preview's object URL is revoked on exit and refetched
+  // on re-entry. Without the exit half, an image-heavy history could
+  // accumulate every blob it ever scrolled past — rows stay mounted, and a
+  // one-way latch means the full multi-megabyte attachment set for the whole
+  // visible span stays resident. Without an IntersectionObserver (a test
+  // environment, an old embedded webview) this falls back to eager — the
+  // pre-existing behavior — rather than a preview that can never load.
   useEffect(() => {
-    if (!image || inView) return;
+    if (!image) return;
     const el = container.current;
     if (!el || typeof IntersectionObserver === "undefined") {
       setInView(true);
@@ -80,7 +85,17 @@ function AttachmentItem({
     }
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) setInView(true);
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setInView(true);
+          } else {
+            // Drop the fetched URL while the chip is off-screen so the
+            // `<img>` does not keep pointing at a blob the preview effect's
+            // cleanup is about to revoke.
+            setInView(false);
+            setPreviewUrl(undefined);
+          }
+        }
       },
       // A little ahead of the viewport, so a fast scroll finds the preview
       // already loading rather than popping in after the fact.
@@ -88,7 +103,7 @@ function AttachmentItem({
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [image, inView]);
+  }, [image]);
 
   // Fetches the bytes for an inline image once it is in view, and revokes the
   // object URL on unmount so it does not stay resident for the life of the

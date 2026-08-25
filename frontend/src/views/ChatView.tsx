@@ -1545,6 +1545,7 @@ export function ChatView({
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
+              resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) =>
                 void send(text, undefined, parent.id, undefined, mentions)
               }

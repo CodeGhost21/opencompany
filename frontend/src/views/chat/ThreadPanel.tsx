@@ -7,6 +7,7 @@ import type { MessageIntent } from "@/api/tasks";
 import type { AttachmentDto } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
+import { MessageAttachments } from "./MessageAttachments";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
@@ -36,6 +37,14 @@ interface Props {
    * composer's outside-channel warning. Absent when membership is unknown.
    */
   channelMemberIds?: string[];
+  /**
+   * Resolves an attachment's bytes to an object URL for preview/download
+   * (issue #1682). Threaded from the parent ChatView like the main timeline's
+   * `MessageRow` gets it, so a thread line can render the same chips — a
+   * reply with an attachment is legal on the wire and history preserves it,
+   * and it was invisible without this path.
+   */
+  resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   onSend: (
     text: string,
     intent?: MessageIntent,
@@ -73,6 +82,7 @@ export function ThreadPanel({
   sending,
   mentionables,
   channelMemberIds,
+  resolveAttachmentUrl,
   onSend,
   onClose,
   typingNames = [],
@@ -91,7 +101,12 @@ export function ThreadPanel({
       </header>
 
       <div className="flex-1 overflow-y-auto">
-        <Line channel={channel} members={members} message={parent} />
+        <Line
+          channel={channel}
+          members={members}
+          message={parent}
+          resolveAttachmentUrl={resolveAttachmentUrl}
+        />
         <div className="flex items-center gap-2 px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">
             {replies.length} {replies.length === 1 ? "reply" : "replies"}
@@ -99,7 +114,13 @@ export function ThreadPanel({
           <span className="h-px flex-1 bg-border" aria-hidden />
         </div>
         {replies.map((r) => (
-          <Line key={r.id} channel={channel} members={members} message={r} />
+          <Line
+            key={r.id}
+            channel={channel}
+            members={members}
+            message={r}
+            resolveAttachmentUrl={resolveAttachmentUrl}
+          />
         ))}
       </div>
 
@@ -121,10 +142,12 @@ function Line({
   channel,
   members,
   message,
+  resolveAttachmentUrl,
 }: {
   channel: Channel;
   members: TeamMember[];
   message: ChatMessage;
+  resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
 }) {
   const sender = senderOf(message, channel, members);
 
@@ -151,6 +174,12 @@ function Line({
           </span>
         </div>
         <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+        {message.attachments && message.attachments.length > 0 && (
+          <MessageAttachments
+            attachments={message.attachments}
+            resolveUrl={resolveAttachmentUrl}
+          />
+        )}
       </div>
     </div>
   );

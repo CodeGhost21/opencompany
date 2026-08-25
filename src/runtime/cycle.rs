@@ -2850,6 +2850,7 @@ mod test {
                     parent: None,
                     deliverable: None,
                     mentions: Vec::new(),
+                    attachments: Vec::new(),
                 },
             )
         }
