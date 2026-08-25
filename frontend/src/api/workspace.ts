@@ -563,14 +563,20 @@ export async function uploadFile(
  * **The caller must revoke the returned URL** when it is done with it —
  * `URL.revokeObjectURL` — or the blob stays resident for the life of the
  * document.
+ *
+ * An optional `signal` cancels the transfer: a preview that scrolls out of
+ * view aborts its fetch instead of downloading the whole payload only to
+ * discard it (codex review finding).
  */
 export async function fetchBlobUrl(
   client: OpenCompanyClient,
   company: string | null,
   id: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const blob = await client.getBlob(
     `${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(id)}`,
+    signal,
   );
   return URL.createObjectURL(blob);
 }
