@@ -2335,6 +2335,17 @@ export function AppShell({
     // moves a card between columns and needs saying in the conversation the
     // card came from.
     onDispatchTerminal: injectDispatchMarker,
+    // The inline terminal marker is enough only while its origin channel is
+    // actually on screen. Elsewhere — including another chat channel — the
+    // event hook raises the linked completion toast (#1758).
+    isViewingTaskOrigin: useCallback(
+      (event: CompanyStreamEvent) => {
+        if (event.type !== "desk_task_completed" || view !== "chat") return false;
+        const origin = dispatchMarkerPlacement(event, chatChannelByThread)?.channelId;
+        return origin != null && activeChatChannelRef.current === origin;
+      },
+      [view, chatChannelByThread],
+    ),
     // Issue #327. The payload is carried, not folded into a counter — see
     // `workspaceEvent` above. The view still re-reads the tree from the host
     // rather than patching it from the frame: the frame carries no node name
