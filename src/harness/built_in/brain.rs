@@ -3201,25 +3201,91 @@ impl HarnessBrain {
                 }
                 CompanyEvent::ScheduleFired { prompt, .. } => {
                     let responder = self.responder_for(None);
-                    let run_turn = HarnessRunTurn::new(self.pool.clone(), self.deps.clone());
+                    // A scheduled tick drives a real turn, so it needs the same
+                    // scaffolding an operator message gets: stale MCP failures
+                    // cleared before it (nothing leaks from a prior turn), a
+                    // live publish claim while it runs, and its own MCP
+                    // failures re-skinned onto the reply afterwards.
+                    self.deps.mcp_failures.clear();
+                    // Issue #445: claim the publish queue for this conversation,
+                    // so a file the scheduled turn publishes is drained below
+                    // instead of being staged into a queue nothing reaches.
+                    // Claimed only when both stores the drain needs are wired —
+                    // the claim is a promise to record, and one that cannot be
+                    // kept must not be made, or the tool goes back to issuing
+                    // receipts nothing honours.
+                    let publish_claim =
+                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
+                            self.deps
+                                .pending_publishes
+                                .claim(publish::PublishDestination::Conversation)
+                        });
+                    // Drive the same routed turn an operator message gets, so a
+                    // responder bound to a named harness runs there and an
+                    // unavailable default fails loudly instead of silently
+                    // falling back to the embedded engine — the router's job.
+                    let run_turn = self.run_turn();
                     let record = self.record();
                     let turn = self
-                        .delegation_runner(&run_turn, &record)
+                        .delegation_runner(run_turn.as_ref(), &record)
                         .handle_operator_message(&responder, prompt, None)
                         .await?;
                     let mut responses = vec![OutboundMessage {
                         message_id: None,
                         task_id: turn.spawned_task,
-                        channel: responder,
-                        agent: None,
+                        // The reply lands on the General desk — the destination
+                        // — and the responder is its author. Fusing the two into
+                        // `channel` made reload history route the same reply to
+                        // General while journaling the wrong author; they are
+                        // separate facts (issue #885).
+                        channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                        agent: Some(responder.clone()),
                         text: turn.reply,
                         reply_to: None,
                         steps: turn.steps,
                         mentions: Vec::new(),
                     }];
                     responses.extend(turn.bubbles);
+                    // Drain what the scheduled turn published (#445) and file it
+                    // onto the card the turn opened — or a freshly minted one —
+                    // exactly as an operator turn's publish is filed.
+                    let spawned_task = responses[0].task_id.clone();
+                    let published = self.deps.pending_publishes.drain();
+                    let published_card = self
+                        .file_conversation_batch(
+                            &responder,
+                            spawned_task.as_deref(),
+                            Some(crate::server::ops::language::DEFAULT_DESK),
+                            publish_claim.is_some(),
+                            published,
+                            &mut responses[0].text,
+                        )
+                        .await;
+                    drop(publish_claim);
+                    // `published_card` wins over the turn's own card, the same
+                    // rule the operator path applies (#463): it names the card
+                    // the deliverable actually landed on, which is usually the
+                    // turn's card but the freshly minted replacement when that
+                    // card was deleted mid-turn.
+                    if let Some(card_id) = published_card {
+                        responses[0].task_id = Some(card_id);
+                    }
+                    // Re-skin any MCP tool-call failures from the scheduled turn
+                    // as error steps on the reply's timeline — one surface, one
+                    // renderer. Runs before the reply is journaled, so the
+                    // journal order reads failure-then-reply.
+                    self.surface_mcp_failures(&mut responses[0].steps, None)
+                        .await?;
                     if let Some(events) = self.deps.events.as_ref() {
                         for response in &mut responses {
+                            // Per-bubble authorship: a delegation bubble names
+                            // its own speaker; the primary bubble is the
+                            // responder's, and the responder is the fallback a
+                            // bubble without an author needs.
+                            let agent_id = response
+                                .agent
+                                .clone()
+                                .unwrap_or_else(|| responder.clone());
                             match events
                                 .append(
                                     &record.id,
@@ -3228,7 +3294,7 @@ impl HarnessBrain {
                                         task_id: response.task_id.clone(),
                                         chat_id: crate::server::ops::language::DEFAULT_DESK
                                             .to_string(),
-                                        agent_id: response.channel.clone(),
+                                        agent_id,
                                         text: response.text.clone(),
                                         steps: response.steps.clone(),
                                         mentions: Vec::new(),
