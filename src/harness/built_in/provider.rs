@@ -1864,8 +1864,7 @@ mod tests {
             .unwrap_or(false);
         if explicitly_disabled {
             assert_eq!(
-                expected,
-                None,
+                expected, None,
                 "OPENCOMPANY_CONTEXT_WINDOW=off|0 must disable the window"
             );
         } else {
