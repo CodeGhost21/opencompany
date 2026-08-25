@@ -44,6 +44,7 @@ import {
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
+import { personAvatar, personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
@@ -329,6 +330,8 @@ export function ChatView({
   // fix for the rail's issue #1340 focus review).
   const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  /** Your own avatar reference, once `loadViewer` has resolved who you are. */
+  const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
   // the attribution line degrades to "an admin" rather than disappearing.
@@ -386,12 +389,29 @@ export function ChatView({
    * showing an operator a control they cannot use is the only thing this
    * prevents.
    */
+  // Only the newest load may write, exactly as `loadDesks` guards its own runs.
+  // `fetchMe` and `listPeople` can overlap — a scope change while a request is
+  // merely slow — and a stale answer landing last would wear the previous
+  // company's face on your own lines. The face is cleared *before* the fetch so
+  // a slow request can never pin an old avatar across a scope change; the
+  // timeline falls back to the name-seeded mascot meanwhile.
+  const viewerRun = useRef(0);
   const loadViewer = useCallback(async () => {
+    const run = ++viewerRun.current;
+    setYouAvatar(undefined);
     let admin = false;
     try {
-      admin = (await fetchMe(client, company)).role === "admin";
+      const who = await fetchMe(client, company);
+      if (run !== viewerRun.current) return;
+      admin = who.role === "admin";
+      // Your own face, so your lines in a busy channel are yours at a glance.
+      // Read from the same call that resolves your role — there is no second
+      // round trip for it, and no way for the two to disagree about who you are.
+      setYouAvatar(personAvatar(who));
     } catch {
-      // No user plane on this host, or not signed in — treat as non-admin.
+      if (run !== viewerRun.current) return;
+      // No user plane on this host, or not signed in — treat as non-admin, and
+      // leave the composer's own lines on the name-seeded fallback.
     }
     setIsAdmin(admin);
     if (!admin) {
@@ -399,8 +419,11 @@ export function ChatView({
       return;
     }
     try {
-      setPeople(await listPeople(client, company));
+      const people = await listPeople(client, company);
+      if (run !== viewerRun.current) return;
+      setPeople(people);
     } catch {
+      if (run !== viewerRun.current) return;
       // Attribution falls back to "an admin"; not worth a toast.
       setPeople([]);
     }
@@ -415,7 +438,7 @@ export function ChatView({
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
     const person = people.find((p) => p.id === userId);
-    return person?.displayName?.trim() || person?.email || "an admin";
+    return person ? personName(person) : "an admin";
   }
 
   const budgetError = (error: unknown, fallback: string): string => {
@@ -717,8 +740,8 @@ export function ChatView({
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
   const entries = useMemo(
-    () => (channel ? buildTimeline(messages, channel, members) : []),
-    [messages, channel, members],
+    () => (channel ? buildTimeline(messages, channel, members, youAvatar) : []),
+    [messages, channel, members, youAvatar],
   );
 
   /**

@@ -120,12 +120,13 @@ pub(super) enum AgentSource {
 /// about the other, so this is their union. It widens nothing on its own —
 /// `tools`, `model` and `harness` stay admin-gated in [`edit_agent`], and
 /// [`EDITABLE_FIELDS_MEMBER`] is unchanged from what #1530 left it.
-const EDITABLE_FIELDS: [&str; 7] = [
+const EDITABLE_FIELDS: [&str; 8] = [
     "name",
     "role",
     "description",
     "tools",
     "instructions",
+    "avatar",
     "model",
     "harness",
 ];
@@ -138,7 +139,7 @@ const EDITABLE_FIELDS: [&str; 7] = [
 /// gives: a console renders a field read-only exactly when the host says it is,
 /// so offering `tools` to a member who would meet a `403` on save is precisely
 /// the drift `editable` exists to remove.
-const EDITABLE_FIELDS_MEMBER: [&str; 4] = ["name", "role", "description", "instructions"];
+const EDITABLE_FIELDS_MEMBER: [&str; 5] = ["name", "role", "description", "instructions", "avatar"];
 
 /// One agent, in full — everything #264 lists as unreachable.
 #[derive(Debug, Serialize)]
@@ -202,6 +203,12 @@ pub(super) struct AgentDetailDto {
     tools: AgentToolsDto,
     desks: Vec<AgentDeskDto>,
     inbox_enabled: bool,
+    /// The face this teammate wears, when somebody has chosen one — the same
+    /// field, resolved through the same record helper, as `GET …/team`
+    /// (`docs/spec/runtime/avatars.md`). Absent means nobody has chosen and the
+    /// console draws the mascot it hashes from the id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     /// The cap in force, its spend, and its attribution — the same fields and
     /// the same absent-means-uncapped contract as `GET …/team`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -506,6 +513,26 @@ pub(super) struct EditAgent {
     /// is normalized to a reset, so an override can never blank a persona.
     #[serde(default, deserialize_with = "double_option")]
     instructions: Option<Option<String>>,
+    /// The face this teammate wears (`docs/spec/runtime/avatars.md`). A
+    /// **double option**, the same three-state contract as `instructions`:
+    ///
+    /// | body | parses as | means |
+    /// |---|---|---|
+    /// | `{}` | `None` | leave the face alone |
+    /// | `{"avatar": null}` | `Some(None)` | reset to the mascot hashed from the id |
+    /// | `{"avatar": "tiny:teal"}` | `Some(Some(…))` | wear that face |
+    ///
+    /// Accepted for a **manifest** teammate as well, for the reason
+    /// `instructions` is: it writes to the per-agent override record rather than
+    /// to `company.toml`. Editable by any member rather than admin-only —
+    /// picking a colleague's face is not a privilege boundary the way widening a
+    /// tool grant is, and a company whose only admin is away should not be stuck
+    /// with eleven hashed blobs.
+    ///
+    /// Validated by [`crate::company::avatar::normalize`], so the only strings
+    /// that reach the record name something this host already holds.
+    #[serde(default, deserialize_with = "double_option")]
+    avatar: Option<Option<String>>,
     /// The teammate's own model override (issue #1245's per-agent follow-up).
     /// A double option for the same reason as `description`: absent leaves it
     /// alone, `null` clears it back to the harness's own default, and a
@@ -559,31 +586,39 @@ async fn agent_detail(
 /// any signed-in member, matching `POST …/team`: defining a teammate was never
 /// admin-only, so correcting one it defined is not either.
 ///
-/// # Why `tools` is the exception (issue #619)
+/// # Why three fields are the exception (issues #619, #1245)
 ///
 /// That reasoning covers what a teammate *is*. It does not cover what a
-/// teammate may *do*, and a tool grant is the second thing — the
-/// [`AdminScopedCompany`](super::AdminScopedCompany) axis: a write that settles
-/// something *on behalf of* the company rather than one a member makes for
-/// themselves.
+/// teammate may *do* or *run on*, and the three admin-gated fields are the
+/// second thing — the [`AdminScopedCompany`](super::AdminScopedCompany) axis: a
+/// write that settles something *on behalf of* the company rather than one a
+/// member makes for themselves.
 ///
-/// The sharp edge is that **an empty `tools` list means "inherit the company's
-/// standard grant"** — the widest grant the company has. So `{"tools": []}` is
-/// not a small edit, it is a *widening*, and left member-open it would let any
-/// signed-in member hand a deliberately-scoped teammate the company's whole
-/// grant back. That is the exact inversion this field was added to prevent, and
-/// `add_agent` already refuses its own version of it (a narrowing that lands
-/// empty is a hard error there, never a stored empty list).
+/// `tools` is the sharpest edge: **an empty `tools` list means "inherit the
+/// company's standard grant"** — the widest grant the company has. So
+/// `{"tools": []}` is not a small edit, it is a *widening*, and left
+/// member-open it would let any signed-in member hand a deliberately-scoped
+/// teammate the company's whole grant back. That is the exact inversion this
+/// field was added to prevent, and `add_agent` already refuses its own version
+/// of it (a narrowing that lands empty is a hard error there, never a stored
+/// empty list).
 ///
-/// So the admin check is **conditional on the field being present**, in the
+/// `model` and `harness` are admin-gated for the same *kind* of reason without
+/// that sharp edge: both are routing decisions the company owns rather than
+/// details of the teammate. A model override names the inference this company
+/// is paying for; a harness binding pins which serve set the teammate runs on.
+/// Neither is a name or a role the account holder would edit for themselves, so
+/// both sit with the grant on the admin side of the line.
+///
+/// So the admin check is **conditional on the fields being present**, in the
 /// same shape and for the same reason as the cap on
 /// [`add_member`](super::team): a member who edits a name or a role keeps
-/// working exactly as before, and adding this field must not quietly take an
+/// working exactly as before, and adding these fields must not quietly take an
 /// existing capability away from members.
 ///
 /// Being conditional is also what fixes its **position**: it runs after the
 /// `409`/`404` checks, so an unknown id answers `404` whether or not the body
-/// carried `tools`. See the comment at the check itself.
+/// carried an admin-gated field. See the comment at the check itself.
 ///
 /// Narrow-only-for-members was considered and rejected: it makes the scope a
 /// one-way ratchet, so a teammate scoped too tightly could never be loosened by
@@ -598,6 +633,65 @@ async fn edit_agent(
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
 ) -> Result<Json<AgentDetailDto>, crate::server::Rejection> {
+    // Identity before validation, and before the avatar below is resolved.
+    //
+    // A `blob:` avatar streams up to 4 MiB from the workspace backend, and that
+    // resolution is deliberately moved ahead of the write lock (see the note
+    // there). That ordering must not also move it ahead of the roster check: an
+    // id that names nobody has a `404` coming, not a `400` (or up to 4 MiB of
+    // I/O) spent proving the shape of a body nobody could have applied. So when
+    // the body carries an avatar, the roster is read once, unlocked, and an
+    // unknown id is refused before any avatar work; the lock below re-reads and
+    // re-checks, because the roster may have changed while the avatar was
+    // resolving. A body without an avatar has nothing slow to get ahead of, so
+    // the single locked check below is enough for it.
+    if body.avatar.is_some() {
+        let early = company
+            .runtime
+            .store()
+            .load(company.id())
+            .await?
+            .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
+        if !early.is_roster_agent(&agent_id) {
+            return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+                "teammate {agent_id}"
+            )))
+            .into_response()
+            .into());
+        }
+    }
+
+    // A submitted face is resolved *before* the write lock below is taken.
+    //
+    // A `blob:` avatar streams up to 4 MiB from the workspace backend, and the
+    // bytes it resolves to do not depend on the record — so holding the
+    // per-company write lock across that I/O would let a slow or stalled remote
+    // store block every other roster and policy write, on a request any member
+    // can repeat. The immutable reference is resolved here instead, and the
+    // lock below is held only for the load-mutate-save of the record.
+    //
+    // `None` is "field absent" (no change), `Some(None)` is "clear it back to
+    // the hashed default", `Some(Some(ref))` is the stored reference.
+    let resolved_avatar: Option<Option<String>> = match &body.avatar {
+        None => None,
+        Some(avatar) => {
+            let value = avatar.as_deref().map(str::trim).filter(|v| !v.is_empty());
+            match value {
+                Some(value) => {
+                    let stored = crate::company::avatar::resolve(
+                        company.runtime.workspace().as_ref(),
+                        company.id(),
+                        value,
+                    )
+                    .await
+                    .map_err(|e| ApiError(e).into_response())?;
+                    Some(Some(stored))
+                }
+                None => Some(None),
+            }
+        }
+    };
+
     // Serialize with every other write to `overlay_agents`, so a console edit
     // and a concurrent `add_agent` cannot clobber one another's roster.
     let write_lock = company_write_lock(company.id());
@@ -610,6 +704,11 @@ async fn edit_agent(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
 
+    // The roster was already checked, unlocked, above — but the write lock was
+    // taken and the record re-loaded *after* the avatar resolved, and a
+    // concurrent add or retirement can have changed the roster in between. So
+    // the id is re-checked against the locked load before anything is mutated.
+    //
     // Identity before validation, so an unknown id is a 404 rather than a
     // complaint about the shape of a body nobody could have applied anyway.
     //
@@ -634,13 +733,13 @@ async fn edit_agent(
     // Authority **after** existence, and this ordering is forced rather than
     // preferred (review of #745).
     //
-    // The check is conditional on `tools`, so putting it first would make one
-    // route give two answers about whether a teammate exists: `{"name": "x"}`
-    // on an unknown id would 404 while `{"tools": […]}` on the same id would
-    // 403. Nothing about an unrelated field should decide that, and the
-    // non-`tools` path cannot be moved to match — a name edit is member-open
-    // and has no authority check to run first. So this is the only order in
-    // which the two paths agree.
+    // The check is conditional on the admin-gated fields, so putting it first
+    // would make one route give two answers about whether a teammate exists:
+    // `{"name": "x"}` on an unknown id would 404 while `{"tools": […]}` on the
+    // same id would 403. Nothing about an unrelated field should decide that,
+    // and the member-open path cannot be moved to match — a name edit is
+    // member-open and has no authority check to run first. So this is the only
+    // order in which the two paths agree.
     //
     // The usual reason to authorise first — refusing to confirm a resource
     // exists — does not apply: `GET {scope}/team/{agent_id}` is open to any
@@ -845,6 +944,23 @@ async fn edit_agent(
                 ..Default::default()
             }),
             None => record.clear_agent_override(&agent_id),
+        }
+    }
+
+    // The chosen face, written to the same override row for either kind of
+    // teammate. `null` — and a blank string, which is the same intent typed by a
+    // client that cleared an input — resets to the hashed default rather than
+    // storing an unrenderable empty reference. The bytes were resolved before
+    // the write lock above (see the note at the top of this handler), so this
+    // only writes the outcome under the lock.
+    if let Some(avatar) = resolved_avatar {
+        match avatar {
+            Some(stored) => record.upsert_agent_override(AgentOverride {
+                agent_id: agent_id.clone(),
+                avatar: Some(stored),
+                ..Default::default()
+            }),
+            None => record.clear_agent_avatar(&agent_id),
         }
     }
 
@@ -1061,6 +1177,7 @@ async fn detail(
         spent_today_usd: spent,
         budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.map(|entry| entry.at_millis),
+        avatar: record.effective_avatar(agent_id),
     }))
 }
 
@@ -2053,6 +2170,427 @@ prompt = "Lead decisively."
         assert_eq!(blanked["instructionsOverridden"], false, "{blanked}");
     }
 
+    // ---- avatars (docs/spec/runtime/avatars.md) --------------------------
+
+    /// The smallest valid GIF, as bytes. Real enough to be sniffed as one,
+    /// which is the whole point — the upload route reads the signature rather
+    /// than believing the part's declared type.
+    const TINY_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\
+\x01\x00\x01\x00\x00\x02\x00;";
+
+    /// A PNG whose header claims a 65535×65535 frame in a body of a few dozen
+    /// bytes — the decompression bomb the dimension caps exist for. The
+    /// signature and IHDR are enough for both the sniff and the size read.
+    fn bomb_png() -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&65535u32.to_be_bytes());
+        v.extend_from_slice(&65535u32.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v
+    }
+
+    /// Posts `bytes` to the avatar upload route as a `file` part named `name`.
+    async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
+        const BOUNDARY: &str = "----ocavatartest";
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+                 filename=\"{name}\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/avatars")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Posts `bytes` to the generic workspace upload route as a `file` part
+    /// named `name`, declaring `mime` as its `Content-Type`. The declared type
+    /// is what the store keeps — the referent check must not trust it, and this
+    /// helper exists to prove that.
+    async fn upload_workspace_binary(
+        state: &AppState,
+        name: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> (StatusCode, Value) {
+        const BOUNDARY: &str = "----ocworkspacetest";
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+                 filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/workspace/upload")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Picking one of the shipped mascots, and putting it back. `null` resets to
+    /// "nobody has chosen", which is what makes the console's hashed default
+    /// reachable again — a stored empty string could not express it.
+    #[tokio::test]
+    async fn a_teammate_can_wear_a_tiny_flavour_and_take_it_off() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, worn) = patch_agent(&state, "ceo", json!({"avatar": "tiny:teal"})).await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        assert_eq!(worn["avatar"], "tiny:teal", "{worn}");
+
+        // Persisted, not just echoed — and visible on the roster list, which is
+        // what every facepile in the console is drawn from.
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert_eq!(reread["avatar"], "tiny:teal", "{reread}");
+        let (_, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+        let row = roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "ceo")
+            .expect("the ceo is on the roster");
+        assert_eq!(row["avatar"], "tiny:teal", "{row}");
+
+        let (status, bare) = patch_agent(&state, "ceo", json!({"avatar": null})).await;
+        assert_eq!(status, StatusCode::OK, "{bare}");
+        assert!(
+            bare.get("avatar").is_none(),
+            "a reset is absent, not empty: {bare}"
+        );
+    }
+
+    /// Resetting a face must not reset a persona, and vice versa. The two share
+    /// one override row, so this is the route-level net under the record-level
+    /// invariant.
+    #[tokio::test]
+    async fn resetting_a_face_leaves_the_persona_alone() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), PERSONA_MANIFEST).await;
+
+        patch_agent(&state, "ceo", json!({"instructions": "Answer in haiku."})).await;
+        patch_agent(&state, "ceo", json!({"avatar": "tiny:rose"})).await;
+
+        let (status, reset) = patch_agent(&state, "ceo", json!({"avatar": null})).await;
+        assert_eq!(status, StatusCode::OK, "{reset}");
+        assert_eq!(
+            reset["instructions"], "Answer in haiku.",
+            "the persona survives a face reset: {reset}"
+        );
+
+        let (_, persona_reset) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
+        patch_agent(&state, "ceo", json!({"avatar": "tiny:rose"})).await;
+        let (_, after) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
+        assert_eq!(
+            after["avatar"], "tiny:rose",
+            "the face survives a persona reset: {after} (first reset: {persona_reset})"
+        );
+    }
+
+    /// The rule the grammar exists for: an avatar names something this host
+    /// holds. A stored URL would be an instruction the console obeys, in an
+    /// `src=`, on every surface that draws a face.
+    #[tokio::test]
+    async fn a_url_is_not_an_avatar() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        for hostile in [
+            "https://tracker.example/beacon.gif",
+            "javascript:alert(1)",
+            "data:image/gif;base64,R0lGOD",
+            "tiny:puce",
+        ] {
+            let (status, refused) = patch_agent(&state, "ceo", json!({"avatar": hostile})).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{hostile} was accepted: {refused}"
+            );
+        }
+        // And nothing was stored on the way out.
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert!(reread.get("avatar").is_none(), "{reread}");
+    }
+
+    /// The custom-image path end to end: upload, then wear what came back.
+    /// A GIF specifically, because an animated face is the case the format
+    /// allowlist exists to admit.
+    #[tokio::test]
+    async fn an_uploaded_gif_becomes_a_wearable_face() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) = upload_avatar(&state, "wave.gif", TINY_GIF).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        assert_eq!(
+            uploaded["mime"], "image/gif",
+            "sniffed from the bytes, not taken from the part's `image/png`: {uploaded}"
+        );
+        let reference = uploaded["avatar"]
+            .as_str()
+            .expect("a reference")
+            .to_string();
+        assert!(reference.starts_with("blob:"), "{reference}");
+
+        let (status, worn) = patch_agent(&state, "ceo", json!({"avatar": reference})).await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        assert_eq!(worn["avatar"], reference, "{worn}");
+
+        // And the bytes come back through the blob route the console reads.
+        let node = uploaded["nodeId"].as_str().unwrap();
+        let (status, _) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/workspace/blob/{node}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// What only claims to be an image is refused at the door — the reason the
+    /// route sniffs rather than trusting the declared type.
+    #[tokio::test]
+    async fn an_upload_that_is_not_an_image_is_refused() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refused) = upload_avatar(
+            &state,
+            "face.png",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    /// A payload small enough to pass the 4 MiB ceiling whose header claims a
+    /// 65535×65535 frame — the decompression bomb. Refused on the upload, so
+    /// the bytes are never stored to allocate a gigabyte for every member who
+    /// views the roster.
+    #[tokio::test]
+    async fn an_upload_that_decodes_to_a_huge_size_is_refused() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refused) = upload_avatar(&state, "bomb.png", &bomb_png()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["error"].as_str().is_some() || refused.as_object().is_some(),
+            "a named refusal: {refused}"
+        );
+    }
+
+    /// The authority line this route draws (`docs/modules/server/authority.md`):
+    /// a member may pick a colleague's face — it decides nothing about what the
+    /// company reaches the world as — while `tools` stays admin-only. Verified
+    /// as a member specifically, because a rule checked only as an admin passes
+    /// identically against no rule at all.
+    #[tokio::test]
+    async fn a_member_may_change_a_face_but_still_not_a_tool_grant() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+        let (status, worn) = send_as(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/ceo",
+            Some(json!({"avatar": "tiny:clay"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        assert_eq!(worn["avatar"], "tiny:clay", "{worn}");
+
+        let (status, refused) = send_as(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/ceo",
+            Some(json!({"tools": ["docs.*"]})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a grant is still admin-only: {refused}"
+        );
+    }
+
+    /// A `blob:` reference is just a node id, and any member can type one.
+    /// Pointing it at nothing — or at a prose note — is refused on the request
+    /// that asked for it, rather than becoming a broken image on every surface.
+    #[tokio::test]
+    async fn a_blob_reference_must_point_at_an_image() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": "blob:01NOSUCHNODE"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+        // A real node that holds prose rather than bytes.
+        let (status, note) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workspace",
+            Some(json!({"name": "notes.md", "kind": "file", "content": "hello"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{note}");
+        let id = note["id"].as_str().expect("a node id");
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    /// The gap between the avatar route and the generic workspace upload: a
+    /// `blob:` reference must be judged on the bytes, not on the type an upload
+    /// declared. A non-image binary uploaded through the workspace route with
+    /// an `image/png` label is stored under that declared type, so a referent
+    /// check that believed it would let arbitrary or oversized bytes ride every
+    /// avatar surface. The reference is refused instead.
+    #[tokio::test]
+    async fn a_blob_reference_is_refused_when_the_bytes_are_not_an_image() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        // A PDF labelled `image/png` — stored as a binary node whose declared
+        // type is exactly the claim the referent check must not trust.
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "face.png", "image/png", b"%PDF-1.7 not an image")
+                .await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    /// The same decompression bomb, reached through a hand-typed `blob:`
+    /// reference instead of the upload route: a node whose bytes are a real
+    /// image by signature but a 65535×65535 header is refused on the request
+    /// that named it, so a member cannot park it in the workspace and point
+    /// every avatar surface at it.
+    #[tokio::test]
+    async fn a_blob_reference_is_refused_when_the_bytes_are_a_decompression_bomb() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "bomb.png", "image/png", &bomb_png()).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    /// A real image uploaded through the generic workspace route is accepted
+    /// as a face when its declared type matches what its bytes sniff as. This
+    /// is what keeps a face pickable from the Files tab — and the face is then
+    /// served from an **immutable copy** under `avatars/`, never from the
+    /// Files-tab node itself, whose bytes a later republish could rewrite
+    /// without ever passing the avatar checks again.
+    #[tokio::test]
+    async fn a_blob_reference_is_accepted_when_the_bytes_are_an_image() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "face.gif", "image/gif", TINY_GIF).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, worn) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        let reference = worn["avatar"].as_str().expect("a reference");
+        let copy_id = reference
+            .strip_prefix("blob:")
+            .expect("the stored face is a blob reference");
+        assert_ne!(
+            copy_id, id,
+            "a Files-tab node is mutable; the face must be an immutable copy"
+        );
+
+        // And the copy really holds the uploaded bytes, served from the
+        // workspace blob route the console draws faces through.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/company/workspace/blob/{copy_id}"))
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes, TINY_GIF, "the copy must serve the validated bytes");
+    }
+
+    /// The declared type is a claim, and the claim has to match the bytes: the
+    /// same GIF labelled `image/png` is refused, because accepting it would let
+    /// the same bytes render as one type from the avatar's own path and as
+    /// another from the Files tab.
+    #[tokio::test]
+    async fn a_blob_reference_is_refused_when_the_declared_type_does_not_match() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "face.png", "image/png", TINY_GIF).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
     /// Issue #1530: an overlay teammate's persona is editable the same way. It
     /// has no manifest `prompt`, so `blueprintInstructions` is absent and a reset
     /// falls all the way to nothing.
@@ -2137,6 +2675,7 @@ prompt = "Lead decisively."
                 "description",
                 "tools",
                 "instructions",
+                "avatar",
                 "model",
                 "harness"
             ],
@@ -2686,6 +3225,31 @@ agent = "claude"
         );
     }
 
+    /// The same identity-before-validation rule, applied to the slowest path
+    /// the body can take: an unknown id with a malformed `blob:` avatar is a
+    /// `404`, not a `400`. The roster check has to run before the referent is
+    /// resolved — which can otherwise cost up to 4 MiB of workspace I/O for an
+    /// id nobody could have edited anyway.
+    #[tokio::test]
+    async fn an_unknown_teammate_is_a_404_even_when_the_avatar_is_malformed() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+        let (status, _) = send_as(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/nobody",
+            // Would be a `400` on its own — `blob:` node ids allow neither
+            // spaces nor `!` — but the id answers `404` before the body is
+            // ever judged.
+            Some(json!({"avatar": "blob:not a node id!"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     /// The conditional check must not take an existing capability away: a
     /// member editing a name or a role keeps working exactly as before, which
     /// is the same rule `POST …/team` applies to its budget cap.
@@ -2729,6 +3293,7 @@ agent = "claude"
                 "description",
                 "tools",
                 "instructions",
+                "avatar",
                 "model",
                 "harness"
             ],
@@ -2745,8 +3310,10 @@ agent = "claude"
         .await;
         assert_eq!(
             strings(&as_member["editable"]),
-            vec!["name", "role", "description", "instructions"],
-            "a member is not offered a field they cannot save: {as_member}"
+            vec!["name", "role", "description", "instructions", "avatar"],
+            "a member is not offered a field they cannot save — but a face is not \
+             one of those: picking a colleague's icon is no privilege boundary, \
+             and `tools`, `model` and `harness` stay admin-gated: {as_member}"
         );
     }
 

@@ -385,6 +385,7 @@ async fn an_address_removed_from_the_roster_is_refused() {
                 id: generate_id(),
                 email: "bob@example.com".to_string(),
                 display_name: None,
+                avatar: None,
                 role: UserRole::Member,
                 status: UserStatus::Suspended,
                 password_hash: None,

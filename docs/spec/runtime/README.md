@@ -121,6 +121,10 @@ Supporting docs:
   sessions, invites, and chat attribution
 - [auth-modes.md](auth-modes.md) — the configured sign-in mode: `email`,
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
+- [avatars.md](avatars.md) — which icon a teammate wears and which one you do:
+  the closed `tiny:`/`blob:` reference grammar and why a URL is not an avatar,
+  the upload route (GIFs included, SVG refused), and why a person's name is
+  guessed at render time rather than written into the directory
 - [hub-console.md](hub-console.md) — one console deployment operating many hosts
   on other origins: the carried session, CORS, and what it costs
 - [finance-console.md](finance-console.md) — the Finance section: Invoicing
