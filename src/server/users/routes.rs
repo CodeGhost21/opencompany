@@ -79,7 +79,7 @@ pub fn router() -> Router<AppState> {
         .merge(public_scoped("/auth/verify", post(verify_code)))
         .merge(public_scoped("/auth/login", post(login_password)))
         .merge(public_scoped("/auth/logout", post(logout)))
-        .merge(public_scoped("/auth/me", get(me)))
+        .merge(public_scoped("/auth/me", get(me).patch(edit_me)))
         .merge(public_scoped(
             "/auth/hub",
             get(hub_providers).post(hub_sign_in),
@@ -185,6 +185,15 @@ pub struct MeResult {
     email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    /// The face this person chose (`docs/spec/runtime/avatars.md`), absent when
+    /// they have not chosen one.
+    ///
+    /// Absent is a real answer and is why the key is skipped rather than
+    /// defaulted: the console draws the mascot it hashes from `id` in that case,
+    /// and a client that could not tell the two apart would have no way to offer
+    /// "use the default face again".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     role: UserRole,
     company: String,
     /// Whether this user has a password set (vs magic-link only).
@@ -403,6 +412,7 @@ async fn upsert_from_eligibility(
         id: generate_id(),
         email: email.to_string(),
         display_name: None,
+        avatar: None,
         role,
         status: UserStatus::Active,
         password_hash: None,
@@ -446,6 +456,7 @@ pub(crate) async fn local_owner_record(
         id: generate_id(),
         email: key,
         display_name: None,
+        avatar: None,
         role: UserRole::Admin,
         status: UserStatus::Active,
         // No password and no way to set one: `auth/password` refuses outside
@@ -593,6 +604,7 @@ fn me_result(company: &CompanyId, user: &UserRecord) -> MeResult {
         id: user.id.clone(),
         email: user.email.clone(),
         display_name: user.display_name.clone(),
+        avatar: user.avatar.clone(),
         role: user.role,
         company: company.as_ref().to_string(),
         has_password: user.password_hash.is_some(),
@@ -1133,6 +1145,140 @@ async fn me(
         .get_user(runtime.id(), &principal.user_id)
         .await?
         .ok_or_else(no_session)?;
+    Ok(Json(me_result(runtime.id(), &user)))
+}
+
+/// What a person may change about themselves.
+///
+/// Both fields are **double options**, the same three-state contract the
+/// team-edit routes use:
+///
+/// | body | parses as | means |
+/// |---|---|---|
+/// | `{}` | `None` | leave it alone |
+/// | `{"avatar": null}` | `Some(None)` | back to the default |
+/// | `{"avatar": "tiny:teal"}` | `Some(Some(…))` | this one |
+///
+/// Collapsing the first two would make every partial save erase the field it
+/// did not mention, which on a two-field profile form means saving a name wipes
+/// the face.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditMe {
+    #[serde(default, deserialize_with = "crate::server::ops::team::double_option")]
+    display_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::server::ops::team::double_option")]
+    avatar: Option<Option<String>>,
+}
+
+/// `PATCH …/auth/me` — change your own name or face.
+///
+/// # Why this is not the admin route
+///
+/// `PATCH …/users/{id}` can already set somebody's `displayName`, and it is
+/// admin-only — correct for an admin making a roster of raw addresses legible,
+/// and useless for the case this route exists for. Naming yourself and choosing
+/// your own face are not administrative acts, and gating them behind an admin
+/// would mean a member's own identity in the company is something they have to
+/// ask for. So this route authorises on **being** the user rather than on a
+/// role: there is no `user_id` in the path at all, which is what makes it
+/// impossible to point at somebody else.
+///
+/// Every sign-in mode has it, including `none`: the single local owner of a
+/// company with no sign-in is still a person with a name and a face.
+async fn edit_me(
+    company: PublicCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    Json(body): Json<EditMe>,
+) -> Result<Json<MeResult>, crate::server::Rejection> {
+    let runtime = company.runtime.clone();
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
+        return Err(no_session().into());
+    };
+    // A temporary password is for replacing itself, not for spending on the
+    // account's public name or face. An admin who reset a password knows the
+    // value, so a session opened with one must not be able to change what the
+    // rest of the company sees before the user has chosen a private one; the
+    // deliberately-public `GET` stays open so they can still read who they are
+    // and land on the set-password route. Same refusal
+    // [`refuse_until_password_changed`](crate::server::platform_auth::refuse_until_password_changed)
+    // returns for the routes that go through the extractors.
+    if principal.must_change_password {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "set a new password before continuing",
+                "code": "password_change_required",
+            })),
+        )
+            .into_response()
+            .into());
+    }
+    // The avatar resolve is the one slow part of this handler — a workspace
+    // read of an uploaded image — and `upsert_user` below replaces the *entire*
+    // record with whatever `get_user` returned. Resolving the face before that
+    // read keeps the record we persist from being loaded ahead of a long await:
+    // a `status`, `role` or `password_hash` an admin changed while the image was
+    // being looked up is read, not resurrected. (The residual read-to-write gap
+    // is systemic — every user write in this store replaces the whole record —
+    // and closing it for good is a store-level partial update, not something a
+    // route can do alone.)
+    let avatar = match body.avatar {
+        // Field absent — leave the face alone. `Some` here means "the body spoke
+        // about the avatar"; the inner value is the stored reference (`None`
+        // clears back to the hashed default).
+        None => None,
+        Some(inner) => Some(
+            match inner
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                // Validated against what this host holds before it is stored — the
+                // value ends up in an `src=` on every surface that draws this
+                // person's face. See `crate::company::avatar`.
+                Some(value) => Some(
+                    crate::company::avatar::resolve(
+                        runtime.workspace().as_ref(),
+                        runtime.id(),
+                        &value,
+                    )
+                    .await
+                    .map_err(crate::server::Rejection::from)?,
+                ),
+                None => None,
+            },
+        ),
+    };
+    let mut user = runtime
+        .users()
+        .get_user(runtime.id(), &principal.user_id)
+        .await
+        .map_err(crate::server::Rejection::from)?
+        .ok_or_else(no_session)?;
+
+    // A blank name is not a name: an emptied field is the person asking for the
+    // derived one back, which is the same intent `null` carries, so the two
+    // normalize to one stored state rather than to a name that renders as a gap.
+    if let Some(name) = body.display_name {
+        let name = name
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        if let Some(name) = &name {
+            super::validate_display_name(name)?;
+        }
+        user.display_name = name;
+    }
+    if let Some(avatar) = avatar {
+        user.avatar = avatar;
+    }
+    user.updated_at_millis = now_millis();
+    runtime
+        .users()
+        .upsert_user(runtime.id(), &user)
+        .await
+        .map_err(crate::server::Rejection::from)?;
     Ok(Json(me_result(runtime.id(), &user)))
 }
 

@@ -87,6 +87,8 @@ import { defaultDesks, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
+import { ProfileRow } from "@/components/profile-row";
+import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
@@ -2097,19 +2099,25 @@ export function AppShell({
   });
 
   return (
-    // `SidebarProvider` paints the chrome layer itself — see its own note on
-    // why that fill lives there and not here (issue #1178).
-    <SidebarProvider className="h-svh overflow-hidden">
-      <a
-        href={`#${MAIN_CONTENT_ID}`}
-        className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
-        onClick={(event) => {
-          event.preventDefault();
-          document.getElementById(MAIN_CONTENT_ID)?.focus();
-        }}
-      >
-        Skip to content
-      </a>
+    // The ambient `(client, company)` for the leaves that have to fetch and are
+    // drawn from too many parents to thread props to — today, the avatar tile,
+    // which fetches an uploaded face through the client because an `<img>`
+    // cannot carry a credential. See `lib/console-context.tsx` for why this is
+    // deliberately not a general escape from props.
+    <ConsoleProvider client={client} company={company}>
+      {/* `SidebarProvider` paints the chrome layer itself — see its own note on
+          why that fill lives there and not here (issue #1178). */}
+      <SidebarProvider className="h-svh overflow-hidden">
+        <a
+          href={`#${MAIN_CONTENT_ID}`}
+          className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
+          onClick={(event) => {
+            event.preventDefault();
+            document.getElementById(MAIN_CONTENT_ID)?.focus();
+          }}
+        >
+          Skip to content
+        </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -2140,20 +2148,24 @@ export function AppShell({
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-            <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
-          </SidebarContent>
-          <SidebarFooter>
-            <SidebarControls
-              lifecycleState={feed.status.lifecycle}
-              emergencyPaused={feed.status.emergency_paused}
-              companies={companies}
-              activeCompany={company}
-              onSwitchCompany={onSwitchCompany}
-              onBackToPicker={onBackToPicker}
-              view={view}
-              onNavigate={setView}
-            />
-          </SidebarFooter>
+          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
+        </SidebarContent>
+        <SidebarFooter>
+          {/* Who you are signed in as, above the controls that act on the
+              company. It renders nothing where there is nobody to name — a host
+              with no sign-in, or a session that has just gone. */}
+          <ProfileRow client={client} company={company} />
+          <SidebarControls
+            lifecycleState={feed.status.lifecycle}
+            emergencyPaused={feed.status.emergency_paused}
+            companies={companies}
+            activeCompany={company}
+            onSwitchCompany={onSwitchCompany}
+            onBackToPicker={onBackToPicker}
+            view={view}
+            onNavigate={setView}
+          />
+        </SidebarFooter>
         </nav>
         <SidebarRail />
       </Sidebar>
@@ -2607,6 +2619,7 @@ export function AppShell({
         hold={setupOpen}
         suppressWelcome={setupCompleted}
       />
-    </SidebarProvider>
+      </SidebarProvider>
+    </ConsoleProvider>
   );
 }

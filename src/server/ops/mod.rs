@@ -16,6 +16,9 @@
 //! compiled only under the `oauth` feature and 404 otherwise.
 
 pub mod artifacts;
+/// Avatar uploads (`docs/spec/runtime/avatars.md`): the custom-image half of
+/// choosing a face for a teammate or for yourself.
+pub mod avatars;
 pub mod billing;
 pub mod capabilities;
 pub mod company_key;
@@ -203,6 +206,7 @@ pub fn router() -> Router<AppState> {
         .merge(task_export::router())
         .merge(runs::router())
         .merge(artifacts::router())
+        .merge(avatars::router())
         .merge(memory::router())
         .merge(memory_engine::router())
         .merge(memory_ingest::router())

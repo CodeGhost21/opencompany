@@ -4381,6 +4381,7 @@ to = "gate"
                     id: "u1".to_string(),
                     email: "ada@acme.test".to_string(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Active,
                     password_hash: None,

@@ -5076,6 +5076,7 @@ mod test {
                     id: "u1".into(),
                     email: "ada@example.com".into(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Active,
                     password_hash: None,
@@ -7223,6 +7224,7 @@ needs_reason = true
             description: None,
             tools: None,
             instructions: None,
+            avatar: None,
             ..Default::default()
         });
         record.retire_agent("cto");
