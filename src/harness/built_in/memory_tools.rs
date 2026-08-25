@@ -215,24 +215,23 @@ impl Tool for MemoryStoreTool {
                 body.len()
             )));
         }
+        // Redact the title once, here, so the label, the stored body and the
+        // success echo all carry the redacted form — a model-supplied title
+        // like "Bearer sk-longsecret" must not persist verbatim in any of them.
+        let title = super::memory::redact_secrets(title);
         let chunk = ContextChunk {
-            label: format!("{}{}", self.mem.own_prefix(), slug(title)),
+            label: format!("{}{}", self.mem.own_prefix(), slug(&title)),
             // Title on the first line so the body is self-describing wherever
             // it surfaces (recall snippet, Brain view, ambient injection).
             // Title and body pass through the same secret redaction as every
             // other memory write, so an agent that stores a credential in
             // either field does not persist it.
-            body: format!(
-                "{}\n\n{}",
-                super::memory::redact_secrets(title),
-                super::memory::redact_secrets(body)
-            ),
+            body: format!("{title}\n\n{}", super::memory::redact_secrets(body)),
         };
         let addr = self.mem.context.put(&self.mem.company, chunk).await?;
         Ok(ToolResult::success(format!(
-            "Remembered as `{}` (addr {}). It will surface in future turns when relevant; \
+            "Remembered as `{title}` (addr {}). It will surface in future turns when relevant; \
              `memory_forget` with that addr discards it.",
-            title,
             addr.as_ref()
         )))
     }
