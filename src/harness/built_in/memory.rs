@@ -438,6 +438,13 @@ mod tests {
         // Too short after the marker to be a secret: left alone, so ordinary
         // text like "Bearer or not" is not mangled.
         assert_eq!(redact_secrets("Bearer or not"), "Bearer or not");
+        // The MCP config trims the value, so extra whitespace between the
+        // marker and a credential is legal — and must not leave the credential
+        // verbatim because the value scan stopped at the first space.
+        assert_eq!(
+            redact_secrets("auth with Bearer   sk-longsecret please"),
+            "auth with Bearer   [REDACTED] please"
+        );
         // Dots do not turn a short prose word into a secret.
         assert_eq!(
             redact_secrets("Bearer token. Please"),
