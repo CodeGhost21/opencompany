@@ -165,6 +165,22 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether `tool` is one of the raw HTTP web tools that take a plain `url`
+/// argument — `web_fetch`, `http_request`, `curl`.
+///
+/// This is the `url`-taking subset of the `web` namespace: `image_info` is also
+/// `web` but inspects a workspace file, so it is excluded. Kept here — beside
+/// [`namespace_of`], the single source of truth for the family — so the S2
+/// Composio deflection guardrail
+/// ([`web_call_deflection`](crate::harness::composio_catalog::web_call_deflection),
+/// consulted by
+/// [`ApprovalPolicy::check`](crate::harness::policy::ApprovalPolicy)) recognises
+/// the deflectable tools from one place rather than re-hardcoding the three
+/// names where it hooks in.
+pub fn is_web_request_tool(tool: &str) -> bool {
+    matches!(tool, "web_fetch" | "http_request" | "curl")
+}
+
 /// Build the exec-grade [`SecurityPolicy`] shared by an agent's shell + code +
 /// web tools, sandboxed to `workspace`.
 ///
@@ -989,6 +1005,19 @@ mod tests {
         assert_eq!(namespace_of("memory_forget"), None);
         assert_eq!(namespace_of("file_read"), None);
         assert_eq!(namespace_of("mcp_registry_tool_call"), None);
+    }
+
+    /// The `url`-taking web subset the S2 deflection guardrail keys on: the three
+    /// raw HTTP tools, and NOT `image_info` (which is `web` but reads a workspace
+    /// file, not a URL) nor anything outside the family.
+    #[test]
+    fn is_web_request_tool_is_the_url_taking_web_subset() {
+        assert!(is_web_request_tool("web_fetch"));
+        assert!(is_web_request_tool("http_request"));
+        assert!(is_web_request_tool("curl"));
+        assert!(!is_web_request_tool("image_info"));
+        assert!(!is_web_request_tool("shell"));
+        assert!(!is_web_request_tool("composio_execute"));
     }
 
     /// `GATEABLE_NAMESPACES` must be a superset of every namespace `namespace_of`
