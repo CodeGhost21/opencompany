@@ -4151,7 +4151,10 @@ members = ["engineer"]
                     && n.parent_id
                         .as_deref()
                         .and_then(name_of)
-                        .is_some_and(|parent| parent == "t-1")
+                        // Issue #1687: the task folder is named for the work
+                        // and keyed by the card id — `<title>-<id>`, not the
+                        // bare id — so browsing by path lands on that name.
+                        .is_some_and(|parent| parent == "ship-the-thing-t-1")
             })
             .expect("agent B finds the deliverable by browsing the shared tree");
 
