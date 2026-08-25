@@ -281,7 +281,7 @@ export class OpenCompanyClient {
    * lifetime — an object URL leaks until it is revoked, and only the component
    * holding it knows when that is.
    */
-  async getBlob(path: string): Promise<Blob> {
+  async getBlob(path: string, signal?: AbortSignal): Promise<Blob> {
     const headers: Record<string, string> = {};
     Object.assign(headers, this.authHeaders());
 
@@ -291,8 +291,14 @@ export class OpenCompanyClient {
         method: "GET",
         headers,
         credentials: "include",
+        signal,
       });
-    } catch {
+    } catch (err) {
+      // An aborted fetch is the caller's own doing — a preview that scrolled
+      // out of view tore the request down deliberately — not a connection
+      // failure. Let the `AbortError` through so the caller can tell
+      // "cancelled" from "couldn't reach the host" (codex review finding).
+      if (err instanceof Error && err.name === "AbortError") throw err;
       throw new ApiError(
         0,
         "network_error",
