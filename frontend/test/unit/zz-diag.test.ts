@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: does awaiting a macrotask inside the reject act
-// reliably render the error 30/30?
+// Temporary diagnostic: after a miss, does the error EVER appear if we just
+// wait real time? Distinguishes "slow" from "stuck".
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -79,9 +79,9 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("diag: 30 iterations with setTimeout(0) inside the reject act", async () => {
-  let misses = 0;
-  for (let i = 0; i < 30; i++) {
+it("diag: distinguish slow vs stuck", async () => {
+  let stuck = 0;
+  for (let i = 0; i < 20; i++) {
     await act(async () => root.unmount());
     container.remove();
     container = document.createElement("div");
@@ -95,29 +95,24 @@ it("diag: 30 iterations with setTimeout(0) inside the reject act", async () => {
     const client = deferredFilesClient(deferred);
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
-    if (deferred.length !== 1) {
-      console.log(`iter ${i}: deferred.length=${deferred.length}`);
-      continue;
-    }
 
     await act(async () => {
       deferred[0].reject(new Error("boom"));
-      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    const errorEl = container.querySelector(
-      '[data-testid="workflow-run-files-error"]',
-    );
-    if (!errorEl) {
-      misses++;
-      console.log(
-        `iter ${i}: MISS. DOM=${JSON.stringify(
-          container.querySelector('[data-testid="workflow-run-files"]')
-            ?.innerHTML,
-        )}`,
-      );
+    const errorEl = () =>
+      container.querySelector('[data-testid="workflow-run-files-error"]');
+    if (errorEl()) continue;
+
+    // Wait a real 200ms macrotask with no act.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (!errorEl()) {
+      stuck++;
+      console.log(`iter ${i}: STILL absent after 200ms real time`);
+    } else {
+      console.log(`iter ${i}: appeared after 200ms real time`);
     }
   }
-  console.log(`misses=${misses}`);
-  expect(misses).toBe(0);
+  console.log(`stuck=${stuck}`);
+  expect(true).toBe(true);
 });
