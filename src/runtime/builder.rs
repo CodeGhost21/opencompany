@@ -2347,10 +2347,23 @@ impl RuntimeBuilder {
         // except when the upgraded manifest newly confers a BYO real-money
         // namespace (issue #788): an empty `tools` line would silently hand it
         // to a teammate that never asked. Preserve their pre-upgrade scope.
-        let overlay_agents = Self::preserve_pre_upgrade_grant_scope(
+        //
+        // The operator's per-agent edits (issue #1530) ride along for the same
+        // reason every overlay does — the manifest is a read-only boot snapshot
+        // on a hosted tenant, so dropping them would silently revert every
+        // console edit on the next restart. Their empty form is the same
+        // freeze: `AgentOverride.tools = Some([])` is the stored spelling of
+        // "give this teammate the company's standard grant", and copied
+        // verbatim it would replace the new manifest's explicit non-billing
+        // `tools` line with the widened allow-list.
+        let (overlay_agents, overlay_agent_edits) = Self::preserve_pre_upgrade_grant_scope(
             existing
                 .as_ref()
                 .map(|r| r.overlay_agents.clone())
+                .unwrap_or_default(),
+            existing
+                .as_ref()
+                .map(|r| r.overlay_agent_edits.clone())
                 .unwrap_or_default(),
             existing.as_ref().map(|r| &r.manifest),
             &self.manifest,
