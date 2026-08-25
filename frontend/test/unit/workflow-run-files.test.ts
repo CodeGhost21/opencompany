@@ -64,6 +64,25 @@ function deferredFilesClient(deferred: {
   } as unknown as OpenCompanyClient;
 }
 
+/** A client that fails every request while `modes.fail` is true and answers
+ * the canned files response after it flips. The failure is an already-rejected
+ * promise, not a manually-rejected deferred — see the retry test below for why
+ * that shape is the one the unit runner commits reliably. */
+function modeFilesClient(
+  rows: RunArtifactRow[],
+  sink: { calls: string[] },
+  modes: { fail: boolean },
+): OpenCompanyClient {
+  return {
+    scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+    get: async <T>(path: string): Promise<T> => {
+      sink.calls.push(path);
+      if (modes.fail) return Promise.reject(new Error("boom")) as never;
+      return { files: rows, truncated: false } as T;
+    },
+  } as unknown as OpenCompanyClient;
+}
+
 /** Re-renders the same root with a different company/runId but the same
  * `run.seq` — the exact way `WorkflowsView` reuses a row on a company switch —
  * passing through the client so the deferred request queue keeps accumulating. */
