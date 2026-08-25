@@ -389,6 +389,7 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
+  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
   for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
