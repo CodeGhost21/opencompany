@@ -3210,11 +3210,8 @@ impl HarnessBrain {
                     // Issue #989: capture the workspace before the scheduled
                     // turn, so a capped turn can recover files it wrote but
                     // never offered to publish.
-                    let cap_scan_workspace = agent_workspace(
-                        &self.deps.workspace_root,
-                        &self.record().id,
-                        &responder,
-                    );
+                    let cap_scan_workspace =
+                        agent_workspace(&self.deps.workspace_root, &self.record().id, &responder);
                     let cap_scan_baseline = WorkspaceSnapshot::take(&cap_scan_workspace);
                     // Issue #445: claim the publish queue for this conversation,
                     // so a file the scheduled turn publishes is drained below
@@ -3293,8 +3290,10 @@ impl HarnessBrain {
                     // exactly as an operator turn's publish is filed.
                     let spawned_task = responses[0].task_id.clone();
                     let published = self.deps.pending_publishes.drain();
-                    let published_sources: Vec<String> =
-                        published.iter().map(|publish| publish.source.clone()).collect();
+                    let published_sources: Vec<String> = published
+                        .iter()
+                        .map(|publish| publish.source.clone())
+                        .collect();
                     let mut published_card = self
                         .file_conversation_batch(
                             &responder,
