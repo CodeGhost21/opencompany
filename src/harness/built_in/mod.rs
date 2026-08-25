@@ -1233,6 +1233,21 @@ pub struct HarnessPool {
     /// restart. Without this axis the override persists and is silently ignored:
     /// `ApprovalPolicy` is built once per roster, not once per call.
     policy_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// The last cycle-start policy snapshot pinned to a company's roster via
+    /// [`ensure_with_policy`](Self::ensure_with_policy), keyed by company.
+    ///
+    /// A cycle holds the runtime's serial lock, so its own `ensure_with_policy`
+    /// install and the dispatch that follows cannot be interleaved by another
+    /// cycle. The workflow runner is not a cycle caller: it drives turns from a
+    /// spawned task with a plain live [`ensure`](Self::ensure), so without this
+    /// pin it could adopt a mid-cycle console override a turn early — replacing
+    /// the cycle's pinned roster with a looser one before `run_inner` clones its
+    /// agent, and running one turn with the harness gate auto-approving what the
+    /// native gate still parks (issue #1455). A live `ensure` therefore rebuilds
+    /// the policy axis against the pin while one is active, and the pin is only
+    /// refreshed at the next cycle — the same boundary the native gate moves on,
+    /// so the two cannot drift.
+    pinned_policies: RwLock<HashMap<CompanyId, Policy>>,
     /// Per-company fingerprint of the desk scoping a roster's grants resolve
     /// through — which desks exist, who sits on them, and each one's tool
     /// ceiling.
