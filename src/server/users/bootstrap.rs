@@ -39,7 +39,9 @@ use std::sync::Arc;
 use crate::error::OpenCompanyError;
 use crate::ports::generate_id;
 use crate::ports::types::CompanyId;
-use crate::ports::users::{UserRecord, UserRole, UserStatus, UserStore, normalize_email};
+use crate::ports::users::{
+    InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email,
+};
 use crate::server::users::{password, token};
 
 /// What [`issue_password`] did.
