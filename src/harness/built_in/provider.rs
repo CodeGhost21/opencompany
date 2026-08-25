@@ -711,6 +711,35 @@ fn parse_tool_calls(payload: &serde_json::Value) -> Vec<ToolCall> {
         .collect()
 }
 
+/// Extract the visible text from an OpenAI-compatible `content`-shaped field.
+///
+/// The field may be either a plain string (`"hi"`) or an array of content
+/// parts (`[{"type":"text","text":"hi"},…]`) — some providers, and reasoning
+/// models on their `reasoning` field, use the array form. Concatenates the
+/// `text` of every text part; a part counts as text when its `type` is `"text"`
+/// or absent (but a `text` field is present). Returns an empty string when the
+/// value is `null`, absent, or carries no text.
+fn extract_content_text(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => {
+            let mut out = String::new();
+            for part in parts {
+                let is_text = part
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "text")
+                    .unwrap_or(true);
+                if is_text && let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(text);
+                }
+            }
+            out
+        }
+        _ => String::new(),
+    }
+}
+
 /// Parse an OpenAI-compatible chat-completion payload into a tinyagents
 /// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
 /// billing envelope.
@@ -721,22 +750,38 @@ fn parse_tool_calls(payload: &serde_json::Value) -> Vec<ToolCall> {
 /// amount. `content` is **optional**: a tool-call-only turn carries `content:
 /// null`. Errors only when the response carries neither text nor a tool call.
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
-    let content = payload
-        .pointer("/choices/0/message/content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Content may be a plain string OR an array of `{type:"text",text:…}`
+    // parts; tolerate both.
+    let mut content = extract_content_text(payload.pointer("/choices/0/message/content"));
     let tool_calls = parse_tool_calls(&payload);
-    if content.is_empty() && tool_calls.is_empty() {
-        return Err(TinyAgentsError::Model(
-            "inference response carried neither choices[0].message.content nor tool_calls"
-                .to_string(),
-        ));
-    }
     let finish_reason = payload
         .pointer("/choices/0/finish_reason")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+
+    // Reasoning-model fallback: a reasoning-only turn returns `content: null`
+    // with the visible text under `reasoning` / `reasoning_content` (string or
+    // array-of-parts). Recover it so the turn is not lost to a hard error.
+    if content.is_empty() && tool_calls.is_empty() {
+        content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
+        if content.is_empty() {
+            content = extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
+        }
+    }
+
+    // Only a genuinely empty turn (no text anywhere, no tool call) is an error.
+    // Fold `finish_reason` into the message so a truncation (`length`) or
+    // `content_filter` stop is diagnosable rather than hidden behind a generic
+    // "carried neither" string.
+    if content.is_empty() && tool_calls.is_empty() {
+        let detail = finish_reason
+            .as_deref()
+            .map(|r| format!(" (finish_reason: {r})"))
+            .unwrap_or_default();
+        return Err(TinyAgentsError::Model(format!(
+            "inference response carried neither choices[0].message.content nor tool_calls{detail}"
+        )));
+    }
 
     let usage = parse_usage(&payload);
     // USD is only present on the managed envelope; the raw `/openai/v1`
@@ -1711,6 +1756,69 @@ mod tests {
         });
         let resp = model_response_from_payload(no_usage).expect("parses");
         assert!(resp.usage.is_none());
+    }
+
+    /// Some OpenAI-compatible providers return `content` as an array of parts
+    /// (`[{"type":"text","text":"…"}]`) rather than a bare string. The parser
+    /// must concatenate the `text` of each text part instead of treating the
+    /// non-string value as empty and hard-erroring. Regression for bug #1.
+    #[test]
+    fn parses_content_as_array_of_text_parts() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Hello, " },
+                        { "type": "text", "text": "world" }
+                    ]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("array content parses");
+        assert_eq!(resp.text(), "Hello, world");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A reasoning-only turn returns `content: null` with the visible text under
+    /// a `reasoning` field and no tool calls. It must fall back to the reasoning
+    /// text and parse rather than hard-erroring — the managed reasoning brain
+    /// (deepseek/qwen via OpenRouter) is the exact source of the crash.
+    #[test]
+    fn reasoning_only_turn_falls_back_to_reasoning_text() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The answer is 42."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("reasoning-only turn parses");
+        assert_eq!(resp.text(), "The answer is 42.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A genuinely empty turn truncated by `finish_reason: "length"` (max_tokens
+    /// hit) is still an error — but the message must name the finish reason so
+    /// the truncation is diagnosable rather than hidden behind a generic string.
+    #[test]
+    fn truncated_empty_response_errors_with_finish_reason() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": { "role": "assistant", "content": "" }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err("truncated empty turn errors");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("length"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
     }
 
     /// A tool-call-only turn carries `content: null` and a `tool_calls` array.
