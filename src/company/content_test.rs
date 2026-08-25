@@ -174,13 +174,20 @@ const SEARCH_UNGRANTED_COMPANIES: [&str; 0] = [];
 /// are opt-in spend. `agentic_product_team` is excluded on that same
 /// research-lab argument: it produces documents and ledger rows, so it drops
 /// both opt-in namespaces too.
-const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
+const FULL_BELT_PLUS_SEARCH: [&str; 8] = [
+    // Both restate the belt verbatim and append `chargebee` (#788) rather than
+    // `search`, which is already inherited. They belong here for the property
+    // this list actually guards — that an extended `allow` did not silently
+    // drop an inherited entry — which is independent of *which* namespace the
+    // template extended it with.
+    "agentic_accounting_firm",
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
     "agentic_software_company",
+    "agentic_venture_studio",
 ];
 
 fn load_company(name: &str) -> CompanyManifest {
@@ -439,6 +446,122 @@ fn a_wildcard_never_confers_a_billing_namespace() {
     }
 }
 
+/// Issue #788 follow-up, raised in review of the template ceilings: narrowing
+/// the *manifest* teammates does not protect a teammate an operator adds at
+/// runtime. `POST …/team` with no `tools` and no `focus` stores an empty grant,
+/// and empty means "the standard company-wide grant" — which, on a company that
+/// carries `chargebee`, silently included billing.
+#[test]
+fn a_teammate_created_with_no_grant_never_inherits_billing() {
+    use super::{CreationGrant, creation_default_grants};
+
+    let narrowed = |allow: &[String]| match creation_default_grants(allow) {
+        CreationGrant::Narrowed(list) => list,
+        other => panic!("expected a narrowed line for {allow:?}, got {other:?}"),
+    };
+
+    // The overwhelming majority: nothing withheld, so the inherit-everything
+    // contract is untouched and the stored teammate stays empty.
+    let plain = Tools::default().allow;
+    assert_eq!(
+        creation_default_grants(&plain),
+        CreationGrant::Standard,
+        "a company granting no BYO money namespace must keep `empty = standard`"
+    );
+
+    // The degenerate belt: filtering removes everything, and an empty line
+    // would read back as "inherit the whole company grant" — handing over the
+    // exact namespace the filter just removed. It must be refusable instead.
+    for only_money in [
+        vec!["chargebee"],
+        vec!["paypal"],
+        vec!["chargebee", "paypal", "hosting"],
+    ] {
+        let allow: Vec<String> = only_money.iter().map(|g| (*g).to_string()).collect();
+        assert_eq!(
+            creation_default_grants(&allow),
+            CreationGrant::NothingLeft,
+            "an all-withheld belt must not decode as inheritance: {allow:?}"
+        );
+    }
+
+    // A company that named `chargebee` for one teammate does not hand it to the
+    // next one somebody types into the console.
+    let mut billing = plain.clone();
+    billing.push("chargebee".to_string());
+    let defaulted = narrowed(&billing);
+    assert!(
+        !grants_chargebee_explicit(&defaulted),
+        "a new teammate must not inherit `chargebee`: {defaulted:?}"
+    );
+    // ...and loses nothing else on the way.
+    for inherited in &plain {
+        assert!(
+            defaulted.contains(inherited),
+            "withholding billing dropped the inherited `{inherited}`: {defaulted:?}"
+        );
+    }
+
+    // The same for the other two namespaces `*` refuses to confer.
+    for money in ["paypal", "hosting"] {
+        let mut allow = plain.clone();
+        allow.push(money.to_string());
+        let defaulted = narrowed(&allow);
+        assert!(
+            !defaulted.iter().any(|g| g == money),
+            "a new teammate must not inherit `{money}`: {defaulted:?}"
+        );
+    }
+
+    // `media`/`composio`/`search` ship in the default belt (#1674) and are NOT
+    // withheld — doing so would re-create that issue's complaint for every new
+    // teammate.
+    let defaulted = narrowed(&billing);
+    assert!(grants_media_explicit(&defaulted), "{defaulted:?}");
+    assert!(grants_composio_explicit(&defaulted), "{defaulted:?}");
+    assert!(grants_search_explicit(&defaulted), "{defaulted:?}");
+}
+
+/// The second half of the same hole: a teammate MINTED by an orchestrator whose
+/// own scope comes from its desk rather than its `tools` line. The minter copies
+/// its (empty) line, the new teammate is on no desk, and an empty line reads
+/// back as the whole company grant — so it would hold billing its own minter
+/// does not. Pinned as a data property of the shipped templates: no marketing
+/// teammate may be in a position to mint a biller by accident.
+#[test]
+fn a_deskless_teammate_minted_with_no_scope_never_inherits_billing() {
+    use super::{CreationGrant, creation_default_grants};
+
+    for company in [
+        "agentic_marketing_agency",
+        "agentic_accounting_firm",
+        "agentic_venture_studio",
+    ] {
+        let manifest = load_company(company);
+        // The state that makes the escalation reachable: a minter scoped only by
+        // its desk has an empty `tools` line, so "copy the minter's line" stores
+        // an empty grant on a teammate that sits on no desk.
+        let deskless = agent_scoped_grants(&manifest.tools.allow, &[], &[]);
+        assert!(
+            grants_chargebee_explicit(&deskless),
+            "{company}: precondition — an empty line on no desk must resolve to \
+             the company ceiling, or this test proves nothing"
+        );
+
+        // What both creation paths now store instead.
+        match creation_default_grants(&manifest.tools.allow) {
+            CreationGrant::Narrowed(narrowed) => {
+                let resolved = agent_scoped_grants(&manifest.tools.allow, &[], &narrowed);
+                assert!(
+                    !grants_chargebee_explicit(&resolved),
+                    "{company}: a minted teammate must not inherit billing: {resolved:?}"
+                );
+            }
+            other => panic!("{company}: expected a narrowed creation grant, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
     assert!(grants_chargebee_explicit(&["chargebee".to_string()]));
@@ -690,6 +813,138 @@ fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
         assert!(
             !grants_composio_explicit(&grants),
             "{id}: the creative desk must stay composio-less; effective grants: {grants:?}"
+        );
+    }
+}
+
+/// The marketing agency's `chargebee` exclusion lives at the per-agent layer,
+/// not on the strategy/growth desk ceilings, so the console flow the manifest
+/// documents — naming a biller from the console — actually works.
+///
+/// A desk ceiling is manifest-only and cannot be widened from the console, so
+/// an exclusion stated there would make the billing grant unreachable by any
+/// shipped teammate. Pinned through the real three-level narrowing
+/// (`agent_scoped_grants`): a shipped member's own `tools` line excludes
+/// `chargebee`, while the desk level (no ceiling) admits an operator override
+/// that names it.
+#[test]
+fn a_marketing_biller_can_be_named_from_the_console() {
+    let manifest = load_company("agentic_marketing_agency");
+
+    // The desks this PR touched state no ceiling — the exclusion must not live
+    // on an unwidenable layer.
+    for id in ["strategy", "growth"] {
+        let desk = manifest
+            .group_chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .unwrap_or_else(|| panic!("{id} desk"));
+        assert!(
+            desk.tools.is_empty(),
+            "{id}: the `chargebee` exclusion must not live on the desk ceiling \
+             (an unwidenable layer); found {:?}",
+            desk.tools
+        );
+    }
+
+    // Every shipped strategy/growth member holds the belt minus `chargebee`.
+    for id in [
+        "brand_strategist",
+        "seo_specialist",
+        "analytics_analyst",
+        "paid_ads_manager",
+        "email_marketer",
+    ] {
+        let agent = manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .unwrap_or_else(|| panic!("{id} is a marketing teammate"));
+        let desk_refs: Vec<&[String]> = manifest
+            .group_chats
+            .iter()
+            .filter(|chat| chat.members.iter().any(|member| member == id))
+            .map(|chat| chat.tools.as_slice())
+            .collect();
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        assert!(
+            !grants_chargebee_explicit(&grants),
+            "{id}: a shipped marketing teammate must not hold billing tools; \
+             effective grants: {grants:?}"
+        );
+    }
+
+    // An operator naming the biller from the console — adding `chargebee` to a
+    // strategy member's override — now survives the desk level.
+    let brand = manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == "brand_strategist")
+        .unwrap();
+    let mut override_tools = brand.tools.clone();
+    override_tools.push("chargebee".to_string());
+    let strategy = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "strategy")
+        .unwrap();
+    let desk_refs: Vec<&[String]> = vec![strategy.tools.as_slice()];
+    let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &override_tools);
+    assert!(
+        grants_chargebee_explicit(&grants),
+        "the console override naming the biller must survive the desk layer; \
+         effective grants: {grants:?}"
+    );
+}
+
+/// A creative member cross-seated onto an unrestricted desk must not widen to
+/// the company grant.
+///
+/// Desks combine by **union**, and a member scoped only by the creative desk
+/// ceiling would resolve to the full company grant — billing included — the
+/// moment an operator seats them on the strategy or growth desk, which state
+/// no ceiling. The `chargebee` exclusion must therefore ride on the member's
+/// own `tools` line (the company belt minus `chargebee`), not on the desk
+/// alone. Pinned through the same three-level narrowing the roster build uses.
+#[test]
+fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
+    let manifest = load_company("agentic_marketing_agency");
+    let strategy = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "strategy")
+        .unwrap();
+    assert!(
+        strategy.tools.is_empty(),
+        "precondition: the strategy desk must be unrestricted or this test \
+         proves nothing"
+    );
+    let creative = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "creative")
+        .unwrap();
+
+    for id in ["creative_director", "copywriter", "landing_page_builder"] {
+        let agent = manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .unwrap_or_else(|| panic!("{id} is a member of the creative desk"));
+        assert!(
+            !agent.tools.is_empty(),
+            "{id}: the `chargebee` exclusion must ride on the member's own \
+             `tools` line, not only on the creative desk ceiling"
+        );
+
+        // Seated on the creative desk AND the unrestricted strategy desk: the
+        // union would otherwise be the company grant.
+        let desk_refs: Vec<&[String]> = vec![creative.tools.as_slice(), strategy.tools.as_slice()];
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        assert!(
+            !grants_chargebee_explicit(&grants),
+            "{id}: cross-seating a creative member onto an unrestricted desk \
+             must not hand back billing; effective grants: {grants:?}"
         );
     }
 }

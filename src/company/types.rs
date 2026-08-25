@@ -224,6 +224,69 @@ pub fn grants_hosting_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "hosting" || grant.starts_with("hosting."))
 }
 
+/// The grant list a teammate created with **no stated `tools`** should receive.
+///
+/// An omitted `tools` line means "the company's standard grant", and the
+/// standard grant is the whole of `[tools].allow`. That is the right default
+/// for the belt a company runs on — issue #1674 made it wider on purpose,
+/// because a teammate minted from three sentences in a wizard reporting its
+/// own tools as "not enabled" is the worse failure. It is the wrong default
+/// for a namespace `*` deliberately refuses to confer: a company that added
+/// `chargebee` by name so that ONE teammate could invoice should not hand
+/// billing to the next teammate an operator types into the console.
+///
+/// So this withholds exactly the **BYO real-money** namespaces — the ones a
+/// company only ever holds because somebody named them, and that reach a real
+/// business's customers, wallet, or public identity. `media`, `composio` and
+/// `search` are deliberately NOT withheld: they ship in the default belt, so
+/// withholding them would re-create the #1674 complaint for every new
+/// teammate.
+///
+/// Returns **empty** when nothing is withheld, preserving the "empty means the
+/// standard company grant" contract for the overwhelming majority of companies
+/// that grant none of these. A non-empty return is the allow-list minus the
+/// withheld namespaces, materialised so the stored teammate carries its own
+/// narrowed line rather than inheriting a ceiling that later widens.
+pub fn creation_default_grants(allow: &[String]) -> CreationGrant {
+    let withheld = |grant: &String| {
+        let one = std::slice::from_ref(grant);
+        grants_chargebee_explicit(one)
+            || grants_paypal_explicit(one)
+            || grants_hosting_explicit(one)
+    };
+    if !allow.iter().any(withheld) {
+        return CreationGrant::Standard;
+    }
+    let kept: Vec<String> = allow.iter().filter(|g| !withheld(g)).cloned().collect();
+    if kept.is_empty() {
+        return CreationGrant::NothingLeft;
+    }
+    CreationGrant::Narrowed(kept)
+}
+
+/// What [`creation_default_grants`] decided for a teammate created with no
+/// stated `tools`.
+///
+/// Three cases rather than a `Vec`, because a `Vec` cannot express the third
+/// one: an empty list is already spoken for — it means "the standard company
+/// grant" — so returning the filtered-to-nothing result as `vec![]` would hand
+/// back the exact capability the filter just removed. The orchestrator's
+/// `add_agent` refuses on the same reasoning when narrowing a requested scope
+/// yields nothing, and this mirrors it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreationGrant {
+    /// Nothing was withheld. Store an empty line, which keeps tracking
+    /// `[tools].allow` the way an unstated grant always has.
+    Standard,
+    /// Store this narrowed line: the allow-list minus the withheld namespaces.
+    Narrowed(Vec<String>),
+    /// The company's whole belt is withheld namespaces (`allow = ["chargebee"]`
+    /// and nothing else). There is no safe line to store — empty would read
+    /// back as inheritance — so the caller refuses and asks for an explicit
+    /// grant instead.
+    NothingLeft,
+}
+
 /// Whether a tool-grant list **explicitly** grants the `paypal` namespace
 /// (issue #789).
 ///

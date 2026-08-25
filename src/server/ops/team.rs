@@ -473,7 +473,7 @@ async fn add_member(
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
     // take the existing capability away from members.
-    let author = match body.budget_usd_daily {
+    let mut author = match body.budget_usd_daily {
         Some(cap) => {
             if let Some(refusal) = validate_cap(cap) {
                 return Err(refusal.into());
@@ -525,7 +525,7 @@ async fn add_member(
     // host-side instead — the belt table lives in `src/company/setup.rs`, and
     // the console has no business choosing a permission boundary. An unreadable
     // focus fails closed to the Writing belt (`tools_for_focus`), never wider.
-    let tools: Vec<String> = match body.focus.as_deref().map(str::trim) {
+    let mut tools: Vec<String> = match body.focus.as_deref().map(str::trim) {
         Some(focus) if !focus.is_empty() => {
             crate::company::setup::tools_for_focus(AgentFocus::from_wire(focus))
         }
@@ -536,7 +536,55 @@ async fn add_member(
             .filter(|glob| !glob.is_empty())
             .collect(),
     };
+    // Naming a BYO real-money namespace for a NEW teammate is a billing
+    // decision. A budget that spends money is already admin-only above; an
+    // explicit `chargebee`/`paypal`/`hosting` grant without a cap must be too —
+    // otherwise the day a company's ceiling includes `chargebee`, any member
+    // could mint a billing-capable teammate, while editing an existing
+    // teammate's `tools` is already admin-only (`team_agent.rs`). Focus-derived
+    // belts never name these namespaces, so only a hand-typed grant trips this.
+    if author.is_none()
+        && tools.iter().any(|grant| {
+            let one = std::slice::from_ref(grant);
+            crate::company::grants_chargebee_explicit(one)
+                || crate::company::grants_paypal_explicit(one)
+                || crate::company::grants_hosting_explicit(one)
+        })
+    {
+        author = Some(require_admin(&headers, &state, &company.runtime, peer).await?);
+    }
     let mut record = load_record(&company).await?;
+    // A teammate created with no stated grant does not inherit the BYO
+    // real-money namespaces (#788/#789), even though "empty" otherwise means
+    // the standard company-wide grant. A company holds `chargebee` because
+    // somebody named it so that ONE teammate could invoice; the next teammate
+    // an operator types into the console is not that teammate, and silence is
+    // not consent to bill a customer. `creation_default_grants` returns empty
+    // — leaving the inherit-everything contract untouched — for every company
+    // that grants none of them, which is all but a handful.
+    //
+    // Deliberately here rather than in the roster build: this materialises the
+    // narrowed list ONCE, at creation, so the stored teammate carries its own
+    // line. Narrowing at read time instead would silently re-widen the day an
+    // operator edited the teammate for an unrelated reason.
+    if tools.is_empty() {
+        match crate::company::creation_default_grants(&record.manifest.tools.allow) {
+            crate::company::CreationGrant::Standard => {}
+            crate::company::CreationGrant::Narrowed(narrowed) => tools = narrowed,
+            // Nothing safe to store: see `CreationGrant::NothingLeft`. Refusing
+            // is the honest answer and the operator can still create the
+            // teammate by naming its tools.
+            crate::company::CreationGrant::NothingLeft => {
+                return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
+                    "this company grants only billing namespaces, so a teammate created with no \
+                     `tools` would inherit them. State the teammate's tools explicitly."
+                        .to_string(),
+                ))
+                .into_response()
+                .into());
+            }
+        }
+    }
     let agent = OverlayAgent {
         // A readable id derived from the name, unique against the roster this
         // record already holds (issue #686). Minted here rather than pushed and
@@ -1549,6 +1597,58 @@ mod tests {
             effective.contains(&"workspace.write"),
             "a focus-less add still inherits the company grant: {effective:?}"
         );
+    }
+
+    /// Issue #788/#789: naming a BYO billing namespace for a NEW teammate is a
+    /// billing decision, and a member must not be able to make it. A budget
+    /// that spends money is already admin-only; an explicit `chargebee` grant
+    /// without a budget must be too — otherwise any member could mint a
+    /// billing-capable teammate the day the company ceiling includes one, while
+    /// editing an existing teammate's `tools` is already admin-only.
+    #[tokio::test]
+    async fn a_member_may_not_create_a_teammate_with_a_billing_grant() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        let (status, body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Jamie", "role": "Billing", "tools": ["chargebee"]})),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // The refused add must not have persisted a teammate.
+        let (list_status, team) = get_team(&state).await;
+        assert_eq!(list_status, StatusCode::OK, "{team}");
+        let rows = team.as_array().unwrap();
+        assert!(
+            rows.iter().all(|r| r["name"] != "Jamie"),
+            "a refused add must not persist a teammate: {team}"
+        );
+
+        // An admin can still mint the billing-capable teammate.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana", "role": "Billing", "tools": ["chargebee"]})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(created["id"], "dana", "{created}");
     }
 
     /// An **overlay** teammate can be capped after the fact too — the case the

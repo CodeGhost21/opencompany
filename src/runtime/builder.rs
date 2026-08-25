@@ -42,8 +42,8 @@ use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, OverlayWorkflow, PolicyOverride, SecretValue, TemplateProvenance,
-    effective_policy,
+    AgentOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayWorkflow, PolicyOverride,
+    SecretValue, TemplateProvenance, effective_policy,
 };
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
@@ -1392,6 +1392,66 @@ impl RuntimeBuilder {
         Self::new(home, manifest).build().await
     }
 
+    /// Preserve the pre-upgrade scope of persisted overlay teammates whose
+    /// grant was left unstated.
+    ///
+    /// An empty `OverlayAgent.tools` means "inherit the whole company
+    /// allow-list", and it keeps tracking that list across rebuilds on purpose
+    /// — an operator who left the line empty asked for whatever the company
+    /// allows. When a manifest upgrade widens the allow-list into a BYO
+    /// real-money namespace (issue #788) that the previous manifest did not
+    /// grant, that tracking hands billing to a teammate that never asked for
+    /// it. Freeze such a teammate's pre-upgrade scope into an explicit line
+    /// instead: the previous allow-list. Only then, and only for those
+    /// teammates — a company that already granted the namespace keeps its
+    /// tracking, and one that still does not is untouched.
+    ///
+    /// The console's per-agent edit half ([`AgentOverride`]) is covered the
+    /// same way. `tools: Some([])` is its stored spelling of "give this
+    /// teammate the company's standard grant" — the same empty-means-standard
+    /// rule — and an override row is otherwise carried across a rebuild
+    /// verbatim, so a teammate an operator reset to the standard grant before
+    /// the upgrade would silently follow the widened allow-list into the new
+    /// namespace. Its empty line is frozen to the previous allow-list too.
+    fn preserve_pre_upgrade_grant_scope(
+        overlay_agents: Vec<OverlayAgent>,
+        overlay_agent_edits: Vec<AgentOverride>,
+        previous_manifest: Option<&CompanyManifest>,
+        manifest: &CompanyManifest,
+    ) -> (Vec<OverlayAgent>, Vec<AgentOverride>) {
+        let Some(previous) = previous_manifest else {
+            return (overlay_agents, overlay_agent_edits);
+        };
+        let newly_conferred = |detect: fn(&[String]) -> bool| {
+            detect(&manifest.tools.allow) && !detect(&previous.tools.allow)
+        };
+        if !(newly_conferred(crate::company::grants_chargebee_explicit)
+            || newly_conferred(crate::company::grants_paypal_explicit)
+            || newly_conferred(crate::company::grants_hosting_explicit))
+        {
+            return (overlay_agents, overlay_agent_edits);
+        }
+        let overlay_agents = overlay_agents
+            .into_iter()
+            .map(|mut agent| {
+                if agent.tools.is_empty() {
+                    agent.tools = previous.tools.allow.clone();
+                }
+                agent
+            })
+            .collect();
+        let overlay_agent_edits = overlay_agent_edits
+            .into_iter()
+            .map(|mut edit| {
+                if edit.tools.as_ref().is_some_and(Vec::is_empty) {
+                    edit.tools = Some(previous.tools.allow.clone());
+                }
+                edit
+            })
+            .collect();
+        (overlay_agents, overlay_agent_edits)
+    }
+
     /// Assembles the runtime, materializing `company.toml` and replaying the
     /// journal to rebuild the approval queue.
     pub async fn build(mut self) -> Result<CompanyRuntime> {
@@ -2314,10 +2374,31 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.lifecycle.clone())
             .unwrap_or_else(|| "running".to_string());
-        let overlay_agents = existing
-            .as_ref()
-            .map(|r| r.overlay_agents.clone())
-            .unwrap_or_default();
+        // Existing overlay teammates are carried across the rebuild verbatim —
+        // except when the upgraded manifest newly confers a BYO real-money
+        // namespace (issue #788): an empty `tools` line would silently hand it
+        // to a teammate that never asked. Preserve their pre-upgrade scope.
+        //
+        // The operator's per-agent edits (issue #1530) ride along for the same
+        // reason every overlay does — the manifest is a read-only boot snapshot
+        // on a hosted tenant, so dropping them would silently revert every
+        // console edit on the next restart. Their empty form is the same
+        // freeze: `AgentOverride.tools = Some([])` is the stored spelling of
+        // "give this teammate the company's standard grant", and copied
+        // verbatim it would replace the new manifest's explicit non-billing
+        // `tools` line with the widened allow-list.
+        let (overlay_agents, overlay_agent_edits) = Self::preserve_pre_upgrade_grant_scope(
+            existing
+                .as_ref()
+                .map(|r| r.overlay_agents.clone())
+                .unwrap_or_default(),
+            existing
+                .as_ref()
+                .map(|r| r.overlay_agent_edits.clone())
+                .unwrap_or_default(),
+            existing.as_ref().map(|r| &r.manifest),
+            &self.manifest,
+        );
         // The roster edits and removals an operator has made from the console.
         // Carried across the rebuild for the reason the overlay model exists at
         // all: neither is written back to `company.toml`, so the seed manifest
@@ -2418,15 +2499,6 @@ impl RuntimeBuilder {
         let overlay_budgets = existing
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
-            .unwrap_or_default();
-        // Issue #1530: the operator-set per-agent persona overrides. Carried
-        // across the rebuild for the same reason as the budget caps above — the
-        // manifest is a read-only boot snapshot on a hosted tenant, so dropping
-        // these would silently revert every console-edited persona to the text
-        // baked into the image on the next restart.
-        let overlay_agent_edits = existing
-            .as_ref()
-            .map(|r| r.overlay_agent_edits.clone())
             .unwrap_or_default();
         // Issue #562: the operator's `[policy]` override, carried across the
         // rebuild — but ONLY while the seed's `[policy]` has not itself changed.
@@ -3995,7 +4067,7 @@ fn build_networked_brain(
 mod test {
     use super::*;
     use crate::openhuman::MockOpenHumanRpc;
-    use crate::ports::types::{CompanyId, CompressedTrace, ToolCall};
+    use crate::ports::types::{AgentOverride, CompanyId, CompressedTrace, ToolCall};
     use crate::runtime::journal::ExecutedEffect;
 
     #[derive(Clone)]
@@ -4023,6 +4095,155 @@ mod test {
             .prefix(prefix)
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// A manifest upgrade that widens the allow-list into a BYO namespace must
+    /// not hand billing to persisted teammates whose grant was left unstated
+    /// (#788). Their pre-upgrade scope is frozen into an explicit line instead.
+    #[test]
+    fn an_upgrade_into_chargebee_preserves_the_pre_upgrade_scope_of_empty_lines() {
+        let old: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\"]\n",
+        )
+        .expect("old manifest");
+        let new: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("new manifest");
+        let overlay_agents = vec![
+            OverlayAgent {
+                id: "clerk".to_string(),
+                name: "Clerk".to_string(),
+                role: "Data Entry".to_string(),
+                description: None,
+                tools: Vec::new(),
+                model: None,
+                harness: None,
+            },
+            OverlayAgent {
+                id: "finance_help".to_string(),
+                name: "Finance Help".to_string(),
+                role: "Assistant".to_string(),
+                description: None,
+                tools: vec!["docs.*".to_string()],
+                model: None,
+                harness: None,
+            },
+        ];
+
+        let (migrated, _) = RuntimeBuilder::preserve_pre_upgrade_grant_scope(
+            overlay_agents,
+            Vec::new(),
+            Some(&old),
+            &new,
+        );
+
+        assert_eq!(
+            migrated[0].tools, old.tools.allow,
+            "an empty line is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+        );
+        assert_eq!(
+            migrated[1].tools,
+            vec!["docs.*".to_string()],
+            "a stated grant is untouched"
+        );
+    }
+
+    /// The console's per-agent edit half carries the same empty-means-standard
+    /// rule (`AgentOverride.tools = Some([])` is "give this teammate the
+    /// company's standard grant"), so an upgrade into a BYO namespace must
+    /// freeze its empty line to the previous allow-list as well — otherwise the
+    /// override, copied across the rebuild verbatim, replaces the new
+    /// manifest's explicit non-billing `tools` line with the widened list.
+    #[test]
+    fn an_upgrade_into_chargebee_freezes_an_empty_agent_override_scope() {
+        let old: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\"]\n",
+        )
+        .expect("old manifest");
+        let new: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("new manifest");
+        let edits = vec![
+            AgentOverride {
+                agent_id: "tax_preparer".to_string(),
+                // The stored spelling of "reset to the company's standard
+                // grant" — what the console writes for an empty tools list.
+                tools: Some(Vec::new()),
+                ..Default::default()
+            },
+            AgentOverride {
+                agent_id: "brand_strategist".to_string(),
+                tools: Some(vec!["docs.*".to_string()]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, migrated) =
+            RuntimeBuilder::preserve_pre_upgrade_grant_scope(Vec::new(), edits, Some(&old), &new);
+
+        assert_eq!(
+            migrated[0].tools.as_deref().unwrap(),
+            old.tools.allow,
+            "an empty override is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+        );
+        assert_eq!(
+            migrated[1].tools.as_deref().unwrap(),
+            vec!["docs.*".to_string()],
+            "a stated override grant is untouched"
+        );
+    }
+
+    /// When the upgrade does not newly confer a BYO namespace, empty lines keep
+    /// tracking the allow-list as they always have.
+    #[test]
+    fn an_upgrade_without_a_new_billing_namespace_leaves_empty_lines_tracking() {
+        let old: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"media\"]\n",
+        )
+        .expect("old manifest");
+        let new: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"media\", \"search\"]\n",
+        )
+        .expect("new manifest");
+        let overlay_agents = vec![OverlayAgent {
+            id: "clerk".to_string(),
+            name: "Clerk".to_string(),
+            role: "Data Entry".to_string(),
+            description: None,
+            tools: Vec::new(),
+            model: None,
+            harness: None,
+        }];
+
+        let (migrated, _) = RuntimeBuilder::preserve_pre_upgrade_grant_scope(
+            overlay_agents,
+            Vec::new(),
+            Some(&old),
+            &new,
+        );
+
+        assert!(
+            migrated[0].tools.is_empty(),
+            "no BYO namespace was newly conferred, so tracking is preserved"
+        );
     }
 
     mod seed_cards {
