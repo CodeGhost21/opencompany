@@ -1384,7 +1384,7 @@ export function AppShell({
         // keeping it is safer than making durable unread mentions disappear.
         // The next successful refresh reconciles the optimistic snapshot.
       });
-  }, [client, company, reReadSettledThread]);
+  }, [client, company, firstDeskChannelId, reReadSettledThread]);
 
   useEffect(() => {
     mentionFeedRevision.current++;
