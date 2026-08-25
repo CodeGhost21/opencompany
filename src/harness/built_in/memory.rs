@@ -77,23 +77,30 @@ pub(crate) fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
     {
         out.push_str(&rest[..pos + marker.len()]);
         let tail = &rest[pos + marker.len()..];
+        // The MCP config trims the value after the marker, so extra whitespace
+        // (`Bearer   sk-...`) is legal. Keep it in the output but skip it here —
+        // the value scan would otherwise stop at the first space and store the
+        // credential verbatim.
+        let value_start = tail.len() - tail.trim_start().len();
+        out.push_str(&tail[..value_start]);
+        let value = &tail[value_start..];
         // The value runs up to the first character that cannot be part of a token.
-        let end = tail.find(|c: char| !is_token_char(c)).unwrap_or(tail.len());
+        let end = value.find(|c: char| !is_token_char(c)).unwrap_or(value.len());
         // Long values are always a secret. A short value is still redacted when
         // it is token-shaped — it contains a digit, which prose after a marker
         // does not — so a valid short bearer credential like `s3cret` (the MCP
         // config accepts any non-empty bearer value) does not slip through, while
         // a plain word such as "or" in "Bearer or not" is left alone.
-        let has_digit = tail[..end].chars().any(|c| c.is_ascii_digit());
+        let has_digit = value[..end].chars().any(|c| c.is_ascii_digit());
         let threshold = if has_digit { 4 } else { 8 };
         if end >= threshold {
             out.push_str("[REDACTED]");
         } else {
             // Too short to be a secret: leave it, or this function would mangle
             // ordinary text like "Bearer or not".
-            out.push_str(&tail[..end]);
+            out.push_str(&value[..end]);
         }
-        rest = &tail[end..];
+        rest = &tail[end + value_start..];
     }
     out.push_str(rest);
     std::borrow::Cow::Owned(out)
