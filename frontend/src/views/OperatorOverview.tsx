@@ -52,7 +52,29 @@ export function OperatorOverview({
   scope,
   attemptEventTick,
 }: Props) {
-  const [previousVisit, setPreviousVisit] = useState(() => readOverviewVisit(scope));
+  /**
+   * The previous-visit boundary for the current `scope`, captured once per
+   * scope during *render* rather than in an effect.
+   *
+   * `scope` is memoized by its owner ([`ConnectionConsole`]) on
+   * `[connectionId, company]`, so comparing it by reference below only
+   * re-reads when the connection or company actually changes — the same
+   * semantics the write effect's `[scope]` dependency already relies on.
+   *
+   * Reading here, before any effect has run, is what keeps the boundary safe
+   * under React 18 StrictMode's mount→cleanup→remount effect replay. A
+   * `[scope]` *read* effect paired with a `[scope]` *write* effect looks
+   * idempotent, but it is not: StrictMode's replay reruns both effects in
+   * declaration order, so the replay's read would observe the timestamp the
+   * first pass's write had just recorded, silently replacing the true
+   * previous boundary with "now" on every dev mount (#1745).
+   */
+  const visitRef = useRef<{ scope: LocalScope; previousVisit: number | null }>();
+  if (!visitRef.current || visitRef.current.scope !== scope) {
+    visitRef.current = { scope, previousVisit: readOverviewVisit(scope) };
+  }
+  const previousVisit = visitRef.current.previousVisit;
+
   const [stoppedRuns, setStoppedRuns] = useState<RunSummary[]>([]);
   const [failedRuns, setFailedRuns] = useState<RunSummary[]>([]);
   const [runLoad, setRunLoad] = useState<RunLoad>("loading");
@@ -161,17 +183,10 @@ export function OperatorOverview({
       });
   }, [attemptEventTick, fetchRuns]);
 
-  // Refresh the "since your previous visit" baseline whenever `scope` changes
-  // while this page stays mounted — the lazy `useState` initialiser above reads
-  // it only once, so without this a scope switch would keep comparing against
-  // the old scope's boundary. This effect is declared *before* the write effect
-  // below so, on both first mount and every scope change, React runs the read
-  // first and the baseline captures the stored *previous* visit before the
-  // write records the current one — the current time never clobbers it.
-  useEffect(() => {
-    setPreviousVisit(readOverviewVisit(scope));
-  }, [scope]);
-
+  // Record that this browser opened this scope's overview. This is the only
+  // actual side effect in the read/write pair — the read lives at render time
+  // above — so StrictMode replaying it twice on mount is harmless: the
+  // boundary was already captured before this effect's first pass ever ran.
   useEffect(() => {
     writeOverviewVisit(scope, Date.now());
   }, [scope]);
