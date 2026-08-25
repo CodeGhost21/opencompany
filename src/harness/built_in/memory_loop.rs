@@ -268,6 +268,22 @@ mod test {
     }
 
     #[test]
+    fn outcome_chunk_redacts_secrets_on_both_sides() {
+        // This write path bypasses `Memory::store`, so the operator message
+        // and the reply must be redacted here — an operator message carrying
+        // a one-time-secret URL or bearer token must not persist verbatim.
+        let chunk = outcome_chunk(
+            "ceo",
+            "open https://ots.example/secret/AbCdEf123456",
+            "opened it with Bearer sk-verylongsecrettoken",
+        );
+        assert!(chunk.body.contains("/secret/[REDACTED]"));
+        assert!(chunk.body.contains("Bearer [REDACTED]"));
+        assert!(!chunk.body.contains("AbCdEf123456"));
+        assert!(!chunk.body.contains("sk-verylongsecrettoken"));
+    }
+
+    #[test]
     fn multiline_snippets_are_flattened_before_injection() {
         // Embedded newlines in a stored snippet must be collapsed before
         // truncation; otherwise they cross the `## Task` boundary and break
