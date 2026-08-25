@@ -1402,13 +1402,13 @@ impl RuntimeBuilder {
             // replacement ports. When the selection is unchanged — the ordinary
             // issue #290 fast path — this is a fingerprint read, no rebuild, and
             // every agent's conversation history is preserved.
-            pool.rebind_memory_engine(&id, self.memory_engine);
+            pool.rebind_memory_engine(&id, self.memory_engine).await;
             self.harness = Some(pool);
         } else if let Some(pool) = self.harness.as_ref() {
             // Boot (no handover to inherit from): record this build's selection
             // on the pool so the first rebuild can tell a live swap from a
             // no-op.
-            pool.rebind_memory_engine(&id, self.memory_engine);
+            pool.rebind_memory_engine(&id, self.memory_engine).await;
         }
 
         // Inherit-or-construct. The handover's handles outrank an explicitly
