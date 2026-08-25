@@ -894,9 +894,30 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
     Ok(home)
 }
 
+/// Layers the data root's `config.toml` `[memory]` section onto the env-built
+/// settings, the exact resolution the `serve` path uses.
+///
+/// A self-hosted operator's engine selection lives only in that file — the
+/// console never exports environment variables — so bundle export/import must
+/// see it or they would read and write the base stores instead of the engine
+/// the host actually remembers with. An absent file layers nothing, and
+/// `OPENCOMPANY_MEMORY` still owns the choice when set
+/// (`StorageSettings::with_memory_config`).
+fn layer_config_memory(
+    settings: opencompany::store::StorageSettings,
+    config_dir: &std::path::Path,
+) -> Result<opencompany::store::StorageSettings> {
+    let section = ConfigFile::load(config_dir)?
+        .map(|c| c.memory.clone())
+        .unwrap_or_default();
+    settings.with_memory_config(&section)
+}
+
 /// The bundle ports plus the fact port, resolved the way `serve` resolves
 /// them: the env-selected storage backend (`OPENCOMPANY_STORAGE`), with the
-/// env-selected memory engine (`OPENCOMPANY_MEMORY*`) overlaid on top.
+/// memory engine overlaid on top — `OPENCOMPANY_MEMORY*` from the environment,
+/// or the instance's `config.toml` `[memory]` section under it (an env-owned
+/// selection keeps the file layer inert).
 ///
 /// Export and import used to hardwire the fs ports over `home`, which made a
 /// bundle capture the *base* stores rather than what the deployment actually
@@ -905,13 +926,13 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
 /// `serve` uses means a bundle now reads and writes the live engine, and a
 /// misconfigured engine refuses here exactly as it refuses a boot.
 ///
-/// One deployment per bundle, enforced: with a non-default environment
-/// (`OPENCOMPANY_STORAGE` or `OPENCOMPANY_MEMORY` set), an explicit `--home`
-/// is refused rather than mixed in — the base ports would come from the flag
-/// while the engine roots at `OPENCOMPANY_DATA_DIR`, and a bundle spanning
-/// two deployments is a company that never existed. Under the fs+store
-/// default the environment is inert and `--home` means exactly what it
-/// always has. `null` is refused in both directions (an export of nothing,
+/// One deployment per bundle, enforced: with a non-default selection (an env
+/// or `config.toml` that names a live storage backend or a memory engine), an
+/// explicit `--home` is refused rather than mixed in — the base ports would
+/// come from the flag while the engine roots at `OPENCOMPANY_DATA_DIR`, and a
+/// bundle spanning two deployments is a company that never existed. Under the
+/// fs+store default the environment is inert and `--home` means exactly what
+/// it always has. `null` is refused in both directions (an export of nothing,
 /// an import into a black hole, both exiting 0), and so is shared-single-DB
 /// tenant mode (bundle ops write no owner rows; raw slugs would miss the
 /// `<tenant>--` namespaced ids).
