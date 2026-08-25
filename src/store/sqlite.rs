@@ -3236,7 +3236,7 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
                 notification
                     .audience
                     .as_ref()
-                    .map(|a| serde_json::to_string(a))
+                    .map(serde_json::to_string)
                     .transpose()
                     .map_err(|e| crate::error::OpenCompanyError::Store(format!(
                         "notification audience is not serializable: {e}"
