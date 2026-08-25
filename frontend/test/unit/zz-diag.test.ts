@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Temporary diagnostic: reject inside the SAME act as the toggle that fires
-// the fetch — does the error render reliably?
+// Temporary diagnostic: full timeline in the miss case — does the error ever
+// appear, does the latch reset, and when?
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -59,6 +59,17 @@ async function renderPanel(run: WorkflowRunOutcome, client: OpenCompanyClient) {
   });
 }
 
+async function expandFiles() {
+  const details = container.querySelector<HTMLDetailsElement>(
+    '[data-testid="workflow-run-files"]',
+  );
+  await act(async () => {
+    details!.open = true;
+    details!.dispatchEvent(new Event("toggle", { bubbles: true }));
+  });
+  await act(async () => {});
+}
+
 beforeEach(() => {
   (
     globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -68,9 +79,9 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("diag: 30 iterations rejecting inside the toggle act", async () => {
+it("diag: timeline after miss", async () => {
   let misses = 0;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 25; i++) {
     await act(async () => root.unmount());
     container.remove();
     container = document.createElement("div");
@@ -83,31 +94,39 @@ it("diag: 30 iterations rejecting inside the toggle act", async () => {
     }[] = [];
     const client = deferredFilesClient(deferred);
     await renderPanel(completedRun("run-1"), client);
+    await expandFiles();
 
+    await act(async () => {
+      deferred[0].reject(new Error("boom"));
+    });
+
+    const err = () =>
+      container.querySelector('[data-testid="workflow-run-files-error"]');
+    if (err()) continue;
+    misses++;
+
+    const loading = () =>
+      container.querySelector('[data-testid="workflow-run-files"]')
+        ?.textContent?.includes("Loading…") ?? false;
+    console.log(
+      `iter ${i}: miss. loading=${loading()}. latch reset? -> `,
+    );
+    // Reopen: did the latch reset (catch ran)?
     const details = container.querySelector<HTMLDetailsElement>(
       '[data-testid="workflow-run-files"]',
     )!;
     await act(async () => {
-      details.open = true;
+      details.open = false;
       details.dispatchEvent(new Event("toggle", { bubbles: true }));
-      if (deferred.length !== 1) {
-        throw new Error(`deferred.length=${deferred.length}`);
-      }
-      deferred[0].reject(new Error("boom"));
     });
-
-    if (
-      !container.querySelector('[data-testid="workflow-run-files-error"]')
-    ) {
-      misses++;
-      console.log(
-        `iter ${i}: MISS. DOM=${JSON.stringify(
-          container.querySelector('[data-testid="workflow-run-files"]')
-            ?.innerHTML,
-        )}`,
-      );
-    }
+    await expandFiles();
+    const latchReset = deferred.length === 2;
+    console.log(`  latchReset=${latchReset}`);
+    // Does the error element exist NOW, after the reopen cycle?
+    console.log(
+      `  error after reopen=${!!err()} loading=${loading()} deferred=${deferred.length}`,
+    );
   }
-  console.log(`misses=${misses}/30`);
-  expect(misses).toBe(0);
+  console.log(`misses=${misses}`);
+  expect(true).toBe(true);
 });
