@@ -27,6 +27,9 @@ export function deskFromDto(d: DeskDto): Desk {
     blurb: d.description ?? "",
     members: d.members,
     overlayMembers: d.overlayMembers,
+    // Issue #1757: carry the Operator system-channel flag through so the chat
+    // view can render it read-only.
+    system: d.system,
   };
 }
 
@@ -122,6 +125,12 @@ export interface Channel {
    * absent falls back to the whole roster (issue #369).
    */
   memberIds?: string[];
+  /**
+   * Whether this is the built-in **Operator** system channel (issue #1757) — a
+   * read-only aggregation feed of workflow reports. The composer is disabled for
+   * it and it offers no membership editing.
+   */
+  system?: boolean;
 }
 
 export interface ChannelSection {
@@ -158,6 +167,7 @@ export function buildChannels(
     purpose: d.blurb,
     tone: d.tone,
     memberIds: d.members,
+    system: d.system,
   }));
 
   const dms = directMessageChannels(members)

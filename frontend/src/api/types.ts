@@ -206,6 +206,15 @@ export interface DeskDto {
    * for these. Omitted (undefined/false) for blueprint desks.
    */
   overlayCreated?: boolean;
+  /**
+   * Whether this is the built-in **Operator** system channel (issue #1757) — a
+   * read-only "what happened" feed aggregating workflow-run reports and the
+   * owner/no-mailbox fallback, not a real, mutable desk. The console renders it
+   * like a channel but offers no member management, reorder, or delete for it,
+   * and no send box (it is read-only in v1). Omitted (undefined/false) for real
+   * desks.
+   */
+  system?: boolean;
 }
 
 /**

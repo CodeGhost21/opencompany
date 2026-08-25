@@ -28,6 +28,12 @@ export interface Desk {
    * the removable members from the blueprint ones without refetching.
    */
   overlayMembers?: string[];
+  /**
+   * Whether this is the built-in **Operator** system channel (issue #1757): a
+   * read-only aggregation feed of workflow reports, not a real desk. The chat
+   * view renders it but disables its composer and offers no membership editing.
+   */
+  system?: boolean;
 }
 
 /** The main line plus a few focused desks. */

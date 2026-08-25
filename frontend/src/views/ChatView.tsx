@@ -988,6 +988,10 @@ export function ChatView({
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
+  // Issue #1757: the Operator channel is a read-only "what happened" feed. Its
+  // composer is disabled and the host also refuses a send to it, so this is UX,
+  // not the enforcement.
+  const readOnly = Boolean(channel?.system);
   // The host thread this channel is addressed on. A real desk channel's id
   // doubles as its thread id (`deskFromDto`), so addressing by it routes to
   // that desk's lead. A DM's id is console-local (`dmChannelId`), not a host
@@ -1632,10 +1636,27 @@ export function ChatView({
                 </span>
               </p>
             )}
+            {readOnly && (
+              <p
+                role="status"
+                className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0">
+                  The <span className="font-medium text-foreground">Operator</span> channel is a
+                  read-only feed of workflow reports and notifications — a scannable “what
+                  happened” view. There is nothing to reply to here.
+                </span>
+              </p>
+            )}
             <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
             <MessageComposer
-              placeholder={`Message ${channelTitle(channel)}`}
-              disabled={sending}
+              placeholder={
+                readOnly
+                  ? "This channel is read-only"
+                  : `Message ${channelTitle(channel)}`
+              }
+              disabled={sending || readOnly}
               prefill={composerPrefill ?? undefined}
               // Not voided (unlike the thread composer below): the composer
               // awaits this to know whether an attachment it carried actually
@@ -1684,7 +1705,7 @@ export function ChatView({
             />
           )}
 
-          {membersOpen && (
+          {membersOpen && !readOnly && (
             <MembersPane
               channelMembers={inChannel}
               others={outsideChannel}
