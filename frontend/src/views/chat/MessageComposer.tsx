@@ -490,11 +490,16 @@ export function MessageComposer({
     setAttachError(undefined);
     try {
       const reference = await uploadAttachment(file);
-      if (!mountedRef.current) {
-        // The operator navigated away while this upload was in flight —
-        // there is no chip left to hold the reference and no unmount left
-        // to fire, so this continuation is the only place that can still
-        // free the node it just landed (codex review finding on #1682).
+      // The upload went to the scope whose `uploadAttachment` this closure
+      // captured. If the composer unmounted, OR the scope moved while the
+      // upload was in flight, no chip can hold this reference and no send will
+      // claim it — the next send would post an old company's node id to the
+      // new one. Free the node through the callback bound to the company that
+      // owns it, and do not stage it (codex review finding).
+      if (!mountedRef.current || scopeDeleteRef.current !== deleteAttachment) {
+        // No chip left to hold the reference and no unmount left to fire, so
+        // this continuation is the only place that can still free the node it
+        // just landed (codex review finding on #1682).
         deleteAttachment?.(reference.nodeId);
         return;
       }
