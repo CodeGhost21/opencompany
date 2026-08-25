@@ -1437,6 +1437,16 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
    * the tree never scrolled to it.
    */
   const secretNote = isSecretNode(nodes, openId);
+  /**
+   * How many notes the workspace holds, for the header's count.
+   *
+   * Memoised rather than filtered inline: this component re-renders on every
+   * keystroke in the editor (the draft is state), and `nodes` is the whole
+   * tree — so an inline scan would walk every node in the workspace once per
+   * character typed, to recompute a number that only changes when the tree
+   * does.
+   */
+  const noteCount = useMemo(() => nodes.filter((n) => n.kind === "file").length, [nodes]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1458,7 +1468,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       */}
       <PageHeader
         title="Workspace"
-        count={nodes.filter((n) => n.kind === "file").length}
+        count={noteCount}
         description="Every note this company's teammates can read and write — the shared files they work from."
         data-testid="workspace-header"
       />
