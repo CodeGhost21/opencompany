@@ -222,10 +222,7 @@ impl Tool for MemoryStoreTool {
             // The body passes through the same secret redaction as every other
             // memory write, so an agent that stores a credential does not
             // persist it.
-            body: format!(
-                "{title}\n\n{}",
-                super::memory::redact_secrets(body)
-            ),
+            body: format!("{title}\n\n{}", super::memory::redact_secrets(body)),
         };
         let addr = self.mem.context.put(&self.mem.company, chunk).await?;
         Ok(ToolResult::success(format!(
