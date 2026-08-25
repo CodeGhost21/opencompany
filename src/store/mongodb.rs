@@ -5306,7 +5306,7 @@ mod test {
             let node = node.clone();
             tokio::spawn(async move {
                 crate::ports::workspace::WorkspaceStore::create_binary(
-                    &s, &company, &node, b"payload-b",
+                    &*s, &company, &node, b"payload-b",
                 )
                 .await
             })
