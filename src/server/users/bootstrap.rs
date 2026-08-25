@@ -403,8 +403,7 @@ mod test {
     /// Re-issuing must not mint a second account for the same address, which
     /// would leave two rows racing to answer a login.
     #[tokio::test]
-    async fn re_issuing_keeps_one_account() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    async fn re_issuing_keeps_one_account() {        let dir = tempfile::tempdir().expect("tempdir");
         let (users, sessions, login_codes) = stores(&dir);
         let company = CompanyId::new("acme");
 
