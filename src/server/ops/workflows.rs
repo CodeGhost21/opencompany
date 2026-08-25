@@ -1898,7 +1898,10 @@ async fn run_artifacts(
     rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at_millis));
     let truncated = rows.len() > MAX_RUN_ARTIFACTS;
     rows.truncate(MAX_RUN_ARTIFACTS);
-    Ok(Json(RunArtifactsResponse { files: rows, truncated }))
+    Ok(Json(RunArtifactsResponse {
+        files: rows,
+        truncated,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -7027,11 +7030,7 @@ mod tests {
                     .unwrap(),
             )
             .await;
-            assert_eq!(
-                under_a["files"].as_array().unwrap().len(),
-                1,
-                "{under_a}"
-            );
+            assert_eq!(under_a["files"].as_array().unwrap().len(), 1, "{under_a}");
             assert_eq!(under_a["files"][0]["artifactId"], "art-a1");
 
             // Under the re-owner: nothing — provenance is the opening run.
