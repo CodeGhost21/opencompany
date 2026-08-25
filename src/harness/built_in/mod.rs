@@ -820,8 +820,13 @@ impl CompanyAgent {
         // The chat/desk thread this turn answers, captured before `stream` is
         // moved into the collector task below — used for per-conversation history
         // isolation (issue #1725). `None` for a background turn that streams
-        // nothing (a dispatched task card carries no operator chat to bind to).
-        let turn_chat_id: Option<String> = stream.as_ref().map(|ctx| ctx.chat_id.clone());
+        // nothing (a dispatched task card carries no operator chat to bind to),
+        // and also `None` for a workflow agent node (issue #1702) — it routes by
+        // run/node, not a chat thread, so there is nothing to bind history to.
+        let turn_chat_id: Option<String> = stream.as_ref().and_then(|ctx| match &ctx.route {
+            crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
+            crate::turn_stream::LiveRoute::Workflow { .. } => None,
+        });
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();

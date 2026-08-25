@@ -574,7 +574,9 @@ fn stream_for(chat: &str) -> crate::turn_stream::TurnStreamCtx {
     crate::turn_stream::TurnStreamCtx {
         company: CompanyId::new("acme"),
         agent_id: "ceo".to_string(),
-        chat_id: chat.to_string(),
+        route: crate::turn_stream::LiveRoute::Chat {
+            chat_id: chat.to_string(),
+        },
     }
 }
 
