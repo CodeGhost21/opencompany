@@ -232,6 +232,14 @@ export function MessageComposer({
       mountedRef.current = false;
     };
   }, []);
+  // The cleanup callback for the scope currently on screen. `ChatView`
+  // re-binds `deleteAttachment` (and `uploadAttachment`) when the company or
+  // connection changes while this composer stays mounted; an in-flight
+  // upload's continuation compares its captured callback against this to know
+  // whether the scope it was sent to is still the one showing before staging
+  // the result (codex review finding).
+  const scopeDeleteRef = useRef(deleteAttachment);
+  scopeDeleteRef.current = deleteAttachment;
   // The upload is in flight: the paperclip spins and Send waits, so a message
   // cannot post ahead of the bytes it references.
   const [uploading, setUploading] = useState(false);
