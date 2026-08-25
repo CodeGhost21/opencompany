@@ -23,6 +23,18 @@ use super::text::normalize;
 #[cfg(feature = "documents")]
 pub(crate) const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The most cells a spreadsheet's dense range may hold before it is refused.
+///
+/// The decompression guard above bounds the *bytes* of an archive, but
+/// calamine's `worksheet_range` then materializes the dense bounding box of the
+/// cells that actually appear in a sheet: a tiny archive with one cell at `A1`
+/// and one at `XFD1048576` passes that guard yet forces a ~17-billion-cell
+/// allocation inside the blocking extraction thread. The used range of a real
+/// spreadsheet is a small fraction of the grid, so this only bites hostile
+/// input; refuse rather than allocate (codex review finding).
+#[cfg(feature = "documents")]
+pub(crate) const MAX_SPREADSHEET_DENSE_CELLS: usize = 1_000_000;
+
 /// Sums the uncompressed sizes every entry of `archive` declares, without
 /// reading any entry data.
 ///
@@ -105,7 +117,13 @@ pub fn xlsx(bytes: &[u8]) -> Extracted {
     }
 
     let cursor = std::io::Cursor::new(bytes.to_vec());
-    let mut workbook = match calamine::open_workbook_auto_from_rs(cursor) {
+    // Opened as a concrete Xlsx rather than auto-detected: the dispatch only
+    // ever sends `.xlsx`/`.xlsm` here, and the other formats calamine's auto
+    // open would fall back to (`.xls`, `.xlsb`, `.ods`) build their dense
+    // ranges during open — before any extent guard could run — so accepting a
+    // mislabeled file would leave the same allocation attack open in them.
+    // A file that says `.xlsx` and is not one is refused cleanly instead.
+    let mut workbook = match calamine::open_workbook_from_rs::<calamine::Xlsx<_>, _>(cursor) {
         Ok(workbook) => workbook,
         Err(error) => {
             return Extracted::Unsupported(format!("the spreadsheet could not be read: {error}"));
@@ -113,6 +131,38 @@ pub fn xlsx(bytes: &[u8]) -> Extracted {
     };
     let mut out = String::new();
     for name in workbook.sheet_names().to_vec() {
+        // The dense-range guard: `worksheet_range` materializes the bounding
+        // box of a sheet's *actual* cells, so scan them sparsely first (cheap
+        // — no grid is allocated) and refuse a sheet whose box would exceed
+        // the cap before the materialization happens. A sheet with no cells
+        // has nothing to materialize. The reader is dropped here so the
+        // workbook's borrow is free for `worksheet_range` below.
+        let dense = {
+            let Ok(mut reader) = workbook.worksheet_cells_reader(&name) else {
+                continue;
+            };
+            let mut row_min = u32::MAX;
+            let mut row_max = 0;
+            let mut col_min = u32::MAX;
+            let mut col_max = 0;
+            while let Ok(Some(cell)) = reader.next_cell() {
+                let (row, col) = cell.get_position();
+                row_min = row_min.min(row);
+                row_max = row_max.max(row);
+                col_min = col_min.min(col);
+                col_max = col_max.max(col);
+            }
+            if row_min == u32::MAX {
+                continue;
+            }
+            (row_max - row_min + 1).saturating_mul(col_max - col_min + 1) as usize
+        };
+        if dense > MAX_SPREADSHEET_DENSE_CELLS {
+            return Extracted::Unsupported(
+                "the spreadsheet's used range exceeds the size this build can read safely"
+                    .to_string(),
+            );
+        }
         let Ok(range) = workbook.worksheet_range(&name) else {
             continue;
         };
