@@ -176,6 +176,7 @@ pub async fn issue_password(
             id: generate_id(),
             email: email.clone(),
             display_name: None,
+            avatar: None,
             // Eligibility above proved this address is a standing *admin*;
             // there is no other role this path can mint.
             role: UserRole::Admin,
