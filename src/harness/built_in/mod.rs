@@ -1533,7 +1533,12 @@ impl HarnessPool {
         let (effective_snapshot, pin_to_store) = match policy_snapshot {
             Some(policy) => (Some(policy.clone()), Some(policy.clone())),
             None => {
-                let pin = self.pinned_policies.lock().unwrap().get(&company.id).cloned();
+                let pin = self
+                    .pinned_policies
+                    .lock()
+                    .unwrap()
+                    .get(&company.id)
+                    .cloned();
                 (pin, None)
             }
         };
@@ -6454,9 +6459,7 @@ description = "Builds the product."
         live_store.save(&edited).await.unwrap();
         pool.release_policy_pin_sync(&rec.id);
 
-        pool.ensure(&rec, &fx.deps)
-            .await
-            .expect("post-drop ensure");
+        pool.ensure(&rec, &fx.deps).await.expect("post-drop ensure");
         assert_eq!(
             pool.policy_fingerprint_of(&rec.id).await,
             Some(effective_policy_fingerprint(&edited.effective_policy())),

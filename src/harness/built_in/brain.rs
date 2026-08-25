@@ -2758,7 +2758,10 @@ impl PolicyPinGuard {
         run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
         company_id: crate::ports::types::CompanyId,
     ) -> Self {
-        Self { run_turn, company_id }
+        Self {
+            run_turn,
+            company_id,
+        }
     }
 }
 
