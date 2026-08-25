@@ -499,17 +499,25 @@ export function mergeHistoryInOrder(
 ): ChatMessage[] {
   const historyIds = new Set(hydrated.map((m) => m.id));
   const existingById = new Map(existing.map((m) => [m.id, m]));
+  const durableByFingerprint = new Map<string, ChatMessage>();
+  for (const message of hydrated) {
+    if (message.from === "you") {
+      durableByFingerprint.set(messageFingerprint(message), message);
+    }
+  }
   // The endpoint returns only its newest page. Durable rows that fell off that
   // page are still part of the transcript and must remain in their existing
   // prefix; only browser-local rows can safely be treated as optimistic tail
-  // rows. This also makes a later page overlap harmless.
+  // rows. A local operator row whose persisted echo is in this page is matched
+  // by its stable content/time fields and replaced by the durable projection.
   const evictedDurable = existing.filter(
     (m) => isHostMessageId(m.id) && !historyIds.has(m.id),
   );
   const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
-  const optimistic = existing.filter(
-    (m) => !isHostMessageId(m.id) && !historyIds.has(m.id),
-  );
+  const optimistic = existing.filter((m) => {
+    if (isHostMessageId(m.id) || historyIds.has(m.id)) return false;
+    return !durableByFingerprint.has(messageFingerprint(m));
+  });
   const merged = [...evictedDurable, ...persisted, ...optimistic];
   return merged.length === existing.length && merged.every((m, i) => m === existing[i])
     ? existing
