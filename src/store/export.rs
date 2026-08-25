@@ -1081,6 +1081,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .expect("cycle");
@@ -2203,6 +2204,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();

@@ -17,9 +17,12 @@ import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type MessageIntent } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
+import { uploadChatAttachment } from "@/api/chat";
+import { deleteNode, fetchBlobUrl } from "@/api/workspace";
 import {
   ApiError,
   type ApprovalSummary,
+  type AttachmentDto,
   type GrantScope,
   type TeamMemberDto,
   type TurnStep,
@@ -910,6 +913,49 @@ export function ChatView({
     chatPaneVisible,
   ]);
 
+  // Upload one attachment's bytes for the composer (issue #1682). Bound to the
+  // active connection's client/company so the composer stays agnostic of both.
+  // Must live above the early returns: a hook after them is skipped on the
+  // loading render and present on the next, which is a Rules-of-Hooks crash
+  // ("Rendered more hooks than during the previous render").
+  const uploadAttachment = useCallback(
+    (file: File) => uploadChatAttachment(client, company, file),
+    [client, company],
+  );
+
+  // Fetch a stored attachment's bytes as an object URL for the transcript
+  // (issue #1682). The blob route needs the client's bearer, which an `<img>`
+  // or a bare link cannot carry — so the row resolves through this and the
+  // caller revokes the URL when done. Reuses the hardened `/workspace/blob`
+  // serve untouched. The optional `signal` lets a preview that scrolls out of
+  // view cancel its in-flight download (codex review finding).
+  const resolveAttachmentUrl = useCallback(
+    (nodeId: string, signal?: AbortSignal) =>
+      fetchBlobUrl(client, company, nodeId, signal),
+    [client, company],
+  );
+
+  /**
+   * Delete an uploaded-but-never-sent attachment's workspace node (issue
+   * #1682, codex review finding).
+   *
+   * A staged file is uploaded (and charged against the workspace quota) the
+   * moment it lands, before the operator has sent anything — replacing it,
+   * removing it, or leaving the composer used to just drop the local
+   * reference, leaving the binary node on the server forever. Bound the same
+   * way `uploadAttachment` is; best-effort, since a failed cleanup here must
+   * never block the operator from continuing to compose.
+   */
+  const deleteAttachment = useCallback(
+    (nodeId: string) => {
+      void deleteNode(client, company, nodeId).catch(() => {
+        // Best-effort: an orphaned node here is a quota nuisance, not a
+        // correctness bug, and the operator has already moved on.
+      });
+    },
+    [client, company],
+  );
+
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
   // nothing" are different facts and only one of them is worth acting on.
@@ -999,14 +1045,33 @@ export function ChatView({
    * dropped from the request rather than sent as a local counter the host
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
+   *
+   * Returns whether the POST reached the host and journaled (codex review
+   * round 4, on top of round 2's naive version): `true` for every outcome
+   * where `client.chat` itself resolved (a normal reply, a detached turn, or
+   * a stale response the caller discards) — the host answered, so the
+   * journal write is a fact. `undefined` when the request THREW, because a
+   * throw is genuinely ambiguous: `accept_chat_turn` journals the message
+   * before the turn's cycle is spawned onto its own task, and a synchronous
+   * (non-detached) send then awaits that task — so a failure surfacing from
+   * deep in cycle execution reaches this `catch` looking identical to one
+   * that never reached the journal at all. There is no `false` this function
+   * ever returns: nothing observable here tells "refused before journal"
+   * and "journaled, then the turn itself failed" apart. The composer treats
+   * `undefined` as "unknown — leave it alone", never as "not sent"; see
+   * `deleteAttachment` and `MessageComposer.send`.
    */
   async function send(
     text: string,
     intent?: MessageIntent,
     parentId?: string,
+    attachments?: AttachmentDto[],
     mentions?: Mention[],
-  ) {
-    if (sending) return;
+  ): Promise<boolean | undefined> {
+    // The one genuinely safe `false`: another send is already in flight, so
+    // this call's own text/attachments were never handed to `client.chat` at
+    // all — no server round trip happened for them, no ambiguity possible.
+    if (sending) return false;
     const scopeAtSend = {
       connection: scope.connection,
       company: scope.company,
@@ -1014,6 +1079,10 @@ export function ChatView({
     };
     const target = active.id;
     const chatId = activeThreadId;
+    // The optimistic bubble carries the attachments too, so the operator sees
+    // the file on their own message the instant they send (issue #1682) — the
+    // SSE echo / reload copy then matches it, projected from the same durable
+    // references the host resolved.
 
     // Warn about @-mentioning a teammate who is not on this channel.
     if (mentions?.length && inChannel) {
@@ -1052,6 +1121,7 @@ export function ChatView({
     });
     const local = makeMessage("you", text, {
       parentId,
+      attachments,
       mentions: localMentions?.length ? localMentions : undefined,
     });
     append(target, local);
@@ -1079,6 +1149,10 @@ export function ChatView({
         // field ignores this and answers synchronously, which is why the branch
         // below reads the response's shape and never this argument.
         true,
+        // Node ids only (issue #1682): the host re-resolves each against this
+        // company's workspace and takes the name/mime/size from the store, so
+        // the client neither sends nor is trusted for that metadata.
+        attachments?.map((a) => a.nodeId),
         // Who the picker resolved. The host re-validates every entry and
         // demotes what no longer exists, so this is a suggestion; omitting it
         // asks the host to extract from the text instead.
@@ -1100,7 +1174,10 @@ export function ChatView({
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
-        return;
+        // The POST itself succeeded and journaled — this branch only
+        // discards the reply because the scope moved on, so anything the
+        // request carried (an attachment among them) is durably claimed.
+        return true;
       }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
@@ -1119,7 +1196,7 @@ export function ChatView({
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
         if (chatId) onSendDetached?.(chatId, answer.turnId);
-        return;
+        return true;
       }
       const reply = answer;
       const replies = reply.responses.length
@@ -1176,6 +1253,7 @@ export function ChatView({
           });
       }
       onReply?.();
+      return true;
     } catch (err) {
       outcome = "failed";
       const latestScope = scopeRef.current;
@@ -1187,7 +1265,10 @@ export function ChatView({
       ) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
-        return;
+        // Unlike the try-block's stale branch above, the request THREW here —
+        // whether it journaled before failing is unknown, not "no" (see this
+        // function's doc comment), so this is `undefined`, not `false`.
+        return undefined;
       }
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
@@ -1196,6 +1277,8 @@ export function ChatView({
       // the turn goes on to produce.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
+      // Ambiguous, not a confirmed non-send — see this function's doc comment.
+      return undefined;
     } finally {
       // A detached turn ends when its row settles, not when this POST resolves.
       // Calling `onSendEnd` here would clear the live step timeline and take the
@@ -1522,6 +1605,7 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              resolveAttachmentUrl={resolveAttachmentUrl}
               onStartBrief={() =>
                 setComposerPrefill((current) => ({
                   text: FIRST_TEAM_BRIEF,
@@ -1553,9 +1637,19 @@ export function ChatView({
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
               prefill={composerPrefill ?? undefined}
-              onSend={(text, intent, mentions) =>
-                void send(text, intent, undefined, mentions)
+              // Not voided (unlike the thread composer below): the composer
+              // awaits this to know whether an attachment it carried actually
+              // journaled, so it can clean up one that did not (codex review
+              // finding on #1682) — see `deleteAttachment` and `send`'s doc.
+              onSend={(text, intent, attachments, mentions) =>
+                send(text, intent, undefined, attachments, mentions)
               }
+              // Issue #1682: only the channel/DM composer attaches — the paperclip
+              // is present exactly because this prop is.
+              uploadAttachment={uploadAttachment}
+              // Cleans up a staged upload that never got sent (codex review
+              // finding on #1682) — see `deleteAttachment`.
+              deleteAttachment={deleteAttachment}
               // Every keystroke asks; the hook throttles to one ping per
               // channel per few seconds and skips entirely while the event
               // stream is down.
@@ -1580,8 +1674,9 @@ export function ChatView({
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
-              onSend={(text, _intent, mentions) =>
-                void send(text, undefined, parent.id, mentions)
+              resolveAttachmentUrl={resolveAttachmentUrl}
+              onSend={(text, _intent, _attachments, mentions) =>
+                void send(text, undefined, parent.id, undefined, mentions)
               }
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}

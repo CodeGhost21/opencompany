@@ -4882,6 +4882,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -4936,6 +4937,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
         )
         .await
@@ -4953,6 +4955,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }
         );
     }
@@ -5041,6 +5044,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -5059,6 +5063,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }
         );
     }

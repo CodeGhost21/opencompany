@@ -4342,6 +4342,7 @@ mod tests {
                     chat: Some("desk-finance".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -4357,6 +4358,7 @@ mod tests {
                     chat: Some("desk-ops".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -4417,6 +4419,7 @@ mod tests {
                     chat: Some("desk-finance".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -4512,6 +4515,7 @@ mod tests {
                             chat: chat.map(str::to_string),
                             parent: None,
                             deliverable: None,
+                            attachments: Vec::new(),
                         },
                     )
                     .await
@@ -4544,6 +4548,7 @@ mod tests {
                     chat: Some("desk-ops".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await

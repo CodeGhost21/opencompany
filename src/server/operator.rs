@@ -33,8 +33,8 @@ use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, OutboundMessage, OverlayDesk,
-    OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
+    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, OutboundMessage,
+    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -1432,6 +1432,22 @@ struct ChatMessage {
     /// console against a newer host gets extraction too.
     #[serde(default)]
     mentions: Option<Vec<crate::ports::types::Mention>>,
+    /// The workspace node ids of files attached to this message (issue #1682).
+    ///
+    /// **Ids only, and nothing else is trusted.** The client uploads each file
+    /// first (`POST {scope}/chat/upload`), gets back a `node_id`, and lists
+    /// those ids here. The host re-resolves each within this company's own
+    /// workspace and takes the name / mime / size from the store — so a foreign
+    /// or spoofed reference cannot cross a company boundary or misdescribe its
+    /// payload (see `resolve_attachments`). An id that resolves to no binary
+    /// node in this company is a `400`.
+    ///
+    /// Additive in both directions: this struct has no `deny_unknown_fields`,
+    /// so a newer console against an older host has its ids ignored and its
+    /// message still posts, and an older console omits the field entirely — an
+    /// absent list is an empty one, the exact pre-#1682 wire shape.
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1874,6 +1890,206 @@ struct AcceptedTurn {
 /// Best-effort on the row and on the transcript line, never on the append: the
 /// message is the thing the operator can lose, and the other two are how we
 /// describe it.
+/// Resolves the client's attachment `node_id`s to durable [`Attachment`]s
+/// (issue #1682).
+///
+/// The whole security posture of chat attachments lives here. The client hands
+/// this route ids only; every name / mime / size on the journaled event is read
+/// from the company's own workspace tree, never from the request — so a client
+/// cannot claim a `report.pdf` is a `photo.png`, nor pretend a two-byte file is
+/// two gigabytes. Each id must resolve to a **binary** node in *this* company's
+/// tree: a foreign id (the IDOR a shared, guessable ULID would otherwise open),
+/// one that names a prose note, or one that names nothing is a `400`, on the
+/// same terms a bad thread `parent` is. The tree scan is the same read
+/// `upload()` does to re-fetch a just-stored node, so no new store surface is
+/// introduced.
+///
+/// Preserves the caller's order and refuses on the first bad id, so the message
+/// is never journaled with a partial or reordered attachment list.
+///
+/// Also reads and extracts each attachment's text where the format and size
+/// allow it (issue #1682, codex review finding) — see
+/// [`extracted_attachment_text`]. A sequential loop rather than
+/// `node_ids.iter().map(..).collect()`: extraction reads bytes and must
+/// `.await`, and a chat message carries at most a small handful of
+/// attachments, so there is no throughput this would meaningfully cost.
+async fn resolve_attachments(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node_ids: &[String],
+) -> Result<Vec<Attachment>, ApiError> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Codex review finding: an unbounded, unduplicated list turns one `/chat`
+    // POST into an attacker-controlled multiplier on the extraction work
+    // below — each id, however many times it repeats, is a tree scan plus up
+    // to `MAX_ATTACHMENT_EXTRACT_BYTES` of reads and a parse. Refused before
+    // either cost is paid, on the same terms a malformed `parent` is.
+    if node_ids.len() > MAX_CHAT_ATTACHMENTS {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "a message may carry at most {MAX_CHAT_ATTACHMENTS} attachments, got {}",
+            node_ids.len()
+        ))));
+    }
+    // Deduplicated, order preserved: attaching the same file twice to one
+    // message is never a meaningful distinct attachment, so a repeated id
+    // resolves — and, more to the point, extracts — exactly once rather than
+    // once per repetition.
+    let mut seen = std::collections::HashSet::with_capacity(node_ids.len());
+    let node_ids: Vec<&String> = node_ids.iter().filter(|id| seen.insert(*id)).collect();
+    let tree = runtime.workspace().tree(id).await?;
+    let mut resolved = Vec::with_capacity(node_ids.len());
+    for node_id in node_ids {
+        let node = tree
+            .iter()
+            .find(|n| &n.id == node_id && n.is_binary())
+            .ok_or_else(|| {
+                ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "attachment {node_id} is not a file in this company's workspace"
+                )))
+            })?;
+        let extracted_text = extracted_attachment_text(runtime, id, node).await;
+        resolved.push(Attachment {
+            node_id: node.id.clone(),
+            name: node.name.clone(),
+            // A binary node always carries both — `is_binary()` is exactly
+            // `mime.is_some()`, and the store computes `size` alongside it —
+            // so the defaults are unreachable and exist only to keep this
+            // total without an `unwrap` a later store change could break.
+            mime: node.mime.clone().unwrap_or_default(),
+            size: node.size.unwrap_or(0),
+            extracted_text,
+        });
+    }
+    Ok(resolved)
+}
+
+/// The most attachments one chat message may carry (codex review finding).
+///
+/// The composer stages one file at a time (v1), so this is nowhere near the
+/// operator's own path — it exists to bound what an unbounded client
+/// request could otherwise force `resolve_attachments` to do: a tree scan
+/// and an extraction pass per id, and extraction is not free
+/// ([`MAX_ATTACHMENT_EXTRACT_BYTES`] of reads and a parse). Generous enough
+/// for the multi-file UI the wire shape (`Vec<Attachment>`) already allows
+/// room for, small enough that even the worst case — every id resolving and
+/// maxing out the extraction cap — stays bounded per request.
+const MAX_CHAT_ATTACHMENTS: usize = 20;
+
+/// The largest attachment [`resolve_attachments`] reads for extraction, in
+/// bytes.
+///
+/// Well below [`crate::ingest::MAX_DOCUMENT_BYTES`] on purpose — that cap is
+/// for the dedicated memory-drop page, where reading a large document is the
+/// whole point of the request. A chat attachment's extraction instead runs
+/// inline in the synchronous `/chat` POST, so it stays small enough that an
+/// otherwise-instant send never feels stuck parsing a PDF.
+const MAX_ATTACHMENT_EXTRACT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The most extracted text one attachment contributes to the wire, in chars.
+///
+/// [`crate::brain::medulla::wire::WireEvent::body`] caps at 200000 chars and
+/// carries the operator's own words too, so no single attachment may be free
+/// to crowd out the rest of the turn.
+const MAX_ATTACHMENT_EXTRACT_CHARS: usize = 6_000;
+
+/// Reads and extracts one binary node's text where the format and size allow
+/// it, `None` otherwise (issue #1682, codex review finding).
+///
+/// `None` covers three cases alike — an image or other format nothing here
+/// parses, a scan with no text layer, and a payload over
+/// [`MAX_ATTACHMENT_EXTRACT_BYTES`] — because for "does the brain have
+/// something to read" a caller does not need to tell them apart. Reuses
+/// [`crate::ingest::extract`], the same PDF/DOCX/PPTX/XLSX/plain-text
+/// pipeline the memory-drop page already runs, so a chat attachment's actual
+/// words ride the durable [`Attachment`] rather than leaving a hosted or
+/// sidecar brain with only a node id and no device tool that resolves it.
+///
+/// Best-effort: any read failure (a race with a delete, a transient store
+/// error) answers `None` rather than failing the send — the reference alone
+/// still reaches the transcript and the journal.
+async fn extracted_attachment_text(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node: &crate::ports::workspace::WorkspaceNode,
+) -> Option<String> {
+    let size = node.size?;
+    if size == 0 || size > MAX_ATTACHMENT_EXTRACT_BYTES {
+        return None;
+    }
+    let (_, stream) = runtime
+        .workspace()
+        .read_bytes(id, &node.id)
+        .await
+        .ok()
+        .flatten()?;
+    let bytes = drain_bounded(stream, MAX_ATTACHMENT_EXTRACT_BYTES).await?;
+    // The extraction pipeline is synchronous CPU work — PDF/DOCX/PPTX/XLSX
+    // parsing — that can run for a while on a document near the size cap, and
+    // this runs inline in the `/chat` POST. Dispatch it to the blocking pool
+    // rather than stalling a Tokio worker (codex review finding). The owned
+    // pieces are cloned out of the borrowed node first: `spawn_blocking`
+    // requires its closure's captures to be `'static`.
+    let name = node.name.clone();
+    let mime = node.mime.clone();
+    tokio::task::spawn_blocking(move || {
+        match crate::ingest::extract(&name, mime.as_deref(), &bytes) {
+            crate::ingest::Extracted::Text(text) => Some(crate::ledger::budget::truncate(
+                &text,
+                MAX_ATTACHMENT_EXTRACT_CHARS,
+            )),
+            crate::ingest::Extracted::Empty | crate::ingest::Extracted::Unsupported(_) => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Drains a [`BlobStream`](crate::ports::workspace::BlobStream) into a
+/// buffer, `None` if it ever exceeds `cap` or errors partway through (codex
+/// review finding).
+///
+/// Split out from [`extracted_attachment_text`] so the one property that
+/// matters here — a stream error discards what was read, rather than handing
+/// extraction a truncated payload that looks complete — is directly testable
+/// against a synthetic stream, without a real workspace store behind it.
+///
+/// A stream error mid-read used to fall straight through to extraction on
+/// whatever partial bytes had been collected: `while let Ok(Some(chunk)) =
+/// stream.try_next().await` cannot tell "the stream ended" from "the stream
+/// errored", so it just stopped accumulating either way. A truncated payload
+/// is not a smaller version of the file; it can parse into plausible-looking
+/// but wrong or incomplete text (a document missing its ending, a multi-byte
+/// sequence cut mid-codepoint) with nothing marking it as partial once it
+/// reaches the brain. "No readable text" is honest; a guess dressed as a
+/// read is not.
+async fn drain_bounded(
+    mut stream: crate::ports::workspace::BlobStream,
+    cap: u64,
+) -> Option<Vec<u8>> {
+    use futures::TryStreamExt;
+
+    let mut bytes = Vec::new();
+    loop {
+        match stream.try_next().await {
+            Ok(Some(chunk)) => {
+                bytes.extend_from_slice(&chunk);
+                // Belt-and-braces against a store whose streamed length
+                // disagrees with the metadata length its caller expected —
+                // never buffer past the cap just because the node claimed to
+                // be under it.
+                if bytes.len() as u64 > cap {
+                    return None;
+                }
+            }
+            Ok(None) => return Some(bytes),
+            Err(_) => return None,
+        }
+    }
+}
+
 async fn accept_chat_turn(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -1884,6 +2100,12 @@ async fn accept_chat_turn(
 ) -> Result<AcceptedTurn, ApiError> {
     runtime.ensure_running().await?;
     runtime.ensure_accepting().map_err(ApiError)?;
+
+    // Issue #1682: resolve the client's attachment ids to durable references
+    // before the journal write, so a bad reference refuses the send outright —
+    // on the same terms a malformed `parent` does — rather than journaling a
+    // message that points at a file this company does not have.
+    let attachments = resolve_attachments(runtime, id, &message.attachments).await?;
 
     let message_event = CompanyEvent::OperatorMessage {
         text: message.text.clone(),
@@ -1907,6 +2129,10 @@ async fn accept_chat_turn(
         mentions: runtime
             .resolve_mentions(&message.text, message.mentions.clone(), by)
             .await,
+        // Issue #1682: the store-resolved references, so the durable record
+        // carries the name/mime/size the store computed and never the client's
+        // claim. Empty on a message with no attachment, which skips the field.
+        attachments,
     };
     let message_seq = runtime
         .events()
@@ -2522,6 +2748,44 @@ struct ChatHistoryMessageDto {
     /// legacy shape is unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mentions: Vec<ChatMentionDto>,
+    /// Files attached to this message (issue #1682), each a reference into the
+    /// company workspace with the store-computed name / mime / size. Omitted
+    /// when the message carries none — which is every reply, every system pill,
+    /// and every operator message journaled before the field existed — so the
+    /// legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<ChatAttachmentDto>,
+}
+
+/// One file attached to a history message (issue #1682). Mirrors `Attachment`
+/// in `frontend/src/lib/chat.ts`, and carries only store-authored metadata —
+/// the id the payload is reachable at, and the name / mime / size the store
+/// computed. The bytes are fetched separately through the hardened
+/// `GET …/workspace/blob/{nodeId}` route.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAttachmentDto {
+    /// The workspace node id the payload is stored under — what the console
+    /// hands the blob route to download or preview it.
+    node_id: String,
+    /// The stored file's display name.
+    name: String,
+    /// The stored payload's media type, so the console decides download-vs-
+    /// preview without fetching the bytes.
+    mime: String,
+    /// The stored payload's exact length in bytes.
+    size: u64,
+}
+
+impl From<Attachment> for ChatAttachmentDto {
+    fn from(attachment: Attachment) -> Self {
+        Self {
+            node_id: attachment.node_id,
+            name: attachment.name,
+            mime: attachment.mime,
+            size: attachment.size,
+        }
+    }
 }
 
 /// One mention on a history message. Mirrors `Mention` in
@@ -2600,6 +2864,11 @@ impl From<MessageView> for ChatHistoryMessageDto {
                 .mentions
                 .into_iter()
                 .map(ChatMentionDto::from)
+                .collect(),
+            attachments: view
+                .attachments
+                .into_iter()
+                .map(ChatAttachmentDto::from)
                 .collect(),
         }
     }
@@ -4292,6 +4561,7 @@ mode = "full"
                 parent: None,
                 deliverable: None,
                 detach: false,
+                attachments: Vec::new(),
             };
             let accepted = accept_chat_turn(
                 &runtime,
@@ -7950,6 +8220,7 @@ mode = "full"
                 chat: Some("General".into()),
                 parent: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }))
             .is_none(),
             "the operator's own message must not reach the console over SSE"
@@ -8714,6 +8985,7 @@ mode = "full"
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),
@@ -9742,6 +10014,61 @@ mode = "full"
             vec![crate::ports::SYSTEM_AUTHOR.to_string()],
             "the runtime authored this notice, so it must not be stored under its destination"
         );
+    }
+
+    /// Codex review finding: a stream that errors mid-read used to fall
+    /// straight through to extraction on whatever partial bytes it had
+    /// collected. This pins the fix directly against a synthetic stream,
+    /// without needing a real workspace store behind it — a chunk, then an
+    /// error, must discard everything read so far rather than handing back
+    /// a truncated payload that looks complete.
+    #[tokio::test]
+    async fn drain_bounded_discards_everything_on_a_mid_stream_error() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"the first chunk read fine")),
+            Err(crate::error::OpenCompanyError::Store(
+                "transient read failure".to_string(),
+            )),
+        ];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(drain_bounded(synthetic, 1_000_000).await, None);
+    }
+
+    /// The success twin: a stream with no error drains to its bytes, in
+    /// order, across however many chunks it arrives in.
+    #[tokio::test]
+    async fn drain_bounded_concatenates_every_chunk_when_the_stream_never_errors() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"hello ")),
+            Ok(Bytes::from_static(b"world")),
+        ];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(
+            drain_bounded(synthetic, 1_000_000).await,
+            Some(b"hello world".to_vec())
+        );
+    }
+
+    /// A stream that never errors but exceeds the cap is also discarded, not
+    /// truncated — the belt-and-braces the doc comment describes.
+    #[tokio::test]
+    async fn drain_bounded_discards_when_the_stream_exceeds_the_cap() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> =
+            vec![Ok(Bytes::from_static(b"way more than the cap allows"))];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(drain_bounded(synthetic, 4).await, None);
     }
 
     /// A brain whose every reply names `@everyone` — the fixed shape for

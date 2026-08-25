@@ -1,4 +1,9 @@
-import type { ChatHistoryMessageDto, ChatMentionDto, TurnStep } from "@/api/types";
+import type {
+  AttachmentDto,
+  ChatHistoryMessageDto,
+  ChatMentionDto,
+  TurnStep,
+} from "@/api/types";
 
 /**
  * The company's main line, by thread id.
@@ -65,6 +70,14 @@ export interface ChatMessage {
    * `#/tasks/<id>`.
    */
   taskId?: string;
+  /**
+   * Files attached to this line (issue #1682), each a reference into the
+   * company workspace. Set on your own message from the composer's pending
+   * attachment (optimistic), and rehydrated from `chat/history` on reload so a
+   * bubble carries the same chips whichever way it reached the transcript.
+   * Absent on a line with no attachment.
+   */
+  attachments?: AttachmentDto[];
   /**
    * Who this line names (`@engineer`, `@Jane Doe`, `@everyone`), as the host
    * resolved them — spans plus a label, never a target id.
@@ -208,6 +221,7 @@ export function makeMessage(
     steps?: TurnStep[];
     taskId?: string;
     messageId?: string;
+    attachments?: AttachmentDto[];
     /** Mention spans the host resolved against this message, for chip rendering. */
     mentions?: Mention[];
   } = {},
@@ -221,6 +235,9 @@ export function makeMessage(
     parentId: opts.parentId,
     steps: opts.steps,
     taskId: opts.taskId,
+    // Issue #1682: an empty list is dropped to `undefined` so a line with no
+    // attachment stays exactly the shape it was before the field existed.
+    attachments: opts.attachments?.length ? opts.attachments : undefined,
     mentions: opts.mentions?.length ? opts.mentions : undefined,
   };
 }
@@ -346,6 +363,10 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // Only your own lines never have one — you did not open a card by
       // speaking.
       taskId: from === "you" ? undefined : entry.taskId,
+      // Rehydrate the operator's attachments (issue #1682) so a bubble carries
+      // the same chips on reload it showed live. Empty drops to `undefined`,
+      // keeping the pre-#1682 line shape.
+      attachments: entry.attachments?.length ? entry.attachments : undefined,
     };
   });
 }

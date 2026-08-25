@@ -1191,6 +1191,7 @@ fn chat(text: &str) -> CycleRequest {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         }],
         event_seqs: Vec::new(),
         policy: None,

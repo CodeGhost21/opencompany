@@ -321,6 +321,7 @@ mod tests {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         }
     }
 

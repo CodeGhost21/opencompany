@@ -27,6 +27,7 @@ use super::{
     connections, finances, inbox, memory_facts, skills, tasks, usage, workflows, workspace,
 };
 use crate::company::runtime::CompanyRuntime;
+use crate::ports::types::Attachment;
 use crate::ports::types::CompanyId;
 use crate::ports::types::TurnStep;
 use crate::server::chat_history::{self, MentionView, MessageView, ReactionView, Viewer};
@@ -619,6 +620,12 @@ pub struct MessageGql {
     /// Same [`MessageView`] field the REST route reads, so the two surfaces
     /// cannot disagree about who was mentioned.
     pub mentions: Vec<MessageMentionGql>,
+    /// Files attached to this message (issue #1682), each a reference into the
+    /// company workspace with the store-computed name / mime / size. Empty on a
+    /// reply, a system pill, and every operator message journaled before the
+    /// field existed. Same [`MessageView`] field the REST route reads, so the
+    /// two surfaces carry the same rows (issue #65).
+    pub attachments: Vec<MessageAttachmentGql>,
 }
 
 /// One mention on a history message. GraphQL mirror of the REST `mentions`
@@ -637,6 +644,36 @@ pub struct MessageMentionGql {
     pub mine: bool,
     /// Whether this mention renders but pings nobody.
     pub quiet: bool,
+}
+
+/// One file attached to a history message (issue #1682). GraphQL mirror of the
+/// REST `attachments` array, so the two surfaces carry the same rows. Every
+/// field is store-authored metadata; the bytes are fetched separately through
+/// the hardened `GET …/workspace/blob/{nodeId}` route.
+#[derive(SimpleObject)]
+#[graphql(name = "MessageAttachment")]
+pub struct MessageAttachmentGql {
+    /// The workspace node id the payload is stored under.
+    pub node_id: ID,
+    /// The stored file's display name.
+    pub name: String,
+    /// The stored payload's media type.
+    pub mime: String,
+    /// The stored payload's exact length in bytes.
+    pub size: f64,
+}
+
+impl From<Attachment> for MessageAttachmentGql {
+    fn from(attachment: Attachment) -> Self {
+        MessageAttachmentGql {
+            node_id: ID(attachment.node_id),
+            name: attachment.name,
+            mime: attachment.mime,
+            // GraphQL has no 64-bit integer; `Float` carries a byte count
+            // exactly up to 2^53, far past any file this route will store.
+            size: attachment.size as f64,
+        }
+    }
 }
 
 impl From<MentionView> for MessageMentionGql {
@@ -741,6 +778,11 @@ impl From<MessageView> for MessageGql {
                 .mentions
                 .into_iter()
                 .map(MessageMentionGql::from)
+                .collect(),
+            attachments: view
+                .attachments
+                .into_iter()
+                .map(MessageAttachmentGql::from)
                 .collect(),
         }
     }

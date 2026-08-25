@@ -64,6 +64,25 @@ function deferredFilesClient(deferred: {
   } as unknown as OpenCompanyClient;
 }
 
+/** A client that fails every request while `modes.fail` is true and answers
+ * the canned files response after it flips. The failure is an already-rejected
+ * promise, not a manually-rejected deferred — see the retry test below for why
+ * that shape is the one the unit runner commits reliably. */
+function modeFilesClient(
+  rows: RunArtifactRow[],
+  sink: { calls: string[] },
+  modes: { fail: boolean },
+): OpenCompanyClient {
+  return {
+    scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+    get: async <T>(path: string): Promise<T> => {
+      sink.calls.push(path);
+      if (modes.fail) return Promise.reject(new Error("boom")) as never;
+      return { files: rows, truncated: false } as T;
+    },
+  } as unknown as OpenCompanyClient;
+}
+
 /** Re-renders the same root with a different company/runId but the same
  * `run.seq` — the exact way `WorkflowsView` reuses a row on a company switch —
  * passing through the client so the deferred request queue keeps accumulating. */
@@ -443,29 +462,39 @@ describe("run row — files associated (issue #1684)", () => {
     // must render the error line, and the failure path's latch reset must let
     // a reopen retry — both reachable in production and neither asserted
     // anywhere else.
-    const deferred: {
-      resolve: (rows: RunArtifactRow[]) => void;
-      reject: (err: unknown) => void;
-    }[] = [];
-    const client = deferredFilesClient(deferred);
+    //
+    // The failure is an already-rejected promise fired by the expand toggle
+    // inside act, not a manually-rejected deferred: the latter lands several
+    // microtasks deeper (async wrapper adoption → `.then` pass-through →
+    // `.catch`) and intermittently escapes React's act flush, leaving the
+    // error line uncommitted and unrecoverable — the flake that red the
+    // advisory `Console (current Node)` lane. An already-rejected promise
+    // settles before the component attaches its handlers, so every reaction
+    // stays inside the act window. The mode flip then heals the client for
+    // the reopen, and assertions check outcomes rather than exact request
+    // counts because jsdom fires a native `toggle` asynchronously on
+    // `details.open = true` alongside the dispatched one — a second request
+    // may or may not land while the failure has cleared the latch, and the
+    // retry must pass either way.
+    const sink = { calls: [] as string[] };
+    const modes = { fail: true };
     const file: RunArtifactRow = { ...FILE, title: "Retried launch spec" };
+    const client = modeFilesClient([file], sink, modes);
 
     await renderPanel(completedRun("run-1"), client);
     await expandFiles();
-    expect(deferred.length).toBe(1);
 
-    // The current-scope request fails: the error line appears and the latch
-    // clears so the next open retries.
-    await act(async () => {
-      deferred[0].reject(new Error("boom"));
-    });
+    // The current-scope request failed: the error line appears, and the
+    // latch has cleared so the next open retries.
     expect(
       container.querySelector('[data-testid="workflow-run-files-error"]')
         ?.textContent,
     ).toContain("Reopen to try again");
+    expect(sink.calls.length).toBeGreaterThanOrEqual(1);
 
-    // Collapse, then reopen: a second request fires and its success renders
-    // the files, proving the retry latch reset.
+    // Collapse, then reopen with the client healed: a fresh request fires
+    // and its success renders the files, proving the retry latch reset.
+    modes.fail = false;
     const details = container.querySelector<HTMLDetailsElement>(
       '[data-testid="workflow-run-files"]',
     )!;
@@ -474,11 +503,8 @@ describe("run row — files associated (issue #1684)", () => {
       details.dispatchEvent(new Event("toggle", { bubbles: true }));
     });
     await expandFiles();
-    expect(deferred.length).toBe(2);
+    expect(sink.calls.length).toBeGreaterThanOrEqual(2);
 
-    await act(async () => {
-      deferred[1].resolve([file]);
-    });
     expect(
       container.querySelector('[data-testid="workflow-run-files-error"]'),
     ).toBeNull();

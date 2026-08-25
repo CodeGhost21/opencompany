@@ -320,6 +320,56 @@ fn is_zero_depth(depth: &u8) -> bool {
     *depth == 0
 }
 
+/// One file attached to a chat message (issue #1682).
+///
+/// A **reference**, not the bytes. The payload lives as an ordinary binary
+/// [`WorkspaceNode`](crate::ports::workspace::WorkspaceNode) in the sending
+/// company's own workspace blob store, and this carries only what a transcript
+/// needs to render a chip and reach that payload: the node's id plus the
+/// name / mime / size the store computed. The renderer downloads through the
+/// existing hardened `GET …/workspace/blob/{node_id}` serve (issue #667 —
+/// `nosniff` + a closed inline allow-list), so no second blob path is added and
+/// none needs securing.
+///
+/// **Server-authored on every field.** The send route is handed a `node_id`
+/// only; it re-resolves that id within the sending company's tree and copies
+/// name / mime / size straight from the store, discarding anything the client
+/// claimed. A reference that resolves to no binary node in *this* company is a
+/// `400`, on the same terms a bad thread `parent` is — so a stale or hostile
+/// client cannot cross a company boundary (IDOR) or misdescribe a payload
+/// (mime/size spoof). See `accept_chat_turn` in [`crate::server::operator`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    /// The workspace node id the payload is stored under.
+    ///
+    /// Server-generated (`generate_id`) when the file was uploaded, never a
+    /// client-chosen string — so no value here ever reaches a filesystem path.
+    pub node_id: String,
+    /// The stored file's display name, taken from the workspace node — never
+    /// the filename the browser sent with the upload.
+    pub name: String,
+    /// The stored payload's media type, taken from the workspace node.
+    pub mime: String,
+    /// The stored payload's exact length in bytes, as the store computed it.
+    pub size: u64,
+    /// The payload's text, extracted server-side at resolve time, capped to a
+    /// wire-safe length (issue #1682, codex review finding).
+    ///
+    /// A node id alone told a hosted or sidecar brain a file existed but gave
+    /// it nothing to act on — no device tool bridges that surface into the
+    /// workspace's binary store. This reuses the same `ingest::extract`
+    /// pipeline the memory-drop page already runs, so a PDF, DOCX, PPTX, XLSX
+    /// or plain-text attachment's actual words ride the same event the
+    /// reference does. `None` covers three cases alike: an image or other
+    /// format nothing here parses, a scanned document with no text layer, and
+    /// a payload too large to read for one chat turn — the caller cannot tell
+    /// which, and for "does the brain have something to read" it does not
+    /// need to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
+}
+
 /// An operator's resolution of a parked approval.
 ///
 /// The HTTP body uses the lowercase strings `"approve"` / `"deny"`. The
@@ -501,6 +551,23 @@ pub enum CompanyEvent {
         /// stored record migrates.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<Mention>,
+        /// Files the operator attached to this message (issue #1682), resolved
+        /// to durable workspace references at send time.
+        ///
+        /// Each [`Attachment`] names a binary
+        /// [`WorkspaceNode`](crate::ports::workspace::WorkspaceNode) in this
+        /// company's own workspace, carrying the name / mime / size the store
+        /// computed — never a value the client supplied. The route re-resolves
+        /// every `node_id` within the sending company's tree before this is
+        /// journaled, so a reference here cannot point outside the company or
+        /// misdescribe its payload.
+        ///
+        /// Additive on exactly the `by` / `chat` / `parent` / `deliverable` /
+        /// `mentions` terms above: an empty list is skipped, so every
+        /// already-persisted message serializes byte-for-byte as it did before
+        /// this field, and no stored record migrates.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
     },
     /// A turn was **accepted** for an operator message (issue #983) — the
     /// transcript line that says the company took the work on.
@@ -4651,6 +4718,7 @@ mod test {
             parent: None,
             deliverable: None,
             mentions: Vec::new(),
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert_eq!(json, r#"{"kind":"OperatorMessage","text":"hello"}"#);
@@ -5208,6 +5276,7 @@ mod test {
             by: None,
             chat: Some("studio".into()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&threaded).unwrap();
         assert!(json.contains(r#""parent":41"#), "{json}");
@@ -5379,6 +5448,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: Some(MessageIntent::Chat),
+            attachments: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&chatting).unwrap(),
@@ -5399,6 +5469,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&unmarked).unwrap(),
@@ -5422,6 +5493,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }
         );
     }
@@ -5438,6 +5510,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
@@ -5457,6 +5530,7 @@ mod test {
             }),
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["by"]["kind"], "user");
@@ -5485,6 +5559,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),
@@ -7810,5 +7885,113 @@ mod test {
         assert!(card.name.is_empty());
         assert!(card.payment_requirements.is_empty());
         assert!(card.supported_interfaces.is_empty());
+    }
+
+    /// Issue #1682: an attachment round-trips on an `OperatorMessage`, and an
+    /// empty list serializes *away* — the additive shape that makes the field
+    /// zero-migration, on exactly the terms `mentions` / `deliverable` proved
+    /// for themselves above.
+    #[test]
+    fn operator_message_attachments_round_trip_and_skip_when_empty() {
+        // Empty is absent: a message with no attachment serializes byte-for-byte
+        // as it did before the field existed.
+        let bare = CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"hi"}"#,
+            "an empty attachment list must not appear on the wire"
+        );
+
+        // A carried attachment survives the round trip with every field intact.
+        let carried = CompanyEvent::OperatorMessage {
+            text: "see attached".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: vec![Attachment {
+                node_id: "node-1".into(),
+                name: "diagram.png".into(),
+                mime: "image/png".into(),
+                size: 2048,
+                extracted_text: None,
+            }],
+        };
+        let json = serde_json::to_string(&carried).unwrap();
+        assert!(json.contains(r#""nodeId":"node-1""#), "{json}");
+        assert!(json.contains(r#""mime":"image/png""#), "{json}");
+        let back: CompanyEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            CompanyEvent::OperatorMessage { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].name, "diagram.png");
+                assert_eq!(attachments[0].size, 2048);
+            }
+            other => panic!("expected OperatorMessage, got {other:?}"),
+        }
+
+        // A pre-#1682 record with no `attachments` key still loads, as an empty
+        // list — the `#[serde(default)]` half of the contract.
+        let legacy = r#"{"kind":"OperatorMessage","text":"hi"}"#;
+        match serde_json::from_str::<CompanyEvent>(legacy).unwrap() {
+            CompanyEvent::OperatorMessage { attachments, .. } => assert!(attachments.is_empty()),
+            other => panic!("expected OperatorMessage, got {other:?}"),
+        }
+    }
+
+    /// Codex review finding on #1682, round 2: `extracted_text` is a later
+    /// addition to `Attachment` itself, so it needs the identical
+    /// omit-when-absent / default-on-load contract `attachments` got above —
+    /// a record journaled by the first round of the fix (a reference with no
+    /// extracted text) must still load, and a `None` must not put a stray key
+    /// on the wire.
+    #[test]
+    fn attachment_extracted_text_round_trips_and_skips_when_absent() {
+        let no_text = Attachment {
+            node_id: "node-1".into(),
+            name: "photo.png".into(),
+            mime: "image/png".into(),
+            size: 2048,
+            extracted_text: None,
+        };
+        let json = serde_json::to_string(&no_text).unwrap();
+        assert!(
+            !json.contains("extractedText"),
+            "no extracted text must not appear on the wire: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Attachment>(&json).unwrap(), no_text);
+
+        let with_text = Attachment {
+            node_id: "node-2".into(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 4096,
+            extracted_text: Some("Q3 revenue grew 12%.".to_string()),
+        };
+        let json = serde_json::to_string(&with_text).unwrap();
+        assert!(
+            json.contains(r#""extractedText":"Q3 revenue grew 12%.""#),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Attachment>(&json).unwrap(),
+            with_text
+        );
+
+        // A round 1 record (the reference alone, no `extractedText` key) still
+        // loads, defaulting to `None` — the same contract `attachments` itself
+        // got when it was added onto `OperatorMessage`.
+        let round_one = r#"{"nodeId":"node-3","name":"old.png","mime":"image/png","size":10}"#;
+        let loaded: Attachment = serde_json::from_str(round_one).unwrap();
+        assert_eq!(loaded.extracted_text, None);
     }
 }

@@ -2884,6 +2884,7 @@ mod test {
                     parent: None,
                     deliverable: None,
                     mentions: Vec::new(),
+                    attachments: Vec::new(),
                 },
             )
         }
@@ -2942,6 +2943,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable,
+            attachments: Vec::new(),
         };
         let text_of = |event: &CompanyEvent| match event {
             CompanyEvent::OperatorMessage { text, .. } => text.clone(),
@@ -3026,6 +3028,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable,
+            attachments: Vec::new(),
         };
 
         let workflow = rt
@@ -3281,6 +3284,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -3821,6 +3825,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -3858,6 +3863,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -3891,6 +3897,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }
         );
 
@@ -3970,6 +3977,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4032,6 +4040,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4098,6 +4107,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4411,6 +4421,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4457,6 +4468,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4790,6 +4802,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4871,6 +4884,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4929,6 +4943,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -4991,6 +5006,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -5063,6 +5079,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -5155,6 +5172,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -5441,6 +5459,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
             "operator-message"
         );
@@ -5469,6 +5488,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
             two.run_cycle(vec![CompanyEvent::OperatorMessage {
                 mentions: Vec::new(),
@@ -5477,6 +5497,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
         );
         assert_eq!(ra.unwrap().responses.len(), 1);
@@ -5529,6 +5550,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -5854,6 +5876,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         // The company's own machinery stays Internal, event by event: a
         // payment landing is the company's ledger speaking, not third-party
@@ -5885,6 +5908,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(cycle_is_external(&[a2a()]));
         assert!(cycle_is_external(&[operator(), a2a()]));
@@ -6523,6 +6547,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
 
         // A dispatch names the card outright.
@@ -6730,6 +6755,7 @@ mod test {
             by: None,
             chat: Some(chat.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let unaddressed = || CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
@@ -6738,6 +6764,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -6948,6 +6975,7 @@ mod test {
             by: None,
             chat: Some(chat.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -7411,6 +7439,7 @@ mod test {
             by: None,
             chat: Some("Engineering".into()),
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7424,6 +7453,7 @@ mod test {
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7486,6 +7516,7 @@ mod test {
             by: None,
             chat: Some("eng".into()),
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7566,6 +7597,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -7602,6 +7634,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -8087,6 +8120,7 @@ mod test {
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -8315,6 +8349,7 @@ mod test {
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let messages = |stored: &[crate::ports::types::StoredEvent]| -> Vec<String> {
             stored
@@ -8408,6 +8443,7 @@ mod test {
                     chat: None,
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -8422,6 +8458,7 @@ mod test {
                     chat: None,
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )],
             Some("turn-1".to_string()),
