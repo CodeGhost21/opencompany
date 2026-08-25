@@ -3265,6 +3265,13 @@ impl crate::ports::notifications::NotificationStore for MongoStore {
                     "subject_id": notification.subject.id.as_str(),
                     "title": notification.title.as_str(),
                     "created_ms": notification.created_at as i64,
+                    // Absent (not null) for a company-wide row, so a document
+                    // written before this field and one written after it read
+                    // back identically.
+                    "audience": notification.audience.as_ref().map(|a| {
+                        a.iter().map(|id| mongodb::bson::Bson::String(id.clone())).collect::<Vec<_>>()
+                    }),
+                    "context": notification.context.as_deref(),
                 }},
             )
             .with_options(UpdateOptions::builder().upsert(true).build())
@@ -3319,10 +3326,22 @@ impl crate::ports::notifications::NotificationStore for MongoStore {
                     },
                     created_at: d.get_i64("created_ms").unwrap_or_default() as u64,
                     title: get_str(&d, "title")?,
+                    audience: d.get_array("audience").ok().map(|a| {
+                        a.iter()
+                            .filter_map(|b| b.as_str().map(str::to_string))
+                            .collect()
+                    }),
+                    context: d.get_str("context").ok().map(str::to_string),
                 },
                 read_at,
             });
         }
+        // Filtered here rather than in the query, so the audience rule lives in
+        // exactly one place (`Notification::visible_to`) across all three
+        // backends. A company's feed is small; if that stops being true, the
+        // server-side form is `{$or: [{audience: {$exists: false}}, {audience: user}]}`
+        // and must be introduced *with* a conformance case, not instead of one.
+        out.retain(|view| view.notification.visible_to(user));
         Ok(out)
     }
 
@@ -3350,18 +3369,13 @@ impl crate::ports::notifications::NotificationStore for MongoStore {
                 }
                 present
             }
-            None => {
-                let mut cursor = self
-                    .collection("notifications")
-                    .find(doc! {"company_id": company.as_ref()})
-                    .await
-                    .map_err(mongo_err)?;
-                let mut all = Vec::new();
-                while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
-                    all.push(get_str(&d, "id")?);
-                }
-                all
-            }
+            // Only what this person can see. Reuses the same projection `list`
+            // does, so "mark all read" and "what is listed" cannot disagree.
+            None => crate::ports::notifications::NotificationStore::list(self, company, user)
+                .await?
+                .into_iter()
+                .map(|v| v.notification.id)
+                .collect(),
         };
         for id in &targets {
             // `$setOnInsert` is the latch: it seeds `read_ms` only when the
@@ -3448,19 +3462,22 @@ impl MongoStore {
         }
     }
 
-    /// Uploads `bytes` as this node's payload and returns nothing.
+    /// Uploads `bytes` as this node's payload and returns the GridFS file id.
     ///
     /// The blob is written **before** the node document that names it, on both
     /// the create and the replace path. See
     /// [`create_binary`](crate::ports::workspace::WorkspaceStore::create_binary)
-    /// on this type for why that direction.
+    /// on this type for why that direction. The id names exactly the upload
+    /// this call made, so a caller that must reclaim its own payload on a
+    /// losing insert can do so without touching a concurrent writer's blob for
+    /// the same node.
     async fn put_blob(
         &self,
         company: &CompanyId,
         node_id: &str,
         filename: &str,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<mongodb::bson::Bson> {
         use futures::io::AsyncWriteExt;
         let mut upload = self
             .blobs()
@@ -3471,6 +3488,10 @@ impl MongoStore {
             })
             .await
             .map_err(mongo_err)?;
+        // The id is minted when the stream opens and is the files-collection
+        // `_id` the close commits — capture it here, before close, because the
+        // caller may need to delete exactly this upload.
+        let id = upload.id().clone();
         upload
             .write_all(bytes)
             .await
@@ -3482,6 +3503,36 @@ impl MongoStore {
             .close()
             .await
             .map_err(|e| mongo_err(format!("closing a workspace blob failed: {e}")))?;
+        Ok(id)
+    }
+
+    /// Removes exactly the payload one call uploaded, not every payload for
+    /// the node id.
+    ///
+    /// The conflict path of a same-id `create_binary` race must not reclaim
+    /// the winning call's bytes (issue #1694): both racers uploaded under the
+    /// same fresh node id, so a sweep over the id would take the winner's
+    /// payload down with the loser's. The tenancy+node filter is the same
+    /// isolation boundary as [`blob_filter`](MongoStore::blob_filter) — a
+    /// stray id must never be deletable without proving which node owns it.
+    async fn delete_blob(
+        &self,
+        company: &CompanyId,
+        node_id: &str,
+        file_id: &mongodb::bson::Bson,
+    ) -> Result<()> {
+        let bucket = self.blobs();
+        let file = bucket
+            .find_one(doc! {
+                "_id": file_id,
+                "metadata.company_id": company.as_ref(),
+                "metadata.node_id": node_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        if let Some(file) = file {
+            bucket.delete(file.id).await.map_err(mongo_err)?;
+        }
         Ok(())
     }
 
@@ -3890,7 +3941,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 }
             }
         }
-        self.put_blob(company, &node.id, &node.name, bytes).await?;
+        let file_id = self.put_blob(company, &node.id, &node.name, bytes).await?;
         let mut document = doc! {
             "company_id": company.as_ref(),
             "node_id": &node.id,
@@ -3902,19 +3953,39 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         if let Some(key) = node_path_key(&node) {
             document.insert("file_path_key", key);
         }
-        self.collection("workspace_nodes")
+        if let Err(err) = self
+            .collection("workspace_nodes")
             .insert_one(document)
             .await
-            // Issue #894, as in `create`.
-            .map_err(|e| {
-                if is_duplicate_key(&e) {
-                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
-                        &node.name,
-                    ))
-                } else {
-                    mongo_err(e)
-                }
-            })?;
+        {
+            if !is_duplicate_key(&err) {
+                return Err(mongo_err(err));
+            }
+            // Issue #894, as in `create` — but the blob uploaded above now has
+            // no node document, which on this backend is the exact state the
+            // boot sweep exists to reclaim. The sweep only runs at store
+            // construction and spares blobs younger than an hour, so a repeated
+            // name conflict (the chat-attachment flow's retry under a fresh id)
+            // would otherwise strand the full payload as invisible GridFS disk
+            // until some later restart. Reclaim it here instead, but ONLY the
+            // upload this losing call made: a concurrent `create_binary` racing
+            // the same fresh node id has uploaded its own payload under that id
+            // too (issue #1694), and a sweep over the id would take the
+            // winner's bytes down with the loser's. Best-effort: a drop failure
+            // still leaves the sweep to finish the job, and the conflict is the
+            // outcome the caller is owed either way.
+            if let Err(drop_err) = self.delete_blob(company, &node.id, &file_id).await {
+                tracing::warn!(
+                    company = %company,
+                    node_id = %node.id,
+                    error = %drop_err,
+                    "workspace create_binary conflict left its GridFS payload for the boot sweep"
+                );
+            }
+            return Err(OpenCompanyError::Conflict(
+                crate::ports::workspace::duplicate_file_refusal(&node.name),
+            ));
+        }
         // The stamped node, so the digest a caller records can only have come
         // from the store (issue #668).
         Ok(node)
@@ -5099,6 +5170,196 @@ mod test {
             }
         }
         assert_eq!(got, b"in-flight-bytes".to_vec());
+
+        drop_db(&s).await;
+    }
+
+    /// A `create_binary` name conflict must not strand the payload it just
+    /// uploaded.
+    ///
+    /// This backend writes blob-first (issue #894), so a sibling-name collision
+    /// is detected only when the node-document insert fails — by which time the
+    /// bytes are already in GridFS. Before the conflict path reclaimed them, the
+    /// error returned with that blob still present: no node document referenced
+    /// it, and the boot sweep (which runs only at store construction, and only
+    /// for blobs older than an hour) was the sole reclaim path. The
+    /// chat-attachment flow reaches this branch every time a repeated filename
+    /// is disambiguated and retried, so a long-lived tenant would accumulate
+    /// invisible GridFS copies. The conflict path must own the payload it
+    /// uploaded before the caller learns of the conflict.
+    #[tokio::test]
+    async fn a_name_conflict_reclaims_the_blob_it_just_uploaded() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("conflict-co");
+
+        let first = crate::ports::workspace::WorkspaceNode {
+            id: "winner".to_string(),
+            name: "image.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+        crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &first, b"first")
+            .await
+            .unwrap();
+
+        let loser = crate::ports::workspace::WorkspaceNode {
+            id: "loser".to_string(),
+            ..first.clone()
+        };
+        let err = crate::ports::workspace::WorkspaceStore::create_binary(
+            &*s, &company, &loser, b"second",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::error::OpenCompanyError::Conflict(_)),
+            "a taken sibling name is a Conflict, not a storage fault: {err:?}"
+        );
+
+        // The loser's payload must not survive the conflict as an orphan.
+        let files = s
+            .blobs()
+            .find(MongoStore::blob_filter(&company, "loser"))
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            files.len(),
+            0,
+            "the conflicted upload leaves no orphan blob for the sweep to find later"
+        );
+
+        // The winner still serves its bytes.
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&*s, &company, "winner")
+                .await
+                .unwrap()
+                .expect("the winner's payload is untouched by the refusal");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, b"first".to_vec());
+
+        drop_db(&s).await;
+    }
+
+    /// A same-id `create_binary` race must not reclaim the winning payload.
+    ///
+    /// Two callers racing the same fresh node id both pass the `contains_key`
+    /// pre-check (neither document is visible when the reads land), both upload
+    /// a GridFS payload under that id, and the node-document insert then loses
+    /// on the unique `(company_id, node_id)` index for exactly one of them.
+    /// The loser's conflict cleanup used to sweep *every* blob for the id —
+    /// including the winner's, the bytes its live node now points at — leaving
+    /// the download irrecoverable on hosted MongoDB deployments. The cleanup
+    /// must name and delete only the upload this losing call made.
+    ///
+    /// Spawned rather than staged: the whole point is the interleaving, and the
+    /// runtime guarantees it here — each racer awaits a database read before
+    /// either inserts, so both `contains_key` checks necessarily see the empty
+    /// tree regardless of which document insert finally wins.
+    #[tokio::test]
+    async fn a_same_id_race_preserves_the_winning_payload() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("dupe-race-co");
+
+        let node = crate::ports::workspace::WorkspaceNode {
+            id: "dupe".to_string(),
+            name: "dupe.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+
+        let racer_a = {
+            let s = s.clone();
+            let company = company.clone();
+            let node = node.clone();
+            tokio::spawn(async move {
+                crate::ports::workspace::WorkspaceStore::create_binary(
+                    &*s,
+                    &company,
+                    &node,
+                    b"payload-a",
+                )
+                .await
+            })
+        };
+        let racer_b = {
+            let s = s.clone();
+            let company = company.clone();
+            let node = node.clone();
+            tokio::spawn(async move {
+                crate::ports::workspace::WorkspaceStore::create_binary(
+                    &*s,
+                    &company,
+                    &node,
+                    b"payload-b",
+                )
+                .await
+            })
+        };
+
+        let (outcome_a, outcome_b) = (racer_a.await.unwrap(), racer_b.await.unwrap());
+        assert_eq!(
+            outcome_a.is_ok() as u8 + outcome_b.is_ok() as u8,
+            1,
+            "exactly one same-id caller wins the insert; the other must be a Conflict"
+        );
+
+        // The survivor's node still serves its bytes: the loser's cleanup
+        // deleted only its own upload, never the winner's.
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&*s, &company, "dupe")
+                .await
+                .unwrap()
+                .expect("the winning payload survives the same-id race");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert!(
+            got == b"payload-a" || got == b"payload-b",
+            "the surviving payload is exactly one racer's, not a mix: {got:?}"
+        );
+
+        // And exactly one blob remains for the id — the losing upload is gone,
+        // the winner's is untouched.
+        let files = s
+            .blobs()
+            .find(MongoStore::blob_filter(&company, "dupe"))
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            files.len(),
+            1,
+            "the losing upload is reclaimed without touching the winner's"
+        );
 
         drop_db(&s).await;
     }

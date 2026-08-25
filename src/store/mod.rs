@@ -85,8 +85,9 @@ pub use layout::DataLayout;
 pub use migrate::migrate_legacy_nest_announced;
 pub use paths::{Bundle, DATA_DIR_ENV, home_divergence_warning, resolve_home};
 pub use select::{
-    MemoryBackend, MemoryOverlay, MemorySelection, StorageHandles, StorageKind, StorageSettings,
-    open_memory_overlay, open_storage, plaintext_secret_refusal, refuse_bundle_env,
+    MemoryBackend, MemoryOverlay, MemoryScopes, MemorySelection, StorageHandles, StorageKind,
+    StorageSettings, open_memory_overlay, open_storage, plaintext_secret_refusal,
+    refuse_bundle_env,
 };
 
 #[cfg(feature = "sqlite")]

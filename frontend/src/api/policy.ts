@@ -40,10 +40,18 @@ export interface PolicyStatus {
    * over every tier, `full` included.
    */
   alwaysApprove: string[];
+  /** Spend strictly under this amount without an approval; `null` means no cap. */
+  autoApproveUnderUsd: number | null;
+  /** How long an undecided approval remains actionable. */
+  approvalTtlHours: number;
   /** The manifest's tier, so "reset" can name what it would restore. */
   manifestMode: string;
   /** The manifest's always-ask list, for the same reason. */
   manifestAlwaysApprove: string[];
+  /** The manifest's spend cap before a console override. */
+  manifestAutoApproveUnderUsd: number | null;
+  /** The manifest's configured deadline, or `null` when it uses the default. */
+  manifestApprovalTtlHours: number | null;
   /**
    * Whether an operator override is in force.
    *
@@ -89,6 +97,10 @@ export interface PolicyStatus {
 export interface SetPolicyInput {
   mode?: string | null;
   alwaysApprove?: string[] | null;
+  /** `null` means no spend cap; omit to leave the cap alone. */
+  autoApproveUnderUsd?: number | null;
+  /** `null` stops overriding the deadline; omit to leave it alone. */
+  approvalTtlHours?: number | null;
 }
 
 /** The company's effective policy. */

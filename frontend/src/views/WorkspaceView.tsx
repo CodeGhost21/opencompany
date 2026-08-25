@@ -55,6 +55,7 @@ import {
   type WorkspaceFile,
   type WorkspaceOrigin,
 } from "@/api/workspace";
+import { cachedAvatarNodeIds, forgetAvatarNode } from "@/lib/avatar";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -421,6 +422,11 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [nodes, setNodes] = useState<FsNode[]>([]);
+  // Ref mirror used by async tree refreshes: comparing the last authoritative
+  // tree with the new one must not make `loadTree` depend on state and replay
+  // every live-write effect. It also lets remote deletions invalidate cached
+  // uploaded faces, not only deletes initiated by this view.
+  const nodesRef = useRef<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -525,6 +531,21 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       try {
         const tree = await fetchTree(client, company);
         if (mine !== treeGen.current) return null;
+        const nextIds = new Set(tree.map((node) => node.id));
+        for (const previous of nodesRef.current) {
+          if (!nextIds.has(previous.id)) forgetAvatarNode(client, company, previous.id);
+        }
+        // On a fresh mount there is no previous tree to diff — the ref starts
+        // empty — so a face whose node was deleted while this view was
+        // unmounted would otherwise stay cached for the life of the tab. The
+        // module cache is revalidated against this authoritative tree once;
+        // from the next load the diff above carries the job.
+        if (nodesRef.current.length === 0) {
+          for (const id of cachedAvatarNodeIds(client, company)) {
+            if (!nextIds.has(id)) forgetAvatarNode(client, company, id);
+          }
+        }
+        nodesRef.current = tree;
         setNodes(tree);
         setError(null);
         if (!expandedSeeded.current) {
@@ -629,6 +650,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // Mount / company change: reset every scoped piece of state, then load.
   useEffect(() => {
     expandedSeeded.current = false;
+    nodesRef.current = [];
     setNodes([]);
     setOpenId(null);
     setOpenFile(null);
@@ -1234,6 +1256,11 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     try {
       await deleteNodeApi(client, company, node.id);
       setNodes((all) => all.filter((n) => !removed.has(n.id)));
+      nodesRef.current = nodesRef.current.filter((n) => !removed.has(n.id));
+      // A deleted node may be somebody's chosen face (`blob:<nodeId>`); drop
+      // it from the avatar cache so the next render degrades to the tone
+      // tile rather than keeping a face whose file just ceased to exist.
+      for (const id of removed) forgetAvatarNode(client, company, id);
       if (openId && removed.has(openId)) {
         buffer.clear();
         setOpenId(null);

@@ -6,10 +6,15 @@ import {
   CaseSensitive,
   Code,
   Italic,
+  Loader2,
+  Paperclip,
   Strikethrough,
+  X,
 } from "lucide-react";
 
 import type { MessageIntent } from "@/api/tasks";
+import type { AttachmentDto } from "@/api/types";
+import { formatBytes } from "@/api/workspace";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MentionPicker } from "@/views/chat/MentionPicker";
@@ -31,7 +36,25 @@ import {
 interface Props {
   placeholder: string;
   disabled?: boolean;
-  onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
+  /**
+   * May report whether the send actually journaled (issue #1682, codex
+   * review round 4): `true` means it definitely did; `false` means the host
+   * definitely never saw it (refused before any journal write — safe to
+   * clean up an attachment it carried); `undefined` means the outcome is
+   * AMBIGUOUS — a network drop, a timeout, an aborted request — where the
+   * message may well have landed even though this call could not confirm it.
+   * The composer only ever deletes an attachment on an explicit `false`.
+   * Treating `undefined` as "not sent" would risk deleting the node out from
+   * under a message that was actually delivered — a worse bug than the rare
+   * orphaned upload this declines to clean up. `void` (the thread and
+   * copilot composers, which never attach) is "nothing to reconcile."
+   */
+  onSend: (
+    text: string,
+    intent?: MessageIntent,
+    attachments?: AttachmentDto[],
+    mentions?: Mention[],
+  ) => void | Promise<boolean | undefined>;
   /** A new revision replaces the draft and focuses the composer. */
   prefill?: { text: string; revision: number };
   /**
@@ -76,6 +99,44 @@ interface Props {
    * back as a refusal. The control was the only part missing.
    */
   deliverableChoice?: boolean;
+  /**
+   * Upload one attachment's bytes and hand back its stored reference (issue
+   * #1682). Given only where attaching makes sense — the channel and DM
+   * composers — so the paperclip is present exactly when the surface can carry
+   * a file. The composer holds the returned reference as a pending chip and
+   * threads it onto the next `onSend`; the actual upload/verify lives in
+   * `ChatView`.
+   */
+  uploadAttachment?: (file: File) => Promise<AttachmentDto>;
+  /**
+   * Delete a staged attachment's stored node once it is no longer going to be
+   * sent (issue #1682, codex review finding).
+   *
+   * An upload lands — and is charged against the workspace quota — the
+   * instant it succeeds, before the operator has sent anything. Called when
+   * the pending chip's Remove is clicked, when a fresh pick replaces it, and
+   * when the composer unmounts still holding one — every path that drops the
+   * local reference without a send ever claiming the node.
+   */
+  deleteAttachment?: (nodeId: string) => void;
+}
+
+/**
+ * A staged attachment together with the scope-bound delete that must free it.
+ *
+ * `deleteAttachment` is re-bound when the surrounding view switches company or
+ * connection, while this composer stays mounted; the unmount cleanup below is
+ * mounted only once and captured the *first* callback. Holding the node alone
+ * would therefore delete the new company's node through the old company's
+ * callback (orphaning it) or an old node through the new callback (targeting
+ * the wrong workspace) once the scope moves mid-staging. Capturing the delete
+ * alongside the reference keeps every cleanup on the company that owns the
+ * upload (codex review finding on #1682).
+ */
+interface PendingAttachment {
+  reference: AttachmentDto;
+  /** Same optionality as the `deleteAttachment` prop it mirrors. */
+  delete?: (nodeId: string) => void;
 }
 
 /** The markdown a toolbar button wraps the selection in. */
@@ -146,8 +207,44 @@ export function MessageComposer({
   deliverableChoice,
   mentionables,
   onTyping,
+  uploadAttachment,
+  deleteAttachment,
 }: Props) {
   const [draft, setDraft] = useState("");
+  // The single file staged for the next send (issue #1682). v1 carries one
+  // attachment per message, so a fresh pick replaces the last rather than
+  // appending — the wire (`Vec<Attachment>`) already allows more when the UI
+  // grows to it. Held WITH the scope-bound delete that must clean it up (see
+  // `PendingAttachment`).
+  const [pending, setPending] = useState<PendingAttachment | null>(null);
+  // Mirrors `pending` for the unmount cleanup below, which needs the latest
+  // value inside a closure captured once at mount.
+  const pendingRef = useRef<PendingAttachment | null>(null);
+  // Whether this instance is still mounted, checked after every `await`
+  // (issue #1682, codex review finding). Without it, an upload that lands
+  // after the operator has already navigated away resolves into a
+  // continuation on a dead component: the unmount cleanup below ran and saw
+  // nothing pending, so nothing would ever free the node that upload just
+  // charged against the quota.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  // The cleanup callback for the scope currently on screen. `ChatView`
+  // re-binds `deleteAttachment` (and `uploadAttachment`) when the company or
+  // connection changes while this composer stays mounted; an in-flight
+  // upload's continuation compares its captured callback against this to know
+  // whether the scope it was sent to is still the one showing before staging
+  // the result (codex review finding).
+  const scopeDeleteRef = useRef(deleteAttachment);
+  scopeDeleteRef.current = deleteAttachment;
+  // The upload is in flight: the paperclip spins and Send waits, so a message
+  // cannot post ahead of the bytes it references.
+  const [uploading, setUploading] = useState(false);
+  const [attachError, setAttachError] = useState<string>();
+  const fileInput = useRef<HTMLInputElement>(null);
   // What the draft currently resolves to. Reconciled on every edit, so editing
   // or backspacing through a chip un-mentions it rather than leaving a ping
   // for somebody whose name is no longer in the message.
@@ -273,9 +370,40 @@ export function MessageComposer({
     });
   }
 
+  // Deletes a staged attachment that never made it onto a sent message (issue
+  // #1682, codex review finding): removing it, replacing it with a fresh
+  // pick, or leaving the composer all drop the local reference while the
+  // upload stays live on the server, charged against the workspace quota
+  // forever. Centralized here so every one of those paths — not just the
+  // Remove button — clears the same way.
+  function clearPending() {
+    // The node was created under the company whose delete is stored beside it
+    // (see `PendingAttachment`) — never the latest callback, which may already
+    // be bound to a scope this node does not belong to.
+    pendingRef.current?.delete?.(pendingRef.current.reference.nodeId);
+    pendingRef.current = null;
+    setPending(null);
+  }
+
+  // Unmounting still holding a pending attachment (closing the thread panel,
+  // switching channels) is the same leak as clicking Remove — clean it up on
+  // the way out. Reads through the ref rather than `pending` because an
+  // unmount-only cleanup must not re-run on every state change. The delete
+  // comes from the stored pair, so a company switch while the composer stayed
+  // mounted still frees the node in the company that owns it.
+  useEffect(() => {
+    return () => {
+      pendingRef.current?.delete?.(pendingRef.current.reference.nodeId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only, see above
+  }, []);
+
   function send() {
     const text = draft.trim();
-    if (!text || disabled) return;
+    // A message must carry text; an attachment rides an operator's words, it is
+    // not a message on its own. Also held back while the upload is mid-flight,
+    // so a send never references bytes that have not landed.
+    if (!text || disabled || uploading) return;
     // The trim can shift every span, so the list is re-anchored against exactly
     // what is being sent — never against the untrimmed draft.
     let sending = reconcileMentions(text, mentions);
@@ -312,18 +440,83 @@ export function MessageComposer({
       return;
     }
     setOutsideWarning(null);
-    setDraft("");
     setMentions([]);
     closePicker();
-    onSend(
+    setDraft("");
+    // The pair, not just the node id: the reconciliation below must free a
+    // node the send failed to claim through the delete bound to the company
+    // that owns it (see `PendingAttachment`), whichever scope is current now.
+    const inFlight = pendingRef.current;
+    const result = onSend(
       text,
       deliverableChoice ? intent : undefined,
+      pending ? [pending.reference] : undefined,
       // Preserve absent-versus-empty: a loaded directory that resolves no
       // spans intentionally sends [] to suppress host fallback extraction.
       mentionables ? sending : undefined,
     );
     // Back to unselected, not to a default (issue #984).
     setIntent(undefined);
+    // The reference is cleared from the composer's own state immediately —
+    // the shell's optimistic bubble already carries it — WITHOUT deleting the
+    // node yet (unlike `clearPending`): whether it is actually claimed is
+    // still pending on `result` below.
+    pendingRef.current = null;
+    setPending(null);
+    setAttachError(undefined);
+    // If the caller reports whether the send journaled (issue #1682, codex
+    // review round 4), clean up an attachment only on an explicit `false` —
+    // the host definitely never saw it. `undefined` (ambiguous: a network
+    // drop, a timeout — the message may have landed anyway) and `true`
+    // (definitely landed) both leave the node alone. A caller that returns
+    // `void` has nothing to reconcile here.
+    if (inFlight && result instanceof Promise) {
+      void result.then((sent) => {
+        if (sent === false) inFlight.delete?.(inFlight.reference.nodeId);
+      });
+    }
+  }
+
+  /** Upload the picked file and stage its reference as the pending chip. */
+  async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Reset the input so re-picking the same file fires `change` again.
+    e.target.value = "";
+    if (!file || !uploadAttachment) return;
+    // A fresh pick replaces the staged one (v1 carries a single attachment) —
+    // the replaced upload must be cleaned up, not silently orphaned.
+    if (pendingRef.current) clearPending();
+    setUploading(true);
+    setAttachError(undefined);
+    try {
+      const reference = await uploadAttachment(file);
+      // The upload went to the scope whose `uploadAttachment` this closure
+      // captured. If the composer unmounted, OR the scope moved while the
+      // upload was in flight, no chip can hold this reference and no send will
+      // claim it — the next send would post an old company's node id to the
+      // new one. Free the node through the callback bound to the company that
+      // owns it, and do not stage it (codex review finding).
+      if (!mountedRef.current || scopeDeleteRef.current !== deleteAttachment) {
+        // No chip left to hold the reference and no unmount left to fire, so
+        // this continuation is the only place that can still free the node it
+        // just landed (codex review finding on #1682).
+        deleteAttachment?.(reference.nodeId);
+        return;
+      }
+      // Store the delete bound to THIS render's scope beside the reference:
+      // the upload went to that company, so cleanup must target it too, even
+      // if the scope moves before the chip is cleared (see `PendingAttachment`).
+      const staged: PendingAttachment = { reference, delete: deleteAttachment };
+      pendingRef.current = staged;
+      setPending(staged);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      // The filename is operator content — the message says an upload failed
+      // without echoing what it was called.
+      setAttachError(err instanceof Error ? err.message : "Couldn't attach that file.");
+    } finally {
+      if (mountedRef.current) setUploading(false);
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -416,6 +609,35 @@ export function MessageComposer({
               </Button>
             ))}
           </div>
+        )}
+
+        {/* The staged attachment (issue #1682), shown above the box the moment
+            its upload lands and cleared on send or removal. One chip in v1. */}
+        {pending && (
+          <div className="flex items-center gap-2 border-b px-3 py-1.5">
+            <Paperclip className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="min-w-0 truncate text-xs font-medium" title={pending.reference.name}>
+              {pending.reference.name}
+            </span>
+            <span className="shrink-0 text-2xs text-muted-foreground">
+              {formatBytes(pending.reference.size)}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="ml-auto size-6 shrink-0 text-muted-foreground"
+              aria-label={`Remove ${pending.reference.name}`}
+              title="Remove attachment"
+              onClick={clearPending}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </div>
+        )}
+        {attachError && (
+          <p role="alert" className="border-b px-3 py-1.5 text-2xs text-destructive">
+            {attachError}
+          </p>
         )}
 
         {outsideWarning && (
@@ -550,6 +772,37 @@ export function MessageComposer({
           >
             <AtSign className="size-4" />
           </Button>
+          {/* The paperclip (issue #1682), present exactly where attaching makes
+              sense — a composer given an `uploadAttachment`. Born disabled and
+              wired to nothing in the #361 console rebuild; this is where it
+              starts working. */}
+          {uploadAttachment && (
+            <>
+              <input
+                ref={fileInput}
+                type="file"
+                className="hidden"
+                aria-hidden
+                tabIndex={-1}
+                onChange={(e) => void onPickFile(e)}
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 text-muted-foreground"
+                aria-label="Attach a file"
+                title="Attach a file"
+                disabled={disabled || uploading}
+                onClick={() => fileInput.current?.click()}
+              >
+                {uploading ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Paperclip className="size-4" />
+                )}
+              </Button>
+            </>
+          )}
           {!compact && (
             <Button
               variant="ghost"

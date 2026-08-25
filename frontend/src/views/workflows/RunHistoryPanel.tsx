@@ -5,18 +5,22 @@
 // further out again, to `run-health.ts`, because the workflow cards need the
 // same reading — see that file's header.
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { observatoryHref } from "@/views/observatory/hash";
 import { Button } from "@/components/ui/button";
-import type {
-  DeliveryReport,
-  DeliveryStatus,
-  WorkflowGraph,
-  WorkflowRunNode,
-  WorkflowRunOutcome,
+import type { OpenCompanyClient } from "@/api/client";
+import {
+  fetchRunArtifacts,
+  type DeliveryReport,
+  type DeliveryStatus,
+  type RunArtifactRow,
+  type WorkflowGraph,
+  type WorkflowRunNode,
+  type WorkflowRunOutcome,
 } from "@/api/workflows";
+import { artifactHref } from "@/lib/task-output";
 
 import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { failedNodeOf, nodeName } from "./graph";
@@ -161,6 +165,8 @@ export function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
  * operator. These rows come back from the company's journal, so they survive a
  * console reload and a run nobody was watching. */
 export function RunHistoryPanel({
+  client,
+  company,
   runs,
   graph,
   workflowName,
@@ -174,6 +180,15 @@ export function RunHistoryPanel({
   onLoadOlder,
   loadingOlder,
 }: {
+  /**
+   * The host client the lazy per-run "Files associated" fetch reads through
+   * (issue #1684). Optional, like {@link onFixWithCopilot}: when absent the
+   * files affordance is simply not offered — the live view always passes it, so
+   * the omission only happens in focused render tests that assert other rows.
+   */
+  client?: OpenCompanyClient;
+  /** The scoped company for that fetch — `null` for the default scope. */
+  company?: string | null;
   runs: WorkflowRunOutcome[];
   /**
    * The selected workflow's graph, for turning a node id into the name the
@@ -280,6 +295,8 @@ export function RunHistoryPanel({
             {runs.map((run) => (
               <RunHistoryRow
                 key={run.seq}
+                client={client}
+                company={company}
                 run={run}
                 graph={graph}
                 now={now}
@@ -318,8 +335,14 @@ export function RunHistoryPanel({
  *
  * Clicking it overlays that run's node states on the canvas (issue #371) —
  * which is what makes a scheduled run's failure point visible, the case the
- * live canvas by definition cannot cover because nobody was watching. */
-function RunHistoryRow({
+ * live canvas by definition cannot cover because nobody was watching.
+ *
+ * Exported for {@link RunTraceSheet}, which renders the same row inside the
+ * traces-list transcript sheet — a run must read identically whether it's
+ * opened from a workflow's own history or from the company-wide list. */
+export function RunHistoryRow({
+  client,
+  company,
   run,
   graph,
   now,
@@ -331,6 +354,10 @@ function RunHistoryRow({
   fixDisabled,
   fixReason,
 }: {
+  /** The host client for this row's lazy files fetch (issue #1684), if wired. */
+  client?: OpenCompanyClient;
+  /** The scoped company for that fetch. */
+  company?: string | null;
   run: WorkflowRunOutcome;
   /** The selected workflow's graph, for node ids → names (issue #1007). */
   graph: WorkflowGraph | null;
@@ -780,7 +807,181 @@ function RunHistoryRow({
           {notice}
         </p>
       ))}
+      {/* Issue #1684: the files this run produced, deep-linked into the card
+          that made each. Rendered ONLY when the run carries a `runId` — a
+          pre-#371 orphan row has nothing to key a per-run fetch on — and the
+          fetch is lazy, fired on first expand, so a collapsed row (the common
+          case in a long history) makes zero network calls. */}
+      {run.runId && client && (
+        <RunFilesSection
+          client={client}
+          company={company ?? null}
+          runId={run.runId}
+        />
+      )}
     </div>
+  );
+}
+
+/** The lazy "Files associated" disclosure on a run row (issue #1684).
+ *
+ * A native `<details>` so the row makes no request until an operator opens it —
+ * the whole point of the lazy per-run route behind it. The fetch fires once, on
+ * the first expand; a failed fetch clears the latch so the next open retries.
+ * Each file deep-links into its card's Artifacts tab at the run's version
+ * ({@link artifactHref}), with the workspace-node link offered as a second hop
+ * when the file was mirrored into the shared tree. */
+function RunFilesSection({
+  client,
+  company,
+  runId,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  runId: string;
+}) {
+  const [files, setFiles] = useState<RunArtifactRow[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+  // A one-shot latch: the fetch runs on the first open and not on every toggle,
+  // and a collapse-then-reopen does not re-hit the route. Cleared on failure so
+  // a reopen can retry.
+  const requested = useRef(false);
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  // The scope the most recent request was made for, kept current on every
+  // render. A response that settles after a company/runId change can compare
+  // the scope it was fired for against this and recognise itself as stale —
+  // the race in issue #1693 where the previous request's `.then`/`.catch`
+  // would otherwise overwrite the new scope's state.
+  const scopeRef = useRef({ company, runId });
+  scopeRef.current = { company, runId };
+
+  const load = useCallback(() => {
+    if (requested.current) return;
+    requested.current = true;
+    setLoading(true);
+    setError(false);
+    const scope = { company, runId };
+    const stale = () =>
+      scopeRef.current.company !== scope.company ||
+      scopeRef.current.runId !== scope.runId;
+    fetchRunArtifacts(client, company, runId)
+      .then(({ files, truncated }) => {
+        if (stale()) return;
+        setFiles(files);
+        setTruncated(truncated);
+      })
+      .catch(() => {
+        if (stale()) return;
+        requested.current = false;
+        setError(true);
+      })
+      .finally(() => {
+        if (!stale()) setLoading(false);
+      });
+  }, [client, company, runId]);
+
+  // `RunHistoryPanel` keys each row only by `run.seq` (not by company), and
+  // journal sequences commonly repeat across companies and workflows. When an
+  // operator switches company or workflow while a row stays expanded, React
+  // can reuse THIS component instance for an unrelated run — the one-shot
+  // latch above then never re-fires, and the old scope's files (titles,
+  // paths) stay on screen under the new run. Reset on every scope change, and
+  // re-fetch immediately if the disclosure is already open — the `onToggle`
+  // handler below only fires on an open/close transition, not on a prop
+  // change while already open.
+  useEffect(() => {
+    requested.current = false;
+    setFiles(null);
+    setTruncated(false);
+    setError(false);
+    setLoading(false);
+    if (detailsRef.current?.open) {
+      load();
+    }
+  }, [company, runId, load]);
+
+  return (
+    <details
+      ref={detailsRef}
+      className="mt-1.5"
+      data-testid="workflow-run-files"
+      onToggle={(e) => {
+        if ((e.currentTarget as HTMLDetailsElement).open) load();
+      }}
+    >
+      <summary
+        className="cursor-pointer text-2xs text-muted-foreground"
+        data-testid="workflow-run-files-toggle"
+      >
+        Files associated
+      </summary>
+      <div className="mt-1 space-y-1">
+        {loading && (
+          <p className="text-2xs text-muted-foreground">Loading…</p>
+        )}
+        {error && (
+          <p
+            className="text-2xs text-status-failed-text"
+            data-testid="workflow-run-files-error"
+          >
+            Couldn't load this run's files. Reopen to try again.
+          </p>
+        )}
+        {files && files.length === 0 && (
+          <p
+            className="text-2xs text-muted-foreground"
+            data-testid="workflow-run-files-empty"
+          >
+            No files from this run.
+          </p>
+        )}
+        {truncated && (
+          <p
+            className="text-2xs text-muted-foreground"
+            data-testid="workflow-run-files-truncated"
+          >
+            Showing this run's newest files only.
+          </p>
+        )}
+        {files?.map((file) => (
+          <div
+            key={`${file.taskId}-${file.artifactId}`}
+            className="flex flex-col"
+            data-testid="workflow-run-file"
+          >
+            {/* The canonical Artifacts-tab hash the whole console navigates
+                by — no new routing, the Tasks view reads it and focuses the
+                card + artifact at the run's version. */}
+            <a
+              className="truncate text-2xs text-primary hover:underline"
+              href={artifactHref(file.taskId, file.artifactId, file.latestVersion)}
+            >
+              {file.title}
+            </a>
+            <span className="text-3xs text-muted-foreground">
+              {file.taskTitle ? `${file.taskTitle} · ` : ""}
+              {/* A legacy record (issue #244) has no source path; label it as
+                  such rather than showing an empty secondary line. */}
+              {file.source ?? "(legacy)"}
+              {file.workspaceNodeId && (
+                <>
+                  {" · "}
+                  <a
+                    className="hover:underline"
+                    href={`#/workspace/${encodeURIComponent(file.workspaceNodeId)}`}
+                    data-testid="workflow-run-file-workspace"
+                  >
+                    Open in workspace
+                  </a>
+                </>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -855,7 +1056,7 @@ function RunNodeChip({
  * operator leaves it open, and a settled row's duration is a fixed number that
  * re-rendering every second cannot change.
  */
-function useRunningClock(active: boolean): number {
+export function useRunningClock(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;

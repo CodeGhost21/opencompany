@@ -14,6 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::company::Policy;
 use crate::company::steer::SteerControl;
 use crate::harness::run_trace::RunTraceSink;
 use crate::harness::{HarnessDeps, HarnessPool, TurnOutcome};
@@ -97,5 +98,19 @@ impl RunTurn for HarnessRunTurn {
 
     async fn ensure(&self, company: &CompanyRecord) -> Result<()> {
         self.pool.ensure(company, &self.deps).await
+    }
+
+    async fn ensure_with_policy(&self, company: &CompanyRecord, policy: &Policy) -> Result<()> {
+        self.pool
+            .ensure_with_policy(company, &self.deps, policy)
+            .await
+    }
+
+    async fn end_cycle(&self, company: &CompanyId) {
+        self.pool.end_cycle(company).await
+    }
+
+    fn release_policy_pin_sync(&self, company: &CompanyId) {
+        self.pool.release_policy_pin_sync(company);
     }
 }

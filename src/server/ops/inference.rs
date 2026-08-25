@@ -122,6 +122,14 @@ struct InferenceStatusDto {
     /// tells the second apart from `cognition` on its own, and this flag never
     /// promises a restart that would change nothing.
     restart_required: bool,
+    /// Whether the harness cognition path is reachable on this host at all (the
+    /// `openhuman` feature compiled in and a harness pool attached at boot).
+    ///
+    /// `false` means no model configuration can ever put this company on the
+    /// design path, so the console's "set up a model" call-to-action would be a
+    /// dead end — the setup dialog uses this to omit it rather than send the
+    /// operator round a redesign loop that cannot end.
+    harness_reachable: bool,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -384,6 +392,7 @@ async fn effective_status_with(
             cognition: cognition.path.to_string(),
             usage_metering: cognition.metering,
             restart_required,
+            harness_reachable: harness_reachable(runtime),
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -399,6 +408,7 @@ async fn effective_status_with(
             // stranded. Threaded rather than hardcoded so the two arms cannot
             // drift apart.
             restart_required,
+            harness_reachable: harness_reachable(runtime),
         },
     })
 }
@@ -959,6 +969,10 @@ base_url = "https://byo.example/v1"
             !dto.restart_required,
             "a platform endpoint strands no tenant config behind a restart"
         );
+        assert!(
+            !dto.harness_reachable,
+            "a runtime built without a harness pool cannot reach the design path"
+        );
     }
 
     #[tokio::test]
@@ -1516,6 +1530,9 @@ base_url = "https://byo.example/v1"
         // The config resolves now; the running brain still does not know it.
         assert_eq!(resp["status"]["cognition"], "echo");
         assert_eq!(resp["status"]["restartRequired"], true, "{raw}");
+        // A pool is attached on this build, so the design path is reachable —
+        // the flag the setup dialog reads to keep the "set up a model" CTA.
+        assert_eq!(resp["status"]["harnessReachable"], true, "{raw}");
 
         let note = resp["note"].as_str().unwrap_or_default();
         assert!(note.contains("restart"), "note must say restart: {note}");

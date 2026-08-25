@@ -144,8 +144,10 @@ primitive against the deployment's own network.
 ## Operator rights (normative)
 
 - **Inspect**: `GET /api/v1/companies/{id}/memory/traces` exposes the retained
-  cycle-trace window, and the exported bundle exposes everything the selected
-  backend retains, human-readably.
+  cycle-trace window, and `GET …/memory/archives` exposes the traces a
+  provider-backed engine retained when eviction dropped them from that window
+  (a store/embedded engine keeps no archive and answers `404`). The exported
+  bundle exposes everything the selected backend retains, human-readably.
 - **Delete**: the Operator MAY delete any memory item, context chunk, or
   `FactStore` fact; deletion propagates to the backing store and is journaled
   to the `EventLog` (that a deletion happened is auditable; the content is

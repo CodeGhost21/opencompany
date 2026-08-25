@@ -41,6 +41,7 @@ use crate::ports::{
     ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompressedTrace, ContextChunk, ContextStore,
     EvictionPolicy, FactKind, FactRecord, FactStore, MemoryStore, TaskResult,
 };
+use crate::runtime::maintenance::TRACE_RETENTION_LIMIT;
 use crate::store::text::{ceil_boundary, slice_on_char_boundaries};
 use crate::{Result, store::content_address};
 
@@ -748,15 +749,29 @@ impl ProviderMemoryStore {
     /// Reads the archived trace set, for the operator's inspection.
     ///
     /// The archive is a bounded recovery tier on this facade: eviction moves
-    /// traces here rather than destroying them, but it is not part of the
-    /// export bundle or the `GET /memory/traces` window — both read the live
-    /// set. This accessor exists so the operator tier and the "archives rather
-    /// than destroys" property tests can observe the tier itself.
+    /// traces here rather than destroying them. The export path carries this
+    /// tier separately from the live `GET /memory/traces` window — both read
+    /// distinct namespaces. This accessor exists so the operator tier and the
+    /// "archives rather than destroys" property tests can observe the tier itself.
     pub(super) async fn archived_traces(
         &self,
         company: &CompanyId,
     ) -> Result<Vec<CompressedTrace>> {
         self.archive.list(company).await
+    }
+
+    /// Restores traces directly into the archive tier.
+    pub(super) async fn restore_archived_traces(
+        &self,
+        company: &CompanyId,
+        traces: &[CompressedTrace],
+    ) -> Result<()> {
+        for trace in traces {
+            self.archive
+                .put(company, &trace.cycle_id, trace, "trace")
+                .await?;
+        }
+        Ok(())
     }
 
     /// Bounds the archive tier to the newest `n` archived traces.
@@ -844,13 +859,22 @@ impl MemoryStore for ProviderMemoryStore {
     /// The same asymmetry appears if a `put` or `forget` fails mid-loop: the
     /// error propagates and the traces already processed stay archived. That is
     /// the archive-then-delete order behaving as designed under partial failure
-    /// — a duplicate the next read reconciles, never a loss.
+    /// — a duplicate the next read reconciles, never a loss. What must NOT be
+    /// skipped on that path is the archive bound itself: traces already moved
+    /// by the failed pass are still in the archive, so the prune below runs
+    /// before the error propagates, keeping the tier at its limit even when a
+    /// maintenance pass repeatedly fails partway.
     ///
-    /// A `KeepRecent` eviction additionally bounds the archive itself to the
-    /// newest `n` evicted traces (see [`ProviderMemoryStore::prune_archive`]),
-    /// so the policy that bounds the live window also bounds storage: a company
+    /// Every eviction additionally bounds the archive itself to the newest
+    /// `n` evicted traces (see [`ProviderMemoryStore::prune_archive`]): a
+    /// `KeepRecent { n }` eviction bounds it to `n`, and `OlderThan` — which
+    /// has no `n` of its own — to the retention limit, so the policy that
+    /// bounds the live window also bounds storage on every path: a company
     /// that runs for years does not accumulate every trace it ever evicted
-    /// beside the 32 it keeps.
+    /// beside the 32 it keeps, and an operator-sized `OlderThan` sweep cannot
+    /// grow the archive without bound. That bound is what keeps
+    /// `GET /memory/archives` a bounded read by construction rather than a
+    /// download of the whole archive followed by a discard.
     async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
         let traces = self.ordered_traces(id).await?;
         let doomed: Vec<CompressedTrace> = match &policy {
@@ -864,20 +888,44 @@ impl MemoryStore for ProviderMemoryStore {
                 .collect(),
         };
         let mut evicted = 0u64;
-        for trace in doomed {
-            self.archive
-                .put(id, &trace.cycle_id, &trace, "trace")
-                .await?;
-            if self.traces.forget(id, &trace.cycle_id).await? {
-                evicted += 1;
+        let move_result = (async {
+            for trace in doomed {
+                self.archive
+                    .put(id, &trace.cycle_id, &trace, "trace")
+                    .await?;
+                if self.traces.forget(id, &trace.cycle_id).await? {
+                    evicted += 1;
+                }
             }
+            Ok::<(), OpenCompanyError>(())
+        })
+        .await;
+        // Bound the archive on every eviction path — the partial-failure path
+        // included. `KeepRecent` prunes to its own `n`; `OlderThan` has no `n`
+        // to bound by, so it prunes to the retention limit — the same window
+        // the live set is held to, which is what keeps the tier "the eviction
+        // history nearest to the live window" and the archive read bounded for
+        // any policy.
+        let bound = match policy {
+            EvictionPolicy::KeepRecent { n } => n,
+            EvictionPolicy::OlderThan { .. } => TRACE_RETENTION_LIMIT,
+        };
+        if let Err(move_err) = move_result {
+            // A provider failure mid-loop still leaves the traces already
+            // moved sitting in the archive, and a maintenance pass that keeps
+            // failing partway must not grow the tier past its bound across
+            // retries. Prune best-effort, then report the failure that
+            // actually happened.
+            if let Err(prune_err) = self.prune_archive(id, bound).await {
+                tracing::warn!(
+                    error = %prune_err,
+                    "archive prune failed after a partial eviction failure; the archive may exceed \
+                     its retention bound"
+                );
+            }
+            return Err(move_err);
         }
-        // Bound the archive only on the path production calls (`KeepRecent`).
-        // `OlderThan` has no `n` to bound by; its archive is left to retention
-        // policy or the Operator, exactly as the docs describe.
-        if let EvictionPolicy::KeepRecent { n } = policy {
-            self.prune_archive(id, n).await?;
-        }
+        self.prune_archive(id, bound).await?;
         Ok(evicted)
     }
 }
@@ -890,6 +938,16 @@ mod test {
     use super::*;
 
     /// Captures warnings emitted synchronously on this test's thread.
+    ///
+    /// Every exercise of a warn callsite this helper later asserts on must
+    /// itself run through `warnings_from` — never bare. A `tracing::warn!`
+    /// fired on a thread with no subscriber registers its callsite against the
+    /// global NoSubscriber, whose `register_callsite` is `Interest::never()`,
+    /// and tracing caches that answer process-wide: the warn silently stops
+    /// firing everywhere, including here. The CI flake this helper was built
+    /// to make deterministic (`unreadable_content` racing
+    /// `decode_classifies`) was exactly that. See the load-bearing comments on
+    /// those two tests.
     fn warnings_from(body: impl FnOnce()) -> String {
         use std::io::Write;
 
@@ -922,7 +980,16 @@ mod test {
             .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
             .finish();
-        tracing::subscriber::with_default(subscriber, body);
+        let dispatch = tracing::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || {
+            // `tracing` caches each callsite's interest globally. A different
+            // test can first register this warning callsite under the no-op
+            // subscriber, caching `Interest::never` before this scoped
+            // subscriber is installed. Rebuild while this thread's subscriber
+            // is active so the warning assertion remains order-independent.
+            tracing::callsite::rebuild_interest_cache();
+            body();
+        });
         let bytes = sink.lock().expect("warning sink").clone();
         String::from_utf8(bytes).expect("warnings are utf-8")
     }
@@ -1090,7 +1157,24 @@ mod test {
     fn unreadable_content_is_dropped_rather_than_failing_the_read() {
         let facts = ns("acme", Scope::Facts);
         let entry = entry_in(&facts, "not json at all");
-        assert!(decode::<FactRecord>(&entry, &facts).is_none());
+        // The `warnings_from` wrapper is LOAD-BEARING, not decoration: a corrupt
+        // decode must always run under a subscriber, or tracing's global
+        // callsite-interest cache can freeze this warn callsite to `never` for
+        // the whole process. A bare test thread has no subscriber, so its
+        // `get_default` is the global NoSubscriber whose `register_callsite`
+        // answers `Interest::never()` — and once cached, every later capture of
+        // this same callsite (in `warnings_from`) is silently dropped. The race
+        // needs the thread-local sink to have already raised the global max
+        // level to WARN, which `decode_classifies`'s own sink does concurrently,
+        // so `unreadable_content` — run bare — was exactly the poisoner that
+        // made the corruption warning intermittently vanish in CI.
+        let warnings = warnings_from(|| {
+            assert!(decode::<FactRecord>(&entry, &facts).is_none());
+        });
+        assert!(
+            warnings.contains("memory entry in our namespace failed to decode"),
+            "unreadable content in our namespace must be reported: {warnings:?}"
+        );
     }
 
     // The range-widening behavior `peek` relies on is pinned where the helper
@@ -1154,6 +1238,12 @@ mod test {
         );
 
         // No envelope at all: also the corruption path.
-        assert_eq!(decode::<u32>(&entry("not json"), &namespace), None);
+        let warnings = warnings_from(|| {
+            assert_eq!(decode::<u32>(&entry("not json"), &namespace), None);
+        });
+        assert!(
+            warnings.contains("memory entry in our namespace failed to decode"),
+            "envelope-less content in our namespace must be reported: {warnings:?}"
+        );
     }
 }

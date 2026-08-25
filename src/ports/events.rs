@@ -503,6 +503,7 @@ mod test {
                 chat: None,
                 parent: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::AgentReply {
                 mentions: Vec::new(),

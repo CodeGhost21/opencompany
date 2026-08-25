@@ -36,6 +36,7 @@ use crate::ports::types::{
     ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
     OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
 };
+use crate::store::select::MemoryScopes;
 
 /// Canonical bundle file and directory names, matching the fs
 /// [`Bundle`](crate::store::paths::Bundle) layout.
@@ -45,6 +46,7 @@ const EVENTS_JSONL: &str = "events.jsonl";
 const LEDGER_JSONL: &str = "ledger.jsonl";
 const MEMORY_DIR: &str = "memory";
 const TRACES_JSONL: &str = "traces.jsonl";
+const ARCHIVES_JSONL: &str = "archives.jsonl";
 /// Operator facts, at the bundle ROOT — the same place the live fs bundle
 /// keeps them (`paths::Bundle::facts_jsonl`), so an export stays diffable
 /// against a live home and a direct reader finds them where the canonical
@@ -206,6 +208,9 @@ struct BundleContents {
     ledger: Vec<LedgerEntry>,
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
+    /// Traces retained in a provider's archive tier. Empty for base stores and
+    /// bundles written before archive export was introduced.
+    archived_traces: Vec<CompressedTrace>,
     /// Operator facts. Empty when the source served no fact port (an old
     /// bundle, or an export run without one) — never a failure.
     facts: Vec<FactRecord>,
@@ -259,6 +264,7 @@ impl BundleContents {
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
         facts: Option<Arc<dyn FactStore>>,
+        scopes: Option<Arc<dyn MemoryScopes>>,
     ) -> Result<Self> {
         let record = store
             .load(id)
@@ -273,6 +279,10 @@ impl BundleContents {
         let events =
             scrub_redacted_discussion(events.read_from(id, EventSeq::new(0), usize::MAX).await?);
         let traces = memory.recent_traces(id, usize::MAX).await?;
+        let archived_traces = match scopes {
+            Some(scopes) => scopes.archived_traces(id).await?,
+            None => Vec::new(),
+        };
         let facts = match facts {
             Some(port) => port.list(id, None, None).await?,
             None => Vec::new(),
@@ -298,6 +308,7 @@ impl BundleContents {
             ledger: record.ledger,
             events,
             traces,
+            archived_traces,
             facts,
             context: chunks,
             overlay_agents: record.overlay_agents,
@@ -325,8 +336,16 @@ impl BundleContents {
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
         facts: Option<Arc<dyn FactStore>>,
+        scopes: Option<Arc<dyn MemoryScopes>>,
     ) -> Result<()> {
-        // Refused BEFORE anything is written: the event log and ledger are
+        // Archived traces must remain in their recovery tier. Refuse before any
+        // append-only writes when the import target cannot restore that tier.
+        if !self.archived_traces.is_empty() && scopes.is_none() {
+            return Err(OpenCompanyError::Store(format!(
+                "bundle carries {} archived traces but the import target serves no archive tier",
+                self.archived_traces.len()
+            )));
+        }
         // append-only, so a refusal after `store.save`/`append` would leave a
         // half-imported company whose retry duplicates history.
         if facts.is_none() && !self.facts.is_empty() {
@@ -344,6 +363,11 @@ impl BundleContents {
             for fact in &self.facts {
                 port.upsert(&self.id, fact).await?;
             }
+        }
+        if let Some(scopes) = scopes {
+            scopes
+                .restore_archived_traces(&self.id, &self.archived_traces)
+                .await?;
         }
         // The manifest + lifecycle; ledger is appended separately so the store's
         // append-only ledger stays authoritative.
@@ -432,6 +456,23 @@ impl BundleContents {
             jsonl(&self.traces)?.as_bytes(),
         )
         .await?;
+        if !self.archived_traces.is_empty() {
+            write_file(
+                &memory_dir.join(ARCHIVES_JSONL),
+                jsonl(&self.archived_traces)?.as_bytes(),
+            )
+            .await?;
+        } else {
+            match tokio::fs::remove_file(memory_dir.join(ARCHIVES_JSONL)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(OpenCompanyError::Store(format!(
+                        "cannot remove a stale archive file from the bundle: {e}"
+                    )));
+                }
+            }
+        }
         // Only when there are any: an empty file would make every new export
         // differ from an old host's byte-for-byte for no information. At the
         // bundle root, matching `paths::Bundle::facts_jsonl`. A factless
@@ -526,6 +567,8 @@ impl BundleContents {
             scrub_redacted_discussion(read_jsonl::<StoredEvent>(&src.join(EVENTS_JSONL)).await?);
         let traces =
             read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(TRACES_JSONL)).await?;
+        let archived_traces =
+            read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(ARCHIVES_JSONL)).await?;
         // Absent on bundles that predate facts-in-the-bundle: empty, not an error.
         let facts = read_jsonl::<FactRecord>(&src.join(FACTS_JSONL)).await?;
 
@@ -551,6 +594,7 @@ impl BundleContents {
             ledger,
             events,
             traces,
+            archived_traces,
             facts,
             context,
             overlay_agents: meta.overlay_agents,
@@ -649,8 +693,24 @@ pub async fn export_bundle(
     facts: Option<Arc<dyn FactStore>>,
     opts: ExportOpts,
 ) -> Result<()> {
+    export_bundle_with_scopes(id, dest, store, events, memory, context, facts, None, opts).await
+}
+
+/// Exports a bundle while preserving an optional provider archive tier.
+#[allow(clippy::too_many_arguments)]
+pub async fn export_bundle_with_scopes(
+    id: &CompanyId,
+    dest: &Path,
+    store: Arc<dyn CompanyStore>,
+    events: Arc<dyn EventLog>,
+    memory: Arc<dyn MemoryStore>,
+    context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
+    scopes: Option<Arc<dyn MemoryScopes>>,
+    opts: ExportOpts,
+) -> Result<()> {
     let contents =
-        BundleContents::read_via_ports(id, store, events, memory, context, facts).await?;
+        BundleContents::read_via_ports(id, store, events, memory, context, facts, scopes).await?;
     contents.write_to_dir(dest).await?;
 
     if opts.include_secrets
@@ -678,10 +738,23 @@ pub async fn import_bundle(
     context: Arc<dyn ContextStore>,
     facts: Option<Arc<dyn FactStore>>,
 ) -> Result<CompanyId> {
+    import_bundle_with_scopes(src, store, events, memory, context, facts, None).await
+}
+
+/// Imports a bundle while restoring its optional provider archive tier.
+pub async fn import_bundle_with_scopes(
+    src: &Path,
+    store: Arc<dyn CompanyStore>,
+    events: Arc<dyn EventLog>,
+    memory: Arc<dyn MemoryStore>,
+    context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
+    scopes: Option<Arc<dyn MemoryScopes>>,
+) -> Result<CompanyId> {
     let contents = BundleContents::read_from_dir(src).await?;
     let id = contents.id.clone();
     contents
-        .write_via_ports(store, events, memory, context, facts)
+        .write_via_ports(store, events, memory, context, facts, scopes)
         .await?;
     Ok(id)
 }
@@ -909,6 +982,82 @@ mod test {
         )
     }
 
+    struct ArchiveScopes {
+        archived: Vec<CompressedTrace>,
+        restored: Arc<std::sync::Mutex<Vec<CompressedTrace>>>,
+        context: Arc<FsContextStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryScopes for ArchiveScopes {
+        fn agent_context(&self, _agent_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        fn desk_context(&self, _desk_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        async fn archived_traces(&self, _company: &CompanyId) -> Result<Vec<CompressedTrace>> {
+            Ok(self.archived.clone())
+        }
+
+        async fn restore_archived_traces(
+            &self,
+            _company: &CompanyId,
+            traces: &[CompressedTrace],
+        ) -> Result<()> {
+            self.restored.lock().unwrap().extend_from_slice(traces);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_traces_survive_bundle_roundtrip_in_the_archive_tier() {
+        let home1 = tmp_root("archive-src");
+        let home2 = tmp_root("archive-dst");
+        let dest = tmp_root("archive-bundle");
+        let id = CompanyId::new("archive-co");
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&company_record(&id)).await.unwrap();
+        let archived = vec![CompressedTrace {
+            cycle_id: "evicted-cycle".into(),
+            summary: "retained recovery trace".into(),
+            at_millis: 7,
+        }];
+        let source_scopes = Arc::new(ArchiveScopes {
+            archived: archived.clone(),
+            restored: Arc::new(std::sync::Mutex::new(Vec::new())),
+            context: Arc::new(FsContextStore::new(home1.clone())),
+        });
+        export_bundle_with_scopes(
+            &id,
+            &dest,
+            s1,
+            e1,
+            m1,
+            c1,
+            None,
+            Some(source_scopes),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        assert!(dest.join(MEMORY_DIR).join(ARCHIVES_JSONL).is_file());
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let restored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_scopes = Arc::new(ArchiveScopes {
+            archived: Vec::new(),
+            restored: restored.clone(),
+            context: Arc::new(FsContextStore::new(home2)),
+        });
+        import_bundle_with_scopes(&dest, s2, e2, m2, c2, None, Some(target_scopes))
+            .await
+            .unwrap();
+        assert_eq!(*restored.lock().unwrap(), archived);
+    }
+
     /// The mandatory end-to-end round-trip: build a company, run a cycle to
     /// populate events/traces/ledger, seed a ledger entry and context chunk,
     /// export to a bundle directory, import into a *fresh* home through the fs
@@ -932,6 +1081,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .expect("cycle");
@@ -1731,6 +1881,8 @@ mod test {
             overlay_policy: Some(PolicyOverride {
                 mode: Some("auto".to_string()),
                 always_approve: Some(vec!["payment.send".to_string()]),
+                auto_approve_under_usd: Some(Some(25.0)),
+                approval_ttl_hours: Some(48),
                 set_by: admin_actor(),
                 at_millis: 1_700_000_000_002,
             }),
@@ -1826,6 +1978,8 @@ mod test {
             policy.always_approve.as_deref(),
             Some(["payment.send".to_string()].as_slice())
         );
+        assert_eq!(policy.auto_approve_under_usd, Some(Some(25.0)));
+        assert_eq!(policy.approval_ttl_hours, Some(48));
         assert_eq!(policy.set_by, admin_actor());
         assert_eq!(policy.at_millis, 1_700_000_000_002);
         assert_eq!(
@@ -2050,6 +2204,7 @@ mod test {
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
