@@ -1411,7 +1411,7 @@ export function AppShell({
       firstDeskChannelId ?? undefined,
       new Set(Object.values(chatChannelByThread)),
     );
-  }, [mentionFeed, chatChannelByThread]);
+  }, [mentionFeed, firstDeskChannelId, chatChannelByThread]);
   const mentionFeedRef = useRef(mentionFeed);
   mentionFeedRef.current = mentionFeed;
   /**
