@@ -59,7 +59,7 @@ describe("MessageAttachments (issue #1682)", () => {
   it("previews a non-SVG image inline, fetched through the resolver", async () => {
     const resolveUrl = vi.fn(async () => "blob:the-image");
     await render([png], resolveUrl);
-    expect(resolveUrl).toHaveBeenCalledWith("n1");
+    expect(resolveUrl).toHaveBeenCalledWith("n1", expect.any(AbortSignal));
     const img = container.querySelector("img");
     expect(img).not.toBeNull();
     expect(img!.getAttribute("src")).toBe("blob:the-image");
