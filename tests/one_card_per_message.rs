@@ -945,9 +945,22 @@ async fn a_publish_with_no_card_in_scope_mints_one() {
     let host = spawn_host(model).await;
     host.seed_file("ceo", "notes.md", "notes\n");
 
-    // "hi" is neither trackable work nor a recognised imperative, so nothing
-    // else in the turn can open a card.
-    let reply = host.chat("hi", None).await;
+    // Neither trackable work nor a recognised imperative, so nothing else in
+    // the turn can open a card — same property "hi" had before issue #1725's
+    // greeting fast path. NOT "hi" itself: a bare greeting is now a matched
+    // `Chatter` classification that runs the reduced-scope chat-only turn
+    // (no tools offered at all), so the model could never reach the
+    // `publish_artifact` call this test's whole point is to exercise. This
+    // fixture is ambiguous `Chatter` by abstention instead (it opens with
+    // neither a `SMALLTALK_OPENERS` greeting nor a work verb nor a `?`), which
+    // keeps the turn's tools available exactly like every non-greeting
+    // message did before #1725.
+    let neutral = "the deck looks good to me";
+    assert!(
+        detect_task_intent(neutral).is_none(),
+        "fixture must open no card via the REST handler, or this proves nothing"
+    );
+    let reply = host.chat(neutral, None).await;
     let board = host.board(&reply).await;
     assert_sole_card_carries(&host, &board, "ceo", "Some notes").await;
 }

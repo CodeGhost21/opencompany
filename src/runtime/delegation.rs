@@ -1067,7 +1067,15 @@ impl<'a> DelegationRunner<'a> {
         // (the comment above says why — taking them away on a maybe turns a
         // triage miss into work the company silently refuses), while it *does*
         // stand the deterministic card paths down.
-        let mut chatter = false;
+        //
+        // Seeded from the lexical layer's OWN matched verdict (issue #1725
+        // review), not only the escalation below: a bare greeting or
+        // acknowledgement is `Chatter` by a rule firing (`is_matched_chatter`),
+        // not by abstention, so it never reaches the escalation branch at all —
+        // that branch only ever runs on an abstained triage. Without this seed
+        // the greeting fast path below could never fire for the exact messages
+        // it exists to optimise.
+        let mut chatter = triaged.is_matched_chatter();
         if !answering
             && triaged.abstained()
             && let Some(escalation) = self.triage
@@ -3780,6 +3788,14 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
         /// drain happened to run afterwards. Since #267's review it also
         /// distinguishes the narrowed answering claim from the full one.
         committed_at_turn: Mutex<Vec<orchestrator::DrainClaim>>,
+        /// The ambient [`is_chat_only_turn`] hint read from INSIDE each turn,
+        /// so a test proves the greeting fast path fired through the real
+        /// classification path (`handle_operator_message`) rather than the
+        /// caller forcing the scope directly (issue #1725 review — the
+        /// original end-to-end test only ever asserted the hint by wrapping
+        /// the call in `with_chat_only_hint(true, ..)` itself, which cannot
+        /// catch the classifier failing to derive it).
+        chat_only_at_turn: Mutex<Vec<bool>>,
         /// What the tool boundary answered for each
         /// [`Turn::tool_pushes`] entry, in order across all turns (issue #267).
         staged: Mutex<Vec<orchestrator::Staged>>,
@@ -3799,6 +3815,7 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
                 calls: Mutex::new(Vec::new()),
                 board_at_turn: Mutex::new(Vec::new()),
                 committed_at_turn: Mutex::new(Vec::new()),
+                chat_only_at_turn: Mutex::new(Vec::new()),
                 staged: Mutex::new(Vec::new()),
                 tasks: fx.tasks.clone(),
                 company: fx.record.id.clone(),
@@ -3844,6 +3861,12 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             self.committed_at_turn.lock().expect("committed")[n]
         }
 
+        /// Whether [`is_chat_only_turn`] read `true` from INSIDE turn `n` — the
+        /// real hint the harness pool would have read, not one the test forced.
+        fn chat_only_at_turn(&self, n: usize) -> bool {
+            self.chat_only_at_turn.lock().expect("chat_only")[n]
+        }
+
         async fn next(
             &self,
             agent_id: &str,
@@ -3867,6 +3890,10 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
                 .lock()
                 .expect("committed")
                 .push(self.queue.claim_state());
+            self.chat_only_at_turn
+                .lock()
+                .expect("chat_only")
+                .push(is_chat_only_turn());
             let turn = self
                 .script
                 .lock()
@@ -6335,6 +6362,46 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert_eq!(cards.len(), 1, "the delegation still ran: {cards:?}");
         assert_eq!(cards[0].title, "Follow up on the deck");
         assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// A bare greeting is `Chatter` by a RULE FIRING (`is_matched_chatter`),
+    /// not by abstention like `an_ambiguous_message_keeps_its_board_tools`'s
+    /// fixture above — so it never reaches the escalation block, which only
+    /// ever runs on an abstained triage. The greeting fast path (issue #1725)
+    /// must still fire for it.
+    ///
+    /// Goes through the real classification path
+    /// (`handle_operator_message`) rather than forcing
+    /// `with_chat_only_hint(true, ..)` directly, per review: a test that
+    /// forces the scope itself cannot catch the classifier failing to derive
+    /// the hint in the first place.
+    #[tokio::test]
+    async fn a_bare_greeting_enters_the_chat_only_fast_path() {
+        let greeting = "hi";
+        let triaged = crate::company::task_intent::triage_message_detailed(greeting);
+        assert_eq!(
+            triaged.triage,
+            crate::company::task_intent::MessageTriage::Chatter,
+            "fixture must be chatter, or this proves nothing"
+        );
+        assert!(
+            !triaged.abstained(),
+            "fixture must be a MATCHED chatter (a bare-greeting rule firing) — \
+             the exact case that never reaches the escalation block, and the \
+             one the classifier used to miss"
+        );
+
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("Hi! How can I help you today?")]);
+        fx.runner(&turns)
+            .handle_operator_message("chief", greeting, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            turns.chat_only_at_turn(0),
+            "a bare greeting must enter CHAT_ONLY_TURN"
+        );
     }
 
     /// `Track` is unchanged: a real instruction still runs under a claim, still
