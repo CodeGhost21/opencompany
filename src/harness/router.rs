@@ -346,6 +346,10 @@ mod tests {
         ) -> Result<TurnOutcome> {
             self.run(company, agent_id, message, None).await
         }
+
+        async fn end_cycle(&self, company: &CompanyId) {
+            self.cycle_ends.lock().unwrap().push(company.clone());
+        }
     }
 
     /// An engine whose `ensure` can be made to fail on command, so a test can
