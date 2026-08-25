@@ -2469,15 +2469,6 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
             .unwrap_or_default();
-        // Issue #1530: the operator-set per-agent persona overrides. Carried
-        // across the rebuild for the same reason as the budget caps above — the
-        // manifest is a read-only boot snapshot on a hosted tenant, so dropping
-        // these would silently revert every console-edited persona to the text
-        // baked into the image on the next restart.
-        let overlay_agent_edits = existing
-            .as_ref()
-            .map(|r| r.overlay_agent_edits.clone())
-            .unwrap_or_default();
         // Issue #562: the operator's `[policy]` override, carried across the
         // rebuild — but ONLY while the seed's `[policy]` has not itself changed.
         // See `carry_policy_override` for why that condition is the whole point.
