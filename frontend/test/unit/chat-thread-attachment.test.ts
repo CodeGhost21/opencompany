@@ -35,6 +35,8 @@ const MEMBERS: TeamMember[] = [
     tone: "amber",
     avatar: "badger",
     inboxEnabled: true,
+    effectiveTools: [],
+    desks: [],
   },
 ];
 
