@@ -1,0 +1,157 @@
+// @vitest-environment jsdom
+
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import type { DeptLite } from "@/views/overview/kg/KnowledgeDetail";
+import { KnowledgeGraphFullscreen } from "@/views/overview/kg/KnowledgeGraphFullscreen";
+
+/**
+ * Issue #1664: the mobile detail sheet covered the graph legend completely.
+ *
+ * At or below 820px the detail panel stops being a 300px right rail and becomes
+ * a full-width bottom sheet. The legend was `z-10` at the bottom-left and the
+ * sheet is `z-30` anchored to the same edge, so with any node selected the
+ * whole legend disappeared — all seven kind labels and the workflow-placement
+ * caveat that #1318 exists to make reachable without a hover.
+ *
+ * jsdom does no layout and evaluates no media query, so this pins the class
+ * contract; `test/e2e/overview-responsive-chrome.spec.ts` measures the actual
+ * boxes in a browser at both sides of the breakpoint.
+ */
+
+let host: HTMLElement;
+let root: Root;
+
+const DESKS: DeptLite[] = [
+  { deptId: "desk:eng", teamId: "team:desk:eng", name: "Engineering", tagline: "", color: "var(--accent)" },
+  { deptId: "desk:gtm", teamId: "team:desk:gtm", name: "Go-to-Market", tagline: "", color: "var(--ok)" },
+];
+
+function render(detail: boolean) {
+  act(() => {
+    root.render(
+      createElement(KnowledgeGraphFullscreen, {
+        deptList: DESKS,
+        currentTeamId: DESKS[0].teamId,
+        currentDept: DESKS[0],
+        toolWiki: null,
+        extraDetail: detail ? createElement("div", { "data-testid": "card" }, "a card") : undefined,
+        legendSlot: createElement("div", null, "Notes Human AI teammate Tool Workflow Stage SOP task"),
+        onNavDept: () => {},
+        onBack: () => {},
+        children: createElement("svg"),
+      }),
+    );
+  });
+}
+
+function legend(): HTMLElement {
+  const el = host.querySelector('[data-testid="kg-legend"]');
+  expect(el, "the shell must render the legend it is given").not.toBeNull();
+  return el as HTMLElement;
+}
+
+function sheet(): HTMLElement {
+  const el = host.querySelector("aside");
+  expect(el, "an open card must render the detail panel").not.toBeNull();
+  return el as HTMLElement;
+}
+
+function paddle(direction: "Previous" | "Next"): HTMLElement {
+  const el = host.querySelector(`[aria-label="${direction} desk"]`);
+  expect(el).not.toBeNull();
+  return el as HTMLElement;
+}
+
+beforeEach(() => {
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  host = document.createElement("div");
+  document.body.appendChild(host);
+  root = createRoot(host);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  host.remove();
+});
+
+describe("the graph legend and the detail panel (#1664)", () => {
+  it("sits above the panel rather than under it", () => {
+    render(true);
+    // The panel is `z-30`. Anything sharing an edge with it and expecting to be
+    // read has to be above that, which is the level the status slot and the
+    // paddles were already given for the same reason (#1307).
+    expect(sheet().className).toContain("z-30");
+    expect(legend().className).toContain("z-40");
+    expect(legend().className).not.toContain("z-10");
+  });
+
+  it("lifts clear of the bottom sheet at or below 820px", () => {
+    render(true);
+    const classes = legend().className;
+    expect(classes).toContain("max-[820px]:bottom-[calc(55%+0.5rem)]");
+    // …and cannot grow past the band that leaves: at its real cap the legend is
+    // seven wrapped kinds plus an expanded caveat, and the desk selector is
+    // directly above.
+    expect(classes).toContain("max-[820px]:max-h-[26%]");
+    expect(classes).toContain("max-[820px]:overflow-y-auto");
+  });
+
+  it("names the same fraction the sheet is capped at, so the two cannot drift", () => {
+    render(true);
+    const cap = /max-h-\[(\d+)%\]/.exec(sheet().className);
+    const lift = /bottom-\[calc\((\d+)%\+/.exec(legend().className);
+    expect(cap, "the sheet must carry a percentage cap").not.toBeNull();
+    expect(lift, "the legend must lift by that same percentage").not.toBeNull();
+    expect(lift![1]).toBe(cap![1]);
+  });
+
+  it("caps the sheet against the graph card rather than the viewport", () => {
+    // The panel is absolutely positioned inside the graph surface, which sits on
+    // the console's inset card and is shorter than the window. `62vh` measured
+    // 68% of that card at 430x932, so the band every other offset was derived
+    // from never existed. Same correction `Overview.tsx` made when the graph
+    // claimed `h-svh` inside the card and cropped its own legend.
+    render(true);
+    expect(sheet().className).not.toContain("vh]");
+    expect(paddle("Next").className).not.toContain("vh]");
+  });
+
+  it("keeps the paddles out of the strip the legend now takes", () => {
+    render(true);
+    for (const direction of ["Previous", "Next"] as const) {
+      expect(paddle(direction).className).toContain("max-[820px]:top-[17%]");
+    }
+  });
+
+  it("stops short of the right rail above 820px instead of running under it", () => {
+    // Above the breakpoint the panel is the 300px rail and the legend keeps its
+    // corner — but at 900x800 it measured 280px *under* that rail. While it was
+    // `z-10` that read as clipped; at `z-40` it would read as covering the card.
+    render(true);
+    expect(legend().className).toContain("max-w-[calc(100%-21rem)]");
+  });
+
+  it("uses no `sm:` variant while a card is open", () => {
+    // Load-bearing, not stylistic. Tailwind emits `sm:` (min-width 640) after
+    // `max-[820px]`, so a `sm:bottom-5` in this list wins at 700px and the lift
+    // above silently does not happen — which is what the first attempt did.
+    render(true);
+    expect(legend().className).not.toMatch(/\bsm:bottom-/);
+    expect(legend().className).not.toMatch(/\bsm:max-w-/);
+  });
+
+  it("returns to the bottom corner, full width, when the card closes", () => {
+    render(true);
+    render(false);
+    const classes = legend().className;
+    expect(classes).toContain("bottom-3");
+    expect(classes).toContain("sm:bottom-5");
+    expect(classes).toContain("sm:max-w-[calc(100%-2.5rem)]");
+    expect(classes).not.toContain("max-w-[calc(100%-21rem)]");
+    expect(classes).not.toContain("max-[820px]:bottom-[calc(55%+0.5rem)]");
+    expect(classes).not.toContain("overflow-y-auto");
+  });
+});

@@ -189,3 +189,18 @@ running beyond the clipped edge. Below 900px the paddles become 80px by 40px
 and inset 12px; below 640px they become 56px by 32px and inset 8px. Keyboard
 `←` / `→` remains available at every width, so the smaller touch targets do not
 remove a way to turn the pillar wheel.
+
+Opening a card moves the legend as well (issue #1664). The detail panel is a
+300px right rail above 820px and a bottom sheet at or below it, and the legend
+used to sit at `z-10` under its `z-30` on the same bottom edge — so on a phone
+every kind label and the workflow-placement caveat disappeared the moment a node
+was selected. It is now `z-40`, the level the snapshot line and the paddles
+already use; above 820px its width stops short of the rail, and at or below it
+the legend lifts to sit on top of the sheet, capped so it scrolls rather than
+climbing into the desk selector. The sheet's height and the paddles' offset are
+percentages of the graph card rather than `vh`: the card is shorter than the
+window, so `62vh` was 68% of the box the sheet actually lives in, and the band
+above it that every other offset was derived from never existed. Where the
+legend ends up is measured in a browser at both sides of the breakpoint by
+`test/e2e/overview-responsive-chrome.spec.ts`, with the caveat shut and open —
+open is the legend's real height.

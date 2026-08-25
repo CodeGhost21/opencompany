@@ -7,6 +7,35 @@ import type { ToolWiki } from './agent-wiki';
 import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
 
 /**
+ * How much of the graph card the detail sheet may take at or below 820px —
+ * and, in the second string, where its top edge therefore is (issue #1664).
+ *
+ * A **percentage of the card**, not `vh`. The sheet is absolutely positioned
+ * inside the graph surface, which sits on the console's inset content card and
+ * is shorter than the viewport by the shell's frame. Measured at 430x932 the
+ * card is 854px tall, so the old `62vh` was 578px — 68% of the box the sheet
+ * actually lives in, not 62% — and every offset derived from it (a "38vh band"
+ * above it, a paddle centred at `19vh`) was reasoning with a ruler the sheet
+ * does not use. `Overview.tsx` made this same correction once already, when the
+ * graph claiming `h-svh` inside that card laid itself out taller than its
+ * clipping box and cropped its own legend.
+ *
+ * 55%, not the 62% that number converts to, because the band above the sheet
+ * now has to hold the legend as well as the desk selector and the paddles.
+ * Measured at 700x800 — the worst of the widths checked — that band is 325px
+ * against a desk selector of 50px, a paddle of 80px, and a legend of 140px with
+ * its caveat open. At 62% the legend and the paddle overlapped by 21px, which
+ * is a paddle drawn across the caveat text. The sheet gives the strip back; its
+ * content already scrolls, so what it loses is height and not reach.
+ *
+ * These two must stay in agreement: the second is the first plus a gap, and it
+ * is what holds the legend clear of the sheet. Tailwind scans source for
+ * literal class names, so they are strings rather than a computed value.
+ */
+const SHEET_CAP = 'max-[820px]:max-h-[55%]';
+const LEGEND_ABOVE_SHEET = 'max-[820px]:bottom-[calc(55%+0.5rem)]';
+
+/**
  * The chrome around the graph in its fullscreen (only) mode: the desk
  * selector and side paddles for stepping through desks, the vault
  * search/legend slots, and a detail panel that overlays rather than resizes
@@ -60,7 +89,7 @@ export function KnowledgeGraphFullscreen({
    *
    * Above 820px the rail is that 300px column, and the offset is its width
    * plus the inset the control already had. At or below it the rail is a
-   * bottom sheet (`max-h-[62vh]`, anchored bottom) — the right edge is clear
+   * bottom sheet ([`SHEET_CAP`], anchored bottom) — the right edge is clear
    * again, so the offset is reverted and the paddles rise into the band the
    * sheet leaves instead of staying centred underneath it.
    */
@@ -68,14 +97,69 @@ export function KnowledgeGraphFullscreen({
     ? 'right-[316px] max-[820px]:right-3 max-[639px]:right-2'
     : 'right-2 max-[899px]:right-3 max-[639px]:right-2';
   /**
-   * Mid-height normally; in the band above the bottom sheet when there is one.
+   * Mid-height normally; above the bottom sheet *and* above the legend when
+   * there is one (issues #1307, #1664).
    *
-   * The sheet is `max-h-[62vh]` anchored to the bottom, so its top edge sits at
-   * 38vh and a paddle centred at 50vh is underneath it. 19vh is the middle of
-   * what is left. Only applies at or below 820px, because that is the only
-   * width where the rail becomes a sheet.
+   * The band the sheet leaves has to hold three things at or below 820px: the
+   * desk selector at the top, these paddles, and the legend — which used to be
+   * absent from this sum because the sheet simply covered it outright. 17% is
+   * what is left between the other two: below the desk chips (which wrap to
+   * several lines on a company with many desks), above the strip the legend now
+   * takes immediately over the sheet. Measured clearances with a card open, on
+   * the widths this was checked at: 13px / 22px / 27px above, 15px / 28px / 45px
+   * below, at 700x800, 800x800 and 430x932.
+   *
+   * It is not the midpoint of the band any more, and cannot be: at 430x932 the
+   * band is 384px against a desk selector of 70px, a paddle of 56px and a legend
+   * of 158px with its caveat open. A midpoint would put the paddle through one
+   * of the other two.
+   *
+   * A percentage, not `vh`, for the reason [`SHEET_CAP`] gives.
    */
-  const paddleTop = hasDetail ? 'top-1/2 max-[820px]:top-[19vh]' : 'top-1/2';
+  const paddleTop = hasDetail ? 'top-1/2 max-[820px]:top-[17%]' : 'top-1/2';
+  /**
+   * How the legend gets out of the detail panel's way (issue #1664).
+   *
+   * It did not, until now: at `z-10` under a `z-30` panel, both anchored to the
+   * bottom edge at or below 820px, the sheet covered all seven kind labels and
+   * the workflow-placement caveat outright — the caveat #1318 exists to make
+   * reachable without a hover. `z-40` above puts it on the level the status slot
+   * and the paddles already use, so no later move of the sheet can re-bury it.
+   *
+   * The panel is two different things either side of 820px, so the legend
+   * answers it two different ways:
+   *
+   * - **Above 820px** the panel is the 300px right rail and the legend stays at
+   *   the bottom-left corner, but its width now stops short of the rail (300px
+   *   plus the 16px gap the status slot already leaves, hence 21rem). Measured
+   *   at 900x800 the legend ran 280px *under* the rail; while it was `z-10`
+   *   that read as clipped, and raising it to `z-40` without this would have
+   *   traded being covered for covering, which is no better.
+   * - **At or below 820px** the panel is the bottom sheet, so the legend lifts
+   *   to sit on top of it — [`LEGEND_ABOVE_SHEET`] is the sheet's own cap plus a
+   *   gap, so the two cannot drift apart — and is capped at roughly the band
+   *   that is left, scrolling rather than climbing into the desk selector if a
+   *   future legend grows past it.
+   *
+   * Two things about how these classes are written are load-bearing rather than
+   * stylistic, and both were caught by measuring a real browser rather than by
+   * reading:
+   *
+   * - **No `sm:` in the open-panel list.** Tailwind emits `sm:` (min-width 640)
+   *   *after* `max-[820px]`, so a `sm:bottom-5` alongside these wins at 700px
+   *   and the lift silently does not happen. It was written that way first, and
+   *   the 700px measurement is what caught it. Unconditional utilities are
+   *   emitted before every variant, so `max-[820px]` beats those.
+   * - **The rail clearance is the unconditional value, overridden downward**,
+   *   rather than a `min-[821px]` counterpart to `max-[820px]`. A viewport
+   *   whose CSS width lands between the two — 820.5px, which is what Playwright
+   *   reports for a "820px" viewport on a fractional device scale — matches
+   *   neither, and the legend fell back to full width under the rail. There is
+   *   no such gap when one side is the default.
+   */
+  const legendClearOfDetail = hasDetail
+    ? `bottom-5 max-w-[calc(100%-21rem)] ${LEGEND_ABOVE_SHEET} max-[820px]:max-h-[26%] max-[820px]:overflow-y-auto max-[820px]:max-w-[calc(100%-2.5rem)] max-[639px]:max-w-[calc(100%-1.5rem)]`
+    : 'bottom-3 max-w-[calc(100%-1.5rem)] sm:bottom-5 sm:max-w-[calc(100%-2.5rem)]';
   const idx = deptList.findIndex((d) => d.teamId === currentTeamId);
   const step = (dir: number) => {
     if (deptList.length === 0) return;
@@ -195,7 +279,7 @@ export function KnowledgeGraphFullscreen({
         {!emptyState && legendSlot && (
           <div
             data-testid="kg-legend"
-            className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] sm:bottom-5 sm:left-5 sm:max-w-[calc(100%-2.5rem)]"
+            className={`absolute left-3 z-40 transition-[bottom] duration-200 ease-standard sm:left-5 ${legendClearOfDetail}`}
           >
             {legendSlot}
           </div>
@@ -257,7 +341,7 @@ export function KnowledgeGraphFullscreen({
       {/* detail panel — an absolute overlay so opening/closing a card never
           resizes the graph area (that reflow was the back-and-forth glitch) */}
       {hasDetail && (
-        <aside className="absolute right-0 top-0 z-30 flex h-full w-[300px] flex-col border-l border-os-border-strong bg-os-bg/95 shadow-lg backdrop-blur max-[820px]:inset-x-0 max-[820px]:bottom-0 max-[820px]:top-auto max-[820px]:max-h-[62vh] max-[820px]:w-full max-[820px]:rounded-t-lg-t max-[820px]:border-l-0 max-[820px]:border-t">
+        <aside className={`absolute right-0 top-0 z-30 flex h-full w-[300px] flex-col border-l border-os-border-strong bg-os-bg/95 shadow-lg backdrop-blur max-[820px]:inset-x-0 max-[820px]:bottom-0 max-[820px]:top-auto max-[820px]:w-full max-[820px]:rounded-t-lg-t max-[820px]:border-l-0 max-[820px]:border-t ${SHEET_CAP}`}>
           {/* the trail: node → desk (this) → home. Same affordance inline. */}
           <button
             onClick={onBack}
