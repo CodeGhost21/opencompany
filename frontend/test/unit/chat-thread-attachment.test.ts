@@ -116,6 +116,6 @@ describe("ThreadPanel attachment rendering (issue #1682)", () => {
       parent: { id: "p", from: "you", text: "see attached", at: 0, attachments: [png] },
       resolveAttachmentUrl: resolveUrl,
     });
-    expect(resolveUrl).toHaveBeenCalledWith("n2");
+    expect(resolveUrl).toHaveBeenCalledWith("n2", expect.any(AbortSignal));
   });
 });
