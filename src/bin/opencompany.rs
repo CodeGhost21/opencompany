@@ -1134,12 +1134,11 @@ async fn run_issue_password(
                     )));
                 }
                 CompanyId::new(company)
-            } else if company.contains("--") {
-                return Err(opencompany::error::OpenCompanyError::Config(format!(
-                    "company id `{company}` is namespaced for another tenant; this deployment is \
-                     `{tenant}`, whose ids take the `<tenant>--<name>` form"
-                )));
             } else {
+                // A bare company id may itself contain `--`. Prefer treating
+                // the argument as bare and applying this tenant's prefix; a
+                // caller that supplies the already-expanded local id still
+                // matches the branch above.
                 CompanyId::new(format!("{prefix}{company}"))
             }
         }
