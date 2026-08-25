@@ -111,12 +111,16 @@ function AttachmentItem({
 
   // Fetches the bytes for an inline image once it is in view, and revokes the
   // object URL on unmount so it does not stay resident for the life of the
-  // document.
+  // document. Scrolling the chip back out mid-fetch aborts the download — the
+  // whole payload must not transfer to the last byte for a preview nothing
+  // will show, and the next re-entry must not overlap it with a second
+  // concurrent request for the same node (codex review finding).
   useEffect(() => {
     if (!image || !inView || !resolveUrl) return;
+    const controller = new AbortController();
     let url: string | undefined;
     let alive = true;
-    resolveUrl(attachment.nodeId)
+    resolveUrl(attachment.nodeId, controller.signal)
       .then((got) => {
         if (alive) {
           url = got;
@@ -130,10 +134,12 @@ function AttachmentItem({
         // (codex review finding — a rejection here must not go unhandled),
         // so a failed fetch stays silent here rather than duplicating the
         // download button's own error state for a fetch the operator never
-        // asked for directly.
+        // asked for directly. An abort — the chip scrolled away mid-fetch —
+        // lands in the same place and is equally silent.
       });
     return () => {
       alive = false;
+      controller.abort();
       if (url) URL.revokeObjectURL(url);
     };
   }, [image, inView, resolveUrl, attachment.nodeId]);
