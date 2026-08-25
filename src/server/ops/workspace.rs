@@ -1009,11 +1009,12 @@ async fn chat_upload(
             // On MongoDB the failed attempt is not a dry run: `create_binary`
             // uploads the blob before the node-document insert, so a
             // name-collision conflict has already written bytes under this id
-            // (blob-first ordering, issue #894). Retrying under the *same* id
-            // would upload a second blob that matches a live node, which the
-            // orphan sweep can never reclaim. Mint a fresh id instead, so the
-            // failed attempt's blob has no node document and the sweep removes
-            // it exactly as a crash between `put_blob` and the insert would.
+            // (blob-first ordering, issue #894). The store's conflict path
+            // reclaims that payload before returning, so only the name remains
+            // contested. Retrying under the *same* id would upload a second
+            // blob that matches a live node, which the orphan sweep can never
+            // reclaim — so mint a fresh id (and a disambiguated name derived
+            // from it) for the retry.
             node.id = generate_id();
             node.name = disambiguate_name(&name, &node.id);
             company
