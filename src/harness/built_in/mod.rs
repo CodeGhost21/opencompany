@@ -833,12 +833,20 @@ impl CompanyAgent {
                 if let Some(ctx) = &stream
                     && let Some(frame) = steps::stream_event_from(&event, seq, &mut thinking_open)
                 {
-                    crate::turn_stream::publish(
-                        &ctx.company,
-                        frame
-                            .with_agent(ctx.agent_id.clone())
-                            .with_chat(ctx.chat_id.clone()),
-                    );
+                    let frame = frame.with_agent(ctx.agent_id.clone());
+                    // Route by the turn's surface: a chat turn stamps `chatId`;
+                    // a workflow agent node stamps `workflowRunId`/`nodeId`
+                    // instead, since it has no chat thread and the console's
+                    // run-trace sheet keys the live timeline on the run (#1702).
+                    let frame = match &ctx.route {
+                        crate::turn_stream::LiveRoute::Chat { chat_id } => {
+                            frame.with_chat(chat_id.clone())
+                        }
+                        crate::turn_stream::LiveRoute::Workflow { run_id, node_id } => {
+                            frame.with_workflow(run_id.clone(), node_id.clone())
+                        }
+                    };
+                    crate::turn_stream::publish(&ctx.company, frame);
                     seq += 1;
                 }
                 // Durable half (#242): persist the step before moving on, so a
@@ -1407,7 +1415,18 @@ impl Default for HarnessPool {
 #[derive(Clone, Copy)]
 enum LiveStream<'a> {
     Off,
-    On { chat_id: Option<&'a str> },
+    On {
+        chat_id: Option<&'a str>,
+    },
+    /// A workflow agent node (issue #1702): it streams live like `On`, but its
+    /// frames route by the workflow run + node rather than a chat thread — the
+    /// node has no chat bubble, and the console's run-trace sheet keys the live
+    /// timeline on the run. This is what makes a node's tool calls appear live
+    /// without misattributing to whatever thread most recently sent (#125).
+    Workflow {
+        run_id: &'a str,
+        node_id: &'a str,
+    },
 }
 
 /// Per-company serialization of the roster's policy-axis decision through its
@@ -2476,6 +2495,42 @@ impl HarnessPool {
         .await
     }
 
+    /// Like [`run_background`](Self::run_background) but tees the node's live
+    /// tool-call frames onto the turn-stream bus (issue #1702).
+    ///
+    /// A workflow agent node still shows no operator chat bubble, so its frames
+    /// cannot route by a chat thread — they carry the workflow `run_id`/`node_id`
+    /// instead, and the console's run-trace sheet keys the in-flight tool
+    /// timeline on the run. This is the only difference from `run_background`:
+    /// the durable per-attempt trace (`run_sink`) is unchanged, and a
+    /// tag/publish hiccup can never fail the turn (the collector's publish is
+    /// best-effort and the frame carries only the already-scrubbed projection).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_background_workflow(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+        run_sink: Option<Arc<RunTraceSink>>,
+        workflow_run_id: &str,
+        node_id: &str,
+    ) -> crate::Result<TurnOutcome> {
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            None,
+            LiveStream::Workflow {
+                run_id: workflow_run_id,
+                node_id,
+            },
+            run_sink,
+        )
+        .await
+    }
+
     /// Routes a message to one agent with an operator **steer** control installed
     /// (issue #111), so a dispatched task / desk delegation can be paused,
     /// cancelled, or redirected mid-flight. Otherwise identical to
@@ -2649,9 +2704,11 @@ impl HarnessPool {
         let stream_ctx = Some(crate::turn_stream::TurnStreamCtx {
             company: company.clone(),
             agent_id: confine::CONFINED_AGENT_ID.to_string(),
-            chat_id: chat_id
-                .map(str::to_string)
-                .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+            route: crate::turn_stream::LiveRoute::Chat {
+                chat_id: chat_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+            },
         });
 
         // The message goes to the model AS SENT. This is the retrieve→inject
@@ -2890,9 +2947,22 @@ impl HarnessPool {
                 // cross-attribute. Falls back to the default desk to match the
                 // durable reply when the caller addressed no desk (e.g. an API
                 // client that omits `chat`).
-                chat_id: chat_id
-                    .map(str::to_string)
-                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                route: crate::turn_stream::LiveRoute::Chat {
+                    chat_id: chat_id
+                        .map(str::to_string)
+                        .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                },
+            }),
+            // A workflow agent node (issue #1702): streams live, but keyed on
+            // the workflow run + node so its frames land on the console's
+            // run-trace sheet rather than misattributing to a chat thread.
+            LiveStream::Workflow { run_id, node_id } => Some(crate::turn_stream::TurnStreamCtx {
+                company: company.clone(),
+                agent_id: agent_id.to_string(),
+                route: crate::turn_stream::LiveRoute::Workflow {
+                    run_id: run_id.to_string(),
+                    node_id: node_id.to_string(),
+                },
             }),
             LiveStream::Off => None,
         };
