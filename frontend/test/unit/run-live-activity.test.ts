@@ -104,10 +104,15 @@ describe("folding a workflow node's live tool frames (issue #1702)", () => {
 
   it("does not let an out-of-order start blank a value the result already wrote", () => {
     // If the start arrives after its result (broadcast reordering), the merge
-    // must not clobber the result's detail/elapsed with the start's absence.
+    // must not clobber the result's detail/elapsed/status with the start's
+    // absence — the call completed, and it started where its own start says.
     const nodes = liveNodes(fold([toolResult({}), toolCall({})]));
     const row = nodes[0].rows[0];
     expect(row.detail).toBe("brave · search");
     expect(row.elapsedMs).toBe(42);
+    expect(row.status).toBe("ok");
+    // The late start still anchors the row to the call's own start sequence,
+    // rather than inheriting the later result's.
+    expect(row.seq).toBe(0);
   });
 });
