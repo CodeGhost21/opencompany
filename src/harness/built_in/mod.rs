@@ -4888,7 +4888,6 @@ description = "Builds the product."
     #[tokio::test]
     async fn a_swapped_memory_engine_drops_the_roster_and_reads_the_replacement_store() {
         let fx = fixture();
-        let boot_context = fx.deps.context.clone();
         let pool = HarnessPool::new();
         let rec = record();
 
