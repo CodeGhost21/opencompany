@@ -297,6 +297,57 @@ describe("the echo-brain placeholder marker", () => {
     expect(markers()).toHaveLength(1);
   });
 
+  /**
+   * A run is a claim that consecutive lines are one utterance, and two
+   * different authors never are (codex, PR #1740).
+   *
+   * A collaborator's message and an echo reply share a sender key — both are
+   * `from: "company"`, and the echo brain names its outbound channel `operator`
+   * exactly as an operator message does — so within the 5-minute window they
+   * grouped, and the second row rendered as a continuation with no author line
+   * and therefore no marker. Both orders are wrong: an echo hides inside a
+   * colleague's run unmarked, and a colleague's words sit under an author line
+   * the marker has already labelled as the echo brain's.
+   *
+   * Deliberately inside the grouping window, because outside it the rows never
+   * grouped and the test would pass on a build with the bug.
+   */
+  it("breaks a run between a person's line and an echo reply", () => {
+    const person = (id: string, at: number) =>
+      message({ id, from: "company", channel: "operator", byPerson: true, text: "on it", at });
+    const echo = (id: string, at: number) =>
+      message({ id, from: "company", channel: "operator", text: "You said: yo", at });
+
+    const cases: Array<[string, ChatMessage[]]> = [
+      ["person then echo", [person("a1", T0), echo("a2", T0 + 1000)]],
+      ["echo then person", [echo("b1", T0), person("b2", T0 + 1000)]],
+    ];
+    for (const [order, messages] of cases) {
+      const items = buildTimelineItems(buildTimeline(messages, CHANNEL, []), []);
+      act(() => {
+        root.render(
+          createElement(MessageTimeline, {
+            channel: CHANNEL,
+            items,
+            historyPending: false,
+            openThreadId: null,
+            typing: false,
+            onOpenThread: () => {},
+            onReact: () => {},
+            onDismissCard: () => {},
+            dismissingCardId: null,
+            cognition: "unconfigured",
+          }),
+        );
+      });
+
+      // Exactly one marker, and it is on the echo row — never on the person's.
+      expect(markers(), order).toHaveLength(1);
+      const marked = markers()[0].closest("article[data-message-id]") as HTMLElement;
+      expect(marked.dataset.messageId, order).toBe(order === "person then echo" ? "a2" : "b1");
+    }
+  });
+
   /** The same rule, on the panel that draws its own author line. */
   it("never marks another signed-in person's reply inside a thread", () => {
     act(() => {
