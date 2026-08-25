@@ -3282,10 +3282,8 @@ impl HarnessBrain {
                             // its own speaker; the primary bubble is the
                             // responder's, and the responder is the fallback a
                             // bubble without an author needs.
-                            let agent_id = response
-                                .agent
-                                .clone()
-                                .unwrap_or_else(|| responder.clone());
+                            let agent_id =
+                                response.agent.clone().unwrap_or_else(|| responder.clone());
                             match events
                                 .append(
                                     &record.id,
@@ -3624,8 +3622,8 @@ description = "Runs Acme."
     /// (issue #885: destination and author are separate facts).
     #[tokio::test]
     async fn schedule_fired_journals_an_agent_reply_on_the_general_desk() {
-        use crate::ports::types::EventSeq;
         use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
         use crate::store::FsEventLog;
 
         let dir = tempfile::tempdir().unwrap();
@@ -3646,10 +3644,7 @@ description = "Runs Acme."
         // destination and author stay separate.
         assert_eq!(result.channel_responses.len(), 1);
         let bubble = &result.channel_responses[0];
-        assert_eq!(
-            bubble.channel,
-            crate::server::ops::language::DEFAULT_DESK
-        );
+        assert_eq!(bubble.channel, crate::server::ops::language::DEFAULT_DESK);
         assert_eq!(bubble.agent.as_deref(), Some("ceo"));
 
         // The journal holds one AgentReply, on the General desk, attributed to
