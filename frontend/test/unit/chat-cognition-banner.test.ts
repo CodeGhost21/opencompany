@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createElement, createRef } from "react";
+import { Fragment, act, createElement, createRef, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -41,12 +41,21 @@ let root: Root;
  * view already handles everywhere (it is what a company with no teammates and
  * no history looks like), so the fixture stays about the one read it is for.
  */
-function clientWith(cognition: CognitionState | undefined | "reject"): OpenCompanyClient {
-  const capabilityStatus = vi.fn(() =>
-    cognition === "reject"
-      ? Promise.reject(new Error("no capability surface on this host"))
-      : Promise.resolve({ configured: false, cognition } as CapabilityStatusDto),
-  );
+function clientWith(
+  cognition: CognitionState | undefined | "reject" | "pending",
+): OpenCompanyClient {
+  const capabilityStatus = vi.fn(() => {
+    if (cognition === "reject") {
+      return Promise.reject(new Error("no capability surface on this host"));
+    }
+    // A read that never settles — the state a company the operator has only
+    // just switched to is in, and the one the stale-scope test needs to hold
+    // open rather than race.
+    if (cognition === "pending") {
+      return new Promise<CapabilityStatusDto>(() => {});
+    }
+    return Promise.resolve({ configured: false, cognition } as CapabilityStatusDto);
+  });
   const named: Record<string, unknown> = {
     capabilityStatus,
     scopeFor: () => "/api/v1/company",
@@ -146,14 +155,17 @@ describe("the chat cognition banner", () => {
     expect(link!.textContent).toContain("Settings → Inference");
   });
 
-  it("names a rebuild, not a setting, when the harness is not in this build", async () => {
-    await render("not-in-build");
+  it("names the host, not a setting, when no harness is available", async () => {
+    await render("unavailable");
 
     const notice = banner();
     expect(notice).not.toBeNull();
-    // The host's own wording for this fact, reused rather than reworded.
+    // Worded for the remedy rather than one of the two mechanisms behind it:
+    // this state is reported both for a binary with no harness compiled in and
+    // for one whose runtimes were never handed a pool, and naming only the
+    // first would be false on the second (codex, PR #1740).
     expect(notice!.textContent).toContain(
-      "This build cannot reach a model — the agent harness is not compiled in.",
+      "This host cannot reach a model — no agent harness is available.",
     );
     // No settings link here: offering one would be the switch-that-does-nothing
     // this whole surface exists to stop.
@@ -177,6 +189,86 @@ describe("the chat cognition banner", () => {
   it("stays down when the capability read fails", async () => {
     await render("reject");
 
+    expect(banner()).toBeNull();
+  });
+
+  /**
+   * A company switch must not show the previous company's verdict, not even for
+   * the frame before the new read lands (CodeRabbit review of PR #1740).
+   *
+   * `ChatView` stays mounted when `company` changes, and its capability read is
+   * a passive effect — which runs *after* React has committed the DOM and the
+   * browser has painted. Clearing the state inside that effect is therefore too
+   * late by construction: the operator sees company A's "teammates can't think"
+   * banner and its Placeholder chips over company B's transcript first. Binding
+   * the value to the scope that produced it makes the stale answer unreadable
+   * rather than merely short-lived.
+   *
+   * The assertion has to be taken at **commit** time for the same reason.
+   * `act()` flushes passive effects before returning, so a post-`act` DOM query
+   * would find the cleared state and pass either way — the classic vacuous
+   * regression test. The probe below records what was actually committed, from
+   * a layout effect, which React runs after every DOM mutation of a commit and
+   * before any passive effect of it.
+   */
+  it("never shows the previous company's banner over the next company", async () => {
+    const committed: boolean[] = [];
+    function Probe() {
+      useLayoutEffect(() => {
+        committed.push(container.querySelector('[data-testid="chat-cognition-banner"]') !== null);
+      });
+      return null;
+    }
+
+    const clientA = clientWith("unconfigured");
+    // Company B's read never settles, which is the whole window under test: the
+    // console has been told nothing about B yet.
+    const clientB = clientWith("pending");
+
+    function show(client: OpenCompanyClient, company: string) {
+      const scopeRef = createRef<{
+        connection: string;
+        company: string | null;
+        client: OpenCompanyClient;
+      }>() as { current: { connection: string; company: string | null; client: OpenCompanyClient } };
+      scopeRef.current = { connection: "c1", company, client };
+      root.render(
+        createElement(ConnectionScopeProvider, {
+          scope: { connection: "c1", company },
+          children: createElement(Fragment, null, [
+            createElement(ChatView, {
+              key: "chat",
+              client,
+              company,
+              sub: "main",
+              onNavigate: () => {},
+              transcripts: {},
+              setTranscripts: () => {},
+              scopeRef,
+            }),
+            createElement(Probe, { key: "probe" }),
+          ]),
+        }),
+      );
+    }
+
+    await act(async () => {
+      show(clientA, "acme");
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The premise: A really is showing the banner. Without this the assertion
+    // below would pass on a view that never renders one at all.
+    expect(banner()).not.toBeNull();
+
+    committed.length = 0;
+    await act(async () => {
+      show(clientB, "beta");
+    });
+
+    expect(committed.length).toBeGreaterThan(0);
+    expect(committed).not.toContain(true);
     expect(banner()).toBeNull();
   });
 });

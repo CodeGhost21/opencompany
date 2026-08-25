@@ -68,6 +68,7 @@ import {
   type Mention,
   type Mentionable,
 } from "./chat/mentions";
+import { echoCause } from "./chat/EchoPlaceholder";
 import { MessageTimeline } from "./chat/MessageTimeline";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
@@ -344,16 +345,30 @@ export function ChatView({
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
   /**
-   * Whether this company's teammates can actually think (issue #1734/#1735).
+   * Whether this company's teammates can actually think (issue #1734/#1735),
+   * **stamped with the scope that produced it**.
    *
-   * `null` until the host has answered, and it stays `null` on a host that has
-   * no such field — an older one, or one that could not answer. That silence is
-   * *not* evidence of an echo, so the banner stays down and every row renders
-   * exactly as it did before. The failure this fixes is the console asserting
-   * something it was never told; asserting the opposite would be the same bug
-   * pointed the other way.
+   * `null` until the host has answered, and the `state` inside stays `null` on
+   * a host that has no such field — an older one, or one that could not answer.
+   * That silence is *not* evidence of an echo, so the banner stays down and
+   * every row renders exactly as it did before. The failure this fixes is the
+   * console asserting something it was never told; asserting the opposite would
+   * be the same bug pointed the other way.
+   *
+   * The `client`/`company` stamp is what keeps that promise across a company
+   * switch. This view stays mounted when `company` changes, and effects run
+   * *after* the render that changed it — so a bare `CognitionState` would still
+   * be holding the previous company's answer on the first render of the next
+   * one, showing its banner and its Placeholder chips over a transcript they
+   * are not about. Clearing inside the effect cannot fix that; it runs too
+   * late. Deriving through the stamp below makes the stale value unreadable
+   * rather than merely short-lived (CodeRabbit review of PR #1740).
    */
-  const [cognition, setCognition] = useState<CognitionState | null>(null);
+  const [loadedCognition, setLoadedCognition] = useState<{
+    client: OpenCompanyClient;
+    company: string | null;
+    state: CognitionState | null;
+  } | null>(null);
   const [fromHost, setFromHost] = useState(false);
   /**
    * The company's channels — `null` until `/desks` has answered.
@@ -422,23 +437,23 @@ export function ChatView({
    * considered one — same avatar, same name, same timestamp. The runtime knows
    * the difference and, until #1735, never said so.
    *
-   * Cleared on every company switch and re-read, so the previous company's
-   * answer is never rendered over this one's transcript. On failure it stays
-   * `null` — see the state declaration for why silence must not become a claim.
+   * Re-read on every company switch, and every answer is stamped with the
+   * scope it came from — the read is what is scoped, not just when it is
+   * cleared. On failure the stamped state is `null`: see the state declaration
+   * for why silence must not become a claim.
    */
   useEffect(() => {
     let live = true;
-    setCognition(null);
     void (async () => {
       try {
         const capabilities = await client.capabilityStatus(company);
-        if (live) setCognition(capabilities.cognition ?? null);
+        if (live) setLoadedCognition({ client, company, state: capabilities.cognition ?? null });
       } catch (e) {
         // An older host, or one that could not answer. Nothing is claimed
         // either way, and chat renders exactly as it did before the banner
         // existed.
         console.debug("[ChatView] cognition state unavailable", e);
-        if (live) setCognition(null);
+        if (live) setLoadedCognition({ client, company, state: null });
       }
     })();
     return () => {
@@ -447,11 +462,25 @@ export function ChatView({
   }, [client, company]);
 
   /**
+   * The host's answer *for the company on screen right now*, or `null` while
+   * this company's own read is still in flight. A value stamped with another
+   * scope is not an answer about this one.
+   */
+  const cognition =
+    loadedCognition &&
+    loadedCognition.client === client &&
+    loadedCognition.company === company
+      ? loadedCognition.state
+      : null;
+
+  /**
    * The company is on the offline echo brain, whichever of the two reasons it
    * is for. Both mean the same thing to a reader of the transcript: the lines
    * on the company side were not written by the teammates they appear under.
+   * The *cause* still travels separately, because the two have different
+   * remedies and the banner and the chips both have to name the right one.
    */
-  const echoing = cognition === "unconfigured" || cognition === "not-in-build";
+  const echoing = echoCause(cognition) !== null;
 
   function toggleChannels() {
     setChannelsCollapsed((collapsed) => {
@@ -1678,11 +1707,11 @@ export function ChatView({
                   ) : (
                     <>
                       <span className="font-medium text-foreground">
-                        This build cannot reach a model — the agent harness is not compiled in.
+                        This host cannot reach a model — no agent harness is available.
                       </span>{" "}
                       The replies below come from the offline echo brain rather than the teammate
-                      they appear under. No setting changes that: it takes a build with the
-                      harness.
+                      they appear under. No setting changes that: it takes a host built and
+                      started with the harness.
                     </>
                   )}
                 </span>
@@ -1691,7 +1720,7 @@ export function ChatView({
             <MessageTimeline
               channel={channel}
               items={items}
-              echoing={echoing}
+              cognition={cognition}
               historyPending={historyPending}
               openThreadId={openThreadId}
               // An open turn keeps the row up after the POST has resolved, and
@@ -1779,6 +1808,10 @@ export function ChatView({
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
               onTyping={() => onTyping?.(active.id, parent.id)}
+              // A thread is not a lesser transcript (issue #1734): an echoed
+              // reply read here is the same false attribution as one read in
+              // the channel, so the panel marks its rows from the same state.
+              cognition={cognition}
             />
           )}
 

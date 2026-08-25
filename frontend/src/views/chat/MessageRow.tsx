@@ -1,5 +1,6 @@
 import { MessageSquareReply } from "lucide-react";
 
+import type { CognitionState } from "@/api/types";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -17,6 +18,7 @@ import {
   type Sender,
   type TimelineEntry,
 } from "./model";
+import { EchoPlaceholder, echoCause } from "./EchoPlaceholder";
 import { CardChip, StepTimeline } from "./StepTimeline";
 
 interface Props {
@@ -36,9 +38,17 @@ interface Props {
    */
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   /**
-   * The company is running the offline echo brain, so nothing on the company
-   * side of this transcript was written by the teammate it appears under
+   * Whether this company's teammates can think, as the host reported it (issue
+   * #1735). On either echo state nothing on the company side of this transcript
+   * was written by the teammate it appears under, and every such row is marked
    * (issue #1734).
+   *
+   * The **discriminated state** rather than a boolean, because the marker's
+   * tooltip has to name the cause: `unconfigured` and `unavailable` have
+   * different remedies, and a chip that says "no model configured" on a host
+   * with no harness contradicts the banner directly above it. Collapsing them
+   * here is what made that contradiction possible (CodeRabbit and codex both
+   * caught it on PR #1740).
    *
    * A company-level fact rather than a per-message one, because that is the
    * only shape the truth has here: `ChatMessage` carries no provenance, so a
@@ -51,12 +61,16 @@ interface Props {
    * would put the transcript out of step with the journal, which did record a
    * reply.
    *
-   * The known imprecision runs one way only: a company on the echo brain *now*
-   * may hold replies from a boot when it was configured, and those get marked
-   * too. Over-marking a real reply costs a moment of doubt; under-marking an
-   * echo is the bug this exists to fix.
+   * The known imprecision runs both ways, and both are the price of having no
+   * per-message provenance: a company on the echo brain *now* may hold replies
+   * from a boot when it was configured and those get marked too, and a company
+   * configured *since* keeps historical echoes unmarked. Marking by the
+   * company's current state is what the console can actually know; stamping
+   * provenance at write time is a host change (issue #1792).
+   *
+   * `undefined` is unknown — an older host — and marks nothing.
    */
-  echoing?: boolean;
+  cognition?: CognitionState | null;
 }
 
 /**
@@ -97,7 +111,7 @@ export function MessageRow({
   onDismissCard,
   dismissingCardId,
   resolveAttachmentUrl,
-  echoing,
+  cognition,
 }: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
@@ -144,7 +158,7 @@ export function MessageRow({
             // knows it. `system` never reaches here (it short-circuits to
             // `SystemPill` above), so what is left is the company side, which
             // is exactly what the echo brain produced.
-            placeholder={!!echoing && sender.kind !== "you"}
+            placeholder={sender.kind === "you" ? null : echoCause(cognition)}
           />
         )}
         <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
@@ -246,13 +260,11 @@ function AuthorLine({
   sender: Sender;
   at: number;
   /**
-   * Mark this line as not authored by the voice above it (issue #1734). The
-   * chip is short because it sits on every company row; the sentence behind it
-   * is the tooltip, following the `disabledReason` idiom above — a control (or
-   * a label) that just changes shape reads as a bug, so the reason is available
-   * without leaving the row.
+   * Why this line is not authored by the voice above it (issue #1734), or
+   * `null` when it is. Carries the cause rather than a flag so the chip's
+   * tooltip can name it — see `EchoPlaceholder`.
    */
-  placeholder?: boolean;
+  placeholder?: CognitionState | null;
 }) {
   const openProfile = useAgentProfileOpener();
   const { agentId } = sender;
@@ -273,15 +285,7 @@ function AuthorLine({
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 leading-5">
       {name}
-      {placeholder && (
-        <span
-          data-testid="chat-echo-placeholder"
-          title={`${sender.name} did not write this. The company has no model configured, so the offline echo brain answered instead.`}
-          className="shrink-0 rounded-full bg-muted px-1.5 py-px text-2xs font-medium text-muted-foreground"
-        >
-          Placeholder
-        </span>
-      )}
+      {placeholder && <EchoPlaceholder author={sender.name} cause={placeholder} />}
       <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
         {formatTime(at)}
       </span>

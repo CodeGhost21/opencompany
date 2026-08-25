@@ -191,15 +191,16 @@ struct CapabilityStatusDto {
     mcp_in_build: bool,
     /// Whether this company's teammates can actually think, and why not when
     /// they cannot (issue #1735): `configured`, `unconfigured`, or
-    /// `not-in-build`.
+    /// `unavailable`.
     ///
     /// The one capability on this response that is **not** a build fact alone.
     /// `media_in_build` and its neighbours answer "was this compiled in";
-    /// cognition is that question *and* "did a model resolve at boot", and only
-    /// the second is something an operator can fix without a new binary. A
-    /// fifth boolean would have collapsed the two, which is the same mistake as
-    /// the echo reply it exists to explain — an operator told "not available"
-    /// goes looking for a rebuild when a provider was one settings page away.
+    /// cognition is that question *and* "is a harness actually attached" *and*
+    /// "did a model resolve at boot", and only the last is something an
+    /// operator can fix without a new binary. A fifth boolean would have
+    /// collapsed them, which is the same mistake as the echo reply it exists to
+    /// explain — an operator told "not available" goes looking for a rebuild
+    /// when a provider was one settings page away.
     ///
     /// Derived on every read from the brain the runtime is holding, never
     /// stored. See [`crate::server::cognition`].
@@ -417,7 +418,20 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
     // anything else can fail: a company whose record will not load still has a
     // brain, and "can a teammate answer me" is the one question on this
     // response that must never degrade to a reassuring default.
-    let cognition = cognition_state(runtime.cognition().path, cfg!(feature = "openhuman"));
+    //
+    // Reachability, not `cfg!(feature = "openhuman")`: the feature says the
+    // harness was compiled in, not that this runtime was handed a pool, and an
+    // embedder that skips `app::harness::attach` gets exactly that (the shipped
+    // desktop-shell bug that module exists to end). Reporting `unconfigured`
+    // there would point the operator at Settings → Inference, which cannot move
+    // that runtime off the echo brain — the dead end `ops::inference`'s own
+    // `restart_pending`/`runner_gap_for` already gate on this same predicate to
+    // avoid (issues #266, #514). Borrowing that function rather than re-deriving
+    // it is what keeps the two surfaces from disagreeing about one company.
+    let cognition = cognition_state(
+        runtime.cognition().path,
+        crate::server::ops::inference::harness_reachable(runtime),
+    );
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     let Some(record) = record else {
         return Ok(unconfigured(OptInFlags::none(cognition)));
@@ -650,18 +664,18 @@ mod tests {
     /// never report itself as able to think — with or without a `[plan]`, since
     /// the DTO is built in two places.
     ///
-    /// Which of the two honest answers it gives depends on the lane: with the
-    /// `openhuman` feature the harness is compiled in and a provider is one
-    /// settings page away (`unconfigured`); without it, no configuration
-    /// reaches a model (`not-in-build`). Both are asserted so the test says
-    /// something in every lane rather than being silently vacuous in one.
+    /// The runtimes `state_with_manifest` builds never call
+    /// `app::harness::attach`, so **no pool is attached in either lane** and the
+    /// honest answer is `unavailable` in both: nothing an operator saves in
+    /// Settings → Inference reaches a harness that was never wired. This read
+    /// `unconfigured` under `openhuman` while the state was derived from
+    /// `cfg!` alone — a settings link offered on a runtime it could not help
+    /// (codex review of PR #1740). The lane-independent expectation is the
+    /// point: the answer turns on what this runtime holds, not on which lane
+    /// compiled it.
     #[tokio::test]
     async fn a_company_on_the_echo_brain_never_reports_itself_configured() {
-        let expected = if cfg!(feature = "openhuman") {
-            "unconfigured"
-        } else {
-            "not-in-build"
-        };
+        let expected = "unavailable";
 
         // No `[plan]` — the `unconfigured()` construction site.
         let home_a_dir = home();
@@ -694,6 +708,52 @@ mod tests {
         assert_eq!(
             dto_b["cognition"], expected,
             "the plan-configured construction site must carry the same answer: {dto_b}"
+        );
+    }
+
+    /// A harness pool *is* attached and the company still resolved no inference
+    /// source, so the echo brain won — the one state where Settings → Inference
+    /// is a real remedy (issue #1735).
+    ///
+    /// The counterpart to the test above, and the pair is what pins the
+    /// distinction codex's review turned on: same echo brain, same manifest,
+    /// same lane, and the answer flips on whether a pool was attached. Gated on
+    /// `openhuman` because `with_harness` — and the very idea of an attached
+    /// pool — only exists under it; `feature-lanes.txt` records that lane as
+    /// `tested`, so this runs rather than merely compiling.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_attached_harness_with_no_inference_is_a_settings_problem() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+        // Seeds the record and a harness-less runtime, then replaces the
+        // runtime with one holding a pool over the same record — so the only
+        // difference from the test above is the attached harness.
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(crate::harness::HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        // The premise: no inference source resolved, so this is still the echo
+        // brain. Asserted rather than assumed — if a future default put a brain
+        // behind it, the `unconfigured` below would pass for the wrong reason.
+        assert_eq!(
+            runtime.cognition().path,
+            crate::ports::brain::ECHO_PATH,
+            "no inference configured, so the runtime must still be on the echo brain",
+        );
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["cognition"], "unconfigured",
+            "a pool is attached, so a provider really is one settings page away: {dto}"
         );
     }
 

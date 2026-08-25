@@ -56,24 +56,39 @@ publishing the path vocabulary and letting every view restate the rule.
 
 ```rust
 // src/server/cognition.rs
-pub enum CognitionState { Configured, Unconfigured, NotInBuild }
+pub enum CognitionState { Configured, Unconfigured, Unavailable }
 
-pub fn cognition_state(path: &str, harness_in_build: bool) -> CognitionState;
+pub fn cognition_state(path: &str, harness_reachable: bool) -> CognitionState;
 ```
 
 | state | what is true | remedy |
 |---|---|---|
 | `configured` | a path that runs a real model is live | — |
-| `unconfigured` | the harness is compiled in, but nothing resolved at boot, so the company is on the echo brain | Settings → Inference, **in-app** |
-| `not-in-build` | no agent harness in this binary | a rebuild — say so plainly |
+| `unconfigured` | a harness pool is attached, but nothing resolved at boot, so the company is on the echo brain | Settings → Inference, **in-app** |
+| `unavailable` | no agent harness is reachable on this host | a different build or host wiring — say so plainly |
 
-Not a fifth `*_in_build` boolean. Cognition is two facts at once — compiled in,
-*and* configured at runtime — and only the second is actionable without a new
-binary. One flag collapses them and sends the operator who needs a settings page
-off looking for a build.
+Not a fifth `*_in_build` boolean. Cognition is two facts at once — a harness is
+reachable, *and* a model resolved at runtime — and only the second is actionable
+without a new binary. One flag collapses them and sends the operator who needs a
+settings page off looking for a build.
+
+**The states are named for their remedy, not their mechanism.** Two mechanisms
+land on `unavailable`: the `openhuman` feature is not compiled in, or it is and
+the embedder built its runtimes without `app::harness::attach` — the shipped
+desktop-shell bug that module exists to end. The operator can act on neither, so
+splitting them would offer a distinction they cannot use; folding either into
+`unconfigured` would offer a settings page that cannot help.
+
+That is why the second input is **harness reachability, not the Cargo feature**.
+`cfg!(feature = "openhuman")` says the harness was compiled in; it does not say
+this company's runtime was ever handed a pool. `cognition_state` therefore takes
+`ops::inference::harness_reachable` — the same predicate `restart_pending` and
+`runner_gap_for` gate their restart and configure-inference advice on (issues
+#266, #514) — so the chat banner and the Inference card cannot disagree about
+whether Settings → Inference is a remedy or a dead end for one company.
 
 Derived on every read from the brain the runtime is holding
-(`runtime.cognition().path`) plus `cfg!(feature = "openhuman")`, so it cannot
+(`runtime.cognition().path`) plus that reachability check, so it cannot
 drift from reality. Reported on `GET …/capabilities` beside `mediaInBuild`,
 `searchInBuild`, `publishInBuild` and `mcpInBuild` — the per-company answer to
 "what can this company actually do" — as `cognition`.
@@ -82,8 +97,11 @@ The console consumes it in chat (issue #1734): on anything but `configured` the
 transcript carries a banner naming the cause and, where one exists, the remedy,
 and every company-side row is marked as a placeholder rather than presented as
 the teammate's own words. `ChatMessage` carries no provenance, so a company-level
-flag is the only shape that answer has — see `MessageRow`'s `echoing` prop for
-why marking beats suppressing.
+state is the only shape that answer has — see `MessageRow`'s `cognition` prop for
+why marking beats suppressing. The same state reaches `ThreadPanel`, because a
+reply read inside a thread is the same false attribution as one read in the
+channel, and the marker's tooltip names the cause it was given rather than
+restating `unconfigured`'s remedy for both.
 
 ```rust
 /// Callbacks the brain makes into the host mid-cycle.

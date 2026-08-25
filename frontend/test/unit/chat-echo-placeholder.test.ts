@@ -4,8 +4,10 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { CognitionState } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
 import { MessageTimeline } from "@/views/chat/MessageTimeline";
+import { ThreadPanel } from "@/views/chat/ThreadPanel";
 import { buildTimeline, buildTimelineItems, type Channel } from "@/views/chat/model";
 
 /**
@@ -21,8 +23,9 @@ import { buildTimeline, buildTimelineItems, type Channel } from "@/views/chat/mo
  *
  * The console cannot tell the two apart from the message — `ChatMessage`
  * carries no provenance — so the marker is driven by the company-level
- * `echoing` flag the host now reports (issue #1735). These tests pin both
- * directions of that flag, and the one row it must never touch.
+ * cognition state the host now reports (issue #1735). These tests pin both
+ * directions of that state, the one row it must never touch, the cause its
+ * tooltip has to name, and the second surface that renders an author line.
  */
 
 const CHANNEL: Channel = {
@@ -48,7 +51,7 @@ let root: Root;
  * `*.test.ts` — a `.tsx` file is silently not collected, which reads as a
  * passing suite.
  */
-function render(echoing: boolean) {
+function render(cognition: CognitionState) {
   const messages = [
     message({ id: "h1", from: "you", text: "yo" }),
     message({ id: "h2", from: "company", text: "You said: yo", at: T0 + 1000 }),
@@ -66,7 +69,32 @@ function render(echoing: boolean) {
         onReact: () => {},
         onDismissCard: () => {},
         dismissingCardId: null,
-        echoing,
+        cognition,
+      }),
+    );
+  });
+}
+
+/**
+ * The thread panel, with one echoed company reply under the parent.
+ *
+ * A separate render path with its own author line — which is exactly why it
+ * needs its own test: the first cut of this fix threaded the state into
+ * `MessageTimeline` only, and a reader who opened a thread was handed back the
+ * unmarked attribution the channel had just stopped showing them.
+ */
+function renderThread(cognition: CognitionState | undefined) {
+  act(() => {
+    root.render(
+      createElement(ThreadPanel, {
+        channel: CHANNEL,
+        members: [],
+        parent: message({ id: "p1", from: "you", text: "yo" }),
+        replies: [message({ id: "r1", from: "company", text: "You said: yo", at: T0 + 1000 })],
+        sending: false,
+        onSend: () => {},
+        onClose: () => {},
+        cognition,
       }),
     );
   });
@@ -112,7 +140,7 @@ afterEach(() => {
 
 describe("the echo-brain placeholder marker", () => {
   it("marks the company's line when the company is on the echo brain", () => {
-    render(true);
+    render("unconfigured");
 
     expect(markers()).toHaveLength(1);
     expect(markers()[0].textContent).toBe("Placeholder");
@@ -123,8 +151,26 @@ describe("the echo-brain placeholder marker", () => {
     expect(markers()[0].getAttribute("title")).toMatch(/no model configured/);
   });
 
+  /**
+   * The chip renders for both echo states, so it must not narrate the wrong
+   * one. On a host with no harness the banner above says no setting will help
+   * and the tooltip said the company had no model configured — the two
+   * contradicting each other on the same screen (CodeRabbit and codex, PR
+   * #1740). The cause travels with the state precisely so this cannot recur.
+   */
+  it("names the harness, not a missing model, when no harness is available", () => {
+    render("unavailable");
+
+    expect(markers()).toHaveLength(1);
+    const title = markers()[0].getAttribute("title")!;
+    expect(title).toMatch(/did not write this/);
+    expect(title).toMatch(/No agent harness is available on this host/);
+    // The remedy the banner rules out must not be implied here either.
+    expect(title).not.toMatch(/no model configured/);
+  });
+
   it("marks the company's line and not the operator's", () => {
-    render(true);
+    render("unconfigured");
 
     // The operator wrote `h1` and knows it — marking that would be the same
     // misattribution pointed the other way. `h2` is the echo.
@@ -136,13 +182,13 @@ describe("the echo-brain placeholder marker", () => {
   });
 
   it("marks nothing when the company has a model", () => {
-    render(false);
+    render("configured");
 
     expect(markers()).toHaveLength(0);
   });
 
   it("marks nothing when the host never said either way", () => {
-    // `echoing` omitted entirely — an older host, or one that could not answer.
+    // `cognition` omitted entirely — an older host, or one that could not answer.
     // Silence is not evidence of an echo, and a console that treats it as one
     // is the same bug pointed the other way.
     const messages = [message({ id: "h1", from: "company", text: "You said: yo" })];
@@ -162,6 +208,27 @@ describe("the echo-brain placeholder marker", () => {
         }),
       );
     });
+
+    expect(markers()).toHaveLength(0);
+  });
+
+  /**
+   * The thread panel is the second place an author line is drawn, and it draws
+   * its own — so it needs the state threaded to it or it silently keeps the
+   * behaviour the channel just lost. A reader who clicks into a thread is doing
+   * the *more* attentive kind of reading; handing them the unmarked version
+   * there is the worse half of the bug, not a lesser one.
+   */
+  it("marks an echoed reply inside a thread, and not the operator's parent", () => {
+    renderThread("unconfigured");
+
+    expect(markers()).toHaveLength(1);
+    expect(authorOf(markers()[0])).not.toMatch(/^You$/);
+    expect(markers()[0].getAttribute("title")).toMatch(/did not write this/);
+  });
+
+  it("marks nothing in a thread when the host never said either way", () => {
+    renderThread(undefined);
 
     expect(markers()).toHaveLength(0);
   });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
-import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -81,12 +81,13 @@ interface Props {
   failedApprovals?: Record<string, string>;
   onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
   /**
-   * The company is running the offline echo brain, so every company-side row
-   * below is a canned line rather than a teammate's answer (issue #1734).
-   * Passed straight through to `MessageRow`, which explains why this is a
-   * company-level fact and not a per-message one.
+   * Whether this company's teammates can think (issue #1735). On either echo
+   * state every company-side row below is a canned line rather than a
+   * teammate's answer (issue #1734). Passed straight through to `MessageRow`,
+   * which explains why this is a company-level fact and not a per-message one,
+   * and why it carries the cause rather than a boolean.
    */
-  echoing?: boolean;
+  cognition?: CognitionState | null;
 }
 
 /**
@@ -138,7 +139,7 @@ export function MessageTimeline({
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
-  echoing,
+  cognition,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
@@ -304,7 +305,7 @@ export function MessageTimeline({
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
                 resolveAttachmentUrl={resolveAttachmentUrl}
-                echoing={echoing}
+                cognition={cognition}
               />
             </div>
           ) : (

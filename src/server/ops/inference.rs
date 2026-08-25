@@ -209,13 +209,18 @@ fn source_label(source: InferenceSource) -> &'static str {
 /// pool is attached whenever the serve path ran `attach_harness`, independently
 /// of which brain arm won — which is exactly the "this host could have run the
 /// harness, and didn't" signal we need.
+///
+/// Shared with [`crate::server::ops::capabilities`], which asks the same
+/// question for the chat surface's cognition state (issue #1735): whether
+/// Settings → Inference is a remedy or a dead end is one fact, and two copies
+/// of it would let the two surfaces disagree about the same company.
 #[cfg(feature = "openhuman")]
-fn harness_reachable(runtime: &CompanyRuntime) -> bool {
+pub(crate) fn harness_reachable(runtime: &CompanyRuntime) -> bool {
     runtime.harness().is_some()
 }
 
 #[cfg(not(feature = "openhuman"))]
-fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
+pub(crate) fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
     false
 }
 

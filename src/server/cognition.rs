@@ -10,10 +10,20 @@
 //! the echo under the teammate's own avatar and name (issue #1734).
 //!
 //! This is deliberately **not** a fifth `*_in_build` boolean. Cognition is two
-//! facts at once — whether the harness is compiled in, and whether a model is
-//! configured at runtime — and only the second is something an operator can act
-//! on without a rebuild. A single flag collapses them, which sends the operator
-//! who needs one settings page off looking for a new binary.
+//! facts at once — whether an agent harness is reachable at all, and whether a
+//! model is configured at runtime — and only the second is something an
+//! operator can act on without a new build. A single flag collapses them, which
+//! sends the operator who needs one settings page off looking for a new binary.
+//!
+//! The states are named for their **remedy**, not for the mechanism behind
+//! them. "The harness is not compiled in" and "the harness is compiled in and
+//! this host never attached a pool" are different mechanisms with the same
+//! remedy — neither is reachable from a settings page — so they share
+//! [`CognitionState::Unavailable`]. Splitting them would offer the operator a
+//! distinction they cannot act on; folding either into
+//! [`CognitionState::Unconfigured`] would promise a settings page that cannot
+//! help, which is the failure `ops::inference`'s `harness_reachable` already
+//! exists to stop (issues #266, #514).
 
 use serde::Serialize;
 
@@ -32,22 +42,37 @@ pub enum CognitionState {
     /// what `POST …/inference/test` probes. This is the narrower question of
     /// whether anything but the echo brain is in the socket.
     Configured,
-    /// This build carries the agent harness, but the company resolved no
+    /// An agent harness is reachable on this host, but the company resolved no
     /// inference source at boot, so it is running the offline echo brain and
     /// answering every message with a canned line.
     ///
     /// Fixable in the app, at Settings → Inference. This is the state a fresh
     /// instance starts in, and the one the operator is most likely to mistake
     /// for the product being stupid.
+    ///
+    /// **Requires a harness that is actually attached**, not merely compiled
+    /// in — see [`cognition_state`]. Reporting this for a runtime with no pool
+    /// would send the operator to a settings page that cannot move them off the
+    /// echo brain, which is the exact dead end `restart_pending` and
+    /// `runner_gap_for` in [`crate::server::ops::inference`] refuse to walk an
+    /// operator into.
     Unconfigured,
-    /// The agent harness is not compiled into this binary, so no model
-    /// configuration reaches one. Only a rebuild changes this.
+    /// No agent harness is reachable on this host, so no model configuration
+    /// gets anywhere near one. Only a different build — or a host that wires a
+    /// harness pool onto its runtimes — changes this.
+    ///
+    /// Two mechanisms land here and the operator can act on neither: the
+    /// `openhuman` feature is not compiled into this binary, or it is and the
+    /// embedder built its runtimes without calling
+    /// [`crate::app::harness::attach`] (the failure that module exists for —
+    /// the desktop shell shipped companies with no harness in a build that
+    /// compiled one in).
     ///
     /// The console must say so plainly rather than offering a settings link
     /// that cannot help — the same rule `api/setup.ts` states for the
     /// `*_in_build` flags, which exist "so the flow can say 'not in this build'
     /// instead of offering a switch that does nothing".
-    NotInBuild,
+    Unavailable,
 }
 
 impl CognitionState {
@@ -57,7 +82,7 @@ impl CognitionState {
         match self {
             Self::Configured => "configured",
             Self::Unconfigured => "unconfigured",
-            Self::NotInBuild => "not-in-build",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -72,11 +97,25 @@ impl CognitionState {
 /// rebuilt, and reporting the config would tell that operator their teammates
 /// can think while they are still being echoed at.
 ///
-/// `harness_in_build` is `cfg!(feature = "openhuman")` at the call site. Passed
-/// in rather than read here so the three-way matrix is testable without a
-/// runtime per arm — in particular the `not-in-build` arm, which a lane that
-/// enables the feature could otherwise never reach, and which would then be the
-/// one arm with no coverage in the lane that ships.
+/// `harness_reachable` is whether an agent harness pool is actually attached to
+/// this runtime — `crate::server::ops::inference::harness_reachable`, the same
+/// predicate `restart_pending` and `runner_gap_for` gate their "configure
+/// inference" and "restart" advice on, rather than a second copy of it.
+///
+/// **Not `cfg!(feature = "openhuman")`.** The feature says the harness was
+/// compiled in; it does not say this company's runtime was ever handed a pool.
+/// An embedder that builds a [`RuntimeBuilder`](crate::runtime::RuntimeBuilder)
+/// without [`crate::app::harness::attach`] gets exactly that — an `openhuman`
+/// binary whose companies sit on the echo brain with no harness behind them,
+/// which is the shipped bug `app::harness` was written to end. Deriving from
+/// the feature alone reports [`CognitionState::Unconfigured`] there and points
+/// the operator at Settings → Inference, which cannot move that runtime off the
+/// echo brain no matter what they save.
+///
+/// Passed in rather than read here so the three-way matrix is testable without
+/// a runtime per arm — in particular the `unavailable` arm, which a lane that
+/// enables the feature could otherwise reach only by constructing a
+/// harness-less runtime.
 ///
 /// The echo brain is the only path that runs no model
 /// ([`ECHO_PATH`](crate::ports::brain::ECHO_PATH)), so every other label —
@@ -84,14 +123,14 @@ impl CognitionState {
 /// reports [`CognitionState::Configured`]. Matching on the one degraded path
 /// rather than allow-listing the working ones is what keeps a brain added later
 /// from defaulting to "cannot think".
-pub fn cognition_state(path: &str, harness_in_build: bool) -> CognitionState {
+pub fn cognition_state(path: &str, harness_reachable: bool) -> CognitionState {
     if path != crate::ports::brain::ECHO_PATH {
         return CognitionState::Configured;
     }
-    if harness_in_build {
+    if harness_reachable {
         CognitionState::Unconfigured
     } else {
-        CognitionState::NotInBuild
+        CognitionState::Unavailable
     }
 }
 
@@ -100,10 +139,11 @@ mod test {
     use super::*;
     use crate::ports::brain::{ECHO_PATH, HARNESS_PATH};
 
-    /// The whole matrix, both feature settings, in one place — including the
-    /// `not-in-build` arm that the `openhuman` lane cannot otherwise reach.
+    /// The whole matrix, both reachability settings, in one place — including
+    /// the `unavailable` arm that a lane enabling the feature could otherwise
+    /// reach only by constructing a harness-less runtime.
     #[test]
-    fn the_three_states_are_derived_from_the_path_and_the_build() {
+    fn the_three_states_are_derived_from_the_path_and_harness_reachability() {
         assert_eq!(
             cognition_state(HARNESS_PATH, true),
             CognitionState::Configured,
@@ -114,12 +154,12 @@ mod test {
         assert_eq!(
             cognition_state(ECHO_PATH, true),
             CognitionState::Unconfigured,
-            "the harness is compiled in, so a provider is one settings page away",
+            "a harness is attached, so a provider really is one settings page away",
         );
         assert_eq!(
             cognition_state(ECHO_PATH, false),
-            CognitionState::NotInBuild,
-            "no harness in this binary: no configuration reaches a model",
+            CognitionState::Unavailable,
+            "no harness behind this runtime: no configuration reaches a model",
         );
     }
 
@@ -133,6 +173,30 @@ mod test {
             CognitionState::Configured,
         );
         assert_ne!(cognition_state(ECHO_PATH, true), CognitionState::Configured,);
+    }
+
+    /// A harness that is compiled in but never attached must not be sold to the
+    /// operator as a settings problem (codex review of PR #1740).
+    ///
+    /// This is the case `cfg!(feature = "openhuman")` alone gets wrong. An
+    /// embedder that skips [`crate::app::harness::attach`] — the shipped
+    /// desktop-shell bug that module was written to end — leaves an `openhuman`
+    /// binary whose companies hold no pool. Saying `unconfigured` there points
+    /// the operator at Settings → Inference, and nothing they save moves that
+    /// runtime off the echo brain. The input is reachability precisely so this
+    /// arm exists; asserting it here is what stops a later "simplification"
+    /// back to the feature flag.
+    #[test]
+    fn a_compiled_in_harness_that_is_not_attached_is_not_a_settings_problem() {
+        assert_eq!(
+            cognition_state(ECHO_PATH, false),
+            CognitionState::Unavailable,
+        );
+        assert_ne!(
+            cognition_state(ECHO_PATH, false),
+            CognitionState::Unconfigured,
+            "no attached pool: Settings → Inference is a dead end here",
+        );
     }
 
     /// A path this module has never heard of is cognition until proven
@@ -153,7 +217,7 @@ mod test {
         for state in [
             CognitionState::Configured,
             CognitionState::Unconfigured,
-            CognitionState::NotInBuild,
+            CognitionState::Unavailable,
         ] {
             assert_eq!(
                 serde_json::to_value(state).expect("serialize"),

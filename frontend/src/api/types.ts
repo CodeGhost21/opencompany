@@ -1613,19 +1613,25 @@ export interface CapabilityStatusDto {
    * * `configured` — a cognition path that runs a real model is live. It says
    *   nothing about whether that provider will *answer*; reachability is what
    *   `POST .../inference/test` probes.
-   * * `unconfigured` — the harness is in this build, but the company resolved
-   *   no inference source at boot, so it is running the offline echo brain and
-   *   replying `"You said: …"` to everything. **Fixable in the app**, at
-   *   Settings → Inference. This is the state a fresh instance starts in.
-   * * `not-in-build` — no agent harness is compiled into this host, so no
-   *   configuration reaches a model. Only a rebuild changes it, and the console
-   *   must say so rather than offering a settings link that cannot help.
+   * * `unconfigured` — a harness pool is attached to this company's runtime,
+   *   but it resolved no inference source at boot, so it is running the offline
+   *   echo brain and replying `"You said: …"` to everything. **Fixable in the
+   *   app**, at Settings → Inference. This is the state a fresh instance starts
+   *   in.
+   * * `unavailable` — no agent harness is reachable on this host, so no
+   *   configuration reaches a model. Only a different build or host wiring
+   *   changes it, and the console must say so rather than offering a settings
+   *   link that cannot help.
+   *
+   * The states are named for their **remedy**, not their mechanism: both "the
+   * harness is not compiled in" and "it is, and this host never attached a
+   * pool" report `unavailable`, because the operator can act on neither.
    *
    * The only field here that is not a build fact alone — `mediaInBuild` and its
    * neighbours answer "was this compiled in", and cognition is that question
-   * *and* "did a model resolve at boot". A fifth boolean would have collapsed
-   * the two, sending an operator who needs one settings page off looking for a
-   * new binary.
+   * *and* "is a harness attached" *and* "did a model resolve at boot". A fifth
+   * boolean would have collapsed them, sending an operator who needs one
+   * settings page off looking for a new binary.
    *
    * `undefined` is **unknown** — an older host that does not send the field —
    * and must never be rendered as either working or broken. The chat banner
@@ -1638,7 +1644,7 @@ export interface CapabilityStatusDto {
  * Whether a company's teammates can think, and why not when they cannot
  * (issue #1735). See `CapabilityStatusDto.cognition`.
  */
-export type CognitionState = "configured" | "unconfigured" | "not-in-build";
+export type CognitionState = "configured" | "unconfigured" | "unavailable";
 
 /** One day's token totals in the usage series (`GET .../usage`). */
 export interface UsagePointDto {
