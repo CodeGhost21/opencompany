@@ -1391,13 +1391,22 @@ impl RuntimeBuilder {
     /// instead: the previous allow-list. Only then, and only for those
     /// teammates — a company that already granted the namespace keeps its
     /// tracking, and one that still does not is untouched.
+    ///
+    /// The console's per-agent edit half ([`AgentOverride`]) is covered the
+    /// same way. `tools: Some([])` is its stored spelling of "give this
+    /// teammate the company's standard grant" — the same empty-means-standard
+    /// rule — and an override row is otherwise carried across a rebuild
+    /// verbatim, so a teammate an operator reset to the standard grant before
+    /// the upgrade would silently follow the widened allow-list into the new
+    /// namespace. Its empty line is frozen to the previous allow-list too.
     fn preserve_pre_upgrade_grant_scope(
         overlay_agents: Vec<OverlayAgent>,
+        overlay_agent_edits: Vec<AgentOverride>,
         previous_manifest: Option<&CompanyManifest>,
         manifest: &CompanyManifest,
-    ) -> Vec<OverlayAgent> {
+    ) -> (Vec<OverlayAgent>, Vec<AgentOverride>) {
         let Some(previous) = previous_manifest else {
-            return overlay_agents;
+            return (overlay_agents, overlay_agent_edits);
         };
         let newly_conferred = |detect: fn(&[String]) -> bool| {
             detect(&manifest.tools.allow) && !detect(&previous.tools.allow)
@@ -1406,9 +1415,9 @@ impl RuntimeBuilder {
             || newly_conferred(crate::company::grants_paypal_explicit)
             || newly_conferred(crate::company::grants_hosting_explicit))
         {
-            return overlay_agents;
+            return (overlay_agents, overlay_agent_edits);
         }
-        overlay_agents
+        let overlay_agents = overlay_agents
             .into_iter()
             .map(|mut agent| {
                 if agent.tools.is_empty() {
@@ -1416,7 +1425,17 @@ impl RuntimeBuilder {
                 }
                 agent
             })
-            .collect()
+            .collect();
+        let overlay_agent_edits = overlay_agent_edits
+            .into_iter()
+            .map(|mut edit| {
+                if edit.tools.as_ref().is_some_and(Vec::is_empty) {
+                    edit.tools = Some(previous.tools.allow.clone());
+                }
+                edit
+            })
+            .collect();
+        (overlay_agents, overlay_agent_edits)
     }
 
     /// Assembles the runtime, materializing `company.toml` and replaying the
