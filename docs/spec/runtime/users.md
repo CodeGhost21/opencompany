@@ -273,7 +273,6 @@ than adding a second emailed secret to get wrong.
 
 An admin may instead set a **temporary password**, which revokes the user's
 sessions and pending codes and sets `mustChangePassword`. Note two things:
-
 - The admin knows that password and must convey it out-of-band. That is
   inherent to the option, not a defect.
 - `mustChangePassword` is **advisory**: it is surfaced to the console, which
