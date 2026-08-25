@@ -1052,7 +1052,7 @@ function RunNodeChip({
  * operator leaves it open, and a settled row's duration is a fixed number that
  * re-rendering every second cannot change.
  */
-function useRunningClock(active: boolean): number {
+export function useRunningClock(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
