@@ -1239,10 +1239,22 @@ impl<'a> DelegationRunner<'a> {
         } else {
             message
         };
-        let outcome = self
-            .run_turn
-            .run(self.company, responder, message, chat_id)
-            .await?;
+        // Issue #1725: mark this turn chat-only when the operator's own message
+        // is conversation, not work — either the explicit "Just chatting"
+        // (`not_work`, i.e. `deliverable: "chat"`) or a high-confidence greeting
+        // the model read as chatter. The harness pool reads the hint (same task,
+        // propagates through `RunTurn`) and runs a cheap tool-less/memory-less/
+        // goal-less turn instead of the full agentic loop. Only ever set on an
+        // operator turn — a dispatched task card is always real work — and a
+        // greeting that carries a request abstains via `is_pure_small_talk`, so
+        // the card-tracking paths above are untouched.
+        let chat_only =
+            operator_turn && (not_work || (chatter && is_pure_small_talk(operator_words(message))));
+        let outcome = with_chat_only_hint(
+            chat_only,
+            self.run_turn.run(self.company, responder, message, chat_id),
+        )
+        .await?;
         let parked = self.approvals_queued().saturating_sub(approvals_before);
         // The responder's own steps ride on the operator bubble; its reply is the
         // operator-facing text UNLESS a synchronous desk delegation runs, in which
@@ -3168,6 +3180,71 @@ pub(crate) fn is_trackable_work(text: &str) -> bool {
     true
 }
 
+/// Whether `text` is HIGH-CONFIDENCE small talk — a greeting or acknowledgement
+/// and nothing more — that the harness may answer with a cheap tool-less,
+/// memory-less, goal-less turn instead of running the full agentic task loop
+/// (issue #1725).
+///
+/// Deliberately far stricter than the [`is_trackable_work`] small-talk rung:
+/// that one returns `false` (not-work) for plain *questions* too, but a question
+/// deserves a real answer and possibly tools, so it must NOT take the fast path.
+/// This predicate abstains (returns `false`) on anything but a short
+/// greeting/acknowledgement:
+///
+/// 1. empty / punctuation-only → abstain (nothing to answer);
+/// 2. longer than [`SMALLTALK_MAX_WORDS`] → abstain;
+/// 3. contains any [`WORK_VERBS`] entry → abstain (a greeting in front of a
+///    request is a request — keep the regression at
+///    `a_greeting_in_front_of_a_request_does_not_hide_it` green);
+/// 4. ends in `?` or opens with an interrogative → abstain (a question);
+/// 5. opens with a [`SMALLTALK_OPENERS`] greeting/ack → **fast path**.
+///
+/// Abstention always falls through to the normal turn, never to a silent
+/// non-answer.
+pub(crate) fn is_pure_small_talk(text: &str) -> bool {
+    let trimmed = text.trim();
+    let words = work_words(trimmed);
+    if words.is_empty() {
+        return false;
+    }
+    if words.len() > SMALLTALK_MAX_WORDS {
+        return false;
+    }
+    if words.iter().any(|w| WORK_VERBS.contains(&w.as_str())) {
+        return false;
+    }
+    if trimmed.ends_with('?') || INTERROGATIVE_OPENERS.contains(&words[0].as_str()) {
+        return false;
+    }
+    SMALLTALK_OPENERS.contains(&words[0].as_str())
+}
+
+tokio::task_local! {
+    /// Set by the delegation runner around an operator turn it has classified as
+    /// conversation rather than work — either the operator's explicit
+    /// "Just chatting" (`deliverable: "chat"` → `not_work`) or a high-confidence
+    /// [`is_pure_small_talk`] greeting. The harness pool reads it (same task, so
+    /// it propagates through the `RunTurn` seam) and runs that turn with reduced
+    /// scope: no tools to loop on, no pre-turn memory retrieval, and no prior
+    /// task's thread goal re-injected (issue #1725). Absent = a normal turn.
+    pub(crate) static CHAT_ONLY_TURN: bool;
+}
+
+/// Run `fut` with the [`CHAT_ONLY_TURN`] hint set to `chat_only`.
+pub(crate) async fn with_chat_only_hint<F: std::future::Future>(
+    chat_only: bool,
+    fut: F,
+) -> F::Output {
+    CHAT_ONLY_TURN.scope(chat_only, fut).await
+}
+
+/// Whether the current turn was marked chat-only by the delegation runner.
+/// Reads the ambient [`CHAT_ONLY_TURN`] hint; `false` when unset (every path
+/// that does not opt in, e.g. dispatched task cards and background turns).
+pub(crate) fn is_chat_only_turn() -> bool {
+    CHAT_ONLY_TURN.try_with(|v| *v).unwrap_or(false)
+}
+
 /// How many characters of a request survive into the card's title.
 const TITLE_CHARS: usize = 80;
 
@@ -3320,6 +3397,103 @@ mod tests {
         assert!(is_trackable_work(
             "thanks! now write that up as a one-pager"
         ));
+    }
+
+    // ── the greeting fast path (issue #1725) ─────────────────────────────────
+
+    /// A bare greeting / acknowledgement is high-confidence small talk: it takes
+    /// the tool-less/memory-less/goal-less fast path.
+    #[test]
+    fn a_bare_greeting_is_pure_small_talk() {
+        for greeting in [
+            "hi",
+            "hello",
+            "hey there",
+            "yo",
+            "morning",
+            "thanks!",
+            "thank you so much",
+            "ok",
+            "cool",
+            "got it",
+        ] {
+            assert!(
+                is_pure_small_talk(greeting),
+                "should take the fast path: {greeting:?}"
+            );
+        }
+    }
+
+    /// The load-bearing constraint (mirror of
+    /// `a_greeting_in_front_of_a_request_does_not_hide_it`): a greeting that
+    /// carries a request is NOT small talk — the fast path must abstain so the
+    /// task still runs. This is the direct regression guard for the fast path.
+    #[test]
+    fn a_greeting_in_front_of_a_request_is_not_small_talk() {
+        for request in [
+            "hi — please draft the investor update",
+            "thanks! now write that up as a one-pager",
+            "hey, can you compile the pricing comparison",
+            "good morning, prepare the board memo",
+        ] {
+            assert!(
+                !is_pure_small_talk(request),
+                "must NOT take the fast path (carries a request): {request:?}"
+            );
+        }
+    }
+
+    /// A question is not small talk — it deserves a real answer and possibly
+    /// tools, so it must fall through to the normal turn rather than the fast
+    /// path (stricter than `is_trackable_work`, which treats a question as
+    /// not-work).
+    #[test]
+    fn a_question_is_not_small_talk() {
+        for question in [
+            "what's our runway?",
+            "who leads the engineering desk",
+            "how many cards are in review?",
+            "hey what's the status of the build?",
+        ] {
+            assert!(
+                !is_pure_small_talk(question),
+                "a question must not take the fast path: {question:?}"
+            );
+        }
+    }
+
+    /// Neither empty/punctuation nor a plain non-greeting statement takes the
+    /// fast path — the opener must actually be a greeting/ack.
+    #[test]
+    fn only_a_greeting_opener_takes_the_fast_path() {
+        for other in ["", "   ", "!!!", "the quarterly numbers", "runway"] {
+            assert!(
+                !is_pure_small_talk(other),
+                "only a greeting opener takes the fast path: {other:?}"
+            );
+        }
+    }
+
+    /// The chat-only hint is ambient over the turn future and defaults to
+    /// `false` when unset (every path that does not opt in).
+    #[tokio::test]
+    async fn chat_only_hint_is_scoped_and_defaults_false() {
+        assert!(
+            !is_chat_only_turn(),
+            "no hint set → a normal (full-scope) turn"
+        );
+        with_chat_only_hint(true, async {
+            assert!(is_chat_only_turn(), "inside the scope the hint is set");
+        })
+        .await;
+        with_chat_only_hint(false, async {
+            assert!(!is_chat_only_turn(), "an explicit false is still false");
+        })
+        .await;
+        assert!(
+            !is_chat_only_turn(),
+            "the hint does not leak past its scope"
+        );
     }
 
     /// The bias is one-directional and deliberate: an unclassifiable request
