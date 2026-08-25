@@ -902,6 +902,43 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Fingerprints the memory-family ports of an overlay, so a build can record
+    /// which engine its harness roster is bound to (issue #1113).
+    ///
+    /// `HarnessPool::ensure` compares fingerprints covering the MCP, overlay,
+    /// capability, … families, but none of them cover the memory family — the
+    /// `context`/`facts`/`scratch`/`scopes` handles `build_agent` folds into
+    /// every roster agent's `OcMemory`. A live engine swap replaces those
+    /// handles, so the pool needs its own marker for them: this fingerprint.
+    ///
+    /// Port pointers (not just the descriptor) are included because they change
+    /// exactly when a swap replaces the overlay, and they are stable across
+    /// ordinary rebuilds — `AppState` stores one overlay clone and `build`
+    /// re-folds the same handles, so this is robust to the issue #290 fast path
+    /// and sensitive to a swap.
+    #[cfg(feature = "openhuman")]
+    fn memory_engine_fingerprint(overlay: &crate::store::MemoryOverlay) -> u64 {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write_u8(overlay.descriptor.backend as u8);
+        hasher.write(overlay.descriptor.driver_id.as_bytes());
+        hasher.write_u64(Arc::as_ptr(&overlay.context) as *const () as usize as u64);
+        hasher.write_u64(Arc::as_ptr(&overlay.memory) as *const () as usize as u64);
+        if let Some(facts) = &overlay.facts {
+            hasher.write_u64(Arc::as_ptr(facts) as *const () as usize as u64);
+        }
+        if let Some(inbound) = &overlay.inbound_context {
+            hasher.write_u64(Arc::as_ptr(inbound) as *const () as usize as u64);
+        }
+        if let Some(scratch) = &overlay.scratch {
+            hasher.write_u64(Arc::as_ptr(scratch) as *const () as usize as u64);
+        }
+        if let Some(scopes) = &overlay.scopes {
+            hasher.write_u64(Arc::as_ptr(scopes) as *const () as usize as u64);
+        }
+        hasher.finish()
+    }
+
     /// Swaps just the runtime journal's durable sink (default: the company
     /// bundle's `journal.jsonl`).
     ///
