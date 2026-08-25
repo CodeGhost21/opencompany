@@ -1444,19 +1444,35 @@ impl HarnessPool {
         // system prompt until a restart.
         let override_fp = override_fingerprint(&overlay.agent_edits);
         // The policy axis. A cycle pins it to the snapshot the native gate was
-        // re-applied from (so a mid-turn override reaches neither gate); a
-        // direct `ensure` fingerprints the live effective policy. Either way
-        // the fingerprint covers the effective mode/list/cap values — not a
-        // relative override — so a manifest `[policy]` edit moves the cache key
-        // even when no override is stored (or a redundant one was carried and
-        // cleared), and the roster cannot keep an `ApprovalPolicy` built under
-        // a tier the native gate no longer enforces.
-        let policy_fp = match policy_snapshot {
+        // re-applied from (so a mid-turn override reaches neither gate); a plain
+        // `ensure` — the workflow runner's cadence — reuses that pin while one is
+        // active, so a spawned workflow turn cannot adopt a live override a turn
+        // early (issue #1455). Either way the fingerprint covers the effective
+        // mode/list/cap values — not a relative override — so a manifest `[policy]`
+        // edit moves the cache key even when no override is stored (or a redundant
+        // one was carried and cleared), and the roster cannot keep an
+        // `ApprovalPolicy` built under a tier the native gate no longer enforces.
+        let (effective_snapshot, pin_to_store) = match policy_snapshot {
+            Some(policy) => (Some(policy.clone()), Some(policy.clone())),
+            None => {
+                let pin = self.pinned_policies.read().await.get(&company.id).cloned();
+                (pin, None)
+            }
+        };
+        if let Some(pin) = pin_to_store {
+            self.pinned_policies
+                .write()
+                .await
+                .insert(company.id.clone(), pin);
+        }
+        let policy_fp = match &effective_snapshot {
             Some(policy) => effective_policy_fingerprint(policy),
             None => {
-                // The roster is built with the live overlay installed below,
-                // so fingerprint that same effective policy rather than the
-                // possibly stale snapshot carried by `company`.
+                // No cycle has pinned this company yet (a fresh pool before the
+                // first cycle turn, or a company the cycle has not reached). Build
+                // against the live effective policy — the manifest `[policy]`
+                // folded with the operator override from the store read above —
+                // which is exactly what the overlay installed below reflects.
                 let mut live_company = company.clone();
                 live_company.overlay_policy = overlay.policy.clone();
                 effective_policy_fingerprint(&live_company.effective_policy())
