@@ -247,15 +247,32 @@ describe("the echo-brain placeholder marker", () => {
   it("never marks another signed-in person's message", () => {
     const messages = [
       message({ id: "h1", from: "you", text: "yo" }),
-      // A collaborator: not mine, so `from: "company"`, but authored by a human
-      // and stamped with the operator voice.
-      message({ id: "h2", from: "company", channel: "operator", text: "on it", at: T0 + 1000 }),
+      // A collaborator: not mine, so `from: "company"`, but the host says a
+      // person typed it. Deliberately carrying the echo brain's own channel
+      // label as well, because that label matches both and is exactly the
+      // signal this must not be reading.
+      message({
+        id: "h2",
+        from: "company",
+        channel: "operator",
+        byPerson: true,
+        text: "on it",
+        at: T0 + 1000,
+      }),
       // And a genuine echo reply beside it, so the test proves the predicate
       // discriminates rather than simply marking nothing. Past the 5-minute
       // grouping window, or it would join `h2`'s run and render no author line
       // of its own — passing for a reason that has nothing to do with the
       // predicate under test.
-      message({ id: "h3", from: "company", text: "You said: yo", at: T0 + 20 * 60 * 1000 }),
+      // The echo brain's reply carries `channel: "operator"` too — that is the
+      // collision — and no `byPerson`.
+      message({
+        id: "h3",
+        from: "company",
+        channel: "operator",
+        text: "You said: yo",
+        at: T0 + 20 * 60 * 1000,
+      }),
     ];
     const items = buildTimelineItems(buildTimeline(messages, CHANNEL, []), []);
     act(() => {
@@ -289,7 +306,14 @@ describe("the echo-brain placeholder marker", () => {
           members: [],
           parent: message({ id: "p1", from: "you", text: "yo" }),
           replies: [
-            message({ id: "r1", from: "company", channel: "operator", text: "on it", at: T0 + 1000 }),
+            message({
+              id: "r1",
+              from: "company",
+              channel: "operator",
+              byPerson: true,
+              text: "on it",
+              at: T0 + 1000,
+            }),
           ],
           sending: false,
           onSend: () => {},

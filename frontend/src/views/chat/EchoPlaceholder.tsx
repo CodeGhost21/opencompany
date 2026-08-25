@@ -27,17 +27,6 @@ export function echoCause(cognition: CognitionState | null | undefined): Cogniti
 }
 
 /**
- * The originating-channel label the host stamps on a message a **person** sent
- * (`chat_history.rs`'s `OperatorMessage` arm), as opposed to one a desk or an
- * agent produced.
- *
- * Already a known voice here — `model.ts`'s `COMPANY_VOICE` lists it — because
- * a human's line is not the company speaking even though it arrives on the
- * company side of the transcript.
- */
-const OPERATOR_VOICE = "operator";
-
-/**
  * Whether to mark this row, and with which cause — the single predicate both
  * author-line surfaces use.
  *
@@ -48,21 +37,32 @@ const OPERATOR_VOICE = "operator";
  *    the same misattribution pointed the other way.
  * 2. **Another signed-in person's line.** In a multi-user company `fromHistory`
  *    maps every `mine: false` message to `from: "company"`, so a collaborator's
- *    own words land on the company side with `channel: "operator"`. Marking
- *    those would have the console tell one colleague that the echo brain wrote
- *    another colleague's message — a *fabricated* attribution, which is worse
- *    than the missing one this PR set out to fix (codex, PR #1740).
+ *    own words land on the company side beside the agent replies. Marking those
+ *    would have the console tell one colleague that the echo brain wrote another
+ *    colleague's message — a *fabricated* attribution, which is worse than the
+ *    missing one this PR set out to fix (codex, PR #1740).
+ *
+ * The second is read off `byPerson`, which the host projects, and **not** off
+ * `channel === "operator"`. That was the first attempt and it is a trap worth
+ * naming: the offline echo brain names its own outbound channel `operator` too
+ * (`brain::echo`), so the label matches a canned reply and a human's message
+ * alike, and splitting on it suppressed the marker on exactly the replies this
+ * feature exists for. A real browser against a live host caught it; no unit
+ * test here would have.
+ *
+ * `undefined` — a host that predates the field — marks as before rather than
+ * silently trusting a guess.
  *
  * `system` never reaches either call site: both short-circuit it to a centred
  * pill above.
  */
 export function echoMarkerFor(
-  message: Pick<ChatMessage, "channel">,
+  message: Pick<ChatMessage, "byPerson">,
   sender: Sender,
   cognition: CognitionState | null | undefined,
 ): CognitionState | null {
   if (sender.kind === "you") return null;
-  if (message.channel?.trim().toLowerCase() === OPERATOR_VOICE) return null;
+  if (message.byPerson) return null;
   return echoCause(cognition);
 }
 

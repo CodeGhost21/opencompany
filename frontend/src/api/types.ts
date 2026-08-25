@@ -234,6 +234,22 @@ export interface ChatHistoryMessageDto {
   atMillis: number;
   mine: boolean;
   /**
+   * Whether a **person** typed this line rather than the runtime (issue #1734).
+   *
+   * `mine` answers a different question — "did *you* write it" — and is relative
+   * to the reader, so a colleague's own message is `mine: false` and arrives on
+   * the company side of the transcript beside the agent replies. Nothing here
+   * can separate the two without this field, and the obvious substitute is a
+   * trap: the offline echo brain names its own outbound channel `operator`,
+   * exactly as an operator message does, so `channel === "operator"` matches
+   * both.
+   *
+   * Optional because a host predating it omits it. `undefined` means "cannot
+   * say", and the honest rendering of that is today's behaviour — never a
+   * confident "the runtime wrote this".
+   */
+  byPerson?: boolean;
+  /**
    * The scrubbed processing steps behind a company reply, so a rehydrated
    * transcript renders the same timeline the live turn showed. Omitted when
    * empty (operator messages, tool-less replies).
