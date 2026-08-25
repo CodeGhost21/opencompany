@@ -266,6 +266,81 @@ silent fallback either.
 
 ---
 
+## How long a turn may take
+
+There is exactly **one** time bound anywhere on the path from a workflow run to
+a model call, and it does not live in this repo.
+
+```
+workflow run ............................. no time bound
+  └─ tinyflows node execution ............ no time bound (duration observed only)
+      └─ agent capability → agent.turn() . no time bound
+          └─ tinyagents run "agent_turn" . the per-turn wall-clock ceiling
+              └─ each model / tool call .. bounded by (ceiling − run elapsed)
+                  └─ sub-agent turn ...... inherits the parent's remainder
+```
+
+The ceiling is the vendored harness policy's `max_wall_clock_ms`, set in
+`vendor/openhuman/src/openhuman/agent/tinyagents/mod.rs::run_policy_for`. It
+defaults to ten minutes, is overridden with
+**`OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`** (whole seconds; `0` removes it
+entirely), and is process-global — not per node, not per workflow, and not
+settable from a manifest or from the console.
+
+**It bounds the whole turn, from the moment the harness run starts.** Remaining
+budget is `ceiling − Instant::elapsed()`, so model time, tool time, sub-agent
+time and retry backoff all count against it; each individual call is then given
+whatever is left. It is deliberately generous: a hang backstop, not a UX
+deadline.
+
+### Why the harness's own message misleads, and what this crate says instead
+
+When the ceiling fires, the vendored leaf reads:
+
+```
+model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)
+```
+
+Every word of that is true and it is almost impossible to read correctly. The
+number is the budget that **remained** when that call was issued — not the
+call's duration, and not the ceiling. A turn that ran the full ten minutes
+therefore reports a figure ten times smaller than the limit it hit, and reads
+as though one slow model call were at fault. Issue #1680 was filed on exactly
+that reading: a node that had already spent about nine minutes before its last
+model call started was diagnosed as a 56-second budget being too tight.
+
+`CompanyAgent::classify_turn` (`src/harness/built_in/mod.rs`) therefore times
+each turn attempt and rewrites this one class of error, naming what the turn
+actually spent, saying that the harness's figure is a remainder, and naming the
+environment variable that moves the ceiling. The underlying error is appended
+verbatim — it is the only thing that says which call was in flight.
+
+Two constraints on that message are deliberate:
+
+- **It does not restate the default value.** `DEFAULT_AGENT_TURN_TIMEOUT_SECS`
+  is private to the vendored crate and cannot be read from here; a copy of
+  `600` would go stale on the next vendored bump without anything failing. The
+  elapsed time is measured and the knob's *name* is a fact independent of its
+  value, so both can be stated honestly while the number cannot.
+- **A ceiling hit stays a hard failure.** It is not retried — the one-shot
+  empty-reply retry would turn a ten-minute failure into a twenty-minute one —
+  and it fails the node rather than degrading to a partial result.
+
+### What this crate does not bound
+
+OpenCompany imposes no run-level or node-level deadline of its own. The two
+`Duration` constants in `src/workflows/runner.rs` are a progress-collector join
+(`PROGRESS_DRAIN_TIMEOUT`) and a grace period that arms only after an explicit
+operator cancel (`CANCEL_HARD_ABORT_GRACE`); neither fires on its own. The
+per-node `elapsed_ms` on `WorkflowRunNodeRow` is recorded **after** the fact and
+compared to nothing.
+
+So a node whose agent turn walks off the ceiling is the only way a workflow run
+stops on time alone, and the honest reading of that failure is "this step asked
+for more than one turn can do", not "the model was slow".
+
+---
+
 ## OpenHuman's own library front door
 
 Upstream now exposes an agent turn as a **library call**. `openhuman_core`
