@@ -901,7 +901,9 @@ impl RuntimeBuilder {
         // rebuild TO `store` drops the inherited pool's provider-built roster,
         // exactly as the reverse swap does (issue #1113).
         #[cfg(feature = "openhuman")]
-        self.memory_engine = None;
+        {
+            self.memory_engine = None;
+        }
         self
     }
 
