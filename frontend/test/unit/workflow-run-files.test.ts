@@ -184,6 +184,32 @@ describe("run row — files associated (issue #1684)", () => {
     expect(entries.length).toBe(1);
   });
 
+  it("does not re-fetch on a collapse then reopen (issue #1693)", async () => {
+    // The one-shot latch: the fetch fires on the first expand, and a
+    // collapse-then-reopen must not hit the route again. Without the latch a
+    // regression would send one request per toggle and stay green on the
+    // assertion above.
+    const sink = { calls: [] as string[] };
+    await renderPanel(completedRun("run-1"), filesClient([FILE], sink));
+    await expandFiles();
+    expect(sink.calls.length).toBe(1);
+
+    const details = container.querySelector<HTMLDetailsElement>(
+      '[data-testid="workflow-run-files"]',
+    )!;
+    await act(async () => {
+      details.open = false;
+      details.dispatchEvent(new Event("toggle", { bubbles: true }));
+    });
+    await expandFiles();
+
+    expect(sink.calls.length).toBe(1);
+    expect(
+      container.querySelector('[data-testid="workflow-run-file"]')
+        ?.textContent,
+    ).toContain("Launch spec");
+  });
+
   it("deep-links each file into the Artifacts tab at the run's version", async () => {
     const sink = { calls: [] as string[] };
     await renderPanel(completedRun("run-1"), filesClient([FILE], sink));
