@@ -516,9 +516,6 @@ export function mergeHistoryInOrder(
   // prefix; only browser-local rows can safely be treated as optimistic tail
   // rows. A local operator row whose persisted echo is in this page is matched
   // by its stable content/time fields and replaced by the durable projection.
-  const evictedDurable = existing.filter(
-    (m) => isHostMessageId(m.id) && !historyIds.has(m.id),
-  );
   const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
   const liveDurable = existing.filter(
     (m) => isHostMessageId(m.id) && !historyIds.has(m.id),
