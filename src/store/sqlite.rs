@@ -3392,7 +3392,11 @@ impl crate::ports::notifications::NotificationStore for SqliteStore {
             .map_err(sql_err)?;
         let mut unread = 0u64;
         for row in rows {
-            if audience_admits(row.map_err(sql_err)?.as_deref(), user) {
+            let audience = row.map_err(sql_err)?;
+            let decoded: Option<Vec<String>> = audience
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok());
+            if crate::ports::notifications::audience_admits(decoded.as_deref(), user) {
                 unread += 1;
             }
         }
