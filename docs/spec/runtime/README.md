@@ -104,7 +104,7 @@ Supporting docs:
   hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — the map of the API surface: which planes exist and where
   each is documented
-  - [api-write-plane.md](api-write-plane.md) — every write the console makes,
+  - [Console write plane](api-write-plane.md) — every write the console makes,
     route by route
   - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
 - [credentials.md](credentials.md) — the company's own TinyHumans key: the one
