@@ -41,6 +41,57 @@ use oh::memory::{Memory, MemoryCategory, MemoryEntry, MemoryTaint, NamespaceSumm
 use crate::ports::ContextStore;
 use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};
 
+/// Redacts secrets from text on its way into memory.
+///
+/// Measured in a live deployment: chat messages of the form "here is the link
+/// with the password" carried a full one-time-secret URL
+/// (`.../secret/<key>`), and because every operator message is remembered
+/// verbatim, `recall` could pull the still-unopened secret back into a later
+/// turn's context — leaving it readable in the store.
+///
+/// Deliberately *replaces* rather than *rejects*: memory should still record
+/// that a link was shared, since that is the context an agent needs to
+/// understand what happened. Only the secret value itself is removed.
+///
+/// openhuman's [`redact_text`](oh::agent::experience::redact_text) does the same
+/// for its own experience records; this is the opencompany-side of that rule,
+/// because every [`Memory::store`] passes through here, not just the experience
+/// capture.
+fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
+    // Two unambiguous shapes. A generic "anything that looks like a token"
+    // regex would mangle ordinary prose.
+    const MARKERS: [&str; 2] = ["/secret/", "Bearer "];
+
+    if !MARKERS.iter().any(|m| text.contains(m)) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((pos, marker)) = MARKERS
+        .iter()
+        .filter_map(|m| rest.find(m).map(|p| (p, *m)))
+        .min_by_key(|(p, _)| *p)
+    {
+        out.push_str(&rest[..pos + marker.len()]);
+        let tail = &rest[pos + marker.len()..];
+        // The value runs up to the first character that cannot be part of a key.
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(tail.len());
+        if end >= 8 {
+            out.push_str("[REDACTED]");
+        } else {
+            // Too short to be a secret: leave it, or this function would mangle
+            // ordinary text like "Bearer or not".
+            out.push_str(&tail[..end]);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 /// openhuman [`Memory`] backed by an opencompany [`ContextStore`], namespaced to
 /// one `{company}/{agent}` pair.
 pub struct OcMemory {
@@ -127,7 +178,7 @@ impl Memory for OcMemory {
     ) -> anyhow::Result<()> {
         let chunk = ContextChunk {
             label: self.label_for(namespace, key),
-            body: content.to_string(),
+            body: redact_secrets(content).into_owned(),
         };
         self.context
             .put(&self.company, chunk)
@@ -320,6 +371,29 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::ports::types::{ChunkAddr, ChunkHit, ChunkMeta};
+
+    #[test]
+    fn redact_secrets_removes_the_value_but_keeps_the_prose() {
+        // A one-time-secret link: the key is stripped, the surrounding sentence
+        // (the context an agent needs) is kept.
+        assert_eq!(
+            redact_secrets("here it is https://ots.example/secret/AbCdEf123456 open it"),
+            "here it is https://ots.example/secret/[REDACTED] open it"
+        );
+        // A bearer token in prose.
+        assert_eq!(
+            redact_secrets("auth with Bearer sk-verylongsecrettoken please"),
+            "auth with Bearer [REDACTED] please"
+        );
+        // No marker: borrowed through untouched, no allocation.
+        assert!(matches!(
+            redact_secrets("nothing secret here"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // Too short after the marker to be a secret: left alone, so ordinary
+        // text like "Bearer or not" is not mangled.
+        assert_eq!(redact_secrets("Bearer or not"), "Bearer or not");
+    }
 
     /// Minimal in-memory ContextStore for adapter isolation tests.
     #[derive(Default)]
