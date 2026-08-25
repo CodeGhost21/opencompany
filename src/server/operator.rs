@@ -9981,6 +9981,7 @@ mode = "full"
             id: "engineering".to_string(),
             email: "human@example.test".to_string(),
             display_name: None,
+            avatar: None,
             role: crate::ports::users::UserRole::Member,
             status: crate::ports::users::UserStatus::Active,
             password_hash: None,
