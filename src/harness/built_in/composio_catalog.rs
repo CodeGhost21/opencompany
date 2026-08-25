@@ -710,6 +710,76 @@ pub fn list_tools_description() -> &'static str {
      the result always says so and how to narrow it. Read-only."
 }
 
+/// The capability-grounding + Composio-first routing brief (issue #1759).
+///
+/// Wired into the agent turn system prompt by
+/// [`build_agent`](crate::harness::build::build_agent) whenever the per-tenant
+/// Composio tools are actually on the belt (an explicit `composio` grant AND a
+/// resolved credential). It does two jobs the rest of the prompt did not:
+///
+/// * **Grounds the agent in what it can actually do.** The observed failure
+///   (issue #1759) is an agent that reached for `http_request` against
+///   `api.github.com`, got a 403, and then *promised* to "manually review it on
+///   GitHub" — a browser action it has no tool for. A truthful line about the
+///   surface it holds, and an explicit "do not promise what you have no tool
+///   for", is what stops both halves.
+/// * **Routes provider actions through the connected toolkit.** GitHub and every
+///   connected SaaS is reachable ONLY through the company's Composio connection;
+///   the raw web tools (`http_request`/`curl`/`web_fetch`) hit those APIs with no
+///   credential and are refused. This is the agent-turn twin of the
+///   workflow-node framing in
+///   [`orchestrator`](crate::harness::built_in::orchestrator) ("for
+///   Composio/GitHub use an agent node, not a `tool_call`"): the same rule, one
+///   layer down.
+///
+/// Pure, and deliberately NOT behind the `composio` feature — the reason argued
+/// in this module's header: that feature is built but never *run* by CI, so a
+/// brief authored behind it would ship untested. `toolkits` is the company's
+/// manifest allowlist
+/// ([`TenantComposio::toolkits`](crate::harness::composio::TenantComposio)):
+/// non-empty names exactly the connected toolkits, and empty is open mode, where
+/// the agent is pointed at `composio_list_connections` to discover them rather
+/// than promised a provider (GitHub, say) that may not be connected.
+pub fn composio_brief(toolkits: &[String]) -> String {
+    let mut brief = String::from(
+        "\n\n## Connected integrations (GitHub and other SaaS)\n\
+         You reach GitHub and the company's other connected accounts through its Composio \
+         integration, never by calling those services' web APIs yourself. Discover what is \
+         available with `composio_list_toolkits` and `composio_list_connections`, find the action \
+         you need with `composio_list_tools` (search words first, then `detail: \"schemas\"` on the \
+         one slug), and run it with `composio_execute`; `composio_authorize` starts a connection \
+         that is not set up yet.\n",
+    );
+
+    let named: Vec<String> = toolkits
+        .iter()
+        .map(|toolkit| toolkit.trim().to_ascii_lowercase())
+        .filter(|toolkit| !toolkit.is_empty())
+        .collect();
+    if named.is_empty() {
+        brief.push_str(
+            "Which toolkits this company has connected is not fixed here — call \
+             `composio_list_connections` to see them before you rely on one.\n",
+        );
+    } else {
+        brief.push_str(&format!(
+            "Connected toolkits for this company: {}. Confirm their live state with \
+             `composio_list_connections`.\n",
+            named.join(", ")
+        ));
+    }
+
+    brief.push_str(
+        "Do NOT use `http_request`, `curl` or `web_fetch` against a connected provider's API (for \
+         example `api.github.com`) — those tools call it with no credential and it answers 401 or \
+         403; only the Composio tools carry the company's connection. And do not promise an action \
+         you have no tool for: you have no browser and cannot open a page or \"review it on \
+         GitHub\" by hand, so either carry the action out through a Composio tool or say plainly \
+         that you cannot.",
+    );
+    brief
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,5 +1208,85 @@ mod tests {
             no_match.contains("Do NOT guess a toolkit slug"),
             "{no_match}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The capability-grounding + Composio-first routing brief (issue #1759)
+    // -----------------------------------------------------------------------
+
+    /// The brief must name the concrete Composio tools an agent holds and the
+    /// two-step it reasons in, or it re-creates the unmentioned-tool failure the
+    /// sandbox brief exists to stop, one surface over.
+    #[test]
+    fn the_composio_brief_names_the_tools_and_the_two_step() {
+        let brief = composio_brief(&["github".to_string()]);
+        for tool in [
+            "composio_list_toolkits",
+            "composio_list_connections",
+            "composio_list_tools",
+            "composio_execute",
+            "composio_authorize",
+        ] {
+            assert!(brief.contains(tool), "brief never names `{tool}`: {brief}");
+        }
+    }
+
+    /// The routing rule is the whole point: GitHub / connected SaaS go through
+    /// Composio, and the raw web tools are named as the wrong door (they answer
+    /// 401/403 unauthenticated). The observed failure — `api.github.com` via
+    /// `http_request` — must be called out by name.
+    #[test]
+    fn the_composio_brief_routes_provider_apis_through_composio_not_the_web_tools() {
+        let brief = composio_brief(&["github".to_string()]);
+        for web_tool in ["http_request", "curl", "web_fetch"] {
+            assert!(
+                brief.contains(web_tool),
+                "the brief must warn off `{web_tool}`: {brief}"
+            );
+        }
+        assert!(brief.contains("api.github.com"), "{brief}");
+        assert!(brief.contains("401") || brief.contains("403"), "{brief}");
+    }
+
+    /// The grounding half: the agent is told not to promise an action it has no
+    /// tool for, with the exact browser overreach the issue observed named.
+    #[test]
+    fn the_composio_brief_forbids_promising_actions_it_has_no_tool_for() {
+        let brief = composio_brief(&["github".to_string()]);
+        let lower = brief.to_lowercase();
+        assert!(lower.contains("no browser"), "{brief}");
+        assert!(lower.contains("do not promise"), "{brief}");
+    }
+
+    /// A non-empty allowlist names exactly those toolkits, lowercased, so the
+    /// agent is grounded in what THIS company connected rather than a generic
+    /// list.
+    #[test]
+    fn the_composio_brief_names_the_connected_toolkits_lowercased() {
+        let brief = composio_brief(&["GitHub".to_string(), " Gmail ".to_string()]);
+        assert!(
+            brief.contains("Connected toolkits for this company: github, gmail"),
+            "{brief}"
+        );
+    }
+
+    /// Open mode (an empty allowlist) must NOT invent a provider the company may
+    /// not have connected — it points the agent at `composio_list_connections`
+    /// to discover the real set instead. This is requirement #3: never advertise
+    /// a toolkit that is not known-connected.
+    #[test]
+    fn the_composio_brief_open_mode_points_at_discovery_without_naming_a_provider() {
+        let brief = composio_brief(&[]);
+        assert!(
+            brief.contains("not fixed here"),
+            "open mode must defer to discovery: {brief}"
+        );
+        assert!(
+            !brief.contains("Connected toolkits for this company:"),
+            "open mode must not claim a specific connected set: {brief}"
+        );
+        // The routing rule and grounding still hold with no allowlist.
+        assert!(brief.contains("composio_execute"), "{brief}");
+        assert!(brief.contains("http_request"), "{brief}");
     }
 }
