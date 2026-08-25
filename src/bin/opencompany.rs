@@ -524,6 +524,12 @@ fn company_builder(
     }
     if let Some(overlay) = state.memory_overlay() {
         builder = builder.with_memory_overlay(&overlay);
+    } else {
+        // The engine is (now) the base backend. On a live rebuild this must
+        // clear the outgoing provider engine's ports rather than inherit them —
+        // a company switched to `store` must not keep reading the provider it
+        // just deselected. See `RuntimeBuilder::with_memory_overlay_cleared`.
+        builder = builder.with_memory_overlay_cleared();
     }
     #[cfg(feature = "smtp")]
     if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
@@ -888,9 +894,30 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
     Ok(home)
 }
 
+/// Layers the data root's `config.toml` `[memory]` section onto the env-built
+/// settings, the exact resolution the `serve` path uses.
+///
+/// A self-hosted operator's engine selection lives only in that file — the
+/// console never exports environment variables — so bundle export/import must
+/// see it or they would read and write the base stores instead of the engine
+/// the host actually remembers with. An absent file layers nothing, and
+/// `OPENCOMPANY_MEMORY` still owns the choice when set
+/// (`StorageSettings::with_memory_config`).
+fn layer_config_memory(
+    settings: opencompany::store::StorageSettings,
+    config_dir: &std::path::Path,
+) -> Result<opencompany::store::StorageSettings> {
+    let section = ConfigFile::load(config_dir)?
+        .map(|c| c.memory.clone())
+        .unwrap_or_default();
+    settings.with_memory_config(&section)
+}
+
 /// The bundle ports plus the fact port, resolved the way `serve` resolves
 /// them: the env-selected storage backend (`OPENCOMPANY_STORAGE`), with the
-/// env-selected memory engine (`OPENCOMPANY_MEMORY*`) overlaid on top.
+/// memory engine overlaid on top — `OPENCOMPANY_MEMORY*` from the environment,
+/// or the instance's `config.toml` `[memory]` section under it (an env-owned
+/// selection keeps the file layer inert).
 ///
 /// Export and import used to hardwire the fs ports over `home`, which made a
 /// bundle capture the *base* stores rather than what the deployment actually
@@ -899,13 +926,13 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
 /// `serve` uses means a bundle now reads and writes the live engine, and a
 /// misconfigured engine refuses here exactly as it refuses a boot.
 ///
-/// One deployment per bundle, enforced: with a non-default environment
-/// (`OPENCOMPANY_STORAGE` or `OPENCOMPANY_MEMORY` set), an explicit `--home`
-/// is refused rather than mixed in — the base ports would come from the flag
-/// while the engine roots at `OPENCOMPANY_DATA_DIR`, and a bundle spanning
-/// two deployments is a company that never existed. Under the fs+store
-/// default the environment is inert and `--home` means exactly what it
-/// always has. `null` is refused in both directions (an export of nothing,
+/// One deployment per bundle, enforced: with a non-default selection (an env
+/// or `config.toml` that names a live storage backend or a memory engine), an
+/// explicit `--home` is refused rather than mixed in — the base ports would
+/// come from the flag while the engine roots at `OPENCOMPANY_DATA_DIR`, and a
+/// bundle spanning two deployments is a company that never existed. Under the
+/// fs+store default the environment is inert and `--home` means exactly what
+/// it always has. `null` is refused in both directions (an export of nothing,
 /// an import into a black hole, both exiting 0), and so is shared-single-DB
 /// tenant mode (bundle ops write no owner rows; raw slugs would miss the
 /// `<tenant>--` namespaced ids).
@@ -915,6 +942,7 @@ async fn live_ports(
 ) -> Result<(
     opencompany::store::export::Ports,
     Option<Arc<dyn opencompany::ports::FactStore>>,
+    Option<Arc<dyn opencompany::store::MemoryScopes>>,
     opencompany::store::StorageKind,
 )> {
     use opencompany::store::{
@@ -922,31 +950,53 @@ async fn live_ports(
         open_memory_overlay, open_storage,
     };
     let settings = StorageSettings::from_env()?;
+    // Layer the instance's own `config.toml` `[memory]` section under the
+    // environment, the same resolution `serve` uses: a self-hosted operator's
+    // console selection lives only in that file, and a bundle must read and
+    // write the engine the host actually remembers with. The env still owns
+    // the choice when it names one (`with_memory_config`).
+    let settings = layer_config_memory(settings, &opencompany::app::config::data_dir_from_env())?;
     // Every refusal lives in the lib (`store::select::refuse_bundle_env`)
     // where the feature lanes execute its tests; the bin only reports.
     opencompany::store::refuse_bundle_env(&settings, home_was_flagged)?;
-    let (store, events, mut memory, mut context, mut facts) = match open_storage(&settings, home)
-        .await?
-    {
-        Some(h) => (h.company, h.events, h.memory, h.context, Some(h.facts)),
-        // The fs default: the same ports the old hardwired path built,
-        // plus the fs fact store the old path silently left behind.
-        None => (
-            Arc::new(FsCompanyStore::new(home.to_path_buf())) as _,
-            Arc::new(FsEventLog::new(home.to_path_buf())) as _,
-            Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
-            Arc::new(FsContextStore::new(home.to_path_buf())) as _,
-            Some(Arc::new(FsOps::new(home.to_path_buf())) as Arc<dyn opencompany::ports::FactStore>),
-        ),
-    };
+    let (store, events, mut memory, mut context, mut facts, mut scopes) =
+        match open_storage(&settings, home).await? {
+            Some(h) => (
+                h.company,
+                h.events,
+                h.memory,
+                h.context,
+                Some(h.facts),
+                None,
+            ),
+            // The fs default: the same ports the old hardwired path built,
+            // plus the fs fact store the old path silently left behind.
+            None => (
+                Arc::new(FsCompanyStore::new(home.to_path_buf())) as _,
+                Arc::new(FsEventLog::new(home.to_path_buf())) as _,
+                Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
+                Arc::new(FsContextStore::new(home.to_path_buf())) as _,
+                Some(Arc::new(FsOps::new(home.to_path_buf()))
+                    as Arc<dyn opencompany::ports::FactStore>),
+                None,
+            ),
+        };
     if let Some(overlay) = open_memory_overlay(&settings)? {
         memory = overlay.memory;
         context = overlay.context;
+        if let Some(s) = overlay.scopes {
+            scopes = Some(s);
+        }
         if let Some(f) = overlay.facts {
             facts = Some(f);
         }
     }
-    Ok(((store, events, memory, context), facts, settings.kind))
+    Ok((
+        (store, events, memory, context),
+        facts,
+        scopes,
+        settings.kind,
+    ))
 }
 
 /// A process-unique temporary path under the system temp dir. Used only by the
@@ -968,19 +1018,23 @@ async fn export_to_dir(
     include_secrets: bool,
     dest: &std::path::Path,
 ) -> Result<()> {
-    use opencompany::store::export::{ExportOpts, export_bundle};
+    use opencompany::store::export::{ExportOpts, export_bundle_with_scopes};
     use opencompany::store::paths::Bundle;
 
     // The same exclusive root lock `serve` holds: a bundle read while the host
     // is writing is torn, and the refusal here names the running process
     // instead of silently racing it.
     let _home_lock = opencompany::store::lock::acquire(home)?;
-    let ((store, events, memory, context), facts, _) = live_ports(home, home_was_flagged).await?;
+    let ((store, events, memory, context), facts, scopes, _) =
+        live_ports(home, home_was_flagged).await?;
     let opts = ExportOpts {
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
     };
-    export_bundle(id, dest, store, events, memory, context, facts, opts).await
+    export_bundle_with_scopes(
+        id, dest, store, events, memory, context, facts, scopes, opts,
+    )
+    .await
 }
 
 /// Default build: export writes an unpacked bundle directory (no `.tar` support
@@ -1164,7 +1218,9 @@ async fn run_import(path: PathBuf, home: Option<PathBuf>) -> Result<()> {
 /// restoring any fs-only secrets/keys the bundle carried.
 async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result<()> {
     let home_was_flagged = home.is_some();
-    use opencompany::store::export::{find_bundle_root, import_bundle, restore_fs_artifacts};
+    use opencompany::store::export::{
+        find_bundle_root, import_bundle_with_scopes, restore_fs_artifacts,
+    };
     use opencompany::store::paths::Bundle;
 
     let home = resolve_home_migrated(home)?;
@@ -1172,9 +1228,10 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     // Exclusive, same as `serve`: an import into stores a running host has
     // open is the single-writer violation the lock module exists to prevent.
     let _home_lock = opencompany::store::lock::acquire(&home)?;
-    let ((store, events, memory, context), facts, storage_kind) =
+    let ((store, events, memory, context), facts, scopes, storage_kind) =
         live_ports(&home, home_was_flagged).await?;
-    let id = import_bundle(&root, store, events, memory, context, facts).await?;
+    let id =
+        import_bundle_with_scopes(&root, store, events, memory, context, facts, scopes).await?;
     restore_fs_artifacts(&root, Bundle::new(home.clone(), &id).dir()).await?;
     // On a non-fs base backend the records above went to the live backend
     // while these artifacts (secrets/, keys/) are fs-only by design and land
@@ -2233,6 +2290,58 @@ mod test {
             assert!(!home.join("companies/companies").exists());
             let _ = std::fs::remove_dir_all(&home);
         }
+    }
+
+    #[test]
+    fn live_ports_layers_the_config_file_memory_section() {
+        // A self-hosted operator's engine selection lives only in `config.toml`
+        // (the console never exports environment variables), so `live_ports`
+        // must layer that section the way `serve` does — otherwise a bundle
+        // would read and write the base stores instead of the engine the host
+        // actually remembers with. This pins the load-and-layer composition
+        // `live_ports` feeds its settings through.
+        let tmp = std::env::temp_dir().join(format!(
+            "oc-bin-memcfg-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("config.toml"),
+            "[memory]\nbackend = \"remote\"\ndriver = \"supermemory\"\nurl = \"https://memory.example\"\n",
+        )
+        .unwrap();
+        let settings =
+            layer_config_memory(opencompany::store::StorageSettings::default(), &tmp).unwrap();
+        assert_eq!(
+            settings.memory_backend,
+            opencompany::store::MemoryBackend::Remote
+        );
+        assert_eq!(settings.memory_driver.as_deref(), Some("supermemory"));
+        assert_eq!(
+            settings.memory_url.as_deref(),
+            Some("https://memory.example")
+        );
+
+        // The absent-file shape (a fresh root, or the fs default) stays on the
+        // base backend's own memory.
+        let absent = std::env::temp_dir().join(format!(
+            "oc-bin-memcfg-absent-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&absent);
+        std::fs::create_dir_all(&absent).unwrap();
+        let settings =
+            layer_config_memory(opencompany::store::StorageSettings::default(), &absent).unwrap();
+        assert_eq!(
+            settings.memory_backend,
+            opencompany::store::MemoryBackend::Store
+        );
+        let _ = std::fs::remove_dir_all(&absent);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]

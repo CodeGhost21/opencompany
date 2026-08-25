@@ -466,6 +466,35 @@ pub struct RuntimeBuilder {
     /// the legacy engine overlay, which cannot represent taint — falls back
     /// to `context` at build time: today's exact behavior, no regression.
     inbound_context: Option<Arc<dyn ContextStore>>,
+    /// Provisional working context, isolated from durable recall by the
+    /// provider-backed memory decorator. Absent on base and embedded stores.
+    scratch_context: Option<Arc<dyn ContextStore>>,
+    /// Safe agent/desk partitions and archive access from that decorator.
+    memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
+    /// Whether the memory-engine selection has been (re)applied to this builder.
+    ///
+    /// Set by [`with_memory_overlay`](Self::with_memory_overlay) and
+    /// [`with_memory_overlay_cleared`](Self::with_memory_overlay_cleared).
+    /// When true, the builder's own memory-family ports are authoritative and
+    /// the handover's are ignored on a rebuild; when false (a rebuild that is
+    /// not about the memory engine, or a boot), the handover's ports are
+    /// inherited rather than duplicated (issue #290). The distinction is what
+    /// makes a live engine swap (`PUT …/memory/engine`) take effect: the new
+    /// overlay's ports must replace the outgoing engine's, never be outranked
+    /// by them.
+    memory_overlay_applied: bool,
+    /// The memory-engine selection this build's harness roster is bound to,
+    /// for `HarnessPool` invalidation on a live swap (issue #1113).
+    ///
+    /// `Some(fp)` when [`with_memory_overlay`](Self::with_memory_overlay)
+    /// bound a provider-backed engine — a fingerprint of its memory-family
+    /// ports — and `None` for the base backend: the two selections a company
+    /// can be rebuilt between. `build` compares this against the inherited
+    /// pool's recorded selection and drops the cached roster when they differ,
+    /// so a swap stops serving the deselected engine on the next turn instead
+    /// of at the next restart. Feature-gated with the harness pool it talks to.
+    #[cfg(feature = "openhuman")]
+    memory_engine: Option<u64>,
     tools: Option<Arc<dyn ToolProvider>>,
     channels: Option<Vec<Arc<dyn ChannelAdapter>>>,
     economy: Option<Arc<dyn AgentEconomy>>,
@@ -619,6 +648,11 @@ impl RuntimeBuilder {
             memory: None,
             context: None,
             inbound_context: None,
+            scratch_context: None,
+            memory_scopes: None,
+            memory_overlay_applied: false,
+            #[cfg(feature = "openhuman")]
+            memory_engine: None,
             tools: None,
             channels: None,
             economy: None,
@@ -765,6 +799,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the isolated scratch context store.
+    pub fn with_scratch_context(mut self, scratch: Arc<dyn ContextStore>) -> Self {
+        self.scratch_context = Some(scratch);
+        self
+    }
+
+    /// Carries safe provider-only scoped context and archive access.
+    pub fn with_memory_scopes(mut self, scopes: Arc<dyn crate::store::MemoryScopes>) -> Self {
+        self.memory_scopes = Some(scopes);
+        self
+    }
+
     /// Swaps every durable port at once from one opened storage backend
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
@@ -807,7 +853,19 @@ impl RuntimeBuilder {
     /// while an engine bound through the `MemoryProvider` contract covers all
     /// three ports. Taking whichever the overlay offers is what keeps one
     /// company's memory on one engine instead of split across two (issue #914).
-    pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
+    pub fn with_memory_overlay(mut self, overlay: &crate::store::MemoryOverlay) -> Self {
+        // The engine selection is explicit here: on a live rebuild the overlay's
+        // ports must replace the outgoing engine's, never inherit them (see
+        // `memory_overlay_applied`).
+        self.memory_overlay_applied = true;
+        // Record the engine selection so a later rebuild can tell a live swap
+        // from a no-op and drop the inherited harness pool's cached roster
+        // accordingly — the roster's agents captured THIS overlay's ports
+        // (issue #1113).
+        #[cfg(feature = "openhuman")]
+        {
+            self.memory_engine = Some(Self::memory_engine_fingerprint(overlay));
+        }
         let mut builder = self
             .with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone());
@@ -817,10 +875,74 @@ impl RuntimeBuilder {
         if let Some(inbound) = &overlay.inbound_context {
             builder = builder.with_inbound_context(inbound.clone());
         }
+        if let Some(scratch) = &overlay.scratch {
+            builder = builder.with_scratch_context(scratch.clone());
+        }
+        if let Some(scopes) = &overlay.scopes {
+            builder = builder.with_memory_scopes(scopes.clone());
+        }
         match &overlay.facts {
             Some(facts) => builder.with_facts(facts.clone()),
             None => builder,
         }
+    }
+
+    /// Marks the memory engine for this build as the base backend (no overlay).
+    ///
+    /// The mirror of [`with_memory_overlay`](Self::with_memory_overlay) for a
+    /// rebuild that is switching TO the base backend (`store`): the overlay was
+    /// explicitly cleared, so the handover's provider-backed ports must not be
+    /// inherited. The builder's own memory-family ports (from
+    /// [`with_stores`](Self::with_stores) or the fs defaults) become
+    /// authoritative instead — a provider engine cannot be left serving a
+    /// company that has selected `store`.
+    pub fn with_memory_overlay_cleared(mut self) -> Self {
+        self.memory_overlay_applied = true;
+        // The base backend is a distinct engine selection: record it so a
+        // rebuild TO `store` drops the inherited pool's provider-built roster,
+        // exactly as the reverse swap does (issue #1113).
+        #[cfg(feature = "openhuman")]
+        {
+            self.memory_engine = None;
+        }
+        self
+    }
+
+    /// Fingerprints the memory-family ports of an overlay, so a build can record
+    /// which engine its harness roster is bound to (issue #1113).
+    ///
+    /// `HarnessPool::ensure` compares fingerprints covering the MCP, overlay,
+    /// capability, … families, but none of them cover the memory family — the
+    /// `context`/`facts`/`scratch`/`scopes` handles `build_agent` folds into
+    /// every roster agent's `OcMemory`. A live engine swap replaces those
+    /// handles, so the pool needs its own marker for them: this fingerprint.
+    ///
+    /// Port pointers (not just the descriptor) are included because they change
+    /// exactly when a swap replaces the overlay, and they are stable across
+    /// ordinary rebuilds — `AppState` stores one overlay clone and `build`
+    /// re-folds the same handles, so this is robust to the issue #290 fast path
+    /// and sensitive to a swap.
+    #[cfg(feature = "openhuman")]
+    fn memory_engine_fingerprint(overlay: &crate::store::MemoryOverlay) -> u64 {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write_u8(overlay.descriptor.backend as u8);
+        hasher.write(overlay.descriptor.driver_id.as_bytes());
+        hasher.write_u64(Arc::as_ptr(&overlay.context) as *const () as usize as u64);
+        hasher.write_u64(Arc::as_ptr(&overlay.memory) as *const () as usize as u64);
+        if let Some(facts) = &overlay.facts {
+            hasher.write_u64(Arc::as_ptr(facts) as *const () as usize as u64);
+        }
+        if let Some(inbound) = &overlay.inbound_context {
+            hasher.write_u64(Arc::as_ptr(inbound) as *const () as usize as u64);
+        }
+        if let Some(scratch) = &overlay.scratch {
+            hasher.write_u64(Arc::as_ptr(scratch) as *const () as usize as u64);
+        }
+        if let Some(scopes) = &overlay.scopes {
+            hasher.write_u64(Arc::as_ptr(scopes) as *const () as usize as u64);
+        }
+        hasher.finish()
     }
 
     /// Swaps just the runtime journal's durable sink (default: the company
@@ -1275,7 +1397,36 @@ impl RuntimeBuilder {
         // `set_harness` wiring further down agree by construction.
         #[cfg(feature = "openhuman")]
         if let Some(pool) = handover.as_ref().and_then(|h| h.harness.clone()) {
+            // Issue #1113: a live memory-engine swap replaces the memory-family
+            // ports (context, facts, scratch, scopes) that `build_agent` folded
+            // into every roster agent's `OcMemory`, and none of the fingerprints
+            // `HarnessPool::ensure` compares cover that family. An inherited
+            // pool would therefore keep serving agents that read and write the
+            // engine the swap just deselected until a process restart. Drop the
+            // cached roster whenever the recorded engine selection differs from
+            // this build's; the next turn's `ensure` then rebuilds it over the
+            // replacement ports. When the selection is unchanged — the ordinary
+            // issue #290 fast path — this is a fingerprint read, no rebuild, and
+            // every agent's conversation history is preserved.
+            //
+            // Only a build that explicitly re-decided the engine
+            // (`memory_overlay_applied`) moves the marker: a rebuild about
+            // something else inherits the handover's memory-family ports
+            // unchanged (issue #290), so its engine selection is the recorded
+            // one by construction, and re-recording it would be a no-op at best
+            // and a spurious roster drop at worst.
+            if self.memory_overlay_applied {
+                pool.rebind_memory_engine(&id, self.memory_engine).await;
+            }
             self.harness = Some(pool);
+        } else if let Some(pool) = self.harness.as_ref() {
+            // Boot (no handover to inherit from): record this build's selection
+            // on the pool so the first rebuild can tell a live swap from a
+            // no-op. Skips the marker when no overlay was applied — a desktop
+            // boot, which stays on the base backend (`None`) by default.
+            if self.memory_overlay_applied {
+                pool.rebind_memory_engine(&id, self.memory_engine).await;
+            }
         }
 
         // Inherit-or-construct. The handover's handles outrank an explicitly
@@ -1291,25 +1442,62 @@ impl RuntimeBuilder {
             .map(|h| h.events.clone())
             .or(self.events)
             .unwrap_or_else(|| Arc::new(FsEventLog::new(home.clone())));
-        let memory: Arc<dyn MemoryStore> = handover
-            .as_ref()
-            .map(|h| h.memory.clone())
-            .or(self.memory)
-            .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())));
-        let context: Arc<dyn ContextStore> = handover
-            .as_ref()
-            .map(|h| h.context.clone())
-            .or(self.context)
-            .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())));
+        let memory: Arc<dyn MemoryStore> = if self.memory_overlay_applied {
+            self.memory
+                .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())))
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.memory.clone())
+                .or(self.memory)
+                .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())))
+        };
+        let context: Arc<dyn ContextStore> = if self.memory_overlay_applied {
+            self.context
+                .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())))
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.context.clone())
+                .or(self.context)
+                .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())))
+        };
         // Resolved to a real port here so nothing downstream carries the
         // Option: absent (base backends, legacy engine overlay) means the
         // plain context store — the write still lands, it is merely stamped
         // Internal, which is today's exact behavior on those backends.
-        let inbound_context: Arc<dyn ContextStore> = handover
-            .as_ref()
-            .map(|h| h.inbound_context.clone())
-            .or(self.inbound_context)
-            .unwrap_or_else(|| context.clone());
+        let inbound_context: Arc<dyn ContextStore> = if self.memory_overlay_applied {
+            self.inbound_context.unwrap_or_else(|| context.clone())
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.inbound_context.clone())
+                .or(self.inbound_context)
+                .unwrap_or_else(|| context.clone())
+        };
+        // A live engine swap replaces every memory-family port, not just the
+        // two the port contract names: the provider decorator's scratch and
+        // scope partitions must follow the selected engine, or the successor
+        // keeps reading agent/desk contexts and the archive from the engine the
+        // swap was replacing. When the selection was re-applied, the builder's
+        // own (new) handles win and the handover's are dropped; `store` clears
+        // them to `None` (the base backend has no decorator).
+        let scratch_context = if self.memory_overlay_applied {
+            self.scratch_context
+        } else {
+            handover
+                .as_ref()
+                .and_then(|h| h.scratch_context.clone())
+                .or(self.scratch_context)
+        };
+        let memory_scopes = if self.memory_overlay_applied {
+            self.memory_scopes
+        } else {
+            handover
+                .as_ref()
+                .and_then(|h| h.memory_scopes.clone())
+                .or(self.memory_scopes)
+        };
         // Effective grants narrow the company allow-list by per-agent tools.
         let grants = effective_grants(&self.manifest);
         let openhuman = self.openhuman;
@@ -1344,7 +1532,23 @@ impl RuntimeBuilder {
             // A rebuild inherits the ops it was handed, announcer and all — the
             // wrap below happens once, at first construction. Re-wrapping an
             // inherited board would announce every write twice.
-            Some(h) => h.ops.clone(),
+            Some(h) => {
+                let mut ops = h.ops.clone();
+                // A live engine swap replaces every memory-family port, facts
+                // included. The ops struct is inherited wholesale, so without
+                // this override `ops.facts` stays the outgoing engine's — a
+                // fact created after the swap would be written to the engine
+                // the swap was replacing while recall reads the new context
+                // store, leaving the company split across two engines. The
+                // builder's own facts handle (set by `with_memory_overlay`
+                // when the engine serves facts) is authoritative here, falling
+                // back to the base backend exactly as the first-construction
+                // branch below does for an engine that serves no facts.
+                if self.memory_overlay_applied {
+                    ops.facts = self.facts.clone().unwrap_or_else(|| fs_ops.clone());
+                }
+                ops
+            }
             None => OpsStores {
                 // Issue #464: the board announces its own writes. Wrapped here,
                 // at the single place the store is chosen, so *every* writer —
@@ -3131,6 +3335,7 @@ impl RuntimeBuilder {
             filer,
             grants,
         );
+        runtime.set_memory_decorators(scratch_context, memory_scopes);
 
         // The seed dir is the company's on-disk source directory
         // (`companies/<name>`); record it so read resolvers can find committed
@@ -3758,8 +3963,28 @@ fn build_networked_brain(
 mod test {
     use super::*;
     use crate::openhuman::MockOpenHumanRpc;
-    use crate::ports::types::ToolCall;
+    use crate::ports::types::{CompanyId, CompressedTrace, ToolCall};
     use crate::runtime::journal::ExecutedEffect;
+
+    #[derive(Clone)]
+    struct TestMemoryScopes {
+        context: Arc<dyn ContextStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::store::MemoryScopes for TestMemoryScopes {
+        fn agent_context(&self, _agent_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        fn desk_context(&self, _desk_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        async fn archived_traces(&self, _company: &CompanyId) -> Result<Vec<CompressedTrace>> {
+            Ok(Vec::new())
+        }
+    }
 
     fn tmp_home(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -3909,6 +4134,321 @@ mod test {
                 .workspace_git_enabled,
             "the switch must also be able to turn checkpoints back off"
         );
+    }
+
+    /// The provider decorator only has value if the runtime keeps all of its
+    /// safe handles. This pins the overlay path specifically: direct builder
+    /// injection could otherwise pass while `with_memory_overlay` still drops
+    /// scratch, scoped facades, or the archive reader.
+    #[tokio::test]
+    async fn memory_overlay_carries_scratch_scopes_and_archive_access_to_runtime() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-memory-overlay-");
+        let memory = tempfile::tempdir().unwrap();
+        let context = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(context.path().to_path_buf()));
+        let scratch: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(scratch.path().to_path_buf()));
+        let scopes: Arc<dyn crate::store::MemoryScopes> = Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        });
+        let mut overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(memory.path().to_path_buf())),
+            plain,
+            None,
+        );
+        overlay.scratch = Some(scratch);
+        overlay.scopes = Some(scopes);
+
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let runtime = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(runtime.scratch_context().is_some());
+        assert!(runtime.agent_context("cto").is_some());
+        assert!(runtime.desk_context("engineering").is_some());
+        assert_eq!(runtime.archived_traces().await.unwrap(), Some(Vec::new()));
+    }
+
+    /// A live engine swap must replace the outgoing engine's memory-family
+    /// ports, never inherit them. `with_handover` carries the outgoing
+    /// runtime's ports, and `build()` used to resolve those handover-first —
+    /// so a rebuild that re-applied the new selection kept the old engine's
+    /// scratch and scope partitions (issue #1113): provider→provider, the
+    /// successor read the engine the swap was replacing. The overlay-applied
+    /// marker makes the builder's own (new) handles authoritative whenever the
+    /// selection was re-applied.
+    #[tokio::test]
+    async fn a_rebuild_reapplying_the_engine_replaces_the_handover_ports() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        // Engine A: plain ports, no decorator (the pre-swap engine).
+        let home = tmp_home("opencompany-engine-swap-");
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            first.scratch_context().is_none(),
+            "engine A has no decorator"
+        );
+
+        // Engine B: adds scratch and scope partitions, so the swap is
+        // observable — the successor must carry B's, not A's (none).
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let mut overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        overlay_b.scratch = Some(Arc::new(FsContextStore::new(scratch.path().to_path_buf())));
+        overlay_b.scopes = Some(Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        }));
+
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay_b)
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            swapped.scratch_context().is_some(),
+            "the swapped engine's scratch partition must win over the handover's none"
+        );
+        assert!(
+            swapped.agent_context("cto").is_some(),
+            "the swapped engine's scope partition must win over the handover's none"
+        );
+    }
+
+    /// The mirror: switching to the base backend must drop the outgoing
+    /// provider's decorator, not inherit it. The handover carries the
+    /// provider's scratch and scope partitions, and a rebuild that applied no
+    /// overlay used to inherit them anyway — so a company switched to `store`
+    /// kept reading the provider it just deselected. The overlay-cleared marker
+    /// resolves the builder's own (absent) ports instead, which is the base
+    /// backend's honest answer.
+    #[tokio::test]
+    async fn a_rebuild_clearing_the_engine_drops_the_handover_decorator() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-engine-clear-");
+        let mem = tempfile::tempdir().unwrap();
+        let ctx = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let mut overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx.path().to_path_buf())),
+            None,
+        );
+        overlay.scratch = Some(Arc::new(FsContextStore::new(scratch.path().to_path_buf())));
+        overlay.scopes = Some(Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        }));
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            first.scratch_context().is_some(),
+            "engine A has a decorator"
+        );
+
+        let cleared = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay_cleared()
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            cleared.scratch_context().is_none(),
+            "the base backend has no scratch partition; the provider's must not be inherited"
+        );
+        assert!(
+            cleared.agent_context("cto").is_none(),
+            "the base backend has no scope partitions; the provider's must not be inherited"
+        );
+    }
+
+    /// The scratch/scopes swaps above leave `ops.facts` untouched: the ops
+    /// struct is inherited wholesale on a rebuild, so the fact store stayed on
+    /// the outgoing engine while memory and context moved to the new one — a
+    /// fact created after a live engine swap was written to the deselected
+    /// engine while its recall mirror went to the new context store. This pins
+    /// the override that keeps `facts` on the selected engine's port family.
+    #[tokio::test]
+    async fn a_rebuild_reapplying_the_engine_replaces_the_fact_store() {
+        use crate::store::{FsContextStore, FsMemoryStore, FsOps, MemoryOverlay};
+
+        // Engine A serves facts; the swap to B must re-point `ops.facts` at B's
+        // store, not keep A's.
+        let home = tmp_home("opencompany-engine-fact-swap-");
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let facts_dir_a = tempfile::tempdir().unwrap();
+        let facts_a: Arc<dyn FactStore> = Arc::new(FsOps::new(facts_dir_a.path().to_path_buf()));
+        let mut overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        overlay_a.facts = Some(facts_a.clone());
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(first.facts(), &facts_a),
+            "engine A's facts are the runtime's before the swap"
+        );
+
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let facts_dir_b = tempfile::tempdir().unwrap();
+        let facts_b: Arc<dyn FactStore> = Arc::new(FsOps::new(facts_dir_b.path().to_path_buf()));
+        let mut overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        overlay_b.facts = Some(facts_b.clone());
+
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_b)
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(swapped.facts(), &facts_b),
+            "the swapped engine's facts must win over the handover's engine A store"
+        );
+
+        // The mirror: switching to the base backend drops the provider's fact
+        // store back onto the base backend, exactly as the first-construction
+        // branch does for an engine that serves no facts.
+        let cleared = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay_cleared()
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(cleared.facts(), &facts_a),
+            "switching to `store` must drop the outgoing provider's fact store"
+        );
+    }
+
+    /// Issue #1113 wiring: a live engine swap must move the selection marker on
+    /// the inherited harness pool, so the pool can drop the cached roster on
+    /// the next rebuild and `ensure` can fold the replacement ports into new
+    /// agents.
+    ///
+    /// The pool-level contract (roster dropped, replacement store read) is
+    /// covered in `harness::built_in`; this pins the builder half — every build
+    /// re-records the selection, an unchanged one is a no-op, and a swap moves
+    /// the marker.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_rebuild_over_a_swapped_engine_rebinds_the_harness_pool() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-engine-pool-");
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let pool = Arc::new(crate::harness::HarnessPool::new());
+
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .with_harness(pool.clone())
+            .build()
+            .await
+            .unwrap();
+        let id = first.id().clone();
+        let fp_a = pool.memory_engine(&id).await;
+        assert!(
+            fp_a.is_some(),
+            "boot records the engine selection on the pool"
+        );
+
+        // A rebuild that re-applies the same engine is a no-op: same marker,
+        // so the pool keeps the roster (conversation history intact).
+        let again = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .with_harness(pool.clone())
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            pool.memory_engine(&id).await,
+            fp_a,
+            "re-applying the same engine keeps the same marker"
+        );
+        drop(again);
+
+        // A live swap to engine B moves the marker, so the pool can tell the
+        // cached roster is stale and drop it on the next build.
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay_b)
+            .with_harness(pool.clone())
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        let fp_b = pool.memory_engine(&id).await;
+        assert!(
+            fp_b.is_some(),
+            "the swap re-records the engine selection on the pool"
+        );
+        assert_ne!(
+            fp_b, fp_a,
+            "a different engine must move the marker, or the pool cannot tell a swap from a no-op"
+        );
+        drop(swapped);
     }
 
     mod scoped_grants {

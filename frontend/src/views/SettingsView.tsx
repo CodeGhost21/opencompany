@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Compass,
   Flag,
@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner";
 
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
+import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -52,6 +53,18 @@ interface Props {
   feed: CompanyFeed;
   onFlag: () => void;
 }
+
+// These are the optional capability families closest to the mandatory core /
+// recall / portability path. Remote providers commonly omit them, so merely
+// listing what answered leaves an operator to infer a material limitation.
+const MANDATORY_ADJACENT_MEMORY_FAMILIES = [
+  "tree",
+  "entities",
+  "graph",
+  "diff",
+  "goals",
+  "tool_memory",
+];
 
 /** Connection details, lifecycle controls, and the feedback entry point. */
 export function SettingsView({ client, company, feed, onFlag }: Props) {
@@ -118,6 +131,8 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             </InfoRow>
           </CardContent>
         </Card>
+
+        <MemoryEngineCard client={client} company={company} />
 
         {/* Lifecycle */}
         {scoped ? (
@@ -390,6 +405,99 @@ function ConfirmAction({
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+/**
+ * Read-only: which memory engine this instance is bound to, from the
+ * `…/memory/engine` surface.
+ *
+ * Deliberately carries no setter. Engine selection is instance-wide and
+ * belongs to the infra operator or the company configuration, depending on
+ * the reported layer. A console admin can see the engine but never repoint a
+ * deployment's storage from here. The switch runbook lives in
+ * `docs/spec/runtime/memory-engine.md`. Renders nothing on the `store`
+ * default and on a host predating the engine route.
+ */
+function MemoryEngineCard({
+  client,
+  company,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+}) {
+  const [engine, setEngine] = useState<MemoryEngineState | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    setEngine(undefined);
+    memoryEngine(client, company)
+      .then((state) => {
+        if (live) setEngine(state);
+      })
+      .catch(() => {
+        /* best-effort: the settings page works without the engine route */
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  if (!engine || engine.active === "store") return null;
+  const discarding = engine.active === "null";
+  const unservedFamilies = MANDATORY_ADJACENT_MEMORY_FAMILIES.filter(
+    (family) => !engine.capabilities.includes(family),
+  );
+  return (
+    <Card data-testid="settings-memory-engine">
+      <CardHeader>
+        <CardTitle className="text-base">Memory engine</CardTitle>
+        <CardDescription>
+          {engine.editable ? (
+            engine.layer === "config.toml" ? (
+              <>Selected in the company configuration. You can change it here.</>
+            ) : (
+              <>Using the default engine. You can change it here.</>
+            )
+          ) : (
+            <>
+              Set by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>, read
+              at boot). Instance-wide; read-only here by design.
+            </>
+          )}
+          {discarding &&
+            " This engine accepts and discards every write — nothing this company is told will be remembered."}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-0 divide-y">
+        <InfoRow label="Engine">
+          <span className="font-mono text-xs">{engine.active}</span>
+        </InfoRow>
+        <InfoRow label="Layer">
+          <span className="font-mono text-xs">{engine.layer}</span>
+        </InfoRow>
+        <InfoRow label="Capabilities">
+          <span className="text-sm">
+            {engine.capabilities.length > 0
+              ? engine.capabilities.join(", ")
+              : "not negotiated"}
+          </span>
+        </InfoRow>
+        <InfoRow label="Not served">
+          <span className="text-sm">
+            {unservedFamilies.length > 0 ? unservedFamilies.join(", ") : "none in this set"}
+          </span>
+        </InfoRow>
+        <InfoRow label="Boot probe">
+          <span className="text-sm">
+            {engine.healthy === true
+              ? "reachable"
+              : engine.healthy === false
+                ? "unreachable — check the endpoint and credential"
+                : "not probed"}
+          </span>
+        </InfoRow>
+      </CardContent>
+    </Card>
   );
 }
 
