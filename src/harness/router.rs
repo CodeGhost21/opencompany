@@ -715,4 +715,31 @@ mod tests {
             "a named lane must receive the release"
         );
     }
+
+    /// The drop-guard half of the same fan-out: the synchronous release reaches
+    /// every lane too, so a cancelled or panicked cycle (which cannot await
+    /// `end_cycle`) still releases each pool's pin (issue #1455).
+    #[test]
+    fn release_policy_pin_sync_fans_out_to_every_lane() {
+        let embedded = SpyEngine::new("embedded");
+        let deep = SpyEngine::new("deep");
+        let router = HarnessRouter::new("embedded")
+            .with_engine("embedded", embedded.clone())
+            .with_engine("deep", deep.clone())
+            .bind("researcher", "deep")
+            .bind("ceo", "embedded");
+
+        router.release_policy_pin_sync(&company());
+
+        assert_eq!(
+            *embedded.cycle_ends.lock().unwrap(),
+            vec![company()],
+            "the default lane must receive the synchronous release"
+        );
+        assert_eq!(
+            *deep.cycle_ends.lock().unwrap(),
+            vec![company()],
+            "a named lane must receive the synchronous release"
+        );
+    }
 }
