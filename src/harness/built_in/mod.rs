@@ -911,6 +911,33 @@ impl CompanyAgent {
                 );
                 *bound = Some(incoming.to_string());
             }
+        } else {
+            // Unthreaded turn (a dispatched background task or a workflow
+            // agent node): it still runs against this agent's shared,
+            // in-memory `history` — the same field a chat turn reads and
+            // extends — but carries no chat thread to bind that history to.
+            // Left alone, `bound_chat` keeps pointing at whichever chat was
+            // bound before this turn ran, so if the operator's next message
+            // lands on that same thread, `switched` above reads `false` and
+            // skips the clear-and-reseed entirely, silently grounding the
+            // reply in whatever this background turn just appended (the
+            // cross-context leak review found). Invalidate the binding so
+            // the next chat-routed turn is *always* treated as a switch,
+            // regardless of which thread it lands on.
+            //
+            // Deliberately does NOT clear `history` here: a single
+            // background task can span several unthreaded turns in a row
+            // (e.g. a steered continuation), and those legitimately depend
+            // on the history accumulated between them. The clear already
+            // happens on the switch branch above, the next time a chat turn
+            // actually claims the binding.
+            let mut bound = self.bound_chat.lock().await;
+            if bound.is_some() {
+                tracing::debug!(
+                    "[harness] unthreaded turn — invalidating chat binding so the next chat turn rebinds"
+                );
+                *bound = None;
+            }
         }
 
         // Reduced-scope chat turn. When the delegation runner marked this turn
