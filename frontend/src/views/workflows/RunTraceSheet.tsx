@@ -136,8 +136,12 @@ export function RunTraceSheet({
               <div className="space-y-4 px-4 pb-4">
                 {/* The same row the history rail renders, its "Show on canvas"
                     button repurposed as a navigation rather than an in-place
-                    toggle — this sheet has no canvas beside it to toggle. */}
+                    toggle — this sheet has no canvas beside it to toggle.
+                    `client`/`company` are forwarded so the row's lazy "Files
+                    associated" disclosure works here too (issue #1684). */}
                 <RunHistoryRow
+                  client={client}
+                  company={company}
                   run={run}
                   graph={null}
                   now={now}
