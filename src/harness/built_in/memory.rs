@@ -434,6 +434,13 @@ mod tests {
             redact_secrets("auth with Bearer s3cret please"),
             "auth with Bearer [REDACTED] please"
         );
+        // A digit-free credential is redacted from six characters on: a real
+        // if weak value like `secret` must not persist, while prose words
+        // after the marker stay short enough to survive.
+        assert_eq!(
+            redact_secrets("auth with Bearer secret please"),
+            "auth with Bearer [REDACTED] please"
+        );
         // No marker: borrowed through untouched, no allocation.
         assert!(matches!(
             redact_secrets("nothing secret here"),
