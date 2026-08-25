@@ -4105,8 +4105,12 @@ mod test {
             },
         ];
 
-        let (migrated, _) =
-            RuntimeBuilder::preserve_pre_upgrade_grant_scope(overlay_agents, Vec::new(), Some(&old), &new);
+        let (migrated, _) = RuntimeBuilder::preserve_pre_upgrade_grant_scope(
+            overlay_agents,
+            Vec::new(),
+            Some(&old),
+            &new,
+        );
 
         assert_eq!(
             migrated[0].tools, old.tools.allow,
@@ -4197,8 +4201,12 @@ mod test {
             harness: None,
         }];
 
-        let (migrated, _) =
-            RuntimeBuilder::preserve_pre_upgrade_grant_scope(overlay_agents, Vec::new(), Some(&old), &new);
+        let (migrated, _) = RuntimeBuilder::preserve_pre_upgrade_grant_scope(
+            overlay_agents,
+            Vec::new(),
+            Some(&old),
+            &new,
+        );
 
         assert!(
             migrated[0].tools.is_empty(),
