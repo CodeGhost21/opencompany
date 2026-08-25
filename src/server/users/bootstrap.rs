@@ -208,6 +208,7 @@ pub async fn issue_password(
 mod test {
     use super::*;
     use crate::store::FsOps;
+    use async_trait::async_trait;
 
     fn stores(
         dir: &tempfile::TempDir,
