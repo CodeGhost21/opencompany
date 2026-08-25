@@ -650,6 +650,8 @@ impl RuntimeBuilder {
             scratch_context: None,
             memory_scopes: None,
             memory_overlay_applied: false,
+            #[cfg(feature = "openhuman")]
+            memory_engine: None,
             tools: None,
             channels: None,
             economy: None,
