@@ -154,6 +154,30 @@ variable on the instance and restart it. The workload reads it at boot, and
 eligibility is evaluated per login rather than cached, so the next link request
 from that address succeeds.
 
+### Recovery without a mailbox
+
+Every path above needs a magic link to arrive — and a hosted tenant may have
+**no mail transport at all**, or one that is failing. With no admin yet, no one
+can set a password from the console, so the address stays unreachable
+(issue #1718). For that case the host issues the first password directly:
+
+```sh
+opencompany issue-password --company <id> --email ada@example.com
+```
+
+It reads storage directly, so its authority is possession of the host and its
+data — which an operator has and an HTTP caller never does. It admits exactly
+the standing grants above — a manifest `[users].admins` entry or
+`OPENCOMPANY_ADMIN_EMAIL` — and makes one usable without mail; it does **not**
+create one. Committing revokes the user's existing sessions and pending login
+codes first, and by default flags the password for replacement, matching the
+admin temporary-password route ([Passwords](#passwords)). It requires the
+effective email auth mode, takes the company id in the namespaced
+`<tenant>--<id>` form in shared-database mode, reads the password from stdin to
+keep it out of argv, and on the filesystem store holds the same data-root lock
+as `serve`, so it fails cleanly if a server is running on that root. See the
+[CLI reference](../../../gitbooks/developers/cli.md) for the full semantics.
+
 ## Routes
 
 Login routes are **unauthenticated by construction** (`PublicCompany`), because
