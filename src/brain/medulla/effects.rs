@@ -31,8 +31,14 @@ const MAX_WIRE_BODY_CHARS: usize = 200_000;
 
 /// Appends a marker per attachment — its extracted text when
 /// `resolve_attachments` (`server::operator`) managed to read one, else just
-/// the workspace node id — so a hosted or sidecar turn has something to work
-/// with (issue #1682).
+/// the workspace node id — so a turn has something to work with (issue #1682).
+///
+/// Shared by every model-facing seam that takes an operator message: the
+/// hosted medulla and sidecar brains fold the result into the wire body
+/// [`wire_event`] composes, and the `openhuman`-featured
+/// [`HarnessBrain`](crate::harness::built_in::brain::HarnessBrain) feeds it to
+/// the embedded agent instead — otherwise the raw message reached the agent
+/// with no indication a file was attached.
 ///
 /// Without this, `OperatorMessage.attachments` was journaled for the
 /// transcript but never reached the wire at all — a turn had no way to know a
@@ -54,7 +60,15 @@ const MAX_WIRE_BODY_CHARS: usize = 200_000;
 /// instructions" voice (compare the note and failure framings in
 /// `harness::built_in::planning` / `workflow_build`), so a directive inside a
 /// file reads as data the model should quote, not commands it should follow.
-fn with_attachment_refs(text: &str, attachments: &[Attachment]) -> String {
+/// The framing that opens every attachment marker [`with_attachment_refs`]
+/// appends. Shared so the triage cut in
+/// `runtime::delegation::operator_words` and the composer cannot drift — a
+/// marker is machine text, and anything that reasons about what the operator
+/// *asked* must strip it like the work/builder briefings, or "thanks" beside a
+/// large attachment would score as a substantial request and open a card.
+pub(crate) const ATTACHMENT_MARKER_PREFIX: &str = "\n\n[Attached file:";
+
+pub(crate) fn with_attachment_refs(text: &str, attachments: &[Attachment]) -> String {
     if attachments.is_empty() {
         return text.to_string();
     }
