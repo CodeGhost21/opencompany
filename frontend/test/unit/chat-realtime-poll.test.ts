@@ -71,7 +71,37 @@ describe("chat channel history polling", () => {
     expect(merged.map((message) => message.text)).toEqual(["First", "Second", "Third"]);
   });
 
-  it("keeps rows the host has not persisted yet at the tail", () => {
+  it("keeps durable rows evicted from the newest history page in order", () => {
+    const old = fromHistory([dto("1", "Oldest")])[0];
+    const current = fromHistory([dto("2", "Current"), dto("3", "Newest")]);
+
+    // The endpoint's default page contains only the newest 200 rows. The
+    // durable row missing from that page is not an optimistic send and must
+    // remain before the returned page on every poll.
+    const merged = mergeHistoryInOrder([old, current[0]], current);
+    expect(merged.map((message) => message.text)).toEqual(["Oldest", "Current", "Newest"]);
+    expect(merged[0]).toBe(old);
+  });
+
+  it("does not retain an optimistic send after its persisted echo appears", () => {
+    const optimistic: ChatMessage = {
+      id: "m42",
+      from: "you",
+      text: "slow synchronous send",
+      at: 1_700_000_010_000,
+    };
+    const persisted = fromHistory([dto("42", optimistic.text, true)])[0];
+
+    // The POST is still awaiting its response, but the host has already
+    // journaled the operator row. Match the echo by its stable fields and
+    // replace the local row with the durable projection rather than showing
+    // both copies.
+    const merged = mergeHistoryInOrder([optimistic], [persisted]);
+    expect(merged).toEqual([persisted]);
+    expect(merged).not.toContain(optimistic);
+  });
+
+
     // The operator's optimistic bubble is minted with a browser-local `m<seq>`
     // id the host does not know, so history does not name it. It must survive
     // the fold as the newest line, after every persisted row.
