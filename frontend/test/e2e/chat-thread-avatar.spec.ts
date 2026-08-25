@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { LIVE_BRAIN } from "./capabilities";
 import { bubbles, openChannel } from "./chat-helpers";
 
 /**
@@ -65,6 +66,18 @@ function panel(page: Page): Locator {
 }
 
 test("your own line wears your own face in the thread panel too", async ({ page }, testInfo) => {
+  // Same guard, and the same one-line reason, as the three other specs that
+  // locate the company's reply by the offline echo brain's `You said: <text>`
+  // (`chat-detached-post-failure`, `chat-detached-sse-unavailable`,
+  // `chat-live-events`). The live-brain lane runs a real turn against
+  // `test/e2e/mock-brain.mjs`, whose plain reply quotes nothing back
+  // deliberately — so the wait below can never be satisfied there. Not a
+  // flake and not a lane to paper over: the assertion this spec exists for
+  // (your face and the agent's are two different faces) is about the console,
+  // and the default `Console E2E` lane — the one the CI comments name as the
+  // gate on a console change — runs it in full.
+  test.skip(LIVE_BRAIN, "asserts the offline echo brain's `You said: <text>` reply.");
+
   await openChannel(page, ENGINEERING);
 
   const marker = `thread-face-${Date.now()}`;
