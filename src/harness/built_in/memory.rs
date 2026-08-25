@@ -77,7 +77,14 @@ fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
         let tail = &rest[pos + marker.len()..];
         // The value runs up to the first character that cannot be part of a token.
         let end = tail.find(|c: char| !is_token_char(c)).unwrap_or(tail.len());
-        if end >= 8 {
+        // Long values are always a secret. A short value is still redacted when
+        // it is token-shaped — it contains a digit, which prose after a marker
+        // does not — so a valid short bearer credential like `s3cret` (the MCP
+        // config accepts any non-empty bearer value) does not slip through, while
+        // a plain word such as "or" in "Bearer or not" is left alone.
+        let has_digit = tail[..end].chars().any(|c| c.is_ascii_digit());
+        let threshold = if has_digit { 4 } else { 8 };
+        if end >= threshold {
             out.push_str("[REDACTED]");
         } else {
             // Too short to be a secret: leave it, or this function would mangle
