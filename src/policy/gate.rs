@@ -257,6 +257,21 @@ impl ManifestApprovalGate {
         self.ttl_millis.load(Ordering::Relaxed)
     }
 
+    /// The policy snapshot the gate currently evaluates against.
+    ///
+    /// What [`apply_effective_policy`](Self::apply_effective_policy) last
+    /// installed, or the `[policy]` block [`new`](Self::new) was built from when
+    /// nothing has overridden it. The cycle reads this for a test-injected gate
+    /// so the harness roster is pinned to the SAME policy the native gate keeps
+    /// (issue #1455) — an injected gate carries its own policy on purpose, which
+    /// may differ from the persisted record's effective one.
+    pub fn policy(&self) -> Policy {
+        self.policy
+            .read()
+            .expect("policy lock poisoned")
+            .clone()
+    }
+
     /// Updates the deadline used for new and already parked approvals.
     ///
     /// The policy overlay is an operator control, so waiting for a process
