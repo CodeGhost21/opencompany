@@ -37,3 +37,16 @@ context = [
 # A missing path here is a manifest error rather than a skipped entry — a role
 # whose prompt was written around a briefing it never received fails silently.
 prompt_files = ["prompts/finance.md"]
+
+# Billing (#788). The one teammate in this company that holds `chargebee`.
+# Recording transactions and reconciling accounts is the job invoicing belongs
+# to, so the grant sits here rather than on the company at large.
+#
+# The company belt restated verbatim, then extended — the same rule
+# `[tools].allow` follows, and for the same reason: a short list here REPLACES
+# the belt rather than adding to it.
+#
+# `chargebee_send_invoice` and `chargebee_create_customer` are declared
+# `Reach::Consequence`, so they still park for approval under this company's
+# `auto` policy. Holding the tools is not the same as invoicing unattended.
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]
