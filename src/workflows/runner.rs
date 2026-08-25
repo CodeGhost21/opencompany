@@ -2874,13 +2874,13 @@ to = "done"
         // every spend now parks (`auto_approve_under_usd` lowered to 0), a
         // change the run's gate must classify under.
         let live = CompanyRecord {
-            overlay_policy: Some(PolicyOverride {
+            overlay_policy: Some(crate::ports::PolicyOverride {
                 mode: None,
                 always_approve: None,
                 auto_approve_under_usd: Some(Some(0.0)),
                 approval_ttl_hours: None,
-                set_by: Actor {
-                    kind: ActorKind::User,
+                set_by: crate::ports::Actor {
+                    kind: crate::ports::ActorKind::User,
                     id: "console-operator".to_string(),
                 },
                 at_millis: 1_700_000_000_000,
