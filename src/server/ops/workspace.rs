@@ -1040,13 +1040,35 @@ async fn chat_upload(
 /// with none), from the tail of `id` — already a fresh, collision-free ULID,
 /// so no extra uniqueness check is needed against it.
 ///
-/// `image.png` + id `...01J8` → `image-01j8.png`.
+/// `image.png` + id `...01j8` → `image-01j8.png`.
+///
+/// The result stays within the workspace-name budget ([`MAX_NAME_BYTES`]).
+/// `name` arrives already canonical, so it may already fill the whole budget;
+/// appending the tag would then exceed the cap, and the next normalization
+/// would truncate the tag back off — mapping the disambiguated name onto the
+/// very collision it exists to escape. The stem is trimmed to make room for
+/// the tag and the extension; an extension that would alone eat the budget is
+/// dropped (the same rule the sanitizer applies).
 fn disambiguate_name(name: &str, id: &str) -> String {
     let tag = &id[id.len().saturating_sub(6)..];
-    match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => format!("{stem}-{tag}.{ext}"),
-        _ => format!("{name}-{tag}"),
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    let with_extension =
+        extension.is_some_and(|ext| 8 + ext.len() <= MAX_NAME_BYTES); // `-<tag>.<ext>`
+    let suffix = if with_extension {
+        format!("-{tag}.{}", extension.unwrap())
+    } else {
+        format!("-{tag}")
+    };
+    let mut trimmed = &stem[..stem.len().min(MAX_NAME_BYTES.saturating_sub(suffix.len()))];
+    // A cut that lands mid-run leaves a separator abutting the tag; trim it so
+    // the result is still canonical kebab-case and `is_kebab_name` fixes it.
+    while trimmed.ends_with('-') || trimmed.ends_with('.') {
+        trimmed = &trimmed[..trimmed.len() - 1];
     }
+    format!("{trimmed}{suffix}")
 }
 
 /// The media type to store a upload under.
