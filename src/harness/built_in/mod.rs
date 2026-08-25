@@ -6121,14 +6121,9 @@ description = "Builds the product."
         // holds instead of a snapshot that would otherwise outlive its cycle.
         pool.end_cycle(&rec.id).await;
         pool.ensure(&rec, &fx.deps).await.expect("post-cycle ensure");
-        let live_fp = {
-            let mut live = rec.clone();
-            live.overlay_policy = Some(fp_entry_full(Some("full"), None, None, None));
-            effective_policy_fingerprint(&live.effective_policy())
-        };
         assert_eq!(
             pool.policy_fingerprint_of(&rec.id).await,
-            Some(live_fp),
+            Some(effective_policy_fingerprint(&edited.effective_policy())),
             "after end_cycle a plain ensure must adopt the live override"
         );
     }
