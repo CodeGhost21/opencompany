@@ -5322,7 +5322,7 @@ mod test {
         // The survivor's node still serves its bytes: the loser's cleanup
         // deleted only its own upload, never the winner's.
         let (_, stream) =
-            crate::ports::workspace::WorkspaceStore::read_bytes(&s, &company, "dupe")
+            crate::ports::workspace::WorkspaceStore::read_bytes(&*s, &company, "dupe")
                 .await
                 .unwrap()
                 .expect("the winning payload survives the same-id race");
