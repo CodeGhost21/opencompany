@@ -466,3 +466,143 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
   });
   return changed ? next : messages;
 }
+
+/** Stable content fields shared by an optimistic row and its history echo. */
+function messageFingerprint(message: ChatMessage): string {
+  return JSON.stringify([message.from, message.text, message.parentId ?? null]);
+}
+
+/** The host event sequence encoded by a durable console id, when available. */
+function messageSequence(message: ChatMessage): number | null {
+  if (!isHostMessageId(message.id)) return null;
+  const sequence = Number(toHostMessageId(message.id));
+  return Number.isSafeInteger(sequence) ? sequence : null;
+}
+
+/**
+ * Fold one `chat/history` response into a live transcript (issue #1690).
+ *
+ * `chat/history` is the host's authoritative, **oldest-first** record for a
+ * thread; a live transcript is that record plus whatever has not been
+ * journaled yet — the operator's own optimistic bubbles, minted with
+ * browser-local `m<seq>` ids the host does not know. Folding the response in
+ * is therefore neither prepend nor append but *reconstruction*, and the two
+ * rules below are what make that safe:
+ *
+ * 1. **Persisted rows take the history's own order.** A reply the live SSE
+ *    path missed lands after the message it follows (a plain append/prepend
+ *    rule could put it *before* the transcript), and a gap the SSE path
+ *    dropped is filled in its correct position rather than tacked on after
+ *    the tail — `[1, 3]` + history `[1, 2, 3]` must merge to `[1, 2, 3]`,
+ *    never `[1, 3, 2]`.
+ * 2. **Rows the host has not persisted yet stay in their live order.** They
+ *    are inserted at the boundary implied by their durable neighbours, while
+ *    optimistic sends with no durable sequence remain at the tail.
+ *
+ * Rows the history names that are already on screen are kept as the caller's
+ * own objects (reactions and other local decoration survive the re-fetch)
+ * rather than replaced by the freshly-projected copy. When nothing differs the
+ * input array is returned unchanged, so a caller can bail out of a state write
+ * and React can skip a re-render.
+ */
+export function mergeHistoryInOrder(
+  existing: ChatMessage[],
+  hydrated: ChatMessage[],
+): ChatMessage[] {
+  const historyIds = new Set(hydrated.map((m) => m.id));
+  const existingById = new Map(existing.map((m) => [m.id, m]));
+  const durableEchoes = new Map<string, ChatMessage[]>();
+  for (const message of hydrated) {
+    const matches = durableEchoes.get(messageFingerprint(message)) ?? [];
+    matches.push(message);
+    durableEchoes.set(messageFingerprint(message), matches);
+  }
+
+  const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
+  const consumedEchoes = new Set<ChatMessage>();
+  const liveRows = existing.filter((m) => !historyIds.has(m.id));
+  const liveDurable = liveRows.filter((m) => isHostMessageId(m.id));
+  const hydratedSequences = hydrated.map(messageSequence);
+  const firstSequence = hydratedSequences.find((sequence) => sequence !== null) ?? null;
+  const lastSequence = [...hydratedSequences]
+    .reverse()
+    .find((sequence) => sequence !== null) ?? null;
+  const snapshotAt = hydrated.length ? hydrated[hydrated.length - 1].at : null;
+
+  const optimistic = liveRows.filter((message) => {
+    if (isHostMessageId(message.id)) return false;
+    const matches = durableEchoes.get(messageFingerprint(message));
+    const echo = matches?.find((candidate) => {
+      if (consumedEchoes.has(candidate)) return false;
+      // A durable row already present in the live transcript is an older
+      // identical send, even when it is the newest (or only) row in the page.
+      // Only an id that was not on screen when this fold began can reconcile
+      // this local bubble; otherwise a send made after the snapshot would be
+      // consumed by the page-boundary row it duplicated.
+      if (existingById.has(candidate.id)) return false;
+      // A matching row before the snapshot may be an older identical message,
+      // not this send. A row at/after the snapshot is fresh evidence; for a
+      // single-row response there is no older page boundary to consult, but
+      // the id check above still protects that boundary when it was live.
+      return snapshotAt === null || hydrated.length === 1 || candidate.at >= snapshotAt;
+    });
+    if (!echo) return true;
+    consumedEchoes.add(echo);
+    return false;
+  });
+
+  const outsidePage = liveDurable.filter((message) => {
+    const sequence = messageSequence(message);
+    if (sequence !== null && firstSequence !== null && lastSequence !== null) {
+      // A durable row absent from the page may be a gap or a live tail. Keep
+      // every such row and let sequence-aware insertion restore its position.
+      return true;
+    }
+    if (!hydrated.length) return true;
+    return message.at <= hydrated[0].at || message.at >= hydrated[hydrated.length - 1].at;
+  });
+
+  // Start with the authoritative page, then insert rows that were already
+  // live. Numeric host sequences are the ordering authority; timestamps are a
+  // compatibility fallback for legacy/non-numeric ids. Finally insert local
+  // rows without a durable position at the boundary implied by their live
+  // neighbours, rather than moving every optimistic send to the tail.
+  const merged = [...persisted];
+  for (const message of outsidePage) {
+    const sequence = messageSequence(message);
+    let index = -1;
+    if (sequence !== null) {
+      index = merged.findIndex((candidate) => {
+        const candidateSequence = messageSequence(candidate);
+        return candidateSequence !== null && candidateSequence > sequence;
+      });
+    } else {
+      index = merged.findIndex((candidate) => candidate.at > message.at);
+    }
+    merged.splice(index < 0 ? merged.length : index, 0, message);
+  }
+
+  for (const message of optimistic) {
+    const liveIndex = liveRows.indexOf(message);
+    // A local row's position is defined by the nearest durable live row on
+    // either side of it. The preceding live row may itself be optimistic and
+    // already inserted; using it as the lower bound preserves the order of a
+    // burst of local sends around one durable SSE row.
+    const previousLive = liveRows
+      .slice(0, liveIndex)
+      .reverse()
+      .find((candidate) => merged.includes(candidate));
+    const nextLive = liveRows.slice(liveIndex + 1).find((candidate) => merged.includes(candidate));
+    if (previousLive) {
+      merged.splice(merged.indexOf(previousLive) + 1, 0, message);
+    } else if (nextLive) {
+      merged.splice(merged.indexOf(nextLive), 0, message);
+    } else {
+      merged.push(message);
+    }
+  }
+
+  return merged.length === existing.length && merged.every((m, i) => m === existing[i])
+    ? existing
+    : merged;
+}
