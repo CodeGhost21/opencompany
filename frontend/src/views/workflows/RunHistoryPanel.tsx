@@ -318,8 +318,12 @@ export function RunHistoryPanel({
  *
  * Clicking it overlays that run's node states on the canvas (issue #371) —
  * which is what makes a scheduled run's failure point visible, the case the
- * live canvas by definition cannot cover because nobody was watching. */
-function RunHistoryRow({
+ * live canvas by definition cannot cover because nobody was watching.
+ *
+ * Exported (issue #1697) so the company-wide run traces list can reuse the
+ * exact same row inside its transcript sheet — one reading of "what did this
+ * run do", not a second one that can drift from the rail's. */
+export function RunHistoryRow({
   run,
   graph,
   now,
@@ -854,8 +858,11 @@ function RunNodeChip({
  * Gated rather than always-on: the history rail stays up for as long as the
  * operator leaves it open, and a settled row's duration is a fixed number that
  * re-rendering every second cannot change.
+ *
+ * Exported (issue #1697) so the run traces sheet ticks a running row the same
+ * way the rail does.
  */
-function useRunningClock(active: boolean): number {
+export function useRunningClock(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;

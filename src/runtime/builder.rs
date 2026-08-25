@@ -3234,7 +3234,7 @@ impl RuntimeBuilder {
         // against a snapshot predating the other. Adopting them is also what
         // makes the quiesce drain mean something after the swap.
         if let Some(h) = handover.as_ref() {
-            runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
+            runtime.adopt_locks(h.serial.clone(), h.per_agent.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
         runtime.adopt_workflow_gates(workflow_gates);
