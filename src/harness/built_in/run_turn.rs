@@ -96,6 +96,28 @@ impl RunTurn for HarnessRunTurn {
             .await
     }
 
+    async fn run_background_workflow(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        run_sink: Option<Arc<RunTraceSink>>,
+        workflow_run_id: &str,
+        node_id: &str,
+    ) -> Result<TurnOutcome> {
+        self.pool
+            .run_background_workflow(
+                company,
+                agent_id,
+                message,
+                &self.deps,
+                run_sink,
+                workflow_run_id,
+                node_id,
+            )
+            .await
+    }
+
     async fn ensure(&self, company: &CompanyRecord) -> Result<()> {
         self.pool.ensure(company, &self.deps).await
     }
