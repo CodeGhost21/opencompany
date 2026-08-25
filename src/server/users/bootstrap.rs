@@ -338,6 +338,57 @@ mod test {
         );
     }
 
+    /// A stored invite for the address must read as redeemed once the host
+    /// password creates the account — otherwise a manifest admin's invite row
+    /// sits beside the new account as "still pending" forever. This is the
+    /// same stamp the login path writes on redemption.
+    #[tokio::test]
+    async fn creating_an_account_marks_an_outstanding_invite_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (users, sessions, login_codes) = stores(&dir);
+        let company = CompanyId::new("acme");
+        let now = crate::ports::now_millis();
+        users
+            .upsert_invite(
+                &company,
+                &InviteRecord {
+                    id: "manifest:ada@acme.test".into(),
+                    email: "ada@acme.test".into(),
+                    role: UserRole::Admin,
+                    invited_by: "manifest".into(),
+                    created_at_millis: now,
+                    expires_at_millis: now + 60_000,
+                    accepted_at_millis: None,
+                    notified_at_millis: None,
+                },
+            )
+            .await
+            .expect("invite stored");
+
+        issue_password(
+            context(
+                &users,
+                &sessions,
+                &login_codes,
+                &company,
+                &["ada@acme.test".into()],
+                None,
+            ),
+            "ada@acme.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect("issues");
+
+        let invite = users
+            .find_invite_by_email(&company, "ada@acme.test")
+            .await
+            .expect("read")
+            .expect("the invite still exists");
+        assert_eq!(invite.accepted_at_millis, Some(now));
+    }
+
     /// The boundary that keeps this from being a back door. Possession of the
     /// host lets an operator issue a password to someone the company already
     /// admits — not add a member.
