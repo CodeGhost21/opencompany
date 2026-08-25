@@ -3763,6 +3763,20 @@ pub(crate) fn build_roster(
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
+        // Issue #1759 (S2): when this agent has Composio wired (an explicit
+        // company/agent grant AND a resolved credential with a non-empty toolkit
+        // allowlist), install those connected toolkits on its policy so a raw
+        // `http_request`/`curl`/`web_fetch` aimed at one of their API hosts is
+        // deflected to the Composio route — the same condition S1's
+        // `composio_brief` is wired under, one door down (enforcement, not just
+        // instruction).
+        #[cfg(feature = "composio")]
+        if crate::company::grants_composio_explicit(&grants)
+            && let Some(config) = deps.composio.as_ref()
+            && !config.toolkits.is_empty()
+        {
+            agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
+        }
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -3834,6 +3848,16 @@ pub(crate) fn build_roster(
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
+        // Issue #1759 (S2): same Composio deflection wiring as the manifest loop
+        // — an overlay teammate that holds the Composio grant is guarded on the
+        // same terms.
+        #[cfg(feature = "composio")]
+        if crate::company::grants_composio_explicit(&grants)
+            && let Some(config) = deps.composio.as_ref()
+            && !config.toolkits.is_empty()
+        {
+            agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
+        }
         let agent = build::build_agent(
             &company.id,
             company_name,
