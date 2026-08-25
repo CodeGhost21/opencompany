@@ -392,6 +392,20 @@ mod tests {
             redact_secrets("auth with Bearer sk-verylongsecrettoken please"),
             "auth with Bearer [REDACTED] please"
         );
+        // A JWT carries `.` between its base64url segments; the whole
+        // credential is consumed, not just the header segment.
+        assert_eq!(
+            redact_secrets(
+                "auth with Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.aSignature0123456789 please"
+            ),
+            "auth with Bearer [REDACTED] please"
+        );
+        // An opaque key with base64 punctuation (`+`, `/`, `~`, `=`) is also
+        // consumed whole rather than leaking the part after the first such char.
+        assert_eq!(
+            redact_secrets("auth with Bearer aGVsbG8r/d29ybGQ=andtheRestOfTheKey please"),
+            "auth with Bearer [REDACTED] please"
+        );
         // No marker: borrowed through untouched, no allocation.
         assert!(matches!(
             redact_secrets("nothing secret here"),
@@ -400,6 +414,8 @@ mod tests {
         // Too short after the marker to be a secret: left alone, so ordinary
         // text like "Bearer or not" is not mangled.
         assert_eq!(redact_secrets("Bearer or not"), "Bearer or not");
+        // Dots do not turn a short prose word into a secret.
+        assert_eq!(redact_secrets("Bearer token. Please"), "Bearer token. Please");
     }
 
     /// Minimal in-memory ContextStore for adapter isolation tests.
