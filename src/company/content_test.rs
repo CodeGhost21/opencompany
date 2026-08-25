@@ -755,6 +755,86 @@ fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
     }
 }
 
+/// The marketing agency's `chargebee` exclusion lives at the per-agent layer,
+/// not on the strategy/growth desk ceilings, so the console flow the manifest
+/// documents — naming a biller from the console — actually works.
+///
+/// A desk ceiling is manifest-only and cannot be widened from the console, so
+/// an exclusion stated there would make the billing grant unreachable by any
+/// shipped teammate. Pinned through the real three-level narrowing
+/// (`agent_scoped_grants`): a shipped member's own `tools` line excludes
+/// `chargebee`, while the desk level (no ceiling) admits an operator override
+/// that names it.
+#[test]
+fn a_marketing_biller_can_be_named_from_the_console() {
+    let manifest = load_company("agentic_marketing_agency");
+
+    // The desks this PR touched state no ceiling — the exclusion must not live
+    // on an unwidenable layer.
+    for id in ["strategy", "growth"] {
+        let desk = manifest
+            .group_chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .unwrap_or_else(|| panic!("{id} desk"));
+        assert!(
+            desk.tools.is_empty(),
+            "{id}: the `chargebee` exclusion must not live on the desk ceiling \
+             (an unwidenable layer); found {:?}",
+            desk.tools
+        );
+    }
+
+    // Every shipped strategy/growth member holds the belt minus `chargebee`.
+    for id in [
+        "brand_strategist",
+        "seo_specialist",
+        "analytics_analyst",
+        "paid_ads_manager",
+        "email_marketer",
+    ] {
+        let agent = manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .unwrap_or_else(|| panic!("{id} is a marketing teammate"));
+        let desk_refs: Vec<&[String]> = manifest
+            .group_chats
+            .iter()
+            .filter(|chat| chat.members.iter().any(|member| member == id))
+            .map(|chat| chat.tools.as_slice())
+            .collect();
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        assert!(
+            !grants_chargebee_explicit(&grants),
+            "{id}: a shipped marketing teammate must not hold billing tools; \
+             effective grants: {grants:?}"
+        );
+    }
+
+    // An operator naming the biller from the console — adding `chargebee` to a
+    // strategy member's override — now survives the desk level.
+    let brand = manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == "brand_strategist")
+        .unwrap();
+    let mut override_tools = brand.tools.clone();
+    override_tools.push("chargebee".to_string());
+    let strategy = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "strategy")
+        .unwrap();
+    let desk_refs: Vec<&[String]> = vec![strategy.tools.as_slice()];
+    let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &override_tools);
+    assert!(
+        grants_chargebee_explicit(&grants),
+        "the console override naming the biller must survive the desk layer; \
+         effective grants: {grants:?}"
+    );
+}
+
 /// Every seeded `output` node names a destination its own manifest can resolve,
 /// except the research lab, which deliberately proves that workflows can
 /// coordinate without desks (issue #963).
