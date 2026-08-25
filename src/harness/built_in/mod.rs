@@ -1056,6 +1056,41 @@ impl CompanyAgent {
                             if steer.map(|c| c.requested()).unwrap_or(false) || spend_halted {
                                 Ok(crate::harness::mcp_probe::scrub(GRACEFUL_EMPTY_REPLY, &[]))
                             } else {
+                                // Issue #1725 review: `set_next_turn_overrides`
+                                // is one-shot — openhuman consumes it at the
+                                // top of the NEXT `Agent::turn` call and resets
+                                // to the default (`turn/core.rs`'s
+                                // `std::mem::take`). Applied only once, above,
+                                // a chat-only turn's suppression would cover
+                                // just the first attempt: were this retry ever
+                                // reached with the override already spent, it
+                                // would run with the agent's full,
+                                // un-suppressed scope — regaining the whole
+                                // tool belt, memory agent and active goal the
+                                // fast path exists to withhold. Reapply the
+                                // SAME overrides so every attempt in a
+                                // chat-only turn stays reduced, not just the
+                                // first.
+                                //
+                                // Defence in depth, like the guard above it:
+                                // an immediately-blank completion with no tool
+                                // call is retried INSIDE openhuman's own tool
+                                // loop under the SAME per-turn overrides
+                                // (verified by instrumenting a scripted blank
+                                // response — `first` came back
+                                // `Ok("...")` directly, never reaching this
+                                // arm at all), so this specific line is not
+                                // known to fire from any script this suite can
+                                // build. What it buys is that IF this arm ever
+                                // is reached — a terminal `EmptyProviderResponse`
+                                // openhuman raises after exhausting its own
+                                // internal budget — the retry does not silently
+                                // regress to full scope.
+                                if overrides
+                                    != oh::agent::harness::session::TurnOverrides::default()
+                                {
+                                    agent.set_next_turn_overrides(overrides);
+                                }
                                 let second = agent.turn(message).await;
                                 usages.push(read_turn_usage(&agent));
                                 match self.classify_turn(second) {
