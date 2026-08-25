@@ -112,6 +112,101 @@ describe("cyclic workflow layout", () => {
     expect(xOf(nodes, "revise_pr")).toBe(xOf(nodes, "merge_pr"));
   });
 
+  it("breaks the authored return when a branch enters the loop's middle", () => {
+    // `agentic_math_lab/euler_solve`, shipped. `cost` fans out to BOTH `solve`
+    // and `approach`, so a DFS reaches `solve` first, descends to `agree`, and
+    // finds `approach -> solve` closing onto the stack — an ordinary forward
+    // edge. Breaking that one lays `approach` out AFTER `agree`, so the normal
+    // approach-to-solve path runs backwards and the retry branch points forward.
+    // The authored return is `agree -> approach`, and nothing about traversal
+    // order can tell you that.
+    const euler: WorkflowGraph = {
+      id: "euler_solve",
+      name: "euler_solve",
+      nodes: [
+        "problem",
+        "restate",
+        "cost",
+        "approach",
+        "solve",
+        "check",
+        "agree",
+        "record",
+        "report",
+      ].map((id) => ({ id, kind: "agent", name: id })),
+      edges: [
+        { from: "problem", to: "restate" },
+        { from: "restate", to: "cost" },
+        { from: "cost", to: "solve" },
+        { from: "cost", to: "approach" },
+        { from: "approach", to: "solve" },
+        { from: "solve", to: "check" },
+        { from: "check", to: "agree" },
+        { from: "agree", to: "approach" },
+        { from: "agree", to: "record" },
+        { from: "record", to: "report" },
+      ],
+    } as WorkflowGraph;
+
+    expect([...backEdges(euler)].map((e) => `${e.from}->${e.to}`)).toEqual(["agree->approach"]);
+
+    const { nodes } = layout(euler);
+    // The authored path reads left to right: cost, then approach, then solve.
+    expect(xOf(nodes, "cost")).toBeLessThan(xOf(nodes, "approach"));
+    expect(xOf(nodes, "approach")).toBeLessThan(xOf(nodes, "solve"));
+    // And the retry target sits before the node that retries it.
+    expect(xOf(nodes, "approach")).toBeLessThan(xOf(nodes, "agree"));
+  });
+
+  it("does not mistake a converging path for a loop", () => {
+    // `a` reaches `d` two ways. Nothing here is cyclic, so nothing may be
+    // broken — the condition is reachability back to the source, not "I have
+    // seen this node before".
+    const diamond: WorkflowGraph = {
+      id: "diamond",
+      name: "diamond",
+      nodes: ["a", "b", "c", "d"].map((id) => ({ id, kind: "agent", name: id })),
+      edges: [
+        { from: "a", to: "b" },
+        { from: "a", to: "c" },
+        { from: "b", to: "d" },
+        { from: "c", to: "d" },
+      ],
+    } as WorkflowGraph;
+    expect(backEdges(diamond).size).toBe(0);
+  });
+
+  it("breaks a cycle even when no edge runs against the authored order", () => {
+    // Nodes declared out of flow order, so there is no authored return to find.
+    // Termination must not depend on the author having been tidy.
+    const scrambled: WorkflowGraph = {
+      id: "scrambled",
+      name: "scrambled",
+      nodes: ["c", "a", "b"].map((id) => ({ id, kind: "agent", name: id })),
+      edges: [
+        { from: "a", to: "b" },
+        { from: "b", to: "c" },
+        { from: "c", to: "a" },
+      ],
+    } as WorkflowGraph;
+    expect(backEdges(scrambled).size).toBe(1);
+    expect(contentBounds(layout(scrambled).nodes).width).toBe(790);
+  });
+
+  it("treats a self-loop as its own return", () => {
+    const selfish: WorkflowGraph = {
+      id: "selfish",
+      name: "selfish",
+      nodes: ["a", "b"].map((id) => ({ id, kind: "agent", name: id })),
+      edges: [
+        { from: "a", to: "b" },
+        { from: "b", to: "b" },
+      ],
+    } as WorkflowGraph;
+    expect([...backEdges(selfish)].map((e) => `${e.from}->${e.to}`)).toEqual(["b->b"]);
+    expect(layout(selfish).nodes.map((n) => n.position.x)).toEqual([0, 300]);
+  });
+
   it("layers a graph that is entirely a cycle, with no root to start from", () => {
     const ring: WorkflowGraph = {
       id: "ring",

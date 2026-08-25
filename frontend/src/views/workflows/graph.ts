@@ -559,76 +559,103 @@ export function failedNodeOf(run: WorkflowRunOutcome): string | null {
  * node in it is normally also in `runStates` as `ok` — both are true and the
  * card renders both. See {@link undeliveredNodes} in `run-health.ts`. */
 /**
- * The edges that close a cycle, found by a three-colour DFS: an edge into a node
- * that is currently **on the recursion stack** points back at an ancestor, and
- * is the one edge of its cycle that has to be ignored for layering to terminate.
+ * The edges that close a cycle and must be left out of the depth arithmetic, so
+ * that layering — a longest-path relaxation, defined only on a DAG — terminates
+ * on a graph that has loops in it.
  *
  * Exported for the layout tests, which is the only reason it is not local to
  * {@link layout}: the arithmetic in this module is deliberately pure so it can
- * be checked without a canvas, and "which edge did it decide to break" is the
+ * be checked without a canvas, and *which* edge it decided to break is the
  * assertion that distinguishes this working from it merely not crashing.
  *
- * ## Which edge gets broken
+ * ## Which edge gets broken, and why it is not the traversal's choice
  *
- * The DFS starts from the roots — nodes with no incoming edge — so on a workflow
- * with a trigger the traversal follows the direction the operator authored, and
- * the edge it breaks is the one that reads as the loop's *return*: `plan_approved
- * -> read_and_plan`, not `read_and_plan -> review_plan`. That is what keeps a
- * revision loop laid out as a pipeline with an arrow curving back, rather than a
- * pipeline cut at an arbitrary point.
+ * Any edge of a cycle would make layering terminate; only one of them reads
+ * correctly to the person who drew the graph. A revision loop should lay out as
+ * a pipeline with an arrow curving back from the retry, not as a pipeline cut at
+ * an arbitrary point — so the rule has to be about what the author meant, not
+ * about the order a traversal happened to arrive.
  *
- * Nodes unreachable from any root are then visited in their own right, so a
- * graph that is *entirely* a cycle — no root at all — still gets layered instead
- * of falling back to the pathological case this exists to prevent.
+ * The first version of this used a DFS and broke whichever edge closed onto the
+ * recursion stack. That is wrong whenever a node *before* a loop branches
+ * straight into the loop's middle, because the traversal then enters the loop
+ * from the wrong side. The shipped `agentic_math_lab/euler_solve` is exactly
+ * that shape: `cost` fans out to both `solve` and `approach`, the DFS reaches
+ * `solve` first, and it marked the ordinary forward edge `approach -> solve`
+ * instead of the authored return `agree -> approach` — which laid `approach` out
+ * *after* `agree` and made the normal approach-to-solve path run backwards.
  *
- * Back edges are only excluded from the depth arithmetic. They are still handed
- * to React Flow and still drawn; a loop the operator authored stays visible.
+ * So the rule is two conditions, and neither is about traversal order:
+ *
+ * 1. The edge is genuinely inside a cycle — its target can reach its source.
+ *    An edge that merely points at an already-visited node is not a loop.
+ * 2. It points backwards in the order the author **declared** the nodes. A
+ *    workflow is written in the order the work flows, so the edge that runs
+ *    against that order is the return.
+ *
+ * Both graphs the previous rule disagreed about come out right: `euler_solve`
+ * yields `agree -> approach`, and an issue-to-PR lifecycle with two revision
+ * loops yields `plan_approved -> read_and_plan` and `revise_pr -> qa_review`.
+ *
+ * A cycle whose edges *all* point forward in declaration order — possible when
+ * the nodes were not written in flow order — has no authored return to find, so
+ * one of its edges is broken arbitrarily rather than none. Termination must not
+ * depend on the author having been tidy.
+ *
+ * Reachability is recomputed per candidate edge, which is `O(E * (V + E))`.
+ * That is chosen for legibility over an SCC pass: a workflow graph is tens of
+ * nodes, this runs on repaint of a canvas that is already doing more work than
+ * this per frame, and the condition reads as the sentence it implements.
+ *
+ * Back edges are excluded from the depth arithmetic **only**. They are still
+ * handed to React Flow and still drawn; a loop the operator authored stays
+ * visible.
  */
 export function backEdges(graph: WorkflowGraph): Set<WorkflowGraph["edges"][number]> {
-  const outgoing = new Map<string, WorkflowGraph["edges"]>();
+  const order = new Map<string, number>(graph.nodes.map((n, i) => [n.id, i]));
+  const adjacency = new Map<string, string[]>(graph.nodes.map((n) => [n.id, []]));
   for (const e of graph.edges) {
-    const list = outgoing.get(e.from);
-    if (list) list.push(e);
-    else outgoing.set(e.from, [e]);
+    const from = adjacency.get(e.from);
+    // An edge naming a node the graph does not have is dangling; it cannot be
+    // part of a cycle, and the relaxation already ignores it.
+    if (from && adjacency.has(e.to)) from.push(e.to);
   }
 
-  const back = new Set<WorkflowGraph["edges"][number]>();
-  // 0 = unvisited, 1 = on the stack, 2 = done.
-  const state = new Map<string, 0 | 1 | 2>(graph.nodes.map((n) => [n.id, 0]));
-
-  // Iterative rather than recursive: a long workflow is a long chain, and a
-  // recursive DFS would put its depth on the JS stack for no benefit.
-  const visit = (root: string) => {
-    if (state.get(root) !== 0) return;
-    const stack: { id: string; next: number }[] = [{ id: root, next: 0 }];
-    state.set(root, 1);
+  /** Whether `to` is reachable from `from`, ignoring `skip` edges. */
+  const reaches = (from: string, to: string, skip: Set<WorkflowGraph["edges"][number]>) => {
+    const blocked = new Set<string>();
+    for (const e of skip) blocked.add(`${e.from}\u0000${e.to}`);
+    const seen = new Set([from]);
+    const stack = [from];
     while (stack.length > 0) {
-      const frame = stack[stack.length - 1];
-      const edges = outgoing.get(frame.id) ?? [];
-      if (frame.next >= edges.length) {
-        state.set(frame.id, 2);
-        stack.pop();
-        continue;
-      }
-      const edge = edges[frame.next++];
-      const target = state.get(edge.to);
-      // An edge to a node not in `nodes` at all is dangling — left to the
-      // relaxation, which simply never finds a depth for it, exactly as before.
-      if (target === undefined) continue;
-      if (target === 1) back.add(edge);
-      else if (target === 0) {
-        state.set(edge.to, 1);
-        stack.push({ id: edge.to, next: 0 });
+      const at = stack.pop()!;
+      if (at === to) return true;
+      for (const next of adjacency.get(at) ?? []) {
+        if (blocked.has(`${at}\u0000${next}`)) continue;
+        if (!seen.has(next)) {
+          seen.add(next);
+          stack.push(next);
+        }
       }
     }
+    return false;
   };
 
-  const hasIncoming = new Set(graph.edges.map((e) => e.to));
-  for (const n of graph.nodes) {
-    if (!hasIncoming.has(n.id)) visit(n.id);
+  const none = new Set<WorkflowGraph["edges"][number]>();
+  // Condition 1: genuinely inside a cycle.
+  const cyclic = graph.edges.filter(
+    (e) => order.has(e.from) && order.has(e.to) && reaches(e.to, e.from, none),
+  );
+  // Condition 2: runs against the authored order. A self-loop satisfies this
+  // by `>=`, which is right — it is its own return.
+  const back = new Set(cyclic.filter((e) => order.get(e.from)! >= order.get(e.to)!));
+
+  // Whatever is still cyclic once those are gone had no authored return to
+  // find. Break it arbitrarily rather than leaving the relaxation to diverge.
+  for (const e of cyclic) {
+    if (back.has(e)) continue;
+    if (reaches(e.to, e.from, back)) back.add(e);
   }
-  // Whatever a root could not reach — including a graph that is all cycle.
-  for (const n of graph.nodes) visit(n.id);
 
   return back;
 }
