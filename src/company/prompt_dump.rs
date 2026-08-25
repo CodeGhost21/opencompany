@@ -379,6 +379,16 @@ fn harness_sections(
         title: "MCP capability brief".to_string(),
         reason: "appended only when this agent is granted an enabled MCP server, which needs a configured registry".to_string(),
     });
+
+    // Issue #1759: the connected-integration grounding + Composio-routing brief.
+    // Appended by `build_agent` only when the Composio tools are actually wired
+    // (an explicit `composio` grant AND a credential resolved for this company),
+    // and its text names this company's connected toolkits — neither of which a
+    // manifest alone can know, so it is reported deferred rather than guessed at.
+    deferred.push(Deferred {
+        title: "Connected integrations brief".to_string(),
+        reason: "appended only when this agent explicitly grants `composio` and a Composio credential resolves for the company; its toolkit list needs the live connection state".to_string(),
+    });
 }
 
 #[cfg(not(feature = "openhuman"))]
