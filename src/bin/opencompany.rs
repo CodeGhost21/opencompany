@@ -1078,10 +1078,19 @@ async fn run_issue_password(
     };
 
     let home = resolve_home_migrated(home)?;
-    // Serialize all filesystem mutations with serve/import/export. The guard
-    // must outlive storage opening and the complete password operation.
-    let _home_lock = opencompany::store::lock::acquire(&home)?;
     let settings = opencompany::store::StorageSettings::from_env()?;
+    // Serialize filesystem mutations with serve/import/export — but only for
+    // the filesystem store. `serve` holds this same root lock for its whole
+    // lifetime even on a MongoDB-backed tenant, so contending with it here
+    // would refuse this command in exactly the environment it exists for: a
+    // live hosted container that cannot mail a sign-in link. Those mutations
+    // go through the storage handles and never touch `home`, so the lock has
+    // nothing to protect there. The guard must outlive storage opening and
+    // the complete password operation.
+    let _home_lock = match settings.kind {
+        opencompany::store::StorageKind::Fs => Some(opencompany::store::lock::acquire(&home)?),
+        _ => None,
+    };
     let config_root = opencompany::app::config::data_dir_from_env();
     let config_file = ConfigFile::load(&config_root)?;
     let fs_ops = Arc::new(opencompany::store::FsOps::new(home.clone()));
