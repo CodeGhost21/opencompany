@@ -564,8 +564,9 @@ export function mergeHistoryInOrder(
 
   // Start with the authoritative page, then insert rows that were already
   // live. Numeric host sequences are the ordering authority; timestamps are a
-  // compatibility fallback for legacy/non-numeric ids. Finally append local
-  // rows that have no durable position, preserving their existing order.
+  // compatibility fallback for legacy/non-numeric ids. Finally insert local
+  // rows without a durable position at the boundary implied by their live
+  // neighbours, rather than moving every optimistic send to the tail.
   const merged = [...persisted];
   for (const message of outsidePage) {
     const sequence = messageSequence(message);
@@ -580,7 +581,26 @@ export function mergeHistoryInOrder(
     }
     merged.splice(index < 0 ? merged.length : index, 0, message);
   }
-  merged.push(...optimistic);
+
+  for (const message of optimistic) {
+    const liveIndex = liveRows.indexOf(message);
+    // A local row's position is defined by the nearest durable live row on
+    // either side of it. The preceding live row may itself be optimistic and
+    // already inserted; using it as the lower bound preserves the order of a
+    // burst of local sends around one durable SSE row.
+    const previousLive = liveRows
+      .slice(0, liveIndex)
+      .reverse()
+      .find((candidate) => merged.includes(candidate));
+    const nextLive = liveRows.slice(liveIndex + 1).find((candidate) => merged.includes(candidate));
+    if (previousLive) {
+      merged.splice(merged.indexOf(previousLive) + 1, 0, message);
+    } else if (nextLive) {
+      merged.splice(merged.indexOf(nextLive), 0, message);
+    } else {
+      merged.push(message);
+    }
+  }
 
   return merged.length === existing.length && merged.every((m, i) => m === existing[i])
     ? existing
