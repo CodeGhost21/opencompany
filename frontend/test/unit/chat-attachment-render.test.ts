@@ -151,7 +151,7 @@ describe("MessageAttachments (issue #1682)", () => {
         await Promise.resolve();
       });
 
-      expect(resolveUrl).toHaveBeenCalledWith("n1");
+      expect(resolveUrl).toHaveBeenCalledWith("n1", expect.any(AbortSignal));
       expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:the-image");
     });
 
