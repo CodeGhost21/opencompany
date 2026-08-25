@@ -166,6 +166,25 @@ impl HarnessRouter {
             "agent `{agent_id}` is bound to harness `{harness}`, but {detail}."
         )))
     }
+
+    /// Records each lane's warm-up outcome: a failure is remembered with its
+    /// reason, a success clears any earlier one. Shared by
+    /// [`ensure`](RunTurn::ensure) and
+    /// [`ensure_with_policy`](RunTurn::ensure_with_policy) so the two warm-up
+    /// paths cannot drift apart.
+    fn record_warm_up(&self, outcomes: Vec<(String, Result<()>)>) {
+        let mut failures = self.failures.lock().expect("router failures");
+        for (harness, result) in outcomes {
+            match result {
+                Ok(()) => {
+                    failures.remove(&harness);
+                }
+                Err(err) => {
+                    failures.insert(harness, err.to_string());
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
