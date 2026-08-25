@@ -1658,6 +1658,70 @@ impl HarnessPool {
         Ok(())
     }
 
+    /// The memory-engine selection the company's cached roster was built
+    /// against, if any (issue #1113). `None` for the base backend.
+    ///
+    /// Recorded by [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build);
+    /// an absent row is indistinguishable from a recorded base-backend `None`,
+    /// which is correct (see the field doc).
+    pub async fn memory_engine(&self, company: &CompanyId) -> Option<u64> {
+        self.memory_engine
+            .read()
+            .await
+            .get(company)
+            .copied()
+            .flatten()
+    }
+
+    /// Records the engine selection `engine` as the one the company's roster is
+    /// now bound to, dropping the cached roster when it differs from what was
+    /// recorded before (a live swap, issue #1113).
+    ///
+    /// Returns `true` when the selection is unchanged and the roster survived —
+    /// the ordinary issue #290 rebuild fast path — and `false` when the roster
+    /// was invalidated and the next [`ensure`](Self::ensure) will rebuild it
+    /// over the replacement memory-family ports.
+    ///
+    /// The pool only ever compares selections recorded on a previous `build`;
+    /// it cannot itself know whether an engine swap happened, because the new
+    /// engine's ports arrive on the builder, not here. The builder is therefore
+    /// the only caller, and it calls this on every build — boot included, so the
+    /// first rebuild has a recorded selection to differ from.
+    pub async fn rebind_memory_engine(
+        &self,
+        company: &CompanyId,
+        engine: Option<u64>,
+    ) -> bool {
+        let mut recorded = self.memory_engine.write().await;
+        if recorded.get(company).copied().flatten() == engine {
+            return true;
+        }
+        drop(recorded);
+        self.invalidate_roster(company).await;
+        self.memory_engine.write().await.insert(company.clone(), engine);
+        false
+    }
+
+    /// Drops every cached artifact for one company, so the next `ensure`
+    /// rebuilds its roster from scratch. The memory-engine bookkeeping is a
+    /// cached artifact like any fingerprint — the caller re-records the new
+    /// selection after invalidating.
+    async fn invalidate_roster(&self, company: &CompanyId) {
+        self.agents.write().await.remove(company);
+        self.mcp_fingerprints.write().await.remove(company);
+        self.overlay_fingerprints.write().await.remove(company);
+        self.capability_fingerprints.write().await.remove(company);
+        self.composio_fingerprints.write().await.remove(company);
+        self.billing_fingerprints.write().await.remove(company);
+        self.skill_fingerprints.write().await.remove(company);
+        self.budget_fingerprints.write().await.remove(company);
+        self.override_fingerprints.write().await.remove(company);
+        self.policy_fingerprints.write().await.remove(company);
+        self.desk_fingerprints.write().await.remove(company);
+        self.context_fingerprints.write().await.remove(company);
+        self.memory_engine.write().await.remove(company);
+    }
+
     /// Re-resolves the company's capability filter (issue #108): with a plan
     /// wired ([`HarnessDeps::plan`]), a per-tenant, per-period, fail-closed
     /// budget read from the [`UsageMeter`] via
