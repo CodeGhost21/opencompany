@@ -503,10 +503,12 @@ export function mergeHistoryInOrder(
 ): ChatMessage[] {
   const historyIds = new Set(hydrated.map((m) => m.id));
   const existingById = new Map(existing.map((m) => [m.id, m]));
-  const durableByFingerprint = new Map<string, ChatMessage>();
+  const durableByFingerprint = new Map<string, ChatMessage[]>();
   for (const message of hydrated) {
     if (message.from === "you") {
-      durableByFingerprint.set(messageFingerprint(message), message);
+      const matches = durableByFingerprint.get(messageFingerprint(message)) ?? [];
+      matches.push(message);
+      durableByFingerprint.set(messageFingerprint(message), matches);
     }
   }
   // The endpoint returns only its newest page. Durable rows that fell off that
