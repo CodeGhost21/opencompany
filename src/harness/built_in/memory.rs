@@ -57,16 +57,6 @@ use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};
 /// for its own experience records; this is the opencompany-side of that rule,
 /// because every [`Memory::store`] passes through here, not just the experience
 /// capture.
-///
-/// A character that can appear inside a credential value. Beyond base64url's
-/// `-` and `_`, a JWT joins its `header.payload.signature` segments with `.`,
-/// and opaque keys use the base64 punctuation `+`, `/`, `~`, `=`. Stopping at
-/// any of these would leak the un-redacted remainder of the credential into
-/// memory, so the value runs until a character that cannot be part of a token.
-fn is_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | '/' | '~' | '=')
-}
-
 fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
     // Two unambiguous shapes. A generic "anything that looks like a token"
     // regex would mangle ordinary prose.
