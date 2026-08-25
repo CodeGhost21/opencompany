@@ -186,6 +186,10 @@ function Line({
         avatar={sender.avatar}
         company={sender.kind === "company"}
         className="size-8"
+        // Named by whose line it is, so a spec can assert that your face and
+        // the agent's are two different faces (issue #1729) rather than
+        // counting `img` elements in DOM order.
+        data-testid={`thread-avatar-${sender.kind}`}
       />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">

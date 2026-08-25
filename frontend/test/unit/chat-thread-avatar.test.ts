@@ -97,15 +97,17 @@ async function render(over: Partial<Parameters<typeof ThreadPanel>[0]> = {}) {
   });
 }
 
-/** The `src` of every avatar drawn in the panel, parent line first. */
-function faces(): string[] {
-  return [...container.querySelectorAll("img")].map((img) => img.getAttribute("src") ?? "");
+/** The `src` of the avatar on the line whose sender is `kind`. */
+function face(kind: "you" | "agent"): string {
+  const tile = container.querySelector(`[data-testid="thread-avatar-${kind}"]`);
+  return tile?.querySelector("img")?.getAttribute("src") ?? "";
 }
 
 describe("ThreadPanel avatars (issue #1729)", () => {
   it("draws your own face on your own line", async () => {
     await render({ youAvatar: YOU_AVATAR });
-    const [mine, theirs] = faces();
+    const mine = face("you");
+    const theirs = face("agent");
     expect(mine).toBe(tinySrc("rose"));
     expect(theirs).toBe(tinySrc(hashedFlavour("You")));
     expect(mine).not.toBe(theirs);
@@ -116,7 +118,7 @@ describe("ThreadPanel avatars (issue #1729)", () => {
     // hand the panel must never fall back to seeding on the name "You" — which
     // is what produced the agent's mascot.
     await render({ youAvatar: YOU_AVATAR });
-    expect(faces()[0]).not.toBe(tinySrc(hashedFlavour("You")));
+    expect(face("you")).not.toBe(tinySrc(hashedFlavour("You")));
   });
 
   it("falls back to the name-seeded mascot only before the viewer resolves", async () => {
@@ -124,6 +126,6 @@ describe("ThreadPanel avatars (issue #1729)", () => {
     // tile seeds on the name, exactly as the main timeline does for that first
     // render. Degrading is fine; degrading forever was the bug.
     await render({ youAvatar: undefined });
-    expect(faces()[0]).toBe(tinySrc(hashedFlavour("You")));
+    expect(face("you")).toBe(tinySrc(hashedFlavour("You")));
   });
 });
