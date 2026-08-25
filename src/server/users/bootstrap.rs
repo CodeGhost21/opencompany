@@ -60,7 +60,16 @@ pub struct Issued {
 /// `bootstrap_admins` rather than re-derived, so the CLI cannot come to a
 /// different answer than the login route about who is eligible.
 pub fn standing_admins(manifest_admins: &[String], bootstrap_admin: Option<&str>) -> Vec<String> {
-    let mut admins: Vec<String> = manifest_admins.iter().map(|a| normalize_email(a)).collect();
+    let mut admins: Vec<String> = manifest_admins
+        .iter()
+        .map(|a| normalize_email(a))
+        .filter(|email| !email.is_empty())
+        .fold(Vec::new(), |mut admins, email| {
+            if !admins.contains(&email) {
+                admins.push(email);
+            }
+            admins
+        });
     if let Some(email) = bootstrap_admin
         .map(normalize_email)
         .filter(|e| !e.is_empty())
