@@ -3815,7 +3815,10 @@ mod test {
                     .uri("/api/v1/company/chat")
                     .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"text":"hi"}"#))
+                    // Issue #1725: not "hi". A bare pleasantry is answered by
+                    // the runtime without a turn, so the echo brain — which is
+                    // what this asserts is wired up — never sees it.
+                    .body(Body::from(r#"{"text":"ship the landing page"}"#))
                     .unwrap(),
             )
             .await
@@ -3824,7 +3827,10 @@ mod test {
 
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["responses"][0]["text"], "You said: hi");
+        assert_eq!(
+            value["responses"][0]["text"],
+            "You said: ship the landing page"
+        );
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
@@ -3885,6 +3891,60 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+    }
+
+    /// Issue #1725, through the route an operator actually hits: "hi" comes
+    /// back answered, with no card, no steps, and no turn behind it.
+    ///
+    /// The unit-level proof that the brain is not called lives in
+    /// `runtime::cycle`'s `a_bare_greeting_answers_without_calling_the_brain`,
+    /// where a counting brain can be injected. This one pins that the chat
+    /// handler reaches that path at all — the two are separate failures, and a
+    /// correct fast path nothing routes to leaves the bug where it was.
+    ///
+    /// The echo brain answers `"You said: <text>"`, so the assertion below is
+    /// also the evidence: a canned greeting means the brain never ran.
+    #[tokio::test]
+    async fn a_bare_greeting_is_answered_without_a_turn() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["responses"][0]["text"],
+            crate::company::task_intent::SmallTalk::Hello.reply(),
+            "a greeting is answered by the runtime, not by a turn"
+        );
+        // The console showed "1 step" for a greeting on staging. There is no
+        // step to show, so the field is omitted entirely.
+        assert!(
+            value["responses"][0]["steps"].is_null(),
+            "no tool ran: {}",
+            value["responses"][0]
+        );
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a greeting opens no card"
+        );
     }
 
     // ── Issue #982: the card goes to whoever was addressed ──────────────────
