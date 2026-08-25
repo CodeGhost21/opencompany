@@ -75,13 +75,21 @@ export function foldLiveFrame(
 
   const row: LiveToolRow = {
     key,
-    // Keep the start's seq so a result does not reorder the row.
-    seq: prev?.seq ?? frame.seq,
+    // A start's seq is the row's canonical position: a result arriving after
+    // its start (the normal order) inherits the start's seq, while a start
+    // arriving after its result (broadcast reordering) uses its OWN seq rather
+    // than inheriting the later result's — so the row sits where the call began.
+    seq: isResult ? (prev?.seq ?? frame.seq) : frame.seq,
     label: frame.label ?? prev?.label ?? "Tool call",
     // The result carries detail/elapsed; a start does not, so never let a
     // start frame blank a value the result already wrote (out-of-order arrival).
     detail: isResult ? (frame.detail ?? prev?.detail) : prev?.detail,
-    status: frame.status ?? prev?.status ?? "running",
+    // A result's status is terminal; a start's is only ever "running". When a
+    // start arrives late, keep the status the result already wrote so a
+    // completed call is not shown as running again.
+    status: isResult
+      ? (frame.status ?? prev?.status ?? "running")
+      : (prev?.status ?? frame.status ?? "running"),
     elapsedMs: isResult ? (frame.elapsedMs ?? prev?.elapsedMs) : prev?.elapsedMs,
   };
 
