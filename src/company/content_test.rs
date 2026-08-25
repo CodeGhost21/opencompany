@@ -904,7 +904,7 @@ fn a_marketing_biller_can_be_named_from_the_console() {
 /// ceiling would resolve to the full company grant — billing included — the
 /// moment an operator seats them on the strategy or growth desk, which state
 /// no ceiling. The `chargebee` exclusion must therefore ride on the member's
-/// own `tools` line (which restates the desk's ceiling), not on the desk
+/// own `tools` line (the company belt minus `chargebee`), not on the desk
 /// alone. Pinned through the same three-level narrowing the roster build uses.
 #[test]
 fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
