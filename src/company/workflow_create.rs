@@ -3177,12 +3177,13 @@ to = "done"
         draft
     }
 
-    /// The core of #1046: a scheduled graph whose only report goes to the owner
-    /// on a company with no mailbox is refused at arm time. `owner` with no
-    /// mailbox falls back to the operator channel, which delivery discards, so a
-    /// schedule would fire and drop the report unseen every time.
+    /// Issue #1757 reverses one arm of #1046: a scheduled graph whose only report
+    /// goes to the owner on a company with **no mailbox** now ARMS. `owner` no
+    /// longer dead-ends on an in-memory buffer — it falls back to the durable
+    /// operator channel, which journals the report into the operator's main line,
+    /// so a scheduled owner report reliably lands and the schedule is honest.
     #[tokio::test]
-    async fn arming_a_scheduled_owner_output_with_no_mailbox_is_refused() {
+    async fn arming_a_scheduled_owner_output_with_no_mailbox_now_arms() {
         let dir = tempfile::tempdir().unwrap();
         let company = CompanyId::new("acme");
         let store = store_of(MemStore::seeded(record(
@@ -3201,29 +3202,20 @@ to = "done"
         .await
         .expect("saving a stub is legitimate and must succeed");
 
-        let err = set_company_workflow_enabled(
+        set_company_workflow_enabled(
             &company,
             Some(dir.path()),
             &store,
             None,
             "digest",
             true,
-            // No mailbox, no wired channels: nowhere for an owner report to land.
+            // No mailbox, no wired channels: the owner report still lands, on the
+            // durable operator channel (issue #1757).
             false,
             &[],
         )
         .await
-        .expect_err("a schedule whose report cannot be delivered must not arm");
-
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("nowhere to land"),
-            "the operator is told WHAT is wrong: {rendered}"
-        );
-        assert!(
-            rendered.contains("mailbox") && rendered.contains("wired channel"),
-            "...and the two things they can do about it: {rendered}"
-        );
+        .expect("an owner report always lands, so its schedule must arm");
     }
 
     /// The manual half of the fix: the same undeliverable graph, but with **no**
@@ -3239,8 +3231,10 @@ to = "done"
             manifest_with_assistant(),
         )));
 
-        // owner output, no mailbox — but drop the schedule so it is manual.
-        let mut draft = scheduled_output_draft("digest", "Digest", "owner", None);
+        // A genuinely undeliverable graph — a channel output to an unwired desk —
+        // but drop the schedule so it is manual. (`owner` no longer qualifies:
+        // since issue #1757 it always lands on the durable operator channel.)
+        let mut draft = scheduled_output_draft("digest", "Digest", "channel", Some("marketing"));
         draft.nodes[0].schedule = None;
         create_company_workflow(&company, Some(dir.path()), &store, None, draft, None)
             .await

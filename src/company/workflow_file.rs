@@ -263,11 +263,13 @@ impl WorkflowFile {
 /// time so a schedule whose only report would be dropped is refused before it
 /// arms rather than firing on time and landing nowhere:
 ///
-/// - `owner` needs a mailbox: with none, owner delivery falls back to the
-///   operator channel, which [`post_to_channel`](crate::workflows::delivery)
-///   refuses by name (an in-memory spy with no durable reader), so the report is
-///   discarded. So `owner` is reachable exactly when `mail_configured`.
-/// - `email` sends from the company mailbox, so it too needs `mail_configured`.
+/// - `owner` **always lands** (issue #1757): with a mailbox it emails the
+///   company's admins; with none it falls back to the durable operator channel,
+///   which journals the report into the operator's main line. That fallback used
+///   to be an in-memory spy the delivery path discarded — which is why this arm
+///   once required `mail_configured` — but it is now a real, readable delivery,
+///   so an `owner` output is reachable on every deployment.
+/// - `email` sends from the company mailbox, so it needs `mail_configured`.
 ///   (Delivery further gates on the `email` grant and an established thread;
 ///   those are per-recipient runtime conditions an author-time check cannot see,
 ///   so this stays at the coarser mailbox lever — the same one that decides
@@ -288,7 +290,9 @@ pub fn destination_is_reachable(
     wired_channels: &[String],
 ) -> bool {
     match destination.kind.trim() {
-        "owner" => mail_configured,
+        // Always reachable: a mailbox emails the admins, and with none the
+        // durable operator channel is the guaranteed landing spot (issue #1757).
+        "owner" => true,
         "email" => mail_configured,
         "channel" => {
             let target = destination.target.as_deref().map(str::trim).unwrap_or("");
@@ -330,17 +334,17 @@ pub const STAGELESS_SCHEDULE_REFUSAL: &str = "This workflow has no stage to run 
 /// The delivery-side sibling of [`STAGELESS_SCHEDULE_REFUSAL`]: that one guards
 /// a graph with nothing to *execute*, this one a graph with nowhere to
 /// *deliver*. Its only `output` destinations name places this deployment cannot
-/// reach — `owner` with no mailbox (which falls back to the operator channel and
-/// is discarded), or a channel that is not wired — so a schedule would fire on
-/// time, run, and drop its report unseen every time.
+/// reach — a channel that is not wired, or `email` with no mailbox to send from.
+/// An `owner` output no longer trips it: since issue #1757 `owner` always lands
+/// (the durable operator channel is its guaranteed fallback), so a graph that
+/// routes to the owner is always deliverable.
 ///
 /// A literal, like [`STAGELESS_SCHEDULE_REFUSAL`] and every other notice:
 /// nothing runtime-supplied reaches an operator surface through it. Says what is
 /// wrong, why it matters, and the two things the operator can do.
-pub const UNDELIVERABLE_SCHEDULE_REFUSAL: &str = "This workflow's report has nowhere to land — its output goes to the owner, but no \
-     mailbox is configured, or to a channel that isn't wired — so a schedule would fire on \
-     time and drop the report unseen. Configure a mailbox, or point the output at a wired \
-     channel, then switch it on.";
+pub const UNDELIVERABLE_SCHEDULE_REFUSAL: &str = "This workflow's report has nowhere to land — its output goes to a channel that isn't \
+     wired, or by email with no mailbox configured — so a schedule would fire on time and drop \
+     the report unseen. Wire the channel, or configure a mailbox, then switch it on.";
 
 /// A single node in a workflow graph.
 #[derive(Clone, Debug, PartialEq)]
@@ -3173,17 +3177,20 @@ to = "done"
         assert_eq!(dest.target.as_deref(), Some("operator"));
     }
 
-    /// The reachability predicate mirrors delivery's per-kind outcome (issue
-    /// #1046): `owner`/`email` need a mailbox, `channel` needs a wired,
-    /// non-operator target, anything else never lands.
+    /// The reachability predicate mirrors delivery's per-kind outcome: `owner`
+    /// always lands (the durable operator channel is its guaranteed fallback,
+    /// issue #1757), `email` needs a mailbox (issue #1046), `channel` needs a
+    /// wired, non-operator target, anything else never lands.
     #[test]
     fn destination_reachability_matches_delivery() {
         let owner = WorkflowDestinationDef {
             kind: "owner".to_string(),
             target: None,
         };
+        // Owner lands with a mailbox (emails admins) AND without one (durable
+        // operator channel) — issue #1757.
         assert!(destination_is_reachable(&owner, true, &[]));
-        assert!(!destination_is_reachable(&owner, false, &[]));
+        assert!(destination_is_reachable(&owner, false, &[]));
 
         let email = WorkflowDestinationDef {
             kind: "email".to_string(),
@@ -3216,9 +3223,12 @@ to = "done"
     }
 
     /// The none-vs-any line the arm gate rides on. A graph with one unreachable
-    /// owner output and one reachable channel output is deliverable — a
-    /// partially-deliverable schedule still arms; only a graph where **nothing**
-    /// can land is refused.
+    /// output (a channel to an unwired desk) and one reachable channel output is
+    /// deliverable — a partially-deliverable schedule still arms; only a graph
+    /// where **nothing** can land is refused.
+    ///
+    /// Uses two `channel` outputs rather than owner+channel because `owner` now
+    /// always lands (issue #1757), so it can no longer play the unreachable half.
     #[test]
     fn mixed_graph_is_deliverable_when_any_output_lands() {
         let src = r#"
@@ -3230,11 +3240,12 @@ kind = "trigger"
 name = "Start"
 schedule = "0 9 * * *"
 [[node]]
-id = "to_owner"
+id = "to_unwired"
 kind = "output"
-name = "Owner"
+name = "Unwired"
 [node.destination]
-kind = "owner"
+kind = "channel"
+target = "marketing"
 [[node]]
 id = "to_channel"
 kind = "output"
@@ -3244,7 +3255,7 @@ kind = "channel"
 target = "engineering"
 [[edge]]
 from = "start"
-to = "to_owner"
+to = "to_unwired"
 [[edge]]
 from = "start"
 to = "to_channel"
@@ -3252,9 +3263,10 @@ to = "to_channel"
         let file = parse_workflow(src).expect("parses");
         assert!(file.has_output_destination());
         let eng = vec!["engineering".to_string()];
-        // No mailbox: the owner output is dead, but the channel output lands.
+        // The `marketing` output is dead (unwired), but the `engineering`
+        // channel output lands.
         assert!(file.has_deliverable_output(false, &eng));
-        // Strip the channel to its unwired name: now nothing lands.
+        // Wire nothing: now neither channel lands, so nothing does.
         assert!(!file.has_deliverable_output(false, &[]));
     }
 
