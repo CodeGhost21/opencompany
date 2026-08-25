@@ -159,5 +159,46 @@ describe("MessageAttachments (issue #1682)", () => {
       await render([pdf]);
       expect(observe).not.toHaveBeenCalled();
     });
+
+    // Codex review finding: leaving the viewport mid-fetch used to only mark
+    // the request dead — the download still ran to completion, and a quick
+    // re-enter started a second full transfer of the same (potentially 64 MiB)
+    // payload, so rapid scrolling could keep several concurrent downloads of
+    // one attachment alive with all but the newest discarded. The exit must
+    // cancel the in-flight fetch through the signal.
+    it("cancels an in-flight preview fetch when the image leaves the viewport", async () => {
+      let settle: { aborted: boolean } = { aborted: false };
+      const resolveUrl = vi.fn((_id: string, signal?: AbortSignal) => {
+        return new Promise<string>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            settle.aborted = true;
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      });
+      await render([png], resolveUrl);
+
+      await act(async () => {
+        intersectCallback([{ isIntersecting: true }]);
+      });
+      // The preview fetch carries the signal it can be cancelled with.
+      expect(resolveUrl).toHaveBeenCalledWith("n1", expect.any(AbortSignal));
+
+      // Scrolls back out while the fetch is still pending: the download is
+      // cancelled rather than left to transfer bytes no preview will show.
+      await act(async () => {
+        intersectCallback([{ isIntersecting: false }]);
+        await Promise.resolve();
+      });
+      expect(settle.aborted).toBe(true);
+
+      // Re-entry fetches again — but only after the previous download was
+      // cancelled, so the two never run concurrently.
+      await act(async () => {
+        intersectCallback([{ isIntersecting: true }]);
+        await Promise.resolve();
+      });
+      expect(resolveUrl).toHaveBeenCalledTimes(2);
+    });
   });
 });
