@@ -913,6 +913,47 @@ export function ChatView({
     chatPaneVisible,
   ]);
 
+  // Upload one attachment's bytes for the composer (issue #1682). Bound to the
+  // active connection's client/company so the composer stays agnostic of both.
+  // Must live above the early returns: a hook after them is skipped on the
+  // loading render and present on the next, which is a Rules-of-Hooks crash
+  // ("Rendered more hooks than during the previous render").
+  const uploadAttachment = useCallback(
+    (file: File) => uploadChatAttachment(client, company, file),
+    [client, company],
+  );
+
+  // Fetch a stored attachment's bytes as an object URL for the transcript
+  // (issue #1682). The blob route needs the client's bearer, which an `<img>`
+  // or a bare link cannot carry — so the row resolves through this and the
+  // caller revokes the URL when done. Reuses the hardened `/workspace/blob`
+  // serve untouched.
+  const resolveAttachmentUrl = useCallback(
+    (nodeId: string) => fetchBlobUrl(client, company, nodeId),
+    [client, company],
+  );
+
+  /**
+   * Delete an uploaded-but-never-sent attachment's workspace node (issue
+   * #1682, codex review finding).
+   *
+   * A staged file is uploaded (and charged against the workspace quota) the
+   * moment it lands, before the operator has sent anything — replacing it,
+   * removing it, or leaving the composer used to just drop the local
+   * reference, leaving the binary node on the server forever. Bound the same
+   * way `uploadAttachment` is; best-effort, since a failed cleanup here must
+   * never block the operator from continuing to compose.
+   */
+  const deleteAttachment = useCallback(
+    (nodeId: string) => {
+      void deleteNode(client, company, nodeId).catch(() => {
+        // Best-effort: an orphaned node here is a quota nuisance, not a
+        // correctness bug, and the operator has already moved on.
+      });
+    },
+    [client, company],
+  );
+
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
   // nothing" are different facts and only one of them is worth acting on.
