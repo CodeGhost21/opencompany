@@ -471,6 +471,31 @@ mod tests {
             redact_secrets("auth with Bearer secret please"),
             "auth with Bearer [REDACTED] please"
         );
+        // The scheme is matched case-insensitively (RFC 9110's auth-scheme
+        // ABNF), so lower- and upper-case `bearer` are credentials too.
+        assert_eq!(
+            redact_secrets("auth with bearer sk-longsecret please"),
+            "auth with bearer [REDACTED] please"
+        );
+        assert_eq!(
+            redact_secrets("auth with BEARER sk-longsecret please"),
+            "auth with BEARER [REDACTED] please"
+        );
+        // Lower-case prose survives: `bond` (4) is under the digit-free floor.
+        assert_eq!(
+            redact_secrets("the bearer bond matures in June"),
+            "the bearer bond matures in June"
+        );
+        // A Markdown-backtick or quote wrapper around a credential (formatted
+        // chat) must not defeat the scan.
+        assert_eq!(
+            redact_secrets("auth with Bearer `sk-verylongsecret` please"),
+            "auth with Bearer `[REDACTED]` please"
+        );
+        assert_eq!(
+            redact_secrets("auth with Bearer \"sk-verylongsecret\" please"),
+            "auth with Bearer \"[REDACTED]\" please"
+        );
         // No marker: borrowed through untouched, no allocation.
         assert!(matches!(
             redact_secrets("nothing secret here"),
