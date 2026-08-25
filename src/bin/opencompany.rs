@@ -1108,7 +1108,42 @@ async fn run_issue_password(
         .map(|handles| handles.login_codes.clone())
         .unwrap_or_else(|| fs_ops.clone());
 
-    let id = CompanyId::new(company);
+    // In shared-single-DB mode the `--company` argument is also a tenant
+    // namespace carrier: this command reads a caller-supplied string straight
+    // into the storage handles, so `tenant-b--company` from tenant A's
+    // container would load tenant B's company and reset its admin password —
+    // exactly the authority `serve` and provisioning never hand to a caller
+    // (they only name ids this workload namespaced itself). A prefix that is
+    // not this tenant's is refused; a bare id is namespaced here to the
+    // `<tenant>--<id>` form the shared database stores.
+    let id = match std::env::var("OPENCOMPANY_TENANT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        None => CompanyId::new(company),
+        Some(tenant) => {
+            if let Err(reason) = opencompany::app::validate_tenant_namespace(&tenant) {
+                return Err(opencompany::error::OpenCompanyError::Config(reason));
+            }
+            let prefix = format!("{tenant}--");
+            if let Some(bare) = company.strip_prefix(&prefix) {
+                if bare.is_empty() {
+                    return Err(opencompany::error::OpenCompanyError::Config(format!(
+                        "company id `{company}` is only the `{tenant}--` namespace prefix; \
+                         it names no company"
+                    )));
+                }
+                CompanyId::new(company)
+            } else if company.contains("--") {
+                return Err(opencompany::error::OpenCompanyError::Config(format!(
+                    "company id `{company}` is namespaced for another tenant; this deployment is \
+                     `{tenant}`, whose ids take the `<tenant>--<name>` form"
+                )));
+            } else {
+                CompanyId::new(format!("{prefix}{company}"))
+            }
+        }
+    };
     let record = if let Some(handles) = handles.as_ref() {
         handles.company.load(&id).await?
     } else {
