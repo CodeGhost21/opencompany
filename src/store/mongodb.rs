@@ -3916,19 +3916,31 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         if let Some(key) = node_path_key(&node) {
             document.insert("file_path_key", key);
         }
-        self.collection("workspace_nodes")
-            .insert_one(document)
-            .await
-            // Issue #894, as in `create`.
-            .map_err(|e| {
-                if is_duplicate_key(&e) {
-                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
-                        &node.name,
-                    ))
-                } else {
-                    mongo_err(e)
-                }
-            })?;
+        if let Err(err) = self.collection("workspace_nodes").insert_one(document).await {
+            if !is_duplicate_key(&err) {
+                return Err(mongo_err(err));
+            }
+            // Issue #894, as in `create` — but the blob uploaded above now has
+            // no node document, which on this backend is the exact state the
+            // boot sweep exists to reclaim. The sweep only runs at store
+            // construction and spares blobs younger than an hour, so a repeated
+            // name conflict (the chat-attachment flow's retry under a fresh id)
+            // would otherwise strand the full payload as invisible GridFS disk
+            // until some later restart. Reclaim it here instead. Best-effort: a
+            // drop failure still leaves the sweep to finish the job, and the
+            // conflict is the outcome the caller is owed either way.
+            if let Err(drop_err) = self.drop_blobs(company, &node.id, None).await {
+                tracing::warn!(
+                    company = %company,
+                    node_id = %node.id,
+                    error = %drop_err,
+                    "workspace create_binary conflict left its GridFS payload for the boot sweep"
+                );
+            }
+            return Err(OpenCompanyError::Conflict(
+                crate::ports::workspace::duplicate_file_refusal(&node.name),
+            ));
+        }
         // The stamped node, so the digest a caller records can only have come
         // from the store (issue #668).
         Ok(node)
