@@ -146,15 +146,17 @@ pub(crate) async fn any_workflow_run_succeeded(
 /// [`CompanyEvent::OnboardingCompleted`]. Short-circuits on an existing latch
 /// (see the module docs): no Composio call, no journal scan, once activated.
 ///
-/// `has_composio_connection` is the caller's pre-fetched answer, exactly as
-/// [`derive_steps`] wants it — this function does no Composio IO itself, so it
-/// compiles and runs the same whether or not the `composio` Cargo feature is
-/// enabled; a caller without that feature simply always passes `false`.
+/// `has_composio_connection` is a **lazy** answer to "does this company hold a
+/// live Composio connection" — a closure rather than a pre-fetched `bool`, so
+/// an already-activated company's poll never pays for the round trip that
+/// answer costs. Callers without the `composio` feature simply pass a closure
+/// that always resolves to `false`; this function does no Composio IO itself
+/// either way.
 pub(crate) async fn compute_and_latch(
     company: &CompanyId,
     store: &Arc<dyn CompanyStore>,
     events: &Arc<dyn EventLog>,
-    has_composio_connection: bool,
+    has_composio_connection: impl AsyncFnOnce() -> bool,
 ) -> Result<ActivationStatus> {
     let record = store
         .load(company)
@@ -162,18 +164,21 @@ pub(crate) async fn compute_and_latch(
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
 
     // The latch, once set, is the whole answer — see the module docs. Every
-    // IO below this point exists only to decide whether to *set* it, so an
-    // already-activated company skips all of it.
+    // IO below this point, Composio included, exists only to decide whether
+    // to *set* it, so an already-activated company skips all of it —
+    // `integration_connected` is hardcoded `true` here for the same reason
+    // `workflow_run_succeeded` already was: once latched, every step displays
+    // as complete without re-deriving it live.
     if record.activation_completed_at.is_some() {
         return Ok(ActivationStatus {
             name_confirmed: record.name_confirmed,
-            integration_connected: has_composio_connection
-                && grants_composio_explicit(&record.manifest.tools.allow),
+            integration_connected: true,
             workflow_run_succeeded: true,
             activation_completed_at: record.activation_completed_at,
         });
     }
 
+    let has_composio_connection = has_composio_connection().await;
     let workflow_run_succeeded = any_workflow_run_succeeded(company, events).await?;
     let status = derive_steps(&record, has_composio_connection, workflow_run_succeeded);
 
@@ -400,7 +405,9 @@ mod test {
             .await
             .unwrap();
 
-        let status = compute_and_latch(&id, &store, &events, true).await.unwrap();
+        let status = compute_and_latch(&id, &store, &events, async || true)
+            .await
+            .unwrap();
         assert!(status.is_activated());
         assert!(status.activation_completed_at.is_some());
 
@@ -418,7 +425,9 @@ mod test {
         store.save(&record(&id, &["composio"])).await.unwrap();
 
         // No workflow run journaled at all — the third step is missing.
-        let status = compute_and_latch(&id, &store, &events, true).await.unwrap();
+        let status = compute_and_latch(&id, &store, &events, async || true)
+            .await
+            .unwrap();
         assert!(!status.is_activated());
 
         let reloaded = store.load(&id).await.unwrap().unwrap();
@@ -434,12 +443,27 @@ mod test {
         r.activation_completed_at = Some(1_700_000_000_000);
         store.save(&r).await.unwrap();
 
-        // has_composio_connection: false, and the journal is empty — every live
-        // step reads false, and yet the company must still read as activated.
-        let status = compute_and_latch(&id, &store, &events, false)
-            .await
-            .unwrap();
+        // The journal is empty and the composio closure below always answers
+        // `false` — every live step reads false, and yet the company must still
+        // read as activated. The closure also proves the *other* half of the
+        // short-circuit contract: an already-latched company must not pay for a
+        // Composio round trip at all, so it counts its own invocations and
+        // asserts zero — the regression this test now guards is exactly the one
+        // `GET {scope}/activation` shipped (issue #1850 review): the endpoint
+        // fetched the live connection state before ever checking the latch.
+        let composio_calls = std::sync::atomic::AtomicUsize::new(0);
+        let status = compute_and_latch(&id, &store, &events, async || {
+            composio_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            false
+        })
+        .await
+        .unwrap();
         assert!(status.is_activated());
         assert_eq!(status.activation_completed_at, Some(1_700_000_000_000));
+        assert_eq!(
+            composio_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an already-latched company must not query Composio"
+        );
     }
 }

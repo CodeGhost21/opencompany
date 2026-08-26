@@ -5406,6 +5406,8 @@ mod test {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             };
             s.save(&record).await.expect("save company");
         }
@@ -5483,6 +5485,8 @@ mod test {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             };
             // Same template name under two tenants: distinct namespaced ids, no
             // `companies` unique-index conflict.

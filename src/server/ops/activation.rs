@@ -58,12 +58,16 @@ impl From<ActivationStatus> for ActivationDto {
 
 /// `GET {scope}/activation`.
 async fn get_activation(company: ScopedCompany) -> Result<Json<ActivationDto>, ApiError> {
-    let has_composio_connection = has_composio_connection(&company.runtime).await;
+    // Composio connection state is fetched lazily, inside `compute_and_latch`,
+    // and only when the company is not already latched — see that function's
+    // docs. Awaiting it here unconditionally would pay for the round trip on
+    // every poll of an already-activated company, defeating the fast path this
+    // route's own module docs promise.
     let status = compute_and_latch(
         company.id(),
         company.runtime.store(),
         company.runtime.events(),
-        has_composio_connection,
+        async || has_composio_connection(&company.runtime).await,
     )
     .await
     .map_err(ApiError)?;
