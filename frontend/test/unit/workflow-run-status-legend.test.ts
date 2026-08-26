@@ -329,3 +329,36 @@ describe("the 'not delivered' delivery badge explains itself", () => {
     );
   });
 });
+
+describe("the legend trigger opens without hover or focus", () => {
+  // Codex review on #1821 (fifth pass): Base UI's `Tooltip.Trigger` only
+  // opens on hover or keyboard focus — by design, the same split Base UI
+  // documents between Tooltip (glance-only) and Popover (press-activatable).
+  // A tap on a touch-only device produces neither: `useHoverReferenceInteraction`
+  // is `mouseOnly`, and the trigger's own `onClick` handler *cancels* a
+  // pending hover-open rather than starting one. So the legend button — the
+  // affordance an earlier fix on this same PR called "the panel's one
+  // keyboard- and touch-reachable affordance" — was itself unreachable by
+  // touch. This fires a bare `click` with no prior `pointerenter`/`focus`,
+  // the same shape a touch tap dispatches, and proves the popup opens off
+  // that alone.
+  it("opens the popup on a bare click, the shape a touch tap dispatches", async () => {
+    await renderHistory(baseRun());
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-testid="workflow-run-legend"]',
+    );
+    expect(trigger).not.toBeNull();
+    expect(document.body.textContent).not.toContain("What these statuses mean");
+
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(document.body.textContent).toContain("What these statuses mean");
+    // Every entry in the source-of-truth array actually rendered, not just
+    // the heading.
+    for (const term of RUN_STATUS_LEGEND) {
+      expect(document.body.textContent).toContain(term);
+    }
+  });
+});
