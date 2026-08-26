@@ -848,7 +848,7 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, Option<&'static 
         "hubspot" => &[("api.hubapi.com", None)],
         "stripe" => &[("api.stripe.com", None)],
         "jira" => &[
-            ("api.atlassian.com", None),
+            ("api.atlassian.com", Some("/ex/jira/")),
             ("atlassian.net", Some("/rest/api/")),
         ],
         "discord" => &[
@@ -1596,7 +1596,16 @@ mod tests {
                 "https://api.atlassian.com/ex/jira/some-cloud-id/rest/api/3/issue/PROJ-1"
             )
             .is_some(),
-            "the OAuth-3LO gateway host stays deflected unscoped"
+            "a Jira call through the OAuth-3LO gateway stays deflected"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://api.atlassian.com/ex/confluence/some-cloud-id/rest/api/content"
+            )
+            .is_none(),
+            "another Atlassian product on the shared gateway must pass through — \
+             a jira connection is not a Confluence one"
         );
     }
 }
