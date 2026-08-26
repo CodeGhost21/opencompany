@@ -403,7 +403,49 @@ export type CompanyStreamEvent =
       chatId: string;
       parentId?: string;
       atMillis: number;
+    }
+  // A coarse "near your credit limit" warning (issue #1846), off the same
+  // ephemeral bus as `tool_call`/`tool_result` — a soft heads-up, never
+  // journaled, never carrying a per-task cost claim. `agentId` absent means
+  // the company-wide ceiling; present means one teammate's own daily cap.
+  | {
+      type: "budget_proximity";
+      agentId?: string;
+      message: string;
+      atMillis: number;
     };
+
+/**
+ * The stable prefix a budget-paused system notice starts with (issue #1846),
+ * mirrored from `BUDGET_PAUSE_NOTICE_PREFIX` in
+ * `src/harness/built_in/brain.rs`. There is no structured wire field for a
+ * chat message's "kind" — an unauthored system bubble is just an
+ * `AgentReplyEvent` with `agentId` unset — so this prefix IS the contract
+ * between the two sides. Keep the two constants in sync by hand.
+ */
+export const BUDGET_PAUSE_NOTICE_PREFIX = "⏸ Paused — out of credits:";
+
+/** Whether a chat message's text is the unauthored budget-pause system notice. */
+export function isBudgetPauseNotice(text: string): boolean {
+  return text.startsWith(BUDGET_PAUSE_NOTICE_PREFIX);
+}
+
+/**
+ * Extracts the paused teammate's agent id from a budget-pause notice's text,
+ * so the "Add credits" CTA knows which marker to redeem — there is no
+ * structured wire field carrying it (see {@link BUDGET_PAUSE_NOTICE_PREFIX}).
+ *
+ * Coupled by hand to `budget_paused_summary`'s exact wording in
+ * `src/harness/built_in/mod.rs` ("Paused — {agent_id}'s turn ran out of
+ * inference budget/credits…"). If that wording ever changes, update this
+ * pattern in lockstep — a mismatch here means the CTA silently cannot find
+ * the agent to redeem for, not a wrong redeem (the button call-site guards
+ * on `null`).
+ */
+export function parseBudgetPauseAgent(text: string): string | null {
+  const match = /Paused — (\S+)'s turn ran out of inference budget/.exec(text);
+  return match?.[1] ?? null;
+}
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {
@@ -548,6 +590,14 @@ interface Options {
   /** Called for each `typing` frame. Toast-free for the same reason. */
   onTypingEvent?: (event: CompanyStreamEvent) => void;
   /**
+   * Called for each `budget_proximity` frame (issue #1846) — the coarse
+   * "near your credit limit" warning — so the chat can show a soft,
+   * non-blocking banner. Toast-free like the turn frames above: this can fire
+   * mid-conversation and a banner that stays until dismissed says more than an
+   * interruption that vanishes in four seconds.
+   */
+  onBudgetProximityEvent?: (event: CompanyStreamEvent) => void;
+  /**
    * Called for each `workflow_run_finished` event (issue #228) so the Workflows
    * view can refresh its run history live. Matters most for a *scheduled* run:
    * it fires with the tab already open and nothing else would tell the view a
@@ -637,6 +687,7 @@ export function useEvents(
     onTurnEvent,
     onPresenceEvent,
     onTypingEvent,
+    onBudgetProximityEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
@@ -682,6 +733,10 @@ export function useEvents(
   useEffect(() => {
     onTypingEventRef.current = onTypingEvent;
   }, [onTypingEvent]);
+  const onBudgetProximityEventRef = useRef(onBudgetProximityEvent);
+  useEffect(() => {
+    onBudgetProximityEventRef.current = onBudgetProximityEvent;
+  }, [onBudgetProximityEvent]);
   const onWorkflowRunEventRef = useRef(onWorkflowRunEvent);
   useEffect(() => {
     onWorkflowRunEventRef.current = onWorkflowRunEvent;
@@ -788,6 +843,7 @@ export function useEvents(
             onTurnEvent: onTurnEventRef.current,
             onPresenceEvent: onPresenceEventRef.current,
             onTypingEvent: onTypingEventRef.current,
+            onBudgetProximityEvent: onBudgetProximityEventRef.current,
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
             onWorkflowChanged: onWorkflowChangedRef.current,
             onApprovalEvent: onApprovalEventRef.current,
@@ -843,6 +899,7 @@ export function handleEvent(
     onTurnEvent,
     onPresenceEvent,
     onTypingEvent,
+    onBudgetProximityEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
@@ -869,6 +926,11 @@ export function handleEvent(
       break;
     case "typing":
       onTypingEvent?.(event);
+      break;
+    // Issue #1846: a coarse, non-blocking proximity warning. No toast — see
+    // the doc comment on `onBudgetProximityEvent`.
+    case "budget_proximity":
+      onBudgetProximityEvent?.(event);
       break;
     case "mcp_call_failed":
       toast.error(`MCP ${event.server} failed`, {
