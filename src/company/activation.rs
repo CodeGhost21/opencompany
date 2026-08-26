@@ -289,12 +289,7 @@ pub(crate) async fn compute_and_latch(
     } else {
         false
     };
-    let status = ActivationStatus {
-        name_confirmed: record.name_confirmed,
-        integration_connected,
-        workflow_run_succeeded,
-        activation_completed_at: record.activation_completed_at,
-    };
+    let status = derive_steps(&record, has_composio_connection, workflow_run_succeeded);
 
     if !status.all_steps_complete() {
         return Ok(status);
