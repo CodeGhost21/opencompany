@@ -91,6 +91,9 @@ interface Props {
    * and why it carries the cause rather than a boolean.
    */
   cognition?: CognitionState | null;
+  /** The Add-Credits CTA (issue #1846). Passed straight through to `MessageRow`. */
+  onRedeemBudgetPause?: (agentId: string) => void;
+  redeemingBudgetPauseAgent?: string | null;
 }
 
 /**
@@ -144,6 +147,8 @@ export function MessageTimeline({
   failedApprovals,
   onDecideApproval,
   cognition,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
@@ -312,6 +317,8 @@ export function MessageTimeline({
                 taskStatusByTaskId={taskStatusByTaskId}
                 now={now ?? Date.now()}
                 cognition={cognition}
+                onRedeemBudgetPause={onRedeemBudgetPause}
+                redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
               />
             </div>
           ) : (

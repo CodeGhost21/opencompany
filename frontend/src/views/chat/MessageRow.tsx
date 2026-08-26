@@ -8,6 +8,7 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
+import { isBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
 import { timeAgo } from "@/lib/language";
 import { MessageAttachments } from "./MessageAttachments";
 import { cn } from "@/lib/utils";
@@ -78,6 +79,15 @@ interface Props {
    * `undefined` is unknown — an older host — and marks nothing.
    */
   cognition?: CognitionState | null;
+  /**
+   * The Add-Credits CTA (issue #1846): redeems the parked re-issue marker for
+   * a budget-paused teammate. `undefined` when the shell has not wired
+   * redemption — the notice still renders, just without a working button.
+   */
+  onRedeemBudgetPause?: (agentId: string) => void;
+  /** The agent id whose redeem is currently in flight, so only that row's
+   * button shows a busy state and the others stay clickable. */
+  redeemingBudgetPauseAgent?: string | null;
 }
 
 /**
@@ -148,6 +158,8 @@ export function MessageRow({
   taskStatusByTaskId,
   now = Date.now(),
   cognition,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
 }: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
@@ -156,7 +168,15 @@ export function MessageRow({
   const taskWorking = isTaskWorking(taskStatus);
   const elapsed = taskWorking ? taskElapsedLabel(taskStatus?.startedAt, now) : null;
 
-  if (sender.kind === "system") return <SystemPill message={message} />;
+  if (sender.kind === "system") {
+    return (
+      <SystemPill
+        message={message}
+        onRedeemBudgetPause={onRedeemBudgetPause}
+        redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+      />
+    );
+  }
 
   return (
     <article
@@ -285,10 +305,47 @@ export function MessageRow({
  * always has, as plain text. There is no icon and no chip here on purpose: this
  * is one short sentence, and dressing it up would give a status line more visual
  * weight than the messages around it.
+ *
+ * **Except one** (issue #1846): a budget-pause notice is a terminal state the
+ * operator has exactly one lever for, and a plain sentence buries that lever.
+ * It renders as a highlighted card with an "Add credits" button instead of the
+ * plain pill every other system line still gets.
  */
-function SystemPill({ message }: { message: ChatMessage }) {
+function SystemPill({
+  message,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
+}: {
+  message: ChatMessage;
+  onRedeemBudgetPause?: (agentId: string) => void;
+  redeemingBudgetPauseAgent?: string | null;
+}) {
   const className =
     "rounded-full bg-muted px-3 py-1 text-center text-xs text-muted-foreground";
+
+  if (isBudgetPauseNotice(message.text)) {
+    const agentId = parseBudgetPauseAgent(message.text);
+    const redeeming = agentId != null && redeemingBudgetPauseAgent === agentId;
+    return (
+      <div className="flex justify-center px-4 py-1.5">
+        <div className="flex max-w-lg flex-col gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-900 dark:text-amber-200">
+          <p className="leading-5">{message.text}</p>
+          {agentId != null && onRedeemBudgetPause && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="w-fit border-amber-500/40 bg-transparent text-xs hover:bg-amber-500/15"
+              disabled={redeeming}
+              onClick={() => onRedeemBudgetPause(agentId)}
+            >
+              {redeeming ? "Resending…" : "Add credits & resend"}
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex justify-center px-4 py-1">
       {message.taskId ? (
