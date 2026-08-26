@@ -479,6 +479,38 @@ export function InferenceSection({
     setBusy("removeKey");
     const effective = (status?.provider as InferenceProvider) ?? provider;
     try {
+      let carriedModels =
+        status && Object.keys(status.models).length ? status.models : undefined;
+      // Clearing the key on OpenRouter flips this company onto the platform
+      // proxy immediately (`wouldSaveProxied` above). A catalog-picked raw
+      // `<author>/<model>` id is exactly what that proxy rejects —
+      // `model_for_tier` honours an override verbatim on both paths. The
+      // live-edit effect above already drops that id out of the *draft form*
+      // the moment the transition happens there, but Remove Key echoes back
+      // `status.models` — the *stored* config — straight past that effect, so
+      // an id saved while keyed survives this transition and breaks every
+      // proxied call afterwards (issue #1838 follow-up).
+      //
+      // Fetch the catalog fresh rather than trust the form's `modelCatalog`:
+      // that state tracks the *form's* selected provider, and Remove Key acts
+      // on `status.provider`, which the operator can have moved away from
+      // without saving — so the two can differ right when this runs. A tier
+      // id the operator typed by hand (not present in the catalog) is left
+      // alone, same as the live-edit effect: it is honoured verbatim even if
+      // it will fail, not silently rewritten.
+      if (effective === "openrouter" && carriedModels) {
+        try {
+          const catalog = await listInferenceModels(client, company);
+          const catalogIds = new Set(catalog.map((m) => m.id));
+          const kept = Object.fromEntries(
+            Object.entries(carriedModels).filter(([, v]) => !catalogIds.has(v)),
+          );
+          carriedModels = Object.keys(kept).length ? kept : undefined;
+        } catch {
+          // Catalog fetch failed — fall back to sending the stored overrides
+          // verbatim rather than blocking Remove Key on an unrelated read.
+        }
+      }
       await setInference(client, company, {
         provider: effective,
         // Only echo the resolved base URL back for the providers that require
@@ -486,7 +518,7 @@ export function InferenceSection({
         // a well-known default, and persisting the *displayed* value would pin
         // the company to it — silently overriding `OPENCOMPANY_INFERENCE_URL`.
         baseUrl: PROVIDERS[effective]?.requiresBaseUrl ? status?.baseUrl || undefined : undefined,
-        models: status && Object.keys(status.models).length ? status.models : undefined,
+        models: carriedModels,
         key: "",
       });
       toast.success("Removed the company key. Teammates fall back on their next turn.");

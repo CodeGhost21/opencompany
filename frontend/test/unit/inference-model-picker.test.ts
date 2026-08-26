@@ -34,8 +34,9 @@ function status(
 function clientFor(
   inference: InferenceStatus,
   catalog: InferenceModel[] | Error,
-): { client: OpenCompanyClient; calls: string[] } {
+): { client: OpenCompanyClient; calls: string[]; puts: unknown[] } {
   const calls: string[] = [];
+  const puts: unknown[] = [];
   const client = {
     scopeFor: () => "/api/v1/companies/acme",
     get: async (path: string) => {
@@ -46,8 +47,12 @@ function clientFor(
       }
       return inference;
     },
+    put: async (_path: string, body: unknown) => {
+      puts.push(body);
+      return { status: inference, note: "" };
+    },
   } as unknown as OpenCompanyClient;
-  return { client, calls };
+  return { client, calls, puts };
 }
 
 async function mount(client: OpenCompanyClient) {
@@ -171,5 +176,38 @@ describe("OpenRouter tier model pickers", () => {
       "private/model",
     );
     expect(calls.some((path) => path.endsWith("/inference/models"))).toBe(false);
+  });
+
+  it("strips a catalog-picked id from the stored config when Remove Key is clicked", async () => {
+    // A keyed company saved a raw catalog id straight to OpenRouter (allowed
+    // while keyed — this is not the proxied path). Remove Key clears the key
+    // and, per `wouldSaveProxied`, immediately switches the company onto the
+    // platform proxy. `model_for_tier` honours the stored override verbatim on
+    // both paths, so the id it just carried over is exactly what the proxy
+    // rejects unless Remove Key strips it before saving. The hand-typed tier
+    // id on the other tier (not present in the catalog) must survive — Remove
+    // Key only clears what the catalog select itself wrote.
+    const { client, puts } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "anthropic/claude-sonnet-5", "reasoning-v1": "reasoning-v1" },
+        true,
+      ),
+      [{ id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" }],
+    );
+
+    await mount(client);
+
+    const button = container.querySelector('[data-testid="inference-remove-key"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { key?: string; models?: Record<string, string> };
+    expect(body.key).toBe("");
+    expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
   });
 });
