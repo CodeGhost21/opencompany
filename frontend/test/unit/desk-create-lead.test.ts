@@ -188,6 +188,32 @@ describe("the desk creator lead picker", () => {
     expect(position("Grace")).toBe("3");
   });
 
+  it("keeps focus on the promoted teammate's row after Make lead", async () => {
+    // Regression for the Codex accessibility finding on #1827: clicking
+    // "Make lead" removes that very button from the DOM (the promoted row
+    // switches to the non-focusable "Lead" badge), which used to drop focus
+    // to document.body — stranding a keyboard/AT user outside the dialog in
+    // a long roster. Focus should land on the promoted row's persistent
+    // select/deselect toggle instead.
+    await open(stubClient(() => Promise.reject(new Error("must not be called"))));
+
+    await act(async () => {
+      toggle("Ada").click();
+      toggle("Grace").click();
+    });
+    expect(isLead("Ada")).toBe(true);
+
+    const promoteButton = makeLead("Grace")!;
+    await act(async () => {
+      promoteButton.focus();
+      promoteButton.click();
+    });
+
+    expect(isLead("Grace")).toBe(true);
+    // Focus followed the promotion to Grace's row, not out to document.body.
+    expect(document.activeElement).toBe(toggle("Grace"));
+  });
+
   it("moves the lead when a non-lead is promoted", async () => {
     await open(stubClient(() => Promise.reject(new Error("must not be called"))));
 

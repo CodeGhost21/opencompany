@@ -59,6 +59,9 @@ export function DeskCreateDialog({
   const [nameError, setNameError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  // Keyed by member id, so `makeLead` can move focus to a control that
+  // survives the promotion — see the comment there.
+  const toggleRefs = useRef(new Map<string, HTMLButtonElement>());
   const formId = useId();
   const nameErrorId = `${formId}-name-error`;
 
@@ -99,10 +102,20 @@ export function DeskCreateDialog({
   // `api/types.ts`). The others keep their relative order behind the new lead.
   // No-ops (returns the same reference) when the id is already the lead, and no
   // backend call — the choice is posted with the rest of the draft on Create.
+  //
+  // The row that owns the "Make lead" button the operator just activated
+  // loses that button on this render — the promoted row switches to the
+  // non-focusable "Lead" badge — so the focused element would otherwise be
+  // ripped out of the DOM and focus would drop to `document.body`, stranding
+  // a keyboard/AT user outside the dialog. The row's select/deselect toggle
+  // is keyed by the same `member.id` and renders for every visible row
+  // regardless of lead status, so it is the one control guaranteed to still
+  // be mounted after the promotion; hand focus to it.
   function makeLead(id: string) {
     setMembers((current) =>
       current[0] === id ? current : [id, ...current.filter((m) => m !== id)],
     );
+    toggleRefs.current.get(id)?.focus();
   }
 
   function memberLabel(id: string): string {
@@ -245,6 +258,10 @@ export function DeskCreateDialog({
                   >
                     <button
                       type="button"
+                      ref={(el) => {
+                        if (el) toggleRefs.current.set(member.id, el);
+                        else toggleRefs.current.delete(member.id);
+                      }}
                       onClick={() => toggleMember(member.id)}
                       aria-pressed={selected}
                       className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
