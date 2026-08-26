@@ -55,6 +55,9 @@ POST   …/setup/roster                       propose a starting team from three
 GET    …/policy                              the autonomy tier + spend cap + deadline + always-ask list
 PUT    …/policy                              set the tier, spend cap, deadline, and/or always-ask list
 DELETE …/policy                              reset the policy to the manifest's
+GET    …/tools/grants                        the `[tools].allow` in force + what a connect page may grant (#1796)
+PUT    …/tools/grants                        grant one namespace from a connect page  [admin]
+DELETE …/tools/grants                        withdraw one console grant (`?namespace=`) or all of them  [admin]
 POST   …/inboxes/{key}/read                  mark inbox messages read
 POST   …/inboxes/ingest                     HMAC-signed inbound email → inbox
 GET    …/inboxes                            list inboxes + unread counts
@@ -345,6 +348,51 @@ a spend exactly equal to the cap still parks. The override survives a rebuild
 unless the seed's `[policy]` itself changed: version control wins when it
 speaks, so tightening `company.toml` clears a looser setting here, and a
 redeploy that changed nothing does not.
+
+The three **tool-grant** routes (issue #1796) are the same shape again, applied
+to the field next door. Connecting an integration stores a credential; it does
+not grant the tool namespace, and only the first of those had a write path — so
+five connect surfaces (Chargebee, PayPal, hosting, search, Composio) each ended
+in *"Add `x` to `[tools].allow` in the company's manifest — it cannot be fixed
+from this page."* The integration read **Connected** and reached nobody, and on
+a hosted tenant with a read-only manifest snapshot there was nowhere else to go.
+
+`GET` returns the grant list **in force**, the manifest's own list, what was
+granted from the console and by whom, and `grantable` — the closed list of
+namespaces the host will accept. `PUT {"namespace": "chargebee"}` grants one;
+anything outside `CONSOLE_GRANTABLE_NAMESPACES` is a **`422`**. That list is
+closed because this is the only overlay in the product that *widens* capability:
+every entry is a namespace the catch-all `*` deliberately refuses to confer
+**and** one the console holds a credential form for, so granting is the second
+half of an action the operator already took against an account they already hold.
+`shell`, `code` and `web` have no such form, and a settings page that could
+confer them would be the general capability-widening surface the seed-wins rule
+on `[tools]` exists to prevent. The closed list is enforced again at resolution,
+so a row that reached the store some other way still confers nothing.
+
+Granting what the manifest already grants stores no override — the console must
+not claim credit for a seed grant, or a later `DELETE` would appear to revoke
+one it cannot touch. `DELETE` withdraws one namespace (`?namespace=paypal`) or
+every console grant; a manifest grant is untouchable here by construction. Both
+writes are admin-only and attributed.
+
+Unlike `[policy]`, the resolved value is **folded into the persisted manifest**
+rather than merged at each read. `[tools].allow` is consulted at some three
+dozen sites — the roster build, the workflow capability bundle, the harness tool
+wiring, all five connection status routes — and a parallel resolution would have
+to reach every one of them, with the single missed site reproducing the bug the
+fix exists to close. Folded once, there is one place to be right.
+`ToolGrantsOverride` is still stored separately, so the seed's own list stays
+recoverable (`builder::seed_allow`) and the grant stays attributed.
+
+A grant takes effect on the company's **next turn**: belts are wired per roster
+build, and the effective grant list is fingerprinted alongside the other
+freshness axes (`tool_grants_fingerprint`), so `HarnessPool::ensure` rebuilds
+the roster in place rather than waiting for a restart. The override survives a
+rebuild unless the seed's `[tools]` itself changed — version control wins when
+it speaks, and here that rule is sharper than it is for `[policy]`: a console
+grant outliving a seed edit would be a runtime *widening* surviving the operator
+revoking it in version control.
 
 ### Credential-bearing surfaces (feature-gated)
 
