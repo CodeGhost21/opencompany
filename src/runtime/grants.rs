@@ -1105,6 +1105,20 @@ pub fn current_redeem_context() -> RedeemContext {
     REDEEM_CONTEXT.try_with(Clone::clone).unwrap_or_default()
 }
 
+/// Outcome of a [`BudgetPauseSet::redeem_matching`] attempt. See that
+/// method's doc comment for why an id-matched redeem exists alongside plain
+/// [`BudgetPauseSet::redeem`].
+#[derive(Debug, PartialEq)]
+pub enum RedeemMatch {
+    /// The expected marker was still parked and is now reserved.
+    Reserved(BudgetPauseMarker),
+    /// Nothing is parked for this agent at all.
+    Absent,
+    /// Something IS parked for this agent, but it is not the marker the
+    /// caller expected — left untouched.
+    Stale,
+}
+
 /// One company's parked budget pauses, at most one per agent (issue #1846).
 ///
 /// Parking a new marker for an agent that already has one overwrites it: a
@@ -1179,6 +1193,43 @@ impl BudgetPauseSet {
             .lock()
             .expect("budget-pause set poisoned")
             .remove(agent)
+    }
+
+    /// Reserves the parked marker for `agent` only if it is still the SAME
+    /// marker as `expected_id` — otherwise leaves it untouched.
+    ///
+    /// Issue #1846 review (Codex #3866418876): plain [`redeem`](Self::redeem)
+    /// takes WHATEVER is currently parked for the agent, which is correct
+    /// for a caller with nothing to compare against, but wrong for the
+    /// console's "Add credits & resend" CTA — that card is always rendered
+    /// from a specific marker it already read (`GET …/budget-pause`). A
+    /// background turn (a workflow node, an unstreamed task) pausing for the
+    /// SAME agent re-parks with no chat destination and overwrites that
+    /// marker; the console's stale-card check
+    /// ([`isBudgetPauseNoticeSuperseded`] on the frontend) only watches the
+    /// CHAT transcript, which a chat-less park never touches, so it cannot
+    /// see this happened. A plain `redeem` would then silently reserve and
+    /// re-dispatch the WRONG marker's message as though the operator had
+    /// asked for it.
+    ///
+    /// Matching on `id` — the field [`BudgetPauseMarker::id`] documents as
+    /// existing precisely "so a client reading the marker back can tell a
+    /// fresh park from the one it already saw" — closes that without the
+    /// console needing to know anything about chat/desk routing. Atomic
+    /// under the same lock as every other operation here: a background park
+    /// racing this call either lands entirely before or entirely after it,
+    /// never observed half-applied.
+    ///
+    /// [`isBudgetPauseNoticeSuperseded`]: https://github.com/tinyhumansai/opencompany/blob/main/frontend/src/hooks/use-events.ts
+    pub fn redeem_matching(&self, agent: &str, expected_id: &str) -> RedeemMatch {
+        let mut by_agent = self.by_agent.lock().expect("budget-pause set poisoned");
+        match by_agent.get(agent) {
+            None => RedeemMatch::Absent,
+            Some(marker) if marker.id != expected_id => RedeemMatch::Stale,
+            Some(_) => {
+                RedeemMatch::Reserved(by_agent.remove(agent).expect("just confirmed present"))
+            }
+        }
     }
 
     /// Restores a marker the caller reserved via [`redeem`](Self::redeem) but
@@ -2276,6 +2327,77 @@ mod test {
             marker.message, "second stuck message",
             "the operator's next redeem re-issues the LATEST stalled message, not a queue"
         );
+    }
+
+    #[test]
+    fn redeem_matching_reserves_when_the_id_still_matches() {
+        let set = BudgetPauseSet::default();
+        let marker = set.park("ceo", None, "hi", "paused", 1_000, RedeemContext::default());
+
+        let outcome = set.redeem_matching("ceo", &marker.id);
+        assert_eq!(outcome, RedeemMatch::Reserved(marker));
+        assert!(set.peek("ceo").is_none(), "reserved out of the set");
+    }
+
+    #[test]
+    fn redeem_matching_reports_absent_when_nothing_is_parked() {
+        let set = BudgetPauseSet::default();
+        assert_eq!(set.redeem_matching("ceo", "some-id"), RedeemMatch::Absent);
+    }
+
+    #[test]
+    fn redeem_matching_leaves_a_background_overwrite_untouched_on_a_stale_id() {
+        // Issue #1846 review (Codex #3866418876): a chat pause parks a
+        // marker with a chat destination; a background turn (workflow node,
+        // unstreamed task) for the SAME agent then pauses too and overwrites
+        // it with a marker that has NONE. The console still shows the OLD
+        // chat card because nothing about a chat-less park touches the
+        // transcript-based staleness check. Redeeming by the OLD id must
+        // not silently take the NEW (unrelated) marker.
+        let set = BudgetPauseSet::default();
+        let chat_marker = set.park(
+            "ceo",
+            Some("general".to_string()),
+            "ship the API",
+            "paused for the chat turn",
+            1_000,
+            RedeemContext::default(),
+        );
+        let background_marker = set.park(
+            "ceo",
+            None,
+            "run the nightly workflow node",
+            "paused for the background turn",
+            2_000,
+            RedeemContext::default(),
+        );
+
+        // The stale chat id must not reserve the background marker.
+        assert_eq!(
+            set.redeem_matching("ceo", &chat_marker.id),
+            RedeemMatch::Stale
+        );
+        // Left completely untouched — still there, still the background one.
+        let still_parked = set.peek("ceo").expect("the background marker survives");
+        assert_eq!(still_parked.id, background_marker.id);
+        assert_eq!(still_parked.message, "run the nightly workflow node");
+
+        // The fresh id reserves correctly.
+        let outcome = set.redeem_matching("ceo", &background_marker.id);
+        assert_eq!(outcome, RedeemMatch::Reserved(background_marker));
+        assert!(set.peek("ceo").is_none());
+    }
+
+    #[test]
+    fn redeem_matching_reserves_atomically_so_a_concurrent_stale_attempt_finds_nothing() {
+        let set = BudgetPauseSet::default();
+        let marker = set.park("ceo", None, "hi", "paused", 1_000, RedeemContext::default());
+
+        let first = set.redeem_matching("ceo", &marker.id);
+        assert_eq!(first, RedeemMatch::Reserved(marker.clone()));
+        // A second attempt with the same id now finds nothing parked at all
+        // (not "stale") — the first call already reserved it.
+        assert_eq!(set.redeem_matching("ceo", &marker.id), RedeemMatch::Absent);
     }
 
     #[test]

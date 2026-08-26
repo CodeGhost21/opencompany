@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyEvent;
-use crate::runtime::grants::{BudgetPauseMarker, budget_pauses_for};
+use crate::runtime::grants::{BudgetPauseMarker, RedeemMatch, budget_pauses_for};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -40,6 +40,17 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct AgentPath {
     agent_id: String,
+}
+
+/// The redeem route's `?id=` — the marker id the console last read via
+/// `GET`, so the reservation below can be matched rather than blind (issue
+/// #1846 review, Codex #3866418876). Absent for a caller with no prior read
+/// to compare against, in which case redemption falls back to the
+/// unconditional pre-fix behaviour.
+#[derive(Debug, Deserialize)]
+struct RedeemQuery {
+    #[serde(default)]
+    id: Option<String>,
 }
 
 /// The console's read of a parked budget pause.
@@ -116,22 +127,69 @@ async fn get_budget_pause(
 /// (this marker is in-memory only, see
 /// [`crate::runtime::grants::BudgetPauseMarker`]'s doc comment), or the
 /// `agent_id` never had one.
+///
+/// 409 when `?id=` names a marker that is no longer the one parked (issue
+/// #1846 review, Codex #3866418876): a background turn (a workflow node, an
+/// unstreamed task) pausing for the SAME agent re-parks with no chat
+/// destination and overwrites the marker the console's chat card was reading
+/// from, with no signal the transcript-based staleness check can observe.
+/// The console re-reads the live marker (`GET` above) immediately before
+/// every redeem and sends its `id` here so this mismatch is caught
+/// server-side, atomically, rather than the CTA silently re-dispatching
+/// whatever is parked NOW under the assumption it is still what the
+/// operator clicked. See [`RedeemMatch`]'s doc for the full reasoning.
 async fn redeem_budget_pause(
     company: ScopedCompany,
     Path(AgentPath { agent_id }): Path<AgentPath>,
+    Query(RedeemQuery { id }): Query<RedeemQuery>,
 ) -> Result<Json<BudgetPauseDto>, ApiError> {
     let pauses = budget_pauses_for(company.id());
     // Reserved (atomically removed) up front, not merely peeked — see this
     // function's doc comment. A concurrent second request's own `redeem`
     // below finds nothing and 404s before it ever re-dispatches.
-    let marker = pauses.redeem(&agent_id).ok_or_else(|| {
-        tracing::info!(
-            company = %company.id(),
-            agent = %agent_id,
-            "[budget-pause] redeem requested but nothing is parked — already redeemed, expired with the process, or never paused"
-        );
-        OpenCompanyError::NotFound(format!("no parked budget pause for agent '{agent_id}'"))
-    })?;
+    //
+    // `?id=` present (every console call site sends it, having just read the
+    // marker back via `GET`): reserve only if that id is STILL what's
+    // parked — `RedeemMatch::Stale` means a background turn overwrote it
+    // since the console last read it, and must not silently redispatch the
+    // wrong marker. `?id=` absent: unconditional `redeem`, unchanged from
+    // before this fix — for any caller with nothing to compare against.
+    let marker = match id {
+        Some(expected_id) => match pauses.redeem_matching(&agent_id, &expected_id) {
+            RedeemMatch::Reserved(marker) => marker,
+            RedeemMatch::Absent => {
+                tracing::info!(
+                    company = %company.id(),
+                    agent = %agent_id,
+                    "[budget-pause] redeem requested but nothing is parked — already redeemed, expired with the process, or never paused"
+                );
+                return Err(OpenCompanyError::NotFound(format!(
+                    "no parked budget pause for agent '{agent_id}'"
+                ))
+                .into());
+            }
+            RedeemMatch::Stale => {
+                tracing::info!(
+                    company = %company.id(),
+                    agent = %agent_id,
+                    expected_id = %expected_id,
+                    "[budget-pause] redeem requested a marker that is no longer parked — a newer pause (likely a background turn) has since taken its place; leaving it untouched"
+                );
+                return Err(OpenCompanyError::Conflict(format!(
+                    "the budget pause for agent '{agent_id}' has changed since it was read — refresh and try again"
+                ))
+                .into());
+            }
+        },
+        None => pauses.redeem(&agent_id).ok_or_else(|| {
+            tracing::info!(
+                company = %company.id(),
+                agent = %agent_id,
+                "[budget-pause] redeem requested but nothing is parked — already redeemed, expired with the process, or never paused"
+            );
+            OpenCompanyError::NotFound(format!("no parked budget pause for agent '{agent_id}'"))
+        })?,
+    };
 
     tracing::info!(
         company = %company.id(),
@@ -403,6 +461,124 @@ mod tests {
             }
             other => panic!("expected an OperatorMessage, got {other:?}"),
         }
+    }
+
+    /// Issue #1846 review (Codex #3866418876) — the keystone test for the
+    /// background-overwrite fix. A chat-visible pause parks a marker for
+    /// `ceo` with a chat destination; a background turn (a workflow node or
+    /// an unstreamed task) for the SAME agent then pauses too and
+    /// overwrites it with a marker that has none. The console's stale-card
+    /// check never sees this happen — a chat-less park never touches the
+    /// transcript it watches — so the OLD chat card is still what the
+    /// operator clicks. Redeeming with that card's (now stale) `?id=` must
+    /// be refused with 409 and must NOT redispatch anything — proven here
+    /// by the recording brain seeing no `OperatorMessage` at all, not merely
+    /// the "wrong" one. Redeeming with the CURRENT marker's id then succeeds
+    /// and redispatches the background pause's own message.
+    #[tokio::test]
+    async fn a_stale_marker_id_is_refused_without_redispatching_the_background_pause() {
+        let home = home();
+        let company = "acme-redeem-stale-id";
+        let recording = Arc::new(RecordingBrain::default());
+        let state = state_with_brain(home.path(), company, recording.clone()).await;
+        let id = CompanyId::new(company);
+
+        let chat_marker = budget_pauses_for(&id).park(
+            "ceo",
+            Some("general".to_string()),
+            "ship the API",
+            "paused for the chat turn",
+            1_000,
+            RedeemContext::default(),
+        );
+        let background_marker = budget_pauses_for(&id).park(
+            "ceo",
+            None,
+            "run the nightly workflow node",
+            "paused for the background turn",
+            2_000,
+            RedeemContext::default(),
+        );
+
+        // The console clicks the OLD chat card, so it sends the OLD id.
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            &format!("/api/v1/company/agents/ceo/budget-pause/redeem?id={}", chat_marker.id),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a stale marker id must be refused, not silently honoured: {raw}"
+        );
+        assert!(
+            recording.last.lock().unwrap().is_none(),
+            "a refused stale redeem must never reach the brain — the background pause's \
+             message must not be silently redispatched under a click meant for the chat one"
+        );
+        // Left completely untouched — still there, still the background one.
+        let still_parked = budget_pauses_for(&id).peek("ceo").expect("survives the refusal");
+        assert_eq!(still_parked.id, background_marker.id);
+
+        // The console re-reads the live marker and redeems with ITS id.
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            &format!(
+                "/api/v1/company/agents/ceo/budget-pause/redeem?id={}",
+                background_marker.id
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        let recorded = recording
+            .last
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the redispatch reached the brain");
+        match recorded {
+            CompanyEvent::OperatorMessage { text, .. } => {
+                assert!(
+                    text.starts_with("run the nightly workflow node"),
+                    "the background pause's own message must be what gets resent: {text}"
+                );
+            }
+            other => panic!("expected an OperatorMessage, got {other:?}"),
+        }
+    }
+
+    /// A caller that sends no `?id=` at all falls back to the pre-fix,
+    /// unconditional redeem — the escape hatch for anything that has no
+    /// prior marker read to compare against.
+    #[tokio::test]
+    async fn omitting_the_id_query_param_redeems_unconditionally() {
+        let home = home();
+        let company = "acme-redeem-no-id-param";
+        let recording = Arc::new(RecordingBrain::default());
+        let state = state_with_brain(home.path(), company, recording.clone()).await;
+        let id = CompanyId::new(company);
+
+        budget_pauses_for(&id).park(
+            "ceo",
+            None,
+            "ship the API",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
+
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            "/api/v1/company/agents/ceo/budget-pause/redeem",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
     }
 
     /// A brain whose `run_cycle` always refuses — the redispatch never
