@@ -2197,6 +2197,24 @@ impl CompanyRuntime {
     /// transient failure. Without the dispatched check this function cannot
     /// tell that case apart from a genuine strand and would re-dispatch a
     /// continuation that already ran.
+    ///
+    /// # Unapproved stashes (issue #1825, P2 follow-up)
+    ///
+    /// This used to scan only [`approved_turns`](crate::runtime::blocked_nodes::BlockedNodeQueue::approved_turns),
+    /// on the reasoning that an unapproved turn has nothing worth resuming —
+    /// true, but incomplete: `resume_blocked_agent_node`'s own all-denied
+    /// branch retires a resolved-with-no-approval stash the moment it sees
+    /// one *live*, and a restart landing between that resolution and the
+    /// retirement it owes (or a retirement whose durable write itself fails)
+    /// strands the identical shape this function exists to clean up — just
+    /// unapproved instead of approved. `approved_turns` cannot see it, so on
+    /// `main` it rehydrates on every boot's rearm and is never retired: one
+    /// stale stash held in memory (and in the durable journal beneath it) per
+    /// restart that races this window, accumulating indefinitely. Scanning
+    /// [`stashed_turns`](crate::runtime::blocked_nodes::BlockedNodeQueue::stashed_turns)
+    /// instead and branching on the stash's own `approved` flag lets this
+    /// function retire that case the same way the live path does, rather than
+    /// only ever dispatching.
     pub(crate) async fn reconcile_stranded_blocked_nodes(&self) {
         let still_parked: std::collections::HashSet<String> =
             self.journal.parked_turns().into_iter().collect();
@@ -2209,10 +2227,34 @@ impl CompanyRuntime {
         // this closes.
         let already_dispatched: std::collections::HashSet<String> =
             self.journal.blocked_node_dispatched().into_iter().collect();
-        for turn in self.blocked_nodes.approved_turns() {
+        for turn in self.blocked_nodes.stashed_turns() {
             if still_parked.contains(&turn) {
                 // Still waiting on a sibling decision — not stranded, just
                 // mid-turn; the eventual last decision will release it.
+                continue;
+            }
+            // Issue #1825 (P2 follow-up): nothing left parked and never
+            // approved is the same all-denied/expired shape
+            // `resume_blocked_agent_node`'s own no-approval branch retires
+            // the moment it sees it live — just reached here because the
+            // crash landed before that retirement (or its durable write)
+            // could run. There is no approval to redeem, only a stash to
+            // stop holding; retire it the same way that branch does and move
+            // on, without touching the dispatched check below, which exists
+            // solely to guard the *approved* replay path.
+            if !self
+                .blocked_nodes
+                .peek(&turn)
+                .is_some_and(|stashed| stashed.approved)
+            {
+                tracing::info!(
+                    company = %self.id,
+                    %turn,
+                    "[approval] a restart stranded a blocked node whose last decision resolved \
+                     with nothing approved, before its retirement could run; retiring the stash \
+                     now instead of leaving it to rehydrate on every future boot"
+                );
+                self.retire_blocked_stash(&turn).await;
                 continue;
             }
             if already_dispatched.contains(&turn) {
