@@ -334,6 +334,7 @@ mod tests {
                         cost_usd: 0.25,
                         kind: SampleKind::Inference,
                         run_id: None,
+                        model: None,
                     },
                 )
                 .await
