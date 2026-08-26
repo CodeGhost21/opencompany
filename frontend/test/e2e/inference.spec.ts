@@ -205,3 +205,60 @@ test("OpenRouter models are selected from the registry and persist through reloa
     page.getByText("Reverted to the committed manifest (or managed) configuration."),
   ).toBeVisible({ timeout: 30_000 });
 });
+
+test("a saved OpenRouter tier override can be cleared back to the tier default (issue #1838 follow-up)", async ({
+  page,
+}) => {
+  // Once a keyed company has picked a concrete model for a tier, the select
+  // used to offer no way back — every option only replaced the override, and
+  // Reset throws away the whole provider configuration and key rather than
+  // one tier's mapping. This proves the explicit "Use the tier default" item
+  // actually clears the stored override, end to end against a real host.
+  await page.route("**/inference/models", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
+      ]),
+    });
+  });
+  await openConnections(page);
+  await expect(page.locator("#inference-provider")).toBeVisible({ timeout: 30_000 });
+
+  await pickProvider(page, "OpenRouter");
+  await page.locator("#inference-key").fill(`pw-e2e-${Date.now()}`);
+  const chat = page.getByTestId("inference-model-select-chat-v1");
+  await expect(chat).toBeEnabled();
+  await chat.click();
+  await page.getByRole("option", { name: /Catalog Chat/ }).click();
+  await page.getByTestId("inference-save").click();
+  await expect(
+    page.getByText(/Inference updated\.|Inference saved — restart the company/),
+  ).toBeVisible({ timeout: 30_000 });
+
+  const saved = await page.request.get("/api/v1/company/inference");
+  expect(saved.ok()).toBeTruthy();
+  expect((await saved.json()).models["chat-v1"]).toBe("provider/catalog-chat");
+
+  // Reload so the picker is seeded straight from the stored override, then
+  // clear it through the select rather than typing anything.
+  await page.reload();
+  const chatAfterReload = page.getByTestId("inference-model-select-chat-v1");
+  await expect(chatAfterReload).toContainText("Catalog Chat", { timeout: 30_000 });
+  await chatAfterReload.click();
+  await page.getByRole("option", { name: "Use the tier default" }).click();
+  await page.getByTestId("inference-save").click();
+  await expect(
+    page.getByText(/Inference updated\.|Inference saved — restart the company/),
+  ).toBeVisible({ timeout: 30_000 });
+
+  const cleared = await page.request.get("/api/v1/company/inference");
+  expect(cleared.ok()).toBeTruthy();
+  expect((await cleared.json()).models["chat-v1"]).toBeUndefined();
+
+  // Leave the shared E2E company on its committed default for later specs.
+  await page.getByRole("button", { name: "Reset to default" }).click();
+  await expect(
+    page.getByText("Reverted to the committed manifest (or managed) configuration."),
+  ).toBeVisible({ timeout: 30_000 });
+});
