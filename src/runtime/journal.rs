@@ -1597,12 +1597,20 @@ impl RuntimeJournal {
 
     /// Retires a blocked-node stash once its run has re-dispatched (or its block
     /// was wholly refused), so a later boot does not rehydrate it (issue #1816).
+    ///
+    /// Also retires the turn from `blocked_node_approvals`, mirroring what
+    /// replaying this same record does in [`replay`](Self::replay) — the
+    /// doc-stated invariant on that field is that a turn never lingers there
+    /// past the continuation it describes. Without this, a live release left
+    /// the turn banked in that set for the rest of the process's life: a
+    /// long-running tenant would accumulate one stale key per completed block,
+    /// invisible until the next full reload replayed the same record correctly.
     pub async fn record_blocked_node_released(&self, turn: &str) -> Result<()> {
-        self.state
-            .lock()
-            .expect("journal state poisoned")
-            .blocked_stashes
-            .remove(turn);
+        {
+            let mut state = self.state.lock().expect("journal state poisoned");
+            state.blocked_stashes.remove(turn);
+            state.blocked_node_approvals.remove(turn);
+        }
         self.append(&JournalRecord::BlockedNodeReleased {
             turn: turn.to_string(),
         })
@@ -4143,6 +4151,46 @@ mod test {
             retry.is_err(),
             "the retry must re-attempt the commit and surface the failure again, \
              never take the already-committed early return and report success"
+        );
+    }
+
+    /// A live release must retire a turn from `blocked_node_approvals` exactly
+    /// as replaying its `BlockedNodeReleased` record does — the doc-stated
+    /// invariant on the field itself: "a turn never lingers here past the
+    /// continuation it describes."
+    ///
+    /// `record_blocked_node_released` used to remove only from
+    /// `blocked_stashes`, leaving the turn's entry in
+    /// `blocked_node_approvals` for the rest of the process's life — a
+    /// long-running tenant that parks and approves many blocked nodes
+    /// accumulates one stale key per release, unlike a fresh reload, which
+    /// (via `replay`) always retires both together. Calling the live method
+    /// directly, with no restart in between, isolates exactly that gap.
+    #[tokio::test]
+    async fn release_retires_the_turn_from_blocked_node_approvals_live() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &serde_json::json!({}))
+            .await
+            .unwrap();
+        journal
+            .record_blocked_node_approved("turn-1")
+            .await
+            .unwrap();
+        assert_eq!(journal.blocked_node_approvals(), vec!["turn-1".to_string()]);
+
+        journal
+            .record_blocked_node_released("turn-1")
+            .await
+            .unwrap();
+        assert!(
+            journal.blocked_node_approvals().is_empty(),
+            "a released turn must not linger in the live approval set — it \
+             must be retired the moment release lands, not only on the next \
+             reload's replay"
         );
     }
 }
