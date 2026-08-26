@@ -1640,12 +1640,34 @@ async fn stash_blocked_agent_nodes(
     let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
         return;
     };
-    for node in blocked {
-        if node.approval_ids.is_empty() {
-            continue;
-        }
-        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
-        parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+
+    // Issue #1816 (Stage 2 follow-up): arm every eligible node's in-memory
+    // stash BEFORE awaiting any durable journal write. This settle can name
+    // several blocked nodes at once (a fan-out that pauses on more than one
+    // gate), and their approval cards are already parked and clickable from
+    // agent execution — an operator can act on any of them the instant this
+    // function starts. The old loop interleaved the synchronous `arm()` with
+    // an awaited `record_blocked_node_stashed()` call per node, which opens a
+    // window, per node, where that node's card is clickable but its stash is
+    // not armed yet: a decision landing in that window finds nothing to
+    // release, consumes the approval anyway, and a later arm for that same
+    // turn then stashes facts with no remaining decision to release them —
+    // stranding the approved run. Arming every node up front (a purely
+    // in-memory, non-awaiting pass) closes that window for the whole batch at
+    // once instead of leaving it open per node; only the durable mirroring
+    // below still awaits.
+    let turns: Vec<_> = blocked
+        .iter()
+        .filter(|node| !node.approval_ids.is_empty())
+        .map(|node| {
+            let turn =
+                crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
+            parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+            (turn, &node.node_id)
+        })
+        .collect();
+
+    for (turn, node_id) in turns {
         // Issue #1816 (Stage 2): mirror the in-memory arm into the durable
         // journal so an approval landing after a process/host replacement can
         // still locate this run. Best-effort — a failed write leaves the
@@ -1660,7 +1682,7 @@ async fn stash_blocked_agent_nodes(
             tracing::warn!(
                 %workflow_id,
                 %run_id,
-                node = %node.node_id,
+                node = %node_id,
                 %error,
                 "[approval] a blocked node's continuation facts could not be durably \
                  stashed; the in-memory stash still covers a resolve without a restart"
