@@ -537,6 +537,17 @@ export function RunHistoryRow({
   // names what the run was standing on; a settled run pairs every entry with
   // a `nodes` finish row UNLESS that node is the one the stop actually cut
   // off mid-flight (see `startedNodes`'s own doc comment in `api/workflows.ts`).
+  //
+  // Codex review on #1821 (ninth pass): `startedNodes`'s own doc comment says
+  // "absent must read as 'no start trail', never as 'nothing started'" — a
+  // host predating #1010/#382 sends nothing at all, which the `?? []`
+  // fallback below used to fold into "no node was mid-flight", so a
+  // cancelled run from that host always rendered the completed-cleanly
+  // sentence even though the run's actual boundary is unrecorded and
+  // unknowable. `knowsStartTrail` keeps that distinction: known-absent
+  // trail (`[]`, nothing had started) and unknown trail (`undefined`) are
+  // not the same fact.
+  const knowsStartTrail = run.startedNodes !== undefined;
   const midFlightNode = (run.startedNodes ?? []).find(
     (nodeId) => !nodes.some((n) => n.nodeId === nodeId),
   );
@@ -799,13 +810,22 @@ export function RunHistoryRow({
           .{" "}
           {midFlightNode
             ? "The steps above completed; the one still running was stopped where it was."
-            : // Codex review on #1821 (eighth pass): the legend definition
-              // above was fixed to say the mid-flight step "normally ran to
-              // completion and was recorded" — but this sentence still
-              // claimed unconditionally that a step was cut off, which is
-              // only true when `midFlightNode` names one. Most cancels land
-              // cleanly at a boundary with nothing interrupted at all.
-              "Every step that had started completed and was recorded before the stop took effect."}{" "}
+            : knowsStartTrail
+              ? // Codex review on #1821 (eighth pass): the legend definition
+                // above was fixed to say the mid-flight step "normally ran to
+                // completion and was recorded" — but this sentence still
+                // claimed unconditionally that a step was cut off, which is
+                // only true when `midFlightNode` names one. Most cancels land
+                // cleanly at a boundary with nothing interrupted at all.
+                "Every step that had started completed and was recorded before the stop took effect."
+              : // Codex review on #1821 (ninth pass): a host predating
+                // #1010/#382 sends no `startedNodes` at all, and its own doc
+                // comment says that must read as "no start trail", never as
+                // "nothing started" — so it must not be folded into the same
+                // claim as a settled run whose receipt confirms every started
+                // step finished. This run's actual cancel boundary is
+                // unrecorded and unknowable from here.
+                "Whether the step in progress when the stop landed finished is not recorded for this run."}{" "}
           Any approvals it had already raised are still waiting for you.
         </p>
       ) : isBlocked(run) ? (
