@@ -4889,6 +4889,8 @@ description = "Builds the product."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -7325,6 +7327,8 @@ description = "Sets direction."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 

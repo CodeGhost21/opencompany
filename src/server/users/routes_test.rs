@@ -92,6 +92,8 @@ async fn state_from(
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -881,6 +883,8 @@ async fn a_https_deployment_marks_the_cookie_secure() {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();

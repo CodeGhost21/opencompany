@@ -375,6 +375,8 @@ fn brain_with(
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
     (
         // Issue #339: the run store is wired here so a dispatch carrying a

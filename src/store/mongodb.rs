@@ -847,6 +847,8 @@ impl CompanyStore for MongoStore {
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
             setup: overlay.setup,
+            name_confirmed: overlay.name_confirmed,
+            activation_completed_at: overlay.activation_completed_at,
         }))
     }
 

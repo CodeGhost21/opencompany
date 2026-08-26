@@ -180,6 +180,20 @@ struct BundleMeta {
     /// `#[serde(default)]` keeps older bundles importing cleanly.
     #[serde(default)]
     setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator had confirmed the company's display name at export
+    /// time (issue #1843). Preserved so an export→import does not silently
+    /// re-open a confirmation step the operator already cleared.
+    /// `#[serde(default)]` keeps older bundles importing cleanly (they decode
+    /// to `false`, the pre-#1843 behaviour every such bundle already had).
+    #[serde(default)]
+    name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed at export time
+    /// (issue #1843). Preserved for the same reason `overlay_policy` and
+    /// `disabled_workflows` above are: without this, an export→import would
+    /// silently re-gate an already-activated company behind onboarding.
+    /// `#[serde(default)]` keeps older bundles importing cleanly (`None`).
+    #[serde(default)]
+    activation_completed_at: Option<u64>,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -253,6 +267,14 @@ struct BundleContents {
     /// The workflow ids switched off, carried through the bundle so an import
     /// restores a paused workflow paused (issue #276).
     disabled_workflows: Vec<String>,
+    /// Whether the operator had confirmed the company's display name
+    /// (issue #1843), carried through the bundle so export→import preserves
+    /// it.
+    name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed (issue #1843), carried
+    /// through the bundle so export→import does not silently re-gate an
+    /// already-activated company behind onboarding.
+    activation_completed_at: Option<u64>,
 }
 
 impl BundleContents {
@@ -322,6 +344,8 @@ impl BundleContents {
             overlay_policy: record.overlay_policy,
             overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
+            name_confirmed: record.name_confirmed,
+            activation_completed_at: record.activation_completed_at,
         })
     }
 
@@ -390,6 +414,8 @@ impl BundleContents {
                 disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
                 setup: self.setup.clone(),
+                name_confirmed: self.name_confirmed,
+                activation_completed_at: self.activation_completed_at,
             })
             .await?;
         for entry in &self.ledger {
@@ -439,6 +465,8 @@ impl BundleContents {
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
             setup: self.setup.clone(),
+            name_confirmed: self.name_confirmed,
+            activation_completed_at: self.activation_completed_at,
         };
         write_file(
             &dest.join(META_JSON),
@@ -608,6 +636,8 @@ impl BundleContents {
             overlay_policy: meta.overlay_policy,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
+            name_confirmed: meta.name_confirmed,
+            activation_completed_at: meta.activation_completed_at,
         })
     }
 }
@@ -970,6 +1000,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -1281,6 +1313,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1364,6 +1398,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1498,6 +1534,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1592,6 +1630,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1713,6 +1753,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1921,6 +1963,8 @@ mod test {
             overlay_retired_agents: vec!["ops".to_string()],
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -2049,6 +2093,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -2137,6 +2183,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();

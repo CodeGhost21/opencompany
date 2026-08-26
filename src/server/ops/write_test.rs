@@ -114,6 +114,8 @@ async fn state_with(
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3322,6 +3324,8 @@ async fn state_with_manifest_and_defaults(
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3367,6 +3371,8 @@ async fn state_with_manifest_and_overlays(
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3929,6 +3935,8 @@ async fn state_with_source_dir(
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();

@@ -549,6 +549,29 @@ impl MessageIntent {
 // Events
 // ---------------------------------------------------------------------------
 
+/// One step in the account-activation funnel (issue #1843): the shared
+/// vocabulary the onboarding gate and the week-1 nudge both key off, so the
+/// two features cannot each invent their own step names and drift.
+///
+/// Fieldless and closed on purpose — a step is one of exactly these three
+/// until a future issue adds a fourth, at which point every exhaustive match
+/// over this enum (there are none yet outside this crate; keep it that way)
+/// would need to be revisited anyway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingStep {
+    /// The operator confirmed (or set) the company's display name.
+    NameConfirmed,
+    /// The company holds at least one active Composio connection AND its
+    /// `[tools].allow` explicitly grants the `composio` namespace — both
+    /// halves of [`crate::company::grants_composio_explicit`]'s rule, because
+    /// a connection nobody granted the namespace for cannot actually be used.
+    IntegrationConnected,
+    /// A real (non-dry) workflow run reached
+    /// [`RunStatus::Succeeded`](crate::ports::runs::RunStatus::Succeeded).
+    WorkflowRunSucceeded,
+}
+
 /// An external stimulus fed into a company's cycle loop.
 ///
 /// Serialized internally-tagged under `kind` so each JSONL line is
@@ -1830,6 +1853,42 @@ pub enum CompanyEvent {
         /// the top level, so the line says what the operator was not asked.
         reason: String,
     },
+    /// One step of the account-activation funnel (issue #1843) completed.
+    ///
+    /// Meant to be emitted at the transition — the same moment the step's
+    /// underlying fact becomes true (a workflow run reaches `succeeded`, a
+    /// Composio connection is authorized, the operator confirms the company
+    /// name) — as an audit trail alongside the activation-derivation helper
+    /// (`crate::company::activation`), which derives the *current* answer from
+    /// source-of-truth state and never trusts this journal alone.
+    ///
+    /// **No write path emits this yet.** Issue #1843 defines the vocabulary
+    /// the funnel is spoken in and the read side that derives from source
+    /// state directly, so it does not need this trail to be correct; the write
+    /// hooks belong to whichever change lands each step's own transition (the
+    /// #1844 name-confirm route, the Composio connect flow, a workflow-run
+    /// success path) and can journal through this variant once it does. Only
+    /// [`OnboardingCompleted`](Self::OnboardingCompleted) — the terminal latch
+    /// — is wired today, from `compute_and_latch`.
+    ///
+    /// A step may complete more than once across a company's lifetime (a
+    /// Composio connection is later revoked and reconnected); each completion
+    /// is its own line, once a caller exists.
+    OnboardingStepCompleted {
+        /// Which step completed.
+        step: OnboardingStep,
+    },
+    /// Every activation step completed for the first time — the moment
+    /// [`CompanyRecord::activation_completed_at`] is stamped.
+    ///
+    /// Latched: this fires **once** per company, ever. A step regressing
+    /// afterward (a connection disconnected) does not un-complete activation
+    /// and does not re-fire this event — see
+    /// [`CompanyRecord::activation_completed_at`]'s monotonicity contract.
+    OnboardingCompleted {
+        /// Epoch-millis the funnel completed.
+        at_millis: u64,
+    },
 }
 
 impl CompanyEvent {
@@ -1876,6 +1935,8 @@ impl CompanyEvent {
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeStarted { .. } => "WorkflowNodeStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
+            Self::OnboardingStepCompleted { .. } => "OnboardingStepCompleted",
+            Self::OnboardingCompleted { .. } => "OnboardingCompleted",
         }
     }
 
@@ -2014,7 +2075,16 @@ impl CompanyEvent {
             // it would re-deliver already-sent reports to real people on the
             // next re-run, which is the exact failure the variant exists to
             // prevent. See its own docs.
-            | Self::WorkflowReportDelivered { .. } => Permanent,
+            | Self::WorkflowReportDelivered { .. }
+            // Issue #1843: the activation funnel's audit trail. The *current*
+            // answer to "is this company activated" is read off
+            // `CompanyRecord::activation_completed_at` (a derived, re-computable
+            // latch), not by folding this journal — but these two events are the
+            // only durable record of *when* each step first completed and *when*
+            // the funnel as a whole did, which is exactly the kind of history a
+            // retention pass must not be allowed to quietly erase.
+            | Self::OnboardingStepCompleted { .. }
+            | Self::OnboardingCompleted { .. } => Permanent,
             // Issue #617: permanent, and it is the clearest kind of evidence
             // this enum carries — the record that a consequential call ran
             // WITHOUT the operator being asked. Pruning it would delete the only
@@ -3579,6 +3649,14 @@ pub struct OverlayBlob {
     /// there, which is the worst shape a data-loss bug can take.
     #[serde(default)]
     pub setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator has confirmed the company's display name
+    /// (issue #1843). See [`CompanyRecord::name_confirmed`].
+    #[serde(default)]
+    pub name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed (issue #1843). See
+    /// [`CompanyRecord::activation_completed_at`].
+    #[serde(default)]
+    pub activation_completed_at: Option<u64>,
 }
 
 impl OverlayBlob {
@@ -3598,6 +3676,8 @@ impl OverlayBlob {
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
             setup: record.setup.clone(),
+            name_confirmed: record.name_confirmed,
+            activation_completed_at: record.activation_completed_at,
         }
     }
 
@@ -3629,6 +3709,12 @@ impl OverlayBlob {
                     // A legacy bare-array row predates first-run setup by a long
                     // way; it can carry no answers.
                     setup: None,
+                    // Same reasoning: a legacy bare-array row predates
+                    // activation tracking entirely, so it carries neither.
+                    // `RuntimeBuilder::build`'s back-fill (not this parse) is
+                    // what supplies the right answer for an existing company.
+                    name_confirmed: false,
+                    activation_completed_at: None,
                 })
                 .map_err(|_| original),
         }
@@ -3825,6 +3911,36 @@ pub struct CompanyRecord {
     /// `#[serde(default)]` keeps those records loading without a migration.
     #[serde(default)]
     pub setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator has confirmed the company's display name
+    /// (issue #1843) — the first step of the activation funnel
+    /// [`crate::company::activation`] derives. `false` for every record
+    /// written before the step existed; back-filled to `true` for a company
+    /// already `running` at the moment its record is next loaded/rebuilt (see
+    /// `RuntimeBuilder::build`), since a company that has been operating all
+    /// along plainly cleared whatever naming step it started with — only a
+    /// genuinely new company should be asked. The `#[serde(default)]` is the
+    /// safe fallback for a backend read that predates the field entirely; the
+    /// `running`-lifecycle back-fill is the deliberate migration, not this.
+    #[serde(default)]
+    pub name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed, once — the terminal latch
+    /// [`OnboardingCompleted`](CompanyEvent::OnboardingCompleted) is journaled
+    /// at (issue #1843). `None` until every step in
+    /// [`crate::company::activation::ActivationStatus`] is true.
+    ///
+    /// **Monotonic.** Once set, nothing un-sets it: a Composio connection
+    /// disconnected after activation does not roll this back to `None`, the
+    /// same way [`Self::lifecycle`] moving to `archived` does not erase the
+    /// company's history of having run. The activation query short-circuits on
+    /// this being `Some` precisely so a later step regressing cannot flip the
+    /// answer — see the derivation helper's own docs.
+    ///
+    /// `#[serde(default)]` loads every pre-#1843 record as `None`; the store
+    /// migration in `RuntimeBuilder::build` then back-fills it for a company
+    /// already `running`, so an existing tenant is never re-gated behind an
+    /// onboarding flow it has no memory of starting.
+    #[serde(default)]
+    pub activation_completed_at: Option<u64>,
 }
 
 /// What a teammate key an operator or a model typed resolves to on a company's
@@ -4764,6 +4880,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: Some(answers.clone()),
+            name_confirmed: false,
+            activation_completed_at: None,
         };
 
         let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
@@ -6042,6 +6160,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
