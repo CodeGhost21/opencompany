@@ -126,36 +126,56 @@ while IFS= read -r entry; do
   check "$CI_WORKFLOW:$line" "$value"
 done <<< "$ci_lines"
 
-# The dev script's own copy of the string.
-dev_value="$(
-  sed -n 's/^DESKTOP_RELEASE_FEATURES=\(.*\)$/\1/p' "$DEV_SCRIPT" \
-    | head -1 | sed 's/^"//; s/"$//'
-)"
-check "$DEV_SCRIPT" "$dev_value"
+# The dev launcher (`scripts/desktop-dev.sh`).
+#
+# It is checked DIFFERENTLY from every other call site, because #1823 gave it a
+# better shape than a copy: it *parses* `DESKTOP_RELEASE_FEATURES` out of the
+# release workflow at run time, with a `DESKTOP_FEATURES` override for someone
+# who deliberately wants the leaner build. There is no literal to compare, and
+# that is the point — a value derived from the source of truth cannot drift from
+# it, so demanding a copy here would make the script worse.
+#
+# So the invariant is different in kind: it must DERIVE rather than duplicate,
+# and what it derives must reach cargo.
+dev_reads_workflow=0
+grep -q 'DESKTOP_RELEASE_FEATURES' "$DEV_SCRIPT" \
+  && grep -q 'release-desktop-macos.yml' "$DEV_SCRIPT" \
+  && dev_reads_workflow=1
+if [ "$dev_reads_workflow" -eq 1 ]; then
+  echo "  ok  $DEV_SCRIPT derives the features from $RELEASE_WORKFLOW"
+else
+  echo "  BAD $DEV_SCRIPT no longer reads DESKTOP_RELEASE_FEATURES from the release workflow" >&2
+  status=1
+fi
 
-# ...and every place that actually launches the shell must pass it. A constant
-# nothing reads would satisfy the check above while `tauri dev` still built the
-# default set — the original bug with a decorative variable added.
-#
-# EVERY branch, not any. `desktop-dev.sh` picks between a path-qualified CLI and
-# a `cargo tauri` fallback, so a `grep -q` for one spelling passes while the
-# other launches bare. The first version of this check looked for the literal
-# `tauri dev --features`, which matches ONLY the `cargo tauri dev` fallback —
-# `"${TAURI_CLI}" dev` does not contain that string — so the primary branch,
-# the one that actually runs on any checkout with the console installed, was
-# never verified at all.
-#
-# Comment lines are stripped first: this file's own prose names these
-# invocations, and so does the dev script's.
-dev_invocations="$(grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '(\$\{TAURI_CLI\}"?|cargo tauri)[[:space:]]+dev([[:space:]]|$)' || true)"
+# A re-introduced literal is a regression even if it happens to be correct
+# today: it is a fourth copy of a string three other places already carry, and
+# the whole reason this script exists is that such copies drift. Comments may
+# name the features; a shell assignment may not.
+dev_literal="$(
+  grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '=[^|]*opencompany/[a-z-]+' || true
+)"
+if [ -n "$dev_literal" ]; then
+  echo "  BAD $DEV_SCRIPT hardcodes a feature literal instead of reading the workflow:" >&2
+  printf '        %s\n' "$dev_literal" >&2
+  status=1
+fi
+
+# ...and the derived value must actually reach the build. `desktop-dev.sh`
+# builds its argument list with `set -- --features "$DESKTOP_FEATURES"` and
+# forwards `"$@"`, so a bare `tauri dev` with no `"$@"` is the regression to
+# catch — that is precisely the shape #1738 was filed about.
+dev_invocations="$(
+  grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '(\$\{TAURI_CLI\}"?|cargo tauri)[[:space:]]+dev([[:space:]]|$)' || true
+)"
 if [ -z "$dev_invocations" ]; then
   echo "  BAD $DEV_SCRIPT -> no 'tauri dev' invocation found; this check asserts nothing" >&2
   status=1
 else
   while IFS= read -r invocation; do
     text="${invocation#*:}"
-    if printf '%s' "$text" | grep -q '\${DESKTOP_RELEASE_FEATURES}'; then
-      echo "  ok  $DEV_SCRIPT launches with the features:$(printf '%s' "$text" | sed 's/^[[:space:]]*/ /')"
+    if printf '%s' "$text" | grep -qE '(--features|"\$@")'; then
+      echo "  ok  $DEV_SCRIPT passes the features on:$(printf '%s' "$text" | sed 's/^[[:space:]]*/ /')"
     else
       echo "  BAD $DEV_SCRIPT launches WITHOUT the features:$(printf '%s' "$text" | sed 's/^[[:space:]]*/ /')" >&2
       status=1

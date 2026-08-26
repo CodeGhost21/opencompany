@@ -72,16 +72,24 @@ adds no package and leaves `src-tauri/Cargo.lock` byte-identical, which is what
 lets a release still build `--locked`. A feature gating an optional dependency
 could not be passed this way and would have to move into the manifest.
 
-The cost of that arrangement is three copies of one string, and #1738 is what a
-missing copy looks like: `scripts/desktop-dev.sh` ran `tauri dev` bare, so a
+The cost of that arrangement is several copies of one string, and #1738 is what
+a missing copy looks like: `scripts/desktop-dev.sh` ran `tauri dev` bare, so a
 developer's shell was the manifest set and every DMG was the release set. The
 visible half was Connections — `in_build: cfg!(feature = "composio")` reported
 false, so eight provider tiles rendered "not available here" over a card asking
 the operator to paste a Composio token, on a build nobody ships. `acp` was dark
 the same way and less visibly (`acp_agents = None`, so every `transport =
-"local"` harness resolved `unavailable`; issue #1245). The script now passes the
-release string and `scripts/ci/assert-desktop-features.sh` fails the build if
-the three copies ever disagree.
+"local"` harness resolved `unavailable`; issue #1245).
+
+#1823 fixed the launcher without adding a copy: it **parses**
+`DESKTOP_RELEASE_FEATURES` out of the release workflow, with a
+`DESKTOP_FEATURES` override for the leaner build. A derived value cannot drift.
+
+`scripts/ci/assert-desktop-features.sh` guards what is still duplicated (the two
+`ci.yml` steps, `npm run tauri:build`, the by-hand command below), that the
+release `tauri build` still consumes the variable it declares — otherwise the
+source of truth is a lie — and that the launcher still derives rather than
+re-hardcoding a literal.
 
 `mcp` is the one that puts an agent harness in the app. It implies `openhuman`,
 which is what compiles `src/harness/` at all; without it the bundle boots, seeds

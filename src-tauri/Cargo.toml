@@ -78,8 +78,12 @@ path = "src/main.rs"
 # every desktop built WITHOUT that command line — which, until this issue, was
 # every developer's, because `scripts/desktop-dev.sh` ran `tauri dev` bare. The
 # dev shell and the shipped app were two different products and nothing said so.
-# The script now passes the release string, and
-# `scripts/ci/assert-desktop-features.sh` keeps all three call sites in step.
+# #1823 closed that half, and closed it better than a copy would have: the
+# script *parses* `DESKTOP_RELEASE_FEATURES` out of the release workflow, so the
+# launcher cannot drift from what ships. `scripts/ci/assert-desktop-features.sh`
+# guards the copies that remain — the two `ci.yml` steps, `tauri:build` and the
+# command `docs/spec/runtime/desktop.md` documents — and asserts the launcher
+# still derives rather than duplicates.
 #
 # Deliberately NOT compiled at all, in the default set or the release one, and
 # each for a reason rather than an oversight:
