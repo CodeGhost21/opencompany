@@ -31,9 +31,14 @@ pub(crate) struct InferenceModel {
     pub(crate) context_length: Option<u64>,
 }
 
+/// Parsed leniently: `data` is decoded as raw JSON values first, so one
+/// malformed entry (a non-string `id`, a string-valued `context_length`, …)
+/// only drops that entry in [`parse_models`] instead of failing the whole
+/// response and hiding every valid model the endpoint actually returned.
 #[derive(Deserialize)]
 struct RegistryResponse {
-    data: Vec<RegistryModel>,
+    #[serde(default)]
+    data: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -46,9 +51,16 @@ struct RegistryModel {
 }
 
 /// Parse every concrete model in a standard OpenAI-compatible catalog.
+///
+/// Each `data` entry is decoded on its own so a single malformed record (bad
+/// field type, missing `id`, …) is skipped rather than rejecting entries this
+/// same response otherwise reported cleanly.
 fn parse_models(payload: RegistryResponse) -> Vec<InferenceModel> {
     let mut unique = BTreeMap::new();
-    for model in payload.data {
+    for entry in payload.data {
+        let Ok(model) = serde_json::from_value::<RegistryModel>(entry) else {
+            continue;
+        };
         let id = model.id.trim();
         if id.is_empty() {
             continue;
@@ -159,26 +171,10 @@ mod tests {
     fn catalog_parser_returns_every_non_empty_unique_model() {
         let parsed = parse_models(RegistryResponse {
             data: vec![
-                RegistryModel {
-                    id: " vendor/zeta ".to_string(),
-                    name: Some(" Zeta ".to_string()),
-                    context_length: Some(128_000),
-                },
-                RegistryModel {
-                    id: "vendor/alpha".to_string(),
-                    name: None,
-                    context_length: None,
-                },
-                RegistryModel {
-                    id: "vendor/zeta".to_string(),
-                    name: Some("duplicate".to_string()),
-                    context_length: None,
-                },
-                RegistryModel {
-                    id: "   ".to_string(),
-                    name: None,
-                    context_length: None,
-                },
+                serde_json::json!({"id": " vendor/zeta ", "name": " Zeta ", "context_length": 128_000}),
+                serde_json::json!({"id": "vendor/alpha"}),
+                serde_json::json!({"id": "vendor/zeta", "name": "duplicate"}),
+                serde_json::json!({"id": "   "}),
             ],
         });
 
@@ -187,6 +183,30 @@ mod tests {
         assert_eq!(parsed[1].id, "vendor/zeta");
         assert_eq!(parsed[1].name.as_deref(), Some("Zeta"));
         assert_eq!(parsed[1].context_length, Some(128_000));
+    }
+
+    /// Regression for a P2 review finding on #1838: a single malformed
+    /// record (here, a numeric `id`) used to fail `RegistryResponse`
+    /// deserialization outright — `discover_models` never reached
+    /// `parse_models` at all, so a valid model earlier or later in the same
+    /// `data` array was lost with it. `data` is now decoded as raw JSON
+    /// first, so only the bad entry drops out.
+    #[test]
+    fn catalog_parser_skips_malformed_entries_instead_of_rejecting_the_response() {
+        let payload: RegistryResponse = serde_json::from_str(
+            r#"{"data": [
+                {"id": "vendor/good-one"},
+                {"id": 12345},
+                {"id": "vendor/good-two", "context_length": "not-a-number"},
+                {"id": "vendor/good-three"}
+            ]}"#,
+        )
+        .expect("RegistryResponse itself must still deserialize leniently");
+
+        let parsed = parse_models(payload);
+
+        let ids: Vec<&str> = parsed.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["vendor/good-one", "vendor/good-three"]);
     }
 
     #[test]
