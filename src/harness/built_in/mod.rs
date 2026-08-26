@@ -1276,6 +1276,17 @@ fn is_transient_empty_response(err: &anyhow::Error) -> bool {
         .contains("empty response")
 }
 
+/// The two phrasings `TinyAgentsError::Timeout` uses when the run's wall-clock
+/// budget expires around a call.
+///
+/// Copied from the vendored crate's own list — `web_errors::is_turn_timeout_error`
+/// anchors on exactly these — rather than invented here, so a phrasing added
+/// upstream is a diff against a known set instead of a silent miss.
+const WALL_CLOCK_CEILING_LEAVES: [&str; 2] = [
+    "exceeded its remaining wall-clock budget",
+    "exceeded its wall-clock deadline",
+];
+
 /// Whether a turn error is the harness's per-turn wall-clock ceiling firing
 /// (issue #1680).
 ///
@@ -1284,10 +1295,21 @@ fn is_transient_empty_response(err: &anyhow::Error) -> bool {
 /// typed error is erased by the time it reaches us. The leaf reads
 /// "…exceeded its remaining wall-clock budget (56636 ms)", raised by
 /// `with_call_budget` in the vendored tinyagents harness.
+///
+/// **Whole phrases, not the words `wall-clock budget`.** A provider's response
+/// body reaches this chain verbatim — `provider.rs` raises
+/// `TinyAgentsError::Model(format!("hosted inference returned {status}: {text}"))`
+/// — so a hosted or BYOK endpoint that says anything about a wall-clock budget
+/// of its own would otherwise be reported as this ceiling, complete with a
+/// measured duration of a second or two and an instruction to raise
+/// `OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`, which would fix nothing. Being wrong in
+/// that direction is worse than the bare wrapper this replaces, because it
+/// reads as a diagnosis.
 fn is_wall_clock_ceiling(err: &anyhow::Error) -> bool {
-    format!("{err:#}")
-        .to_ascii_lowercase()
-        .contains("wall-clock budget")
+    let chain = format!("{err:#}").to_ascii_lowercase();
+    WALL_CLOCK_CEILING_LEAVES
+        .iter()
+        .any(|leaf| chain.contains(leaf))
 }
 
 /// A duration as an operator reads one: `9s`, `1m 30s`, `10m 01s`.
@@ -6189,6 +6211,38 @@ description = "Builds the product."
             !is_wall_clock_ceiling(&anyhow::anyhow!("daily budget exceeded for agent 'ceo'")),
             "a SPEND budget is not a wall-clock budget"
         );
+    }
+
+    /// A provider's response body reaches this chain verbatim — `provider.rs`
+    /// raises `TinyAgentsError::Model("hosted inference returned {status}: {text}")`
+    /// — so an endpoint with a wall-clock budget of its own must not be read as
+    /// OpenHuman's per-turn ceiling. That misdiagnosis is worse than the plain
+    /// wrapper: it would report the second the request took as if it were a
+    /// ten-minute turn, and tell the operator to raise a ceiling that was never
+    /// reached.
+    #[test]
+    fn a_provider_body_that_mentions_a_wall_clock_budget_is_not_the_ceiling() {
+        for body in [
+            "hosted inference returned 429: {\"error\":\"wall-clock budget for this key is exhausted\"}",
+            "hosted inference returned 400: your per-request wall-clock budget must be positive",
+        ] {
+            assert!(
+                !is_wall_clock_ceiling(&anyhow::anyhow!("{body}")),
+                "a provider body is not the turn ceiling: {body}"
+            );
+        }
+        // Both phrasings the vendored harness actually raises still match,
+        // including the deadline spelling the old three-word search covered
+        // only by accident.
+        for leaf in [
+            "model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)",
+            "tool call for run 'agent_turn' exceeded its wall-clock deadline",
+        ] {
+            assert!(
+                is_wall_clock_ceiling(&anyhow::anyhow!("{leaf}")),
+                "the harness's own leaf must still be recognised: {leaf}"
+            );
+        }
     }
 
     #[test]

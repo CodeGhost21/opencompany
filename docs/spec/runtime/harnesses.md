@@ -268,15 +268,17 @@ silent fallback either.
 
 ## How long a turn may take
 
-There is exactly **one** time bound anywhere on the path from a workflow run to
-a model call, and it does not live in this repo.
+There is exactly **one whole-turn** time bound anywhere on the path from a
+workflow run to a model call, and it does not live in this repo. Individual
+**tool** calls can carry a second, tighter bound of their own — see below.
 
 ```
 workflow run ............................. no time bound
   └─ tinyflows node execution ............ no time bound (duration observed only)
       └─ agent capability → agent.turn() . no time bound
           └─ tinyagents run "agent_turn" . the per-turn wall-clock ceiling
-              └─ each model / tool call .. bounded by (ceiling − run elapsed)
+              └─ each model call ......... bounded by (ceiling − run elapsed)
+              └─ each tool call .......... the lesser of that and the tool's own
                   └─ sub-agent turn ...... inherits the parent's remainder
 ```
 
@@ -325,6 +327,27 @@ Two constraints on that message are deliberate:
 - **A ceiling hit stays a hard failure.** It is not retried — the one-shot
   empty-reply retry would turn a ten-minute failure into a twenty-minute one —
   and it fails the node rather than degrading to a partial result.
+
+### The per-tool bounds this crate *does* set
+
+Two tools bound themselves, more tightly than the ceiling and independently of
+it, so a turn can lose a call without being anywhere near its own limit:
+
+- **BYO web search** — `TIMEOUT_SECS` in `src/harness/built_in/search_byo.rs`,
+  thirty seconds, passed to each provider tool and applied as the HTTP request
+  timeout on its client. Deliberately shorter than a turn: a search that has not
+  answered in half a minute has already cost more than the answer is worth. Only
+  the bring-your-own providers; the managed tool keeps upstream's own policy.
+- **MCP** — each server declaration's `timeout_secs`, forwarded verbatim to the
+  transport by `server_config` in `src/harness/built_in/mcp.rs`. Per server, set
+  in the company's MCP config, and the one bound on this page an operator can
+  actually edit.
+
+Neither ends the turn. A call that trips its own bound comes back as a failed
+tool result, which the agent may retry or route around; only the ceiling above
+fails the node. The ceiling still counts every second either of them spent —
+which is the reading #1680 turned on, since a turn can burn most of its budget
+on tool calls that each looked fine.
 
 ### What this crate does not bound
 
