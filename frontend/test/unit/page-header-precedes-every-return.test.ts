@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { VIEWS, type View } from "@/lib/console-routes";
 import { SETTINGS_PAGES } from "@/views/settings-pages";
-import { NAMED_BY, SETTINGS_NAMED_BY, type Names } from "./support/routed-views";
+import { NAMED_BY, SETTINGS_NAMED_BY, type Leaf } from "./support/routed-views";
 
 /**
  * A routed view's header is the first thing it can render — in every state
@@ -50,22 +50,54 @@ const VIEWS_DIR = new URL("../../src/views", import.meta.url).pathname;
 /**
  * Views whose named file legitimately returns before rendering a header.
  *
- * `handRolled` views are out of scope by construction — their heading is not a
- * `PageHeader` and `HAND_ROLLED` in the adoption test carries the reason.
- * Anything else needs a row here saying why, in the same register.
+ * **Empty, and that is the point.** It had two rows — `team` and `company` —
+ * because `TeamView`'s first return is `<AgentDetailView …/>`. A route-level
+ * exemption was the wrong instrument (codex review, #1785): it switched the
+ * scan off for the whole route, so every *other* early return under it would
+ * also have gone unseen. Delegation is now recognised structurally instead —
+ * see `delegatesTo` — and both rows are gone.
+ *
+ * `handRolled` leaves are out of scope by construction: their heading is not a
+ * `PageHeader`, and `HAND_ROLLED` in the adoption test carries the reason. A
+ * row here would need to say why a *state* cannot be named, not why a route is
+ * special.
  */
-const EARLY_RETURN_OK: Partial<Record<View, string>> = {
-  team:
-    "TeamView's first return is `<AgentDetailView …/>` — the teammate profile " +
-    "route, which names itself with the heading `HAND_ROLLED` already allows. " +
-    "It delegates rather than rendering an unnamed state.",
-  company:
-    "Same file as `team`, and the same delegating return.",
-};
+const EARLY_RETURN_OK: Partial<Record<View, string>> = {};
 
-/** The file that renders this view's `PageHeader`, or null when it hand-rolls one. */
-function headerFile(how: Names): string | null {
-  return "pageHeader" in how ? how.pageHeader : null;
+/**
+ * Every component name this system holds to a heading — the leaves of every
+ * route plus every settings page.
+ *
+ * Global rather than per-route on purpose. `TeamView` returns
+ * `<AgentDetailView …/>` for `#/team/<id>`, and `#/company` renders the same
+ * file with `sub={null}` so that branch is unreachable from there; a per-route
+ * set would call the identical line delegation under `team` and an offence
+ * under `company`. What the check actually asks is "does this return hand the
+ * screen to a component that is itself guarded", and that has one answer.
+ */
+const GUARDED_COMPONENTS: string[] = [
+  ...Object.values(NAMED_BY).flatMap((list) =>
+    list.map((leaf) => ("pageHeader" in leaf ? leaf.pageHeader : leaf.handRolled)),
+  ),
+  ...Object.values(SETTINGS_NAMED_BY),
+].map((file) => file.slice(file.lastIndexOf("/") + 1).replace(/\.tsx$/, ""));
+
+/**
+ * Whether a returned block is nothing but `<SomeLeaf …/>`.
+ *
+ * `CompanyView` and `TeamView` dispatch: their early return hands the whole
+ * screen to another component this route already enumerates, which is not an
+ * unnamed state — that component's own row is what holds it to a heading. Any
+ * *other* early return still counts, so the route keeps its cover.
+ */
+function delegatesTo(block: string): boolean {
+  const first = block.match(/<([A-Z][A-Za-z0-9_]*)/);
+  return first !== null && GUARDED_COMPONENTS.includes(first[1]);
+}
+
+/** The file that renders this leaf's `PageHeader`, or null when it hand-rolls one. */
+function headerFile(leaf: Leaf): string | null {
+  return "pageHeader" in leaf ? leaf.pageHeader : null;
 }
 
 /**
@@ -111,7 +143,7 @@ function returnsAboveHeader(source: string): { line: number; text: string }[] {
       }
     }
     const text = block.join("\n");
-    if (text.includes("<") && !text.includes("<PageHeader")) {
+    if (text.includes("<") && !text.includes("<PageHeader") && !delegatesTo(text)) {
       const first = block.slice(1).find((l) => l.trim()) ?? line;
       found.push({ line: i + 1, text: first.trim().slice(0, 80) });
     }
@@ -124,7 +156,9 @@ describe("a routed view's header precedes every return it can make (#1785)", () 
   it("checks one file per routed view, and finds all of them", () => {
     // Without this a typo in a path would silently check nothing, which is the
     // failure mode every guard in this directory is written against.
-    const files = VIEWS.map((v) => headerFile(NAMED_BY[v])).filter((f): f is string => f !== null);
+    const files = VIEWS.flatMap((v) => NAMED_BY[v].map(headerFile)).filter(
+      (f): f is string => f !== null,
+    );
     expect(files.length).toBeGreaterThan(12);
     for (const file of files) {
       expect(() => readFileSync(`${VIEWS_DIR}/${file}`, "utf8"), file).not.toThrow();
@@ -133,12 +167,15 @@ describe("a routed view's header precedes every return it can make (#1785)", () 
 
   it("has no routed view returning JSX before it renders its header", () => {
     const offenders = VIEWS.flatMap((view) => {
-      const file = headerFile(NAMED_BY[view]);
-      if (file === null || view in EARLY_RETURN_OK) return [];
-      const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
-      return returnsAboveHeader(source).map(
-        (r) => `${view} (${file}:${r.line}) returns before its header: ${r.text}`,
-      );
+      if (view in EARLY_RETURN_OK) return [];
+      return NAMED_BY[view].flatMap((leaf) => {
+        const file = headerFile(leaf);
+        if (file === null) return [];
+        const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
+        return returnsAboveHeader(source).map(
+          (r) => `${view} (${file}:${r.line}) returns before its header: ${r.text}`,
+        );
+      });
     });
 
     expect(
@@ -175,10 +212,12 @@ describe("a routed view's header precedes every return it can make (#1785)", () 
     // An exemption that stopped applying is a rule nobody is being held to.
     const stale = Object.keys(EARLY_RETURN_OK)
       .map((view) => {
-        const file = headerFile(NAMED_BY[view as View]);
-        if (file === null) return `${view} is exempt but hand-rolls its heading`;
-        const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
-        return returnsAboveHeader(source).length > 0
+        const early = NAMED_BY[view as View].flatMap((leaf) => {
+          const file = headerFile(leaf);
+          if (file === null) return [];
+          return returnsAboveHeader(readFileSync(`${VIEWS_DIR}/${file}`, "utf8"));
+        });
+        return early.length > 0
           ? null
           : `${view} is exempt but no longer returns before its header — drop the row`;
       })

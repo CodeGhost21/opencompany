@@ -63,38 +63,92 @@ import type { SettingsPage } from "@/views/settings-pages";
  * out which branch runs would be wrong in a way nobody could see, which is the
  * failure mode it exists to prevent.
  */
-export type Names =
-  /** The file that renders this view's `<PageHeader>`. */
+/**
+ * One thing a route can render. A route that dispatches gets several.
+ *
+ * The single-leaf version of this was wrong three times over, all found by the
+ * same review: `company` was mapped to `TeamView` alone while
+ * `CompanyView.tsx:116-129` sends `#/company/graph` to `Overview` and every
+ * other segment to `OrgChartView`; and `chat` and `team` named components that
+ * are simply **absent** in some of their own states. Each wrong leaf switched
+ * the guard off for a whole route while reporting green — the exact failure
+ * these tests exist to catch.
+ *
+ * So the rule is: **a route may only name a file that carries a heading in
+ * every state that file is on screen for.** If the route dispatches, enumerate
+ * the leaves. If a state cannot carry one, that is a per-state decision written
+ * into the view, not a row here — a route-level exemption also hides every
+ * future regression under that route.
+ */
+export type Leaf =
+  /** The file renders a `<PageHeader>` — visible, or `hidden` for a page that is its own content. */
   | { pageHeader: string }
   /**
-   * The file that names it some other way. Only legal for a file already in
-   * `HAND_ROLLED` above — the reason lives there, in one place, rather than
-   * being restated here and drifting.
+   * The file names the page some other way. Only legal for a file already in
+   * `HAND_ROLLED` in `page-header-adoption.test.ts` — the reason lives there,
+   * in one place, rather than being restated here and drifting.
    */
   | { handRolled: string };
 
+/** Every leaf a route can render. Order is irrelevant; completeness is not. */
+export type Names = readonly Leaf[];
+
 export const NAMED_BY: Record<View, Names> = {
-  overview: { pageHeader: "OperatorOverview.tsx" },
-  /** Company and Team are two tabs of one page; `TeamView` draws its header. */
-  company: { pageHeader: "TeamView.tsx" },
-  team: { pageHeader: "TeamView.tsx" },
-  chat: { handRolled: "chat/ChatHeader.tsx" },
-  conversation: { pageHeader: "Conversation.tsx" },
-  inbox: { pageHeader: "InboxView.tsx" },
-  /** `#/tasks/<id>` is the card detail pane, not the board. */
-  tasks: { handRolled: "TaskDetailView.tsx" },
-  ledgers: { pageHeader: "LedgersView.tsx" },
-  workspace: { pageHeader: "WorkspaceView.tsx" },
-  approvals: { pageHeader: "ApprovalsView.tsx" },
-  workflows: { pageHeader: "WorkflowsView.tsx" },
-  observatory: { pageHeader: "observatory/ObservatoryView.tsx" },
-  pages: { pageHeader: "PagesView.tsx" },
-  finances: { pageHeader: "FinancesView.tsx" },
+  overview: [{ pageHeader: "OperatorOverview.tsx" }],
+  /**
+   * Three leaves, from `CompanyView`'s own dispatch: `#/company/graph` is the
+   * knowledge graph, any other segment is the org chart focused on that desk,
+   * and the bare route is the roster.
+   */
+  company: [
+    { pageHeader: "TeamView.tsx" },
+    { pageHeader: "company/OrgChartView.tsx" },
+    { pageHeader: "Overview.tsx" },
+  ],
+  /**
+   * `#/team/<id>` opens the teammate profile; the bare route is the roster.
+   *
+   * `AgentDetailView` is a `pageHeader` leaf even though its *loaded* heading
+   * is the hand-rolled one `HAND_ROLLED` allows: it also renders a `hidden`
+   * header for the four states `Identity` does not mount for, and that is the
+   * half a guard has to hold it to. Listing it as `handRolled` asked nothing
+   * of it at all — deleting that header passed every check.
+   */
+  team: [{ pageHeader: "TeamView.tsx" }, { pageHeader: "team/AgentDetailView.tsx" }],
+  /**
+   * The channel bar names the loaded pane. The three channel-less states —
+   * desks failed, desks pending, no channel — are `ChatView`'s own panes, and
+   * each carries a `hidden` header so the page is named before a channel is.
+   */
+  chat: [{ handRolled: "chat/ChatHeader.tsx" }, { pageHeader: "ChatView.tsx" }],
+  conversation: [{ pageHeader: "Conversation.tsx" }],
+  inbox: [{ pageHeader: "InboxView.tsx" }],
+  /**
+   * `#/tasks/<id>` is the card detail pane, not the board. A `pageHeader` leaf
+   * for the same reason `team/AgentDetailView.tsx` is: its loaded heading is
+   * the card's own title, which `HAND_ROLLED` allows, and it also renders a
+   * `hidden` header for the deleted-card state, where there is no title to
+   * show. As `handRolled` the guard asked nothing of it.
+   */
+  tasks: [{ pageHeader: "TaskDetailView.tsx" }],
+  ledgers: [{ pageHeader: "LedgersView.tsx" }],
+  workspace: [{ pageHeader: "WorkspaceView.tsx" }],
+  approvals: [{ pageHeader: "ApprovalsView.tsx" }],
+  workflows: [{ pageHeader: "WorkflowsView.tsx" }],
+  observatory: [{ pageHeader: "observatory/ObservatoryView.tsx" }],
+  pages: [{ pageHeader: "PagesView.tsx" }],
+  finances: [{ pageHeader: "FinancesView.tsx" }],
   /** `SettingsSection` is the tab frame; `SettingsView` is the page. */
-  settings: { pageHeader: "SettingsView.tsx" },
-  feedback: { pageHeader: "FeedbackView.tsx" },
-  setup: { handRolled: "setup/SetupWizard.tsx" },
-  "not-found": { pageHeader: "UnknownRouteView.tsx" },
+  settings: [{ pageHeader: "SettingsView.tsx" }],
+  feedback: [{ pageHeader: "FeedbackView.tsx" }],
+  /**
+   * The first-run flow, outside the console shell. `pageHeader` because its two
+   * pre-wizard states (cannot read the instance, still reading it) carry a
+   * `hidden` header — "outside the shell" is a reason not to paint a bar, not a
+   * reason to have no name.
+   */
+  setup: [{ pageHeader: "setup/SetupWizard.tsx" }],
+  "not-found": [{ pageHeader: "UnknownRouteView.tsx" }],
 };
 
 /**

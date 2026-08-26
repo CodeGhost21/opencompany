@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { VIEWS as ROUTED_VIEWS, type View } from "@/lib/console-routes";
-import { NAMED_BY, type Names } from "./support/routed-views";
+import { NAMED_BY, type Leaf } from "./support/routed-views";
 
 /**
  * Every page's title comes from `PageHeader`. A view that hand-rolls an `<h1>`
@@ -172,6 +172,18 @@ describe("page headers come from PageHeader (#1763)", () => {
   });
 });
 
+/** The file a leaf points at, whichever kind it is. */
+function fileOf(leaf: Leaf): string {
+  return "pageHeader" in leaf ? leaf.pageHeader : leaf.handRolled;
+}
+
+/** Every (route, leaf) pair, flattened — a dispatching route contributes several. */
+function leaves(): [View, Leaf][] {
+  return (Object.entries(NAMED_BY) as [View, readonly Leaf[]][]).flatMap(([view, list]) =>
+    list.map((leaf): [View, Leaf] => [view, leaf]),
+  );
+}
+
 describe("every routed view is named by something (#1763)", () => {
   it("has a row for every view the router can reach, and no stale ones", () => {
     // The compile-time `Record<View, …>` already forbids a missing row. This
@@ -182,20 +194,20 @@ describe("every routed view is named by something (#1763)", () => {
     expect(ROUTED_VIEWS.length).toBeGreaterThan(15);
   });
 
-  it("has every routed view's named file actually exist", () => {
-    const missing = (Object.entries(NAMED_BY) as [View, Names][])
-      .map(([view, how]) => ["pageHeader" in how ? how.pageHeader : how.handRolled, view] as const)
-      .filter(([file]) => !SOURCES.has(file))
-      .map(([file, view]) => `${view} names ${file}, which is not under src/views`);
+  it("has every routed view's named files actually exist", () => {
+    const missing = leaves()
+      .map(([view, leaf]) => [view, fileOf(leaf)] as const)
+      .filter(([, file]) => !SOURCES.has(file))
+      .map(([view, file]) => `${view} names ${file}, which is not under src/views`);
 
     expect(missing, missing.join("\n")).toEqual([]);
   });
 
-  it("has every routed view without a documented exception rendering PageHeader", () => {
-    const offenders = (Object.entries(NAMED_BY) as [View, Names][])
+  it("has every leaf without a documented exception rendering PageHeader", () => {
+    const offenders = leaves()
       .filter((entry): entry is [View, { pageHeader: string }] => "pageHeader" in entry[1])
-      .filter(([, how]) => !(SOURCES.get(how.pageHeader) ?? "").includes("<PageHeader"))
-      .map(([view, how]) => `${view} is named by ${how.pageHeader}, which renders no <PageHeader>`);
+      .filter(([, leaf]) => !(SOURCES.get(leaf.pageHeader) ?? "").includes("<PageHeader"))
+      .map(([view, leaf]) => `${view} is named by ${leaf.pageHeader}, which renders no <PageHeader>`);
 
     expect(
       offenders,
@@ -203,7 +215,7 @@ describe("every routed view is named by something (#1763)", () => {
         `screen reader cannot announce — which is the state Workspace and the ` +
         `unknown-route page were in before #1763.\n` +
         `Render <PageHeader> there (use hidden if the page is its own content), ` +
-        `or move the row to handRolled and add the file to HAND_ROLLED with a ` +
+        `or move the leaf to handRolled and add the file to HAND_ROLLED with a ` +
         `reason.\n${offenders.join("\n")}`,
     ).toEqual([]);
   });
@@ -212,11 +224,20 @@ describe("every routed view is named by something (#1763)", () => {
     // One reason, in one place. A second copy here is a second thing to keep
     // true, and the whole argument of this file is that nobody notices when a
     // second copy stops being true.
-    const undocumented = (Object.entries(NAMED_BY) as [View, Names][])
+    const undocumented = leaves()
       .filter((entry): entry is [View, { handRolled: string }] => "handRolled" in entry[1])
-      .filter(([, how]) => !(how.handRolled in HAND_ROLLED))
-      .map(([view, how]) => `${view} names ${how.handRolled} as hand-rolled, but it has no HAND_ROLLED row`);
+      .filter(([, leaf]) => !(leaf.handRolled in HAND_ROLLED))
+      .map(([view, leaf]) => `${view} names ${leaf.handRolled} as hand-rolled, but it has no HAND_ROLLED row`);
 
     expect(undocumented, undocumented.join("\n")).toEqual([]);
+  });
+
+  it("has a leaf for every route, and none of them empty", () => {
+    // A route mapped to `[]` would satisfy every `flatMap` above by having
+    // nothing to check — the emptiest possible way to pass.
+    const empty = (Object.entries(NAMED_BY) as [View, readonly Leaf[]][])
+      .filter(([, list]) => list.length === 0)
+      .map(([view]) => `${view} names nothing`);
+    expect(empty, empty.join("\n")).toEqual([]);
   });
 });
