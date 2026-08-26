@@ -103,6 +103,12 @@ export function useConversationRuntime(opts: ConversationRuntimeOptions): Conver
 
   const onNew = useCallback(
     async (appended: AppendMessage) => {
+      // Belt to the composer's own `disabled` state below: never mutate state
+      // or call `client.chat` for a channel the server's read-only guard will
+      // refuse anyway (issue #1757). `threadsFromDesks` builds this thread
+      // list straight from `/desks`, so a bypass of the disabled input still
+      // cannot reach the network.
+      if (thread.readOnly) return;
       const text = textOf(appended);
       if (!text) return;
       setMessages(thread.id, (m) => [...m, makeMessage("you", text)]);
@@ -172,6 +178,7 @@ export function useConversationRuntime(opts: ConversationRuntimeOptions): Conver
       setMessages,
       setSending,
       thread.id,
+      thread.readOnly,
     ],
   );
 

@@ -19,6 +19,15 @@ export interface Thread {
   /** Short blurb shown under the name when the thread has no messages yet. */
   blurb: string;
   messages: ChatMessage[];
+  /**
+   * Whether this thread is the built-in **Operator** system channel (issue
+   * #1757): a durable, read-only feed the server refuses to post to. Set from
+   * the desk's own `system` flag so the legacy `#/conversation` route — which
+   * builds its thread list straight from `/desks` rather than through
+   * {@link resolveDesks} — still knows to disable its composer instead of
+   * letting the operator type and submit before the server's guard refuses it.
+   */
+  readOnly?: boolean;
 }
 
 /** Avatar tones rotated across desk threads. */
@@ -76,6 +85,7 @@ export function threadsFromDesks(desks: DeskDto[]): Thread[] {
     },
     blurb: desk.description ?? "A desk of your company",
     messages: [],
+    readOnly: desk.system,
   }));
   return [mainThread(), ...deskThreads];
 }
