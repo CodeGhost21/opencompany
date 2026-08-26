@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-/// The two facts a blocked agent node's continuation needs, stashed at
+/// The facts a blocked agent node's continuation needs, stashed at
 /// block-settle and handed back on release.
 #[derive(Clone, Debug)]
 pub struct StashedBlock {
@@ -64,6 +64,20 @@ pub struct StashedBlock {
     /// The paused run's own trigger input, replayed unchanged — the minted grant
     /// is what lets the identical gated call pass on the re-run.
     pub input: Value,
+    /// Whether any of this node's parked calls has been approved, banked the
+    /// moment that decision lands rather than read off the release batch
+    /// (issue #1816).
+    ///
+    /// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)'s
+    /// released batch only carries the verdicts one process held in memory —
+    /// a restart between two decisions on the same node drops the earlier ones,
+    /// and unlike a workflow gate (which re-parks whatever its own batch
+    /// forgets), a blocked node has no re-park: it either spawns the
+    /// continuation once or not at all. So the fact an approval landed is kept
+    /// here too, set by [`mark_approved`](BlockedNodeQueue::mark_approved) at
+    /// decide time and rehydrated at boot by the same restart the batch cannot
+    /// survive, and read alongside — not instead of — the batch's own verdicts.
+    pub approved: bool,
 }
 
 /// Per-(run, node) continuation state for a blocked agent node: the workflow id
@@ -92,7 +106,29 @@ impl BlockedNodeQueue {
             .or_insert_with(|| StashedBlock {
                 workflow_id: workflow_id.to_string(),
                 input: input.clone(),
+                approved: false,
             });
+    }
+
+    /// Banks that at least one of `turn`'s parked calls has been approved,
+    /// called the moment that decision lands (issue #1816) rather than only
+    /// read off whichever decision happens to release the turn.
+    ///
+    /// A no-op if `turn` has no stash: nothing to bank the fact against, and
+    /// [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)
+    /// will find nothing to redeem either. In ordinary operation this never
+    /// happens — a decision cannot land before its node's park armed the
+    /// stash — so this guards a call ordering the runtime does not exercise
+    /// rather than a real case.
+    pub fn mark_approved(&self, turn: &str) {
+        if let Some(block) = self
+            .inner
+            .lock()
+            .expect("blocked node queue poisoned")
+            .get_mut(turn)
+        {
+            block.approved = true;
+        }
     }
 
     /// Takes `turn`'s stash, dropping it from the queue.
@@ -126,9 +162,11 @@ impl BlockedNodeQueue {
     pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value)>) {
         let mut inner = self.inner.lock().expect("blocked node queue poisoned");
         for (turn, workflow_id, input) in stashes {
-            inner
-                .entry(turn)
-                .or_insert(StashedBlock { workflow_id, input });
+            inner.entry(turn).or_insert(StashedBlock {
+                workflow_id,
+                input,
+                approved: false,
+            });
         }
     }
 
@@ -235,6 +273,65 @@ mod test {
         )]);
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.input, json!({ "n": "live" }), "live wins over replay");
+    }
+
+    /// A fresh stash starts unapproved, and `mark_approved` flips it — the
+    /// state `resume_blocked_agent_node` reads alongside the release batch.
+    #[test]
+    fn mark_approved_flips_the_stashed_flag() {
+        let q = BlockedNodeQueue::default();
+        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+
+        q.mark_approved("workflow-node:run-1:draft");
+
+        let block = q.release("workflow-node:run-1:draft").expect("armed");
+        assert!(
+            block.approved,
+            "marking approved before release must survive to the release"
+        );
+    }
+
+    /// `mark_approved` on a turn with no stash is a no-op, not a panic or a
+    /// phantom entry — there is nothing yet for the fact to attach to.
+    #[test]
+    fn mark_approved_on_an_unarmed_turn_is_a_noop() {
+        let q = BlockedNodeQueue::default();
+        q.mark_approved("workflow-node:run-9:ghost");
+        assert_eq!(q.waiting(), 0, "no stash was created");
+    }
+
+    /// Issue #1816: a restart between the first and second decision on a
+    /// two-call node loses the first decision from `ContinuationQueue`'s
+    /// released batch (see that module's docs), but `mark_approved` called at
+    /// decide time — before the restart wipes the in-memory queues — is what
+    /// this queue's own `approved` flag is for. Rehydrating the stash via
+    /// `rearm` alone reproduces the gap: the flag comes back `false` until the
+    /// caller also replays the durable approvals the way the boot builder does.
+    #[test]
+    fn rearm_alone_does_not_recover_a_pre_restart_approval() {
+        let q = BlockedNodeQueue::default();
+        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        q.mark_approved("workflow-node:run-1:draft");
+
+        // Simulate the restart: the in-memory queue is gone, and boot rehydrates
+        // the stash from the journal's still-live record — but not yet the
+        // approval, which is a separate durable fact the caller must fold in.
+        let rehydrated = BlockedNodeQueue::default();
+        rehydrated.rearm(vec![(
+            "workflow-node:run-1:draft".to_string(),
+            "digest".to_string(),
+            json!({ "n": 1 }),
+        )]);
+
+        let block = rehydrated
+            .release("workflow-node:run-1:draft")
+            .expect("rehydrated");
+        assert!(
+            !block.approved,
+            "rearm alone does not know about the pre-restart approval — the \
+             caller must also replay it via mark_approved, exactly as the boot \
+             builder does from journal.blocked_node_approvals()"
+        );
     }
 
     /// Two blocked nodes of two runs are independent stashes — a release of one
