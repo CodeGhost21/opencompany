@@ -2247,18 +2247,24 @@ impl RuntimeBuilder {
             }
         };
 
-        // Issue #899 (Stage 1): the blocked-agent-node stash, shared between the
-        // workflow runner (which arms it at block-settle through `DeliveryParking`)
-        // and the runtime (whose `continue_turn` releases it). Inherited live on a
-        // rebuild, and a plain `default()` on a boot — unlike its two neighbours
-        // it is NOT rehydrated from the journal, because the parked tool-call
-        // effect carries no workflow id or trigger input to rebuild a stash from.
-        // A boot mid-block therefore re-arms the `continuations` counter but not
-        // this, and the released batch reports "re-run the workflow" instead of
-        // spawning. See `BlockedNodeQueue`.
+        // Issue #899 (Stage 1) / #1816 (Stage 2): the blocked-agent-node stash,
+        // shared between the workflow runner (which arms it at block-settle
+        // through `DeliveryParking`) and the runtime (whose `continue_turn`
+        // releases it). Inherited live on a rebuild. On a boot it is now
+        // rehydrated from the journal's still-live stash records — the durable
+        // half #1816 added beneath Stage 1's in-memory queue — exactly as
+        // `workflow_gates` above re-arms from its still-parked gates. A boot
+        // mid-block therefore re-arms both the `continuations` counter (from
+        // `parked_turns`) and this stash (from `blocked_stashes`), so an approval
+        // landing after the restart re-dispatches the run instead of reporting
+        // "re-run the workflow". See `BlockedNodeQueue`.
         let blocked_nodes = match handover.as_ref() {
             Some(h) => h.blocked_nodes.clone(),
-            None => crate::runtime::blocked_nodes::BlockedNodeQueue::default(),
+            None => {
+                let blocked_nodes = crate::runtime::blocked_nodes::BlockedNodeQueue::default();
+                blocked_nodes.rearm(journal.blocked_stashes());
+                blocked_nodes
+            }
         };
 
         // Brain selection, in precedence order:

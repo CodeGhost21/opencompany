@@ -25,18 +25,30 @@
 //! beside the list of blocked nodes — so the stash is populated there, exactly
 //! as `park_pending_gates` populates the gate queue from the runner.
 //!
-//! # Durability, stated plainly
+//! # Durability, stated plainly (issue #1816, Stage 2)
 //!
-//! In-memory, and — unlike [`WorkflowGateQueue`] — **not** rehydrated from the
-//! journal at recovery, because the parked tool-call effect carries no
-//! workflow id or trigger input to rebuild it from (widening the effect payload
-//! to carry them is a larger change than Stage 1 takes on). A restart in the
-//! middle of a blocked node therefore comes back with the
-//! [`ContinuationQueue`] counter re-armed (from `parked_turns`) but the stash
-//! empty: the batch releases and finds nothing to spawn, and the operator is
-//! told to re-run the workflow. That is a strictly worse restart story than the
-//! gate path's, and it is the Stage-1 boundary — the durable-card version is
-//! Stage 2 territory.
+//! In-memory as the fast path, and — like [`WorkflowGateQueue`] — **rehydrated
+//! from the journal at recovery**. The parked tool-call effect still carries no
+//! workflow id or trigger input, so those two facts cannot be rebuilt from the
+//! effect payload; instead they are written to the journal at park time as a
+//! dedicated, host-durable stash record
+//! ([`RuntimeJournal::record_blocked_node_stashed`](crate::runtime::journal::RuntimeJournal::record_blocked_node_stashed)),
+//! keyed by the same per-(run, node) turn key, and dropped by a paired release
+//! record once the run is re-dispatched. At boot the builder re-arms this queue
+//! from [`RuntimeJournal::blocked_stashes`](crate::runtime::journal::RuntimeJournal::blocked_stashes)
+//! via [`rearm`](BlockedNodeQueue::rearm), exactly as the gate queue re-arms
+//! from its still-parked gates.
+//!
+//! A restart between *park* and *approve* therefore comes back with the
+//! [`ContinuationQueue`] counter re-armed (from `parked_turns`) **and** this
+//! stash re-armed (from `blocked_stashes`): the batch releases, [`release`] hits
+//! the rehydrated stash, and the run re-dispatches instead of stranding the
+//! operator on "re-run the workflow". Stage 1 (issue #899) shipped the in-memory
+//! fast path; Stage 2 (issue #1816) adds the durable record beneath it so an
+//! approval redeems a parked run even across a process/host replacement — the
+//! `~90-min` staging cron pod-roll that stranded parked tasks permanently.
+//!
+//! [`release`]: BlockedNodeQueue::release
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -89,12 +101,35 @@ impl BlockedNodeQueue {
     /// release to — that queue's counting decides who, under one lock, so this
     /// cannot be entered twice for one blocked node. `None` for a turn this
     /// queue is not holding: a card parked before this issue, or a stash lost to
-    /// a restart, which the caller reports as "re-run the workflow".
+    /// a restart **and** never durably recorded (since #1816 a restart rehydrates
+    /// it from the journal via [`rearm`](Self::rearm), so `Some` is the normal
+    /// post-restart case); the caller reports the remaining `None` as "re-run the
+    /// workflow".
     pub fn release(&self, turn: &str) -> Option<StashedBlock> {
         self.inner
             .lock()
             .expect("blocked node queue poisoned")
             .remove(turn)
+    }
+
+    /// Rehydrates the queue at boot from the journal's still-live stash records
+    /// (issue #1816, Stage 2).
+    ///
+    /// The blocked-node counterpart to
+    /// [`WorkflowGateQueue::rearm`](crate::runtime::workflow_gates::WorkflowGateQueue::rearm):
+    /// the builder folds the durable
+    /// [`blocked_stashes`](crate::runtime::journal::RuntimeJournal::blocked_stashes)
+    /// left by a park that outlived its process and re-arms one stash per still-
+    /// undelivered `(turn, workflow_id, input)`. **First write wins**, on
+    /// [`arm`](Self::arm)'s terms, so a live stash inherited on a rebuild is never
+    /// clobbered by a journal replay of the same turn.
+    pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value)>) {
+        let mut inner = self.inner.lock().expect("blocked node queue poisoned");
+        for (turn, workflow_id, input) in stashes {
+            inner
+                .entry(turn)
+                .or_insert(StashedBlock { workflow_id, input });
+        }
     }
 
     /// Whether `turn` is a blocked node this queue is holding a stash for.
@@ -157,6 +192,49 @@ mod test {
         );
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.input, json!({ "topic": "first" }));
+    }
+
+    /// Issue #1816: rehydrating from the journal's still-live stashes re-arms the
+    /// queue so a post-restart release finds the run to re-dispatch — the boot
+    /// path a process replacement between park and approve depends on.
+    #[test]
+    fn rearm_rehydrates_stashes_a_restart_would_have_lost() {
+        let q = BlockedNodeQueue::default();
+        q.rearm(vec![
+            (
+                "workflow-node:run-1:draft".to_string(),
+                "digest".to_string(),
+                json!({ "topic": "x" }),
+            ),
+            (
+                "workflow-node:run-2:draft".to_string(),
+                "digest".to_string(),
+                json!({ "topic": "y" }),
+            ),
+        ]);
+        assert_eq!(q.waiting(), 2, "both durable stashes came back");
+        let block = q.release("workflow-node:run-1:draft").expect("rehydrated");
+        assert_eq!(block.workflow_id, "digest");
+        assert_eq!(block.input, json!({ "topic": "x" }));
+    }
+
+    /// A live stash (inherited on a rebuild) is never clobbered by a journal
+    /// replay of the same turn — `rearm` is first-write-wins like `arm`.
+    #[test]
+    fn rearm_does_not_clobber_a_live_stash() {
+        let q = BlockedNodeQueue::default();
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": "live" }),
+        );
+        q.rearm(vec![(
+            "workflow-node:run-1:draft".to_string(),
+            "digest".to_string(),
+            json!({ "n": "replayed" }),
+        )]);
+        let block = q.release("workflow-node:run-1:draft").expect("armed");
+        assert_eq!(block.input, json!({ "n": "live" }), "live wins over replay");
     }
 
     /// Two blocked nodes of two runs are independent stashes — a release of one
