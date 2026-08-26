@@ -719,14 +719,25 @@ export function RunHistoryRow({
             <p className="mt-1 text-2xs text-muted-foreground">
               {failedNode
                 ? "Review the error details, then correct the workflow and run it again."
-                : // Codex review on #1821 (eighth pass): `failedNode` is null in
-                  // exactly the cases the legend definition above already hedges
-                  // on — a host restart, a capability that failed to build, or a
-                  // graph that would not compile — none of which a workflow edit
-                  // fixes. This sentence still said "correct the workflow"
-                  // unconditionally, contradicting the definition two rounds ago
-                  // fixed to say the opposite for this same run.
-                  "Review the error details — nothing in the graph got the chance to run, so this may be a host or capability problem rather than the workflow. Run it again once you've ruled that out."}
+                : nodes.length > 0
+                  ? // Codex review on #1821 (ninth pass): `failedNode` null does
+                    // NOT mean nothing ran — a host restart can interrupt a run
+                    // after one or more nodes already completed, and none of
+                    // those finish rows carries an error (the synthetic outcome
+                    // the boot sweep writes belongs to no node). `nodes.length`
+                    // is the same signal `failureLocation` in `graph.ts` already
+                    // branches on for this exact case; this sentence collapsed
+                    // it into "nothing in the graph got the chance to run",
+                    // which is only true when `nodes` is empty too.
+                    `Review the error details — ${nodes.length} step${nodes.length === 1 ? "" : "s"} completed before this run was interrupted, so this may be a host or capability problem rather than the workflow. Run it again once you've ruled that out.`
+                  : // Codex review on #1821 (eighth pass): `failedNode` is null in
+                    // exactly the cases the legend definition above already hedges
+                    // on — a host restart, a capability that failed to build, or a
+                    // graph that would not compile — none of which a workflow edit
+                    // fixes. This sentence still said "correct the workflow"
+                    // unconditionally, contradicting the definition two rounds ago
+                    // fixed to say the opposite for this same run.
+                    "Review the error details — nothing in the graph got the chance to run, so this may be a host or capability problem rather than the workflow. Run it again once you've ruled that out."}
             </p>
             <details className="mt-1">
               <summary className="cursor-pointer text-2xs text-muted-foreground">
