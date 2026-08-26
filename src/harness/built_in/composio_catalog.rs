@@ -816,14 +816,21 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// the SAME host as their public web product (`slack.com/api/*`,
 /// `discord.com/api/*`), so matching the bare host would also deflect a
 /// `web_fetch` of a public help page or invite link that needs no connection
-/// and has no equivalent Composio action. The path prefix narrows those two
-/// entries to the API surface only.
+/// and has no equivalent Composio action. `www.googleapis.com` is the same
+/// shape one layer up: it is Google's shared legacy API gateway for many
+/// products, not just Drive (`www.googleapis.com/youtube/v3/...` is unrelated
+/// to Drive), so the Drive entry for it is scoped to `/drive/` — the dedicated
+/// `drive.googleapis.com` host stays an unscoped match since it fronts nothing
+/// else. The path prefix narrows these entries to the API surface only.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, Option<&'static str>)] {
     match toolkit {
         "github" => &[("api.github.com", None)],
         "gmail" => &[("gmail.googleapis.com", None)],
         "googlecalendar" => &[("calendar.googleapis.com", None)],
-        "googledrive" => &[("drive.googleapis.com", None), ("www.googleapis.com", None)],
+        "googledrive" => &[
+            ("drive.googleapis.com", None),
+            ("www.googleapis.com", Some("/drive/")),
+        ],
         "slack" => &[("slack.com", Some("/api/"))],
         "notion" => &[("api.notion.com", None)],
         "linear" => &[("api.linear.app", None)],
@@ -1512,6 +1519,34 @@ mod tests {
             web_call_deflection(&connected, "https://discord.com/invite/somepublicserver")
                 .is_none(),
             "a public discord.com page outside /api/ must pass through"
+        );
+    }
+
+    /// `www.googleapis.com` is Google's shared legacy gateway for many APIs,
+    /// not just Drive — unlike Slack/Discord this is one host fronting several
+    /// unrelated *products*, not a product mixing API and public-page traffic.
+    /// Before the fix this entry had no path prefix, so a `googledrive`
+    /// connection deflected `www.googleapis.com/youtube/v3/...` to the Drive
+    /// toolkit even though Drive cannot serve it (PR #1780 review).
+    #[test]
+    fn drive_deflection_on_the_legacy_host_is_scoped_to_drive_paths() {
+        let connected = vec!["googledrive".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://www.googleapis.com/drive/v3/files").is_some(),
+            "a real Drive call on the legacy gateway host must still be deflected"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://www.googleapis.com/youtube/v3/search?q=rust"
+            )
+            .is_none(),
+            "an unrelated Google API sharing the legacy gateway host must pass through"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://drive.googleapis.com/drive/v3/files")
+                .is_some(),
+            "the dedicated Drive host stays deflected unscoped"
         );
     }
 }
