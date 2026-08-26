@@ -435,19 +435,52 @@ async fn provision(
     // (`self.auth_mode_override.unwrap_or_else(...)`), read from the same
     // `manifest` and the same host override, with no request-serialized
     // mutation of either in between.
-    let status = match runtime.status().await {
+    //
+    // Registered BEFORE the `status()` read below, not after: `builder.build()`
+    // already durably saved this company's `CompanyRecord` as one of its last
+    // steps (see the duplicate-id check's comment above), so by this point the
+    // company genuinely exists — `status()` only re-reads that same record for
+    // the response body. Registering first means a transient failure in that
+    // read (a store blip right after the write) still leaves the company live
+    // and addressable: the in-memory registry, not this request's response,
+    // is what the duplicate-id check and every other route key existence off
+    // of. Registering only after a successful `status()` left exactly that
+    // failure unrecoverable — the durable record made a retry's duplicate
+    // check say `company_exists`, while the registry never got the runtime
+    // that would make `company_exists` true, so no request could ever create
+    // OR address that id again (issue #1828 comment 3866132497).
+    let status = match register_and_report_status(&state, &id, &tenant, runtime).await {
         Ok(status) => status,
         Err(err) => return ApiError(err).into_response(),
     };
-    state
-        .registry()
-        .insert(id.clone(), std::sync::Arc::new(runtime));
+
+    (StatusCode::CREATED, Json(status)).into_response()
+}
+
+/// Registers `runtime` and records its ownership, then reads its status for
+/// the response body.
+///
+/// Registration happens first, deliberately — see the comment at the call
+/// site. A `status()` failure after this point still returns `Err` (the
+/// caller sees an error response), but by then the company is already live
+/// and addressable through `state.registry()`, exactly as if the read had
+/// succeeded: nothing downstream of this function can tell the two cases
+/// apart. Split out so that property is directly testable without a full
+/// HTTP round trip (`test.rs`).
+async fn register_and_report_status(
+    state: &AppState,
+    id: &CompanyId,
+    tenant: &str,
+    runtime: crate::runtime::CompanyRuntime,
+) -> crate::Result<crate::runtime::types::CompanyStatus> {
+    let runtime = std::sync::Arc::new(runtime);
+    state.registry().insert(id.clone(), runtime.clone());
     // The durable row was written and verified above, before the build, so this
     // is only the in-memory mirror the running process serves from (issue
     // #1050).
-    state.set_owner(id.clone(), tenant.clone());
+    state.set_owner(id.clone(), tenant.to_string());
 
-    (StatusCode::CREATED, Json(status)).into_response()
+    runtime.status().await
 }
 
 /// How many times [`persist_owner_with_retry`] attempts the durable write.

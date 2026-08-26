@@ -13,15 +13,15 @@ use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::Brain;
 use crate::ports::types::{
-    CompanyEvent, CompanyId, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup,
-    EventSeq, OutboundMessage, TokenUsage,
+    CompanyEvent, CompanyId, CompanyRecord, CompanySummary, CompressedTrace, CycleRequest,
+    CycleResult, Effect, EffectGroup, EventSeq, LedgerEntry, OutboundMessage, TokenUsage,
 };
-use crate::ports::{CycleHost, EventLog};
+use crate::ports::{CompanyStore, CycleHost, EventLog};
 use crate::runtime::RuntimeBuilder;
 use crate::server::platform_auth::{PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier};
 use crate::server::router;
 use crate::server::webhook::{WebhookConfig, WebhookKind};
-use crate::store::FsEventLog;
+use crate::store::{FsCompanyStore, FsEventLog};
 use crate::{AppConfig, AppState};
 
 const PLATFORM_SECRET: &str = "plat-secret";
@@ -1652,4 +1652,138 @@ async fn a_successful_ownership_write_is_attempted_once() {
         .await
         .expect("writes first time");
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+// ── issue #1828 comment 3866132497: register before the status() read ──────
+
+/// A `CompanyStore` that fails its `fail_on`-th `load` call (1-indexed) and
+/// otherwise delegates to `inner` for everything, including every `save`.
+/// Models a transient read blip (a mongo hiccup) landing right after the
+/// write it would be reading back already succeeded.
+struct FlakyLoadStore {
+    inner: Arc<dyn CompanyStore>,
+    fail_on: usize,
+    load_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FlakyLoadStore {
+    fn new(inner: Arc<dyn CompanyStore>, fail_on: usize) -> Self {
+        Self {
+            inner,
+            fail_on,
+            load_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl CompanyStore for FlakyLoadStore {
+    async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+        let n = self
+            .load_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if n == self.fail_on {
+            return Err(crate::error::OpenCompanyError::Config(
+                "transient store read failure".into(),
+            ));
+        }
+        self.inner.load(id).await
+    }
+    async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+        self.inner.save(record).await
+    }
+    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+        self.inner.list().await
+    }
+    async fn append_ledger(&self, id: &CompanyId, entry: LedgerEntry) -> crate::Result<()> {
+        self.inner.append_ledger(id, entry).await
+    }
+}
+
+/// Builds a runtime the same way `provision`'s `builder.build()` does, over a
+/// store whose SECOND `load` call fails. The first `load` is `build()`'s own
+/// "is this a rebuild" check (empty registry here, so it finds nothing and
+/// proceeds as a fresh boot); the second is whichever caller reads next —
+/// in production that is `register_and_report_status`'s `runtime.status()`.
+/// `build()` itself must still succeed: its own durable `store.save` is
+/// unaffected, so by the time this returns the `CompanyRecord` is already on
+/// disk regardless of what a later read does.
+async fn build_runtime_with_status_read_failing(
+    home: &std::path::Path,
+    id: &CompanyId,
+) -> crate::runtime::CompanyRuntime {
+    let inner = Arc::new(FsCompanyStore::new(home.to_path_buf()));
+    let store = Arc::new(FlakyLoadStore::new(inner, 2));
+    let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
+    RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .with_store(store)
+        .build()
+        .await
+        .expect("build succeeds — its own save is unaffected by a later load failing")
+}
+
+/// The property this whole helper exists for: a `status()` failure right
+/// after a successful build must not leave the company unregistered.
+///
+/// Before the fix, `provision` read `status()` BEFORE calling
+/// `state.registry().insert(...)` — so on this exact failure, the runtime a
+/// successful `build()` had just constructed was discarded, never reaching
+/// the registry. The company's `CompanyRecord` was already durably saved
+/// (`build()`'s own `store.save`, unaffected by a later `load` failing), so a
+/// retry's duplicate-id check (`company_store.load(&id)` in `provision.rs`)
+/// would find that record and refuse with `company_exists` — forever, for an
+/// id nothing had ever registered and no request could ever create or reach
+/// again (issue #1828 comment 3866132497). This test calls the extracted
+/// `register_and_report_status` directly — the exact function `provision`
+/// calls — so it exercises the real ordering, not a re-implementation of it.
+#[tokio::test]
+async fn register_and_report_status_registers_even_when_the_status_read_fails() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let runtime = build_runtime_with_status_read_failing(&home, &id).await;
+
+    let state = platform_state(&home, None);
+    let result = super::register_and_report_status(&state, &id, "tenant-a", runtime).await;
+
+    assert!(
+        result.is_err(),
+        "the status() read was made to fail — the function must report that, not paper over it"
+    );
+    assert!(
+        state.registry().get(&id).is_some(),
+        "the company was fully built (its record is durably saved) before the failing \
+         status() read ran, so it must already be registered and addressable — a status() \
+         failure is a response-body problem, not proof the company doesn't exist"
+    );
+}
+
+/// The direct, HTTP-level consequence of the property above: a caller that
+/// gets an error back from a status()-read failure right after a successful
+/// build can still address the company through the ordinary status route —
+/// it is not the permanent, unrecoverable lockout a pre-fix retry would hit.
+#[tokio::test]
+async fn a_company_registered_despite_a_failed_status_read_is_addressable() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let runtime = build_runtime_with_status_read_failing(&home, &id).await;
+
+    let state = platform_state(&home, None);
+    let result = super::register_and_report_status(&state, &id, "tenant-a", runtime).await;
+    assert!(result.is_err());
+
+    let app = router(state);
+    let response = app
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "registered despite the failed status() read during provisioning, so a plain \
+         status lookup afterward must succeed"
+    );
 }
