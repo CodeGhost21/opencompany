@@ -1082,7 +1082,25 @@ export function AppShell({
             threadId: MAIN_THREAD_ID,
           },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-          ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+          // A DM's history is fetched under the teammate's **own id** — but
+          // that id is not always this DM's address. A manifest may declare a
+          // teammate whose id is a General spelling (`mint_agent_id` reserves
+          // `main` and `General`, but a blueprint is not something this console
+          // overrules), and `GET chat/history?desk=main` then returns the
+          // *folded General conversation*, not that teammate's transcript:
+          // `is_general_chat` has folded `""`, `main`, `General` and `general`
+          // into one conversation since issue #65. Naming `dm:<id>` as its
+          // channel therefore poured the company-wide line into that DM on
+          // every reload, and — before the resolver below was reordered — left
+          // `#general` itself with no hydration target at all.
+          //
+          // Resolved through `channelIdForThread` so the one rule that decides
+          // where a thread renders decides it here too (issue #1743). For every
+          // ordinary teammate that is exactly `dm:<id>`, unchanged.
+          ...roster.map((m) => ({
+            channelId: channelIdForThread(m.id, chatDesks, roster) ?? dmChannelId(m),
+            threadId: m.id,
+          })),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message

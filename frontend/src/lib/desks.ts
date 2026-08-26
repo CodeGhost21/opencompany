@@ -28,6 +28,23 @@ export function isGeneralChannel(id: string): boolean {
   return key === "" || key === MAIN_THREAD_ID || key === GENERAL_CHANNEL;
 }
 
+/**
+ * Does this desk answer to the company-wide line?
+ *
+ * Id **or** display name, mirroring the host's `resolve_desk_id`, which matches
+ * a desk by either — so a blueprint declaring `id = "ops", name = "General"`
+ * routes the built-in line at that desk exactly as one declaring
+ * `id = "general"` does. An id-only test rendered it as a second `#general` row
+ * beside the built-in channel while the host answered from the desk, which is
+ * the same duplicate this predicate exists to prevent.
+ *
+ * The host reserves both spellings against newly created desks; a manifest can
+ * still declare either, and that is the grandfathered case.
+ */
+export function deskClaimsGeneralChannel(desk: { id: string; name: string }): boolean {
+  return isGeneralChannel(desk.id) || isGeneralChannel(desk.name);
+}
+
 export interface Desk {
   id: string;
   /** The channel name, rendered after a `#`. Lowercase, no spaces. */

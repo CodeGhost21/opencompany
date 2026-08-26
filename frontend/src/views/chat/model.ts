@@ -3,7 +3,13 @@
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
 import { clearTaskCard, MAIN_THREAD_ID, type ChatMessage, type Reaction } from "@/lib/chat";
-import { defaultDesks, GENERAL_CHANNEL, isGeneralChannel, type Desk } from "@/lib/desks";
+import {
+  defaultDesks,
+  deskClaimsGeneralChannel,
+  GENERAL_CHANNEL,
+  isGeneralChannel,
+  type Desk,
+} from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 
 /**
@@ -143,7 +149,7 @@ export interface ChannelSection {
  * precisely how a message ends up somewhere nothing is listening.
  */
 function generalChannelId(desks: Desk[]): string {
-  return desks.find((d) => isGeneralChannel(d.id))?.id ?? MAIN_THREAD_ID;
+  return desks.find(deskClaimsGeneralChannel)?.id ?? MAIN_THREAD_ID;
 }
 
 /**
@@ -227,7 +233,7 @@ export function buildChannels(
   // come from a blueprint — and `defaultDesks()` no longer fabricates one, so
   // "a desk claims it" is now a fact about the company rather than about which
   // fallback set the console happened to be holding.
-  const claimed = desks.some((d) => isGeneralChannel(d.id));
+  const claimed = desks.some(deskClaimsGeneralChannel);
   const channels: Channel[] = [
     ...(claimed ? [] : [generalChannel(members)]),
     ...desks.map((d) => ({
@@ -379,8 +385,6 @@ export function channelIdForThread(
   members: TeamMember[],
 ): string | null {
   if (desks.some((d) => d.id === threadId)) return threadId;
-  const member = members.find((m) => m.id === threadId);
-  if (member) return dmChannelId(member);
   // The built-in `#general` channel is in no desk list, so it has to be
   // resolved by name (issue #1743). The host journals this one conversation
   // under four ids — `""`, `main`, `General`, `general` — and folds them on
@@ -388,14 +392,15 @@ export function channelIdForThread(
   // renders it. Without this, an approval raised on the company's main line
   // matched no channel and stayed stranded on the Approvals page.
   //
-  // **Last**, and in this order for a reason. `responder_for` resolves a chat
-  // key desk-first, then roster, and only then falls back to the orchestrator;
-  // this mirrors it, so the console never claims a thread belongs somewhere the
-  // host would answer from somewhere else. A desk that authored one of those
-  // ids keeps its own thread, and a teammate whose id *is* one keeps its DM —
-  // the host reserves both spellings against newly minted teammates
-  // (`RESERVED_AGENT_IDS`), but a manifest can still declare one, and a
-  // manifest is not a thing this console gets to overrule.
+  // **Before the roster**, and in this order for a reason. `responder_for`
+  // resolves a chat key desk-first, then the General fold, and only then the
+  // roster; this mirrors it, so the console never claims a thread belongs
+  // somewhere the host would answer from somewhere else. A teammate whose id
+  // *is* one of these spellings — which `mint_agent_id` reserves, though a
+  // manifest can still declare one — therefore keeps its DM under `dm:<id>`
+  // while the bare key stays the company's line, which is also what
+  // `GET chat/history?desk=main` returns: the folded General conversation, not
+  // that teammate's transcript.
   //
   // When a desk does own the line, every *other* spelling follows it there:
   // `buildChannels` renders no built-in channel beside such a desk, so
@@ -406,7 +411,8 @@ export function channelIdForThread(
   if (isGeneralChannel(threadId)) {
     return generalChannelId(desks);
   }
-  return null;
+  const member = members.find((m) => m.id === threadId);
+  return member ? dmChannelId(member) : null;
 }
 
 /**

@@ -4,7 +4,14 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { defaultDesks, GENERAL_CHANNEL, isGeneralChannel, type Desk } from "@/lib/desks";
+import { MAIN_THREAD_ID } from "@/lib/chat";
+import {
+  defaultDesks,
+  deskClaimsGeneralChannel,
+  GENERAL_CHANNEL,
+  isGeneralChannel,
+  type Desk,
+} from "@/lib/desks";
 import type { TeamMember } from "@/lib/team";
 import {
   buildChannels,
@@ -113,6 +120,44 @@ describe("the built-in #general channel", () => {
     expect(rail[0].purpose).toBe("The line");
   });
 
+  it("steps aside for a blueprint desk whose display *name* is General", () => {
+    // The host matches a desk key by id **or** case-insensitive name
+    // (`resolve_desk_id`), and reserves both spellings against newly created
+    // desks — so `[[group_chat]] id = "ops", name = "General"` is a real,
+    // grandfathered case. An id-only test rendered the built-in channel *and*
+    // this desk, whose own `#` name is also `general`: two rows, one host
+    // conversation. It is not cosmetic either — `everyone_desk` folds the
+    // console's `main` to `General`, `resolve_desk_id("General")` then selects
+    // `ops`, and `@everyone` on the line scopes to that desk's members.
+    const namedGeneral: Desk[] = [
+      { id: "ops", channel: "general", name: "General", blurb: "The line", members: ["ceo"] },
+      ...DESKS,
+    ];
+    const rail = channels(ROSTER, namedGeneral);
+    expect(rail.filter((c) => c.name === GENERAL_CHANNEL)).toHaveLength(1);
+    expect(rail.map((c) => c.id)).toEqual(["ops", "engineering", "growth"]);
+    // The desk survived, with its own membership — not the derived roster.
+    expect(rail[0].memberIds).toEqual(["ceo"]);
+    expect(rail[0].purpose).toBe("The line");
+    // And every General spelling resolves to it, since nothing else renders
+    // the line — the same rule an id-declared desk gets.
+    for (const spelling of ["", "main", "General", "general"]) {
+      expect(channelIdForThread(spelling, namedGeneral, ROSTER)).toBe("ops");
+    }
+  });
+
+  it("does not step aside for a desk merely named after something else", () => {
+    // The guard is the four spellings the host folds, not a fuzzy match: a
+    // desk called `Generals` or `Main Street` claims nothing.
+    const nearby: Desk[] = [
+      { id: "ops", channel: "generals", name: "Generals", blurb: "", members: ["ceo"] },
+      { id: "street", channel: "main-street", name: "Main Street", blurb: "", members: ["eng"] },
+    ];
+    const rail = channels(ROSTER, nearby);
+    expect(rail.map((c) => c.id)).toEqual([MAIN_THREAD_ID, "ops", "street"]);
+    expect(channelIdForThread("main", nearby, ROSTER)).toBe(MAIN_THREAD_ID);
+  });
+
   it("has no fabricated general desk left in the fallback set to be confused for one", () => {
     // The rule above is "a desk claims the line". That is only a fact about the
     // company if the console has stopped inventing such a desk itself.
@@ -182,15 +227,27 @@ describe("resolving a host thread to the general channel", () => {
     expect(channelIdForThread("eng", DESKS, ROSTER)).toBe("dm:eng");
   });
 
-  it("gives a teammate whose id is a General spelling its own DM", () => {
+  it("keeps the line for the company when a teammate's id is a General spelling", () => {
     // The host reserves `main` and `general` against newly minted teammates
-    // (`RESERVED_AGENT_IDS`), but a manifest can still declare one — and
-    // `responder_for` resolves a chat key desk-first, then roster, so such a
-    // teammate really does answer that thread. Folding it into `#general` would
-    // render its conversation as the company-wide line while the host answered
-    // as the teammate.
+    // (`RESERVED_AGENT_IDS`), but a manifest can still declare one. This used
+    // to answer `dm:main` — the roster was consulted before the fold — and the
+    // consequence was not cosmetic: `GET chat/history?desk=main` returns the
+    // **folded General conversation** (`is_general_chat` has folded `""`,
+    // `main`, `General` and `general` into one since issue #65), so the
+    // company-wide line was hydrated into that teammate's DM on every reload
+    // while `#general` itself resolved to no channel and got none.
+    //
+    // The host settles it: `responder_for` now answers the bare key as the
+    // orchestrator and routes the teammate's DM under `dm:<id>`, so the
+    // transcript and the responder finally name the same conversation. This
+    // mirrors that order — desk, then the General fold, then the roster.
     const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
-    expect(channelIdForThread("main", DESKS, withMain)).toBe("dm:main");
+    expect(channelIdForThread("main", DESKS, withMain)).toBe("main");
+    for (const spelling of ["", "General", "general", "  MAIN  "]) {
+      expect(channelIdForThread(spelling, DESKS, withMain)).toBe("main");
+    }
+    // Every other teammate's DM is untouched — this moved one key, not the rule.
+    expect(channelIdForThread("eng", DESKS, withMain)).toBe("dm:eng");
     // A desk still outranks both, exactly as it does on the host.
     const deskMain: Desk[] = [
       { id: "main", channel: "front-office", name: "Front office", blurb: "", members: ["eng"] },
@@ -225,6 +282,26 @@ describe("resolving a host thread to the general channel", () => {
     for (const spelling of ["", "main", "General", "general"]) {
       expect(channelIdForThread(spelling, authoredMain, ROSTER)).toBe("main");
     }
+  });
+});
+
+describe("deskClaimsGeneralChannel", () => {
+  // Mirrors the host's `resolve_desk_id`, which matches a desk by id **or** by
+  // case-insensitive name. Testing the id alone was the gap: the host reserves
+  // both spellings when a desk is created, so a desk answering to `General` by
+  // name is exactly as real, and exactly as grandfathered, as one answering by
+  // id.
+  it("matches on the id or the display name", () => {
+    expect(deskClaimsGeneralChannel({ id: "general", name: "Ops lead" })).toBe(true);
+    expect(deskClaimsGeneralChannel({ id: "main", name: "Front office" })).toBe(true);
+    expect(deskClaimsGeneralChannel({ id: "ops", name: "General" })).toBe(true);
+    expect(deskClaimsGeneralChannel({ id: "ops", name: "MAIN" })).toBe(true);
+  });
+
+  it("matches nothing else", () => {
+    expect(deskClaimsGeneralChannel({ id: "engineering", name: "Engineering" })).toBe(false);
+    expect(deskClaimsGeneralChannel({ id: "ops", name: "Generals" })).toBe(false);
+    expect(deskClaimsGeneralChannel({ id: "street", name: "Main Street" })).toBe(false);
   });
 });
 
@@ -327,6 +404,21 @@ describe("the shell maps the main line to #general, not to the first desk", () =
   it("names #general as a rehydration target, since it is in no desk list", () => {
     expect(shell).toContain(
       "channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,",
+    );
+  });
+
+  it("hydrates a DM from a thread id that actually belongs to that DM", () => {
+    // A DM's history is fetched under the teammate's own id. For a teammate
+    // whose id is a General spelling that id is *not* the DM's address — the
+    // host folds it, and `GET chat/history?desk=main` answers with the whole
+    // company-wide conversation. Pinned through `channelIdForThread` so one
+    // rule decides where a thread's history lands, rather than a second
+    // literal here that can disagree with the rail.
+    expect(shell).toContain(
+      "...roster.map((m) => ({ channelId: channelIdForThread(m.id, chatDesks, roster) ?? dmChannelId(m), threadId: m.id, })),",
+    );
+    expect(shell).not.toContain(
+      "...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),",
     );
   });
 });
