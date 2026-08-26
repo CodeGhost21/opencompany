@@ -129,6 +129,35 @@ describe("OpenRouter tier model pickers", () => {
     expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).toBeNull();
   });
 
+  it("clears a catalog-picked id from the tier field once the form would save proxied", async () => {
+    // Mirrors what a key-clear leaves behind: a company stores a raw
+    // `<author>/<model>` id (exactly what the catalog select writes) while no
+    // key is configured. `model_for_tier` honours a tier override verbatim on
+    // *both* the direct and proxied paths, so this id would ride straight to
+    // the platform proxy, which only resolves an abstract tier name (or its
+    // own disabled-by-default `openrouter/<author>/<model>` passthrough) —
+    // the proxy rejects it. The free-text field that reappears here must not
+    // keep offering that id back to Save; a tier id the operator typed by
+    // hand (not present in the catalog) is unaffected.
+    const { client } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "anthropic/claude-sonnet-5", "reasoning-v1": "reasoning-v1" },
+        false,
+      ),
+      [{ id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" }],
+    );
+
+    await mount(client);
+
+    expect(container.querySelector('[data-testid="inference-model-catalog-proxied"]')).not.toBeNull();
+    expect(container.querySelector("input#inference-model-chat-v1")).toHaveProperty("value", "");
+    expect(container.querySelector("input#inference-model-reasoning-v1")).toHaveProperty(
+      "value",
+      "reasoning-v1",
+    );
+  });
+
   it("keeps free-text inputs for non-OpenRouter providers without fetching the registry", async () => {
     const { client, calls } = clientFor(
       status("openai_compatible", { "chat-v1": "private/model" }),

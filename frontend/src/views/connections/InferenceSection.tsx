@@ -322,6 +322,60 @@ export function InferenceSection({
     };
   }, [client, company, provider]);
 
+  /**
+   * Whether saving right now would ride the platform's subscription proxy
+   * rather than go straight to OpenRouter with a tenant key.
+   *
+   * The proxy only resolves an abstract tier (or its own `openrouter/…`
+   * passthrough form, off by default) — see `model_for_tier` in
+   * `src/company/inference.rs`. The catalog picker below stores the
+   * registry's raw `<author>/<model>` id verbatim, which is exactly the form
+   * the proxy rejects. `key` is write-only and never comes back from the
+   * host, so "no key typed" only means proxied when the stored config is not
+   * already a direct, keyed OpenRouter connection.
+   *
+   * Hoisted above the early return below so the clear-on-transition effect
+   * that follows can depend on it — hooks cannot come after a conditional
+   * return.
+   */
+  const wouldSaveProxied =
+    key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
+
+  /**
+   * Drop a catalog-picked tier override the moment the form would save
+   * proxied (issue #1838 follow-up).
+   *
+   * A keyless company can type a key, pick a model from the catalog select —
+   * which stores the registry's raw `<author>/<model>` id verbatim — and then
+   * clear the key again before Save. `wouldSaveProxied` flips back to `true`
+   * and the free-text input reappears, but nothing cleared the value it
+   * inherited from the select, so Save still persists that raw id as an
+   * override. `model_for_tier` honours overrides verbatim on *both* paths, so
+   * the proxy receives a model namespace it rejects.
+   *
+   * Only tiers whose current value is actually present in the loaded catalog
+   * are touched — a tier id the operator typed by hand (or the proxy's own
+   * `openrouter/<author>/<model>` passthrough form) is left alone, mirroring
+   * `model_for_tier`'s "an operator's own entry is honoured verbatim"
+   * contract rather than wiping the field outright.
+   */
+  useEffect(() => {
+    if (!wouldSaveProxied || modelCatalog.kind !== "ready") return;
+    const catalogIds = new Set(modelCatalog.models.map((m) => m.id));
+    setModels((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const tier of TIERS) {
+        const value = next[tier];
+        if (value && catalogIds.has(value)) {
+          delete next[tier];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [wouldSaveProxied, modelCatalog]);
+
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
     const preset = presetFor(next);
@@ -532,20 +586,6 @@ export function InferenceSection({
   if (load === "unavailable") return null;
 
   const modelRows = status ? Object.entries(status.models) : [];
-  /**
-   * Whether saving right now would ride the platform's subscription proxy
-   * rather than go straight to OpenRouter with a tenant key.
-   *
-   * The proxy only resolves an abstract tier (or its own `openrouter/…`
-   * passthrough form, off by default) — see `model_for_tier` in
-   * `src/company/inference.rs`. The catalog picker below stores the
-   * registry's raw `<author>/<model>` id verbatim, which is exactly the form
-   * the proxy rejects. `key` is write-only and never comes back from the
-   * host, so "no key typed" only means proxied when the stored config is not
-   * already a direct, keyed OpenRouter connection.
-   */
-  const wouldSaveProxied =
-    key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2">
