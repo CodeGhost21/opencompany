@@ -32,29 +32,29 @@ pub(crate) struct InferenceModel {
 
 /// Parsed leniently: `data` is decoded as raw JSON values first, so one
 /// malformed entry (a non-string `id`, a string-valued `context_length`, …)
-/// only drops that entry in [`parse_models`] instead of failing the whole
-/// response and hiding every valid model the endpoint actually returned.
+/// only drops that entry — or, for a malformed *optional* field, just that
+/// field — in [`parse_models`] instead of failing the whole response and
+/// hiding every valid model the endpoint actually returned.
 #[derive(Deserialize)]
 struct RegistryResponse {
     #[serde(default)]
     data: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-struct RegistryModel {
-    id: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    context_length: Option<u64>,
-}
-
 /// Parse every concrete model in a standard OpenAI-compatible catalog, in the
 /// order the provider listed them.
 ///
-/// Each `data` entry is decoded on its own so a single malformed record (bad
-/// field type, missing `id`, …) is skipped rather than rejecting entries this
-/// same response otherwise reported cleanly.
+/// Each `data` entry is read field-by-field rather than decoded in one shot
+/// into a struct. `id` is the only field an entry cannot survive without —
+/// everything downstream keys the tier mapping on it — so a missing or
+/// non-string `id` drops the entry. `name` and `context_length` are read
+/// leniently instead: a malformed optional field (a string-valued
+/// `context_length`, say) is treated as absent rather than failing, so it
+/// costs the entry that one field, not the id underneath it (issue #1838
+/// follow-up — decoding the whole entry into a struct in one shot used to let
+/// a bad *optional* field discard an otherwise-good `id` right along with it,
+/// same shape as the whole-response failure `RegistryResponse` above already
+/// guards against, one level deeper).
 ///
 /// Order is preserved rather than sorted here: `src/server/setup.rs`'s probe
 /// path takes `.next()` off this list to pick a local/custom endpoint's
@@ -67,20 +67,25 @@ fn parse_models(payload: RegistryResponse) -> Vec<InferenceModel> {
     let mut seen = std::collections::HashSet::new();
     let mut models = Vec::new();
     for entry in payload.data {
-        let Ok(model) = serde_json::from_value::<RegistryModel>(entry) else {
+        let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        let id = model.id.trim();
+        let id = id.trim();
         if id.is_empty() || !seen.insert(id.to_string()) {
             continue;
         }
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        let context_length = entry
+            .get("context_length")
+            .and_then(serde_json::Value::as_u64);
         models.push(InferenceModel {
             id: id.to_string(),
-            name: model
-                .name
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty()),
-            context_length: model.context_length,
+            name,
+            context_length,
         });
     }
     models
@@ -241,7 +246,6 @@ mod tests {
             r#"{"data": [
                 {"id": "vendor/good-one"},
                 {"id": 12345},
-                {"id": "vendor/good-two", "context_length": "not-a-number"},
                 {"id": "vendor/good-three"}
             ]}"#,
         )
@@ -251,6 +255,46 @@ mod tests {
 
         let ids: Vec<&str> = parsed.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["vendor/good-one", "vendor/good-three"]);
+    }
+
+    /// Regression for a P2 review finding on #1838's follow-up round: an
+    /// entry whose `id` is fine but whose *optional* `context_length` is not
+    /// used to lose the id right along with it. The old parser decoded each
+    /// `data` entry into `RegistryModel` in one shot, and serde fails that
+    /// whole decode on a type-mismatched field even when it is
+    /// `Option<u64>` — a string-valued `context_length` isn't "field
+    /// absent", it's "field present with the wrong type", and `Option`
+    /// deserialization does not paper over that. So this id used to vanish
+    /// from the catalog entirely instead of just losing its context length.
+    #[test]
+    fn catalog_parser_preserves_a_valid_id_with_malformed_optional_metadata() {
+        let payload: RegistryResponse = serde_json::from_str(
+            r#"{"data": [
+                {"id": "vendor/good-one"},
+                {"id": "vendor/good-two", "context_length": "not-a-number"},
+                {"id": "vendor/good-three", "name": 42}
+            ]}"#,
+        )
+        .expect("RegistryResponse itself must still deserialize leniently");
+
+        let parsed = parse_models(payload);
+
+        let ids: Vec<&str> = parsed.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["vendor/good-one", "vendor/good-two", "vendor/good-three"],
+            "a bad optional field must not discard the id sitting next to it"
+        );
+        let good_two = parsed
+            .iter()
+            .find(|m| m.id == "vendor/good-two")
+            .expect("vendor/good-two must survive");
+        assert_eq!(good_two.context_length, None);
+        let good_three = parsed
+            .iter()
+            .find(|m| m.id == "vendor/good-three")
+            .expect("vendor/good-three must survive");
+        assert_eq!(good_three.name, None);
     }
 
     #[test]
