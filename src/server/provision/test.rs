@@ -206,6 +206,51 @@ async fn provisioning_a_none_mode_company_on_a_routable_bind_is_refused() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// The error above tells the caller to fix the manifest (`email` or `wallet`)
+/// and retry. Before this durable-store duplicate check existed,
+/// `RuntimeBuilder::build` had already saved a `CompanyRecord` for `id` when
+/// the refusal fired, so that recovery hit `company_exists` forever — the id
+/// was reserved by a provision that never succeeded (issue #1828 comment
+/// 3866012835). The auth-mode check now runs before `id` is even resolved, so
+/// a rejected `none`-mode request must never reach the store at all, and the
+/// exact same id must provision cleanly right after.
+#[tokio::test]
+async fn retrying_after_a_none_mode_refusal_with_a_valid_mode_succeeds() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = routable_platform_state(&home);
+    let app = router(state);
+
+    let rejected =
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[users]\nmode = \"none\"\n";
+    let response = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), rejected))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["code"], "auth_mode_none_not_allowed");
+
+    // Same company name, so the same id — corrected to a mode with sign-in.
+    let corrected =
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[users]\nmode = \"email\"\n";
+    let response = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), corrected))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "retry with a valid auth mode must provision the id the rejected \
+         request never should have reserved, got: {body:?}"
+    );
+    assert_eq!(body["id"], "acme");
+}
+
 /// Builds a JSON-envelope provision request naming an explicit id.
 fn provision_req_json(token: Option<&str>, toml: &str, id: &str) -> Request<Body> {
     let body = serde_json::json!({ "manifest_toml": toml, "id": id }).to_string();

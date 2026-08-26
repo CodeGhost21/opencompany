@@ -17,6 +17,7 @@
 //! [`WebhookSink`](crate::server::webhook::WebhookSink); the default build
 //! records deliveries in memory.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
@@ -30,6 +31,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::AppState;
+use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{Actor, ActorKind, CompanyId};
@@ -175,6 +177,39 @@ async fn provision(
             problems,
         })
         .into_response();
+    }
+
+    // The same refusal boot applies to `serve --company`: a company with no
+    // sign-in on a host anyone can reach is an unauthenticated admin console,
+    // not a desktop app. A tenant's manifest can request `[users].mode =
+    // "none"`, but this host will not silently serve it wherever it binds —
+    // it is refused here exactly as it would be refused at boot.
+    //
+    // Checked here, before `id` is even resolved, rather than after
+    // `builder.build()` returns: `RuntimeBuilder::build` persists the
+    // `CompanyRecord` as one of its last steps and returns success, so a
+    // post-build refusal still leaves that record durably saved. The
+    // duplicate-id check further up treats any durable record as a live
+    // occupant of `id` — so a caller who fixed the manifest (switched to
+    // `email` or `wallet`) and retried the exact recovery this error message
+    // recommends got `company_exists` forever, for an id that was never
+    // actually provisioned (issue #1828 comment 3866012835). Resolving the
+    // effective auth mode from the manifest and the host override — the same
+    // two inputs `RuntimeBuilder::build` combines at
+    // `self.auth_mode_override.unwrap_or_else(...)` — lets this reproduce
+    // that decision without paying for the build, so a rejected request never
+    // reserves the id in the first place.
+    let effective_auth_mode = state
+        .auth_mode_override()
+        .unwrap_or_else(|| AuthMode::from_str(&manifest.users.mode).unwrap_or_default());
+    if !effective_auth_mode.has_login() && !state.config().is_local_only() {
+        return envelope(
+            StatusCode::BAD_REQUEST,
+            "auth_mode_none_not_allowed",
+            "this manifest sets `[users].mode = \"none\"`, which has no sign-in, but this \
+             host binds a routable address and would serve it to anyone who can reach it. \
+             Choose `email` or `wallet`, or bind loopback.",
+        );
     }
 
     let id = match explicit_id {
@@ -361,21 +396,13 @@ async fn provision(
         }
     };
 
-    // The same refusal boot applies to `serve --company`: a company with no
-    // sign-in on a host anyone can reach is an unauthenticated admin console,
-    // not a desktop app. A tenant's manifest can request `[users].mode =
-    // "none"`, but this host will not silently serve it wherever it binds —
-    // it is refused here exactly as it would be refused at boot.
-    if !runtime.auth_mode().has_login() && !state.config().is_local_only() {
-        return envelope(
-            StatusCode::BAD_REQUEST,
-            "auth_mode_none_not_allowed",
-            "this manifest sets `[users].mode = \"none\"`, which has no sign-in, but this \
-             host binds a routable address and would serve it to anyone who can reach it. \
-             Choose `email` or `wallet`, or bind loopback.",
-        );
-    }
-
+    // The none-mode-on-a-routable-bind refusal is checked earlier, before `id`
+    // is resolved and before anything is persisted — see the comment there.
+    // By construction `runtime.auth_mode()` cannot disagree with that check:
+    // `RuntimeBuilder::build` resolves it from the exact same two inputs
+    // (`self.auth_mode_override.unwrap_or_else(...)`), read from the same
+    // `manifest` and the same host override, with no request-serialized
+    // mutation of either in between.
     let status = match runtime.status().await {
         Ok(status) => status,
         Err(err) => return ApiError(err).into_response(),
