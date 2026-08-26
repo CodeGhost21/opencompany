@@ -165,6 +165,27 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).not.toContain("A step errored");
   });
 
+  // Codex review on #1821 (second pass): the previous fix above stopped
+  // claiming a step errored when the run failed with no node at fault, but
+  // left the remedy — "correct the workflow" — unconditional. `workflow_outcome.rs`'s
+  // `INTERRUPTED_BY_RESTART` is exactly this case and is deliberately worded
+  // as a host fact, not a workflow fault ("nothing about the graph went
+  // wrong, the process holding it went away... an operator reading this
+  // should go looking at the deployment, not at their nodes"). Telling that
+  // operator to correct the workflow sends them to fix something that was
+  // never broken.
+  it("does not unconditionally tell the operator to correct the workflow", async () => {
+    await renderHistory(failedRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).toContain("failed");
+    expect(title).not.toContain("correct the workflow, and run it again");
+    // The hedge names a case where the failure isn't the workflow's fault.
+    expect(title).toContain("host restart");
+  });
+
   // Codex review on #1821: a blocked node whose gated call could not be
   // queued for approval at all (`unparkable`, not `stranded`) never gets a
   // card in Approvals — `BlockedNodeApprovals`/the row's own body text
