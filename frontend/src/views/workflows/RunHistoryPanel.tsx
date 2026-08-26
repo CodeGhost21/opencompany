@@ -780,7 +780,19 @@ export function RunHistoryRow({
                     // fixes. This sentence still said "correct the workflow"
                     // unconditionally, contradicting the definition two rounds ago
                     // fixed to say the opposite for this same run.
-                    "Review the error details — nothing in the graph got the chance to run, so this may be a host or capability problem rather than the workflow. Run it again once you've ruled that out."}
+                    //
+                    // Codex review on #1821 (twelfth pass): `nodes` being empty is
+                    // not proof nothing ran, for the same reason the sibling arm
+                    // above was fixed in the tenth pass — `WorkflowNodeFinished` is
+                    // appended best-effort (`runner.rs`), so the FIRST failing
+                    // node's own finish row can silently fail to journal while
+                    // `run.error` still lands, leaving `nodes` empty even though
+                    // that node executed. Naming "nothing in the graph got the
+                    // chance to run" as the reading overclaimed what an empty trail
+                    // can prove, the same overclaim the tenth pass removed from the
+                    // `nodes.length > 0` arm. This now says only that the record may
+                    // be incomplete, matching that arm's epistemic stance.
+                    "Review the error details — no step is recorded as having completed, but an empty trail here isn't proof nothing ran: a step's own record can fail to save even when it executed. Read the error before deciding whether this is a host/capability problem or the workflow itself."}
             </p>
             <details className="mt-1">
               <summary className="cursor-pointer text-2xs text-muted-foreground">

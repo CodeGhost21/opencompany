@@ -472,13 +472,25 @@ describe("the failed-run remedy matches whether a node was actually at fault", (
   // rounds ago, tested above) already says is "rather than anything wrong
   // with the workflow". This paragraph still told the operator to correct the
   // workflow unconditionally.
-  it("does not tell the operator to correct the workflow when no node was at fault", async () => {
+  //
+  // Codex review on #1821 (twelfth pass): "nothing in the graph got the
+  // chance to run" itself overclaimed — `WorkflowNodeFinished` is appended
+  // best-effort, so an empty `nodes` can mean a node's own finish row simply
+  // failed to journal, not that execution never began (the same fact the
+  // tenth-pass fix already established for the `nodes.length > 0` sibling
+  // arm). The assertion below on the removed phrase is the regression proof:
+  // it fails against the pre-fix string, which asserted exactly that.
+  it("does not tell the operator to correct the workflow, and does not claim nothing ran, when no node was at fault", async () => {
     await renderHistory(failedRun());
     const row = container.querySelector('[data-testid="workflow-run-row"]');
     expect(row?.textContent).not.toContain(
       "correct the workflow and run it again",
     );
-    expect(row?.textContent).toContain("may be a host or capability problem");
+    expect(row?.textContent).not.toContain(
+      "nothing in the graph got the chance to run",
+    );
+    expect(row?.textContent).toContain("isn't proof nothing ran");
+    expect(row?.textContent).toContain("host/capability problem");
   });
 
   it("offers Fix with copilot for a node-level failure", async () => {
@@ -569,12 +581,20 @@ describe("the failed-run remedy distinguishes an interrupted run from one that n
     expect(row?.textContent).toContain("may not be fully recorded here");
   });
 
-  it("still says nothing ran for a run that failed with no nodes at all", async () => {
+  // Codex review on #1821 (twelfth pass): this test's own premise was the
+  // overclaim — an empty `nodes` is not proof "nothing ran", it can equally
+  // mean the FIRST node's own `WorkflowNodeFinished` silently failed to
+  // journal (the exact best-effort gap the tenth-pass comment above already
+  // names). The `nodes.length === 0` arm now hedges the same way the
+  // `nodes.length > 0` arm above already does, instead of asserting nothing
+  // ran.
+  it("hedges rather than asserting nothing ran for a run that failed with no nodes recorded", async () => {
     await renderHistory(failedRun());
     const row = container.querySelector('[data-testid="workflow-run-row"]');
-    expect(row?.textContent).toContain(
+    expect(row?.textContent).not.toContain(
       "nothing in the graph got the chance to run",
     );
+    expect(row?.textContent).toContain("isn't proof nothing ran");
   });
 });
 
