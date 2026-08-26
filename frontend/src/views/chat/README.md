@@ -72,13 +72,38 @@ whose manifest names a `[[group_chat]]` with a General id — `is_general_channe
 is guarded on the *manifest*, so that desk keeps its lead, its writes and its
 routing, and `responder_for` answers there as it always did. Only the manifest:
 an operator-created overlay desk that took one of those ids before they were
-reserved is refused every desk write and is not listed by `GET .../desks` at
-all, so it never reaches this rail and the built-in channel owns the line. `buildChannels`
+reserved is refused every desk write, is not listed by `GET .../desks`, and —
+since `CompanyRecord::resolve_desk_id` declines to search the overlay list for a
+General key at all — no longer *routes* under one either, so it never reaches
+this rail and the built-in channel owns the line. `buildChannels`
 follows the same rule: the built-in channel is added **only when no desk claims
 a General spelling**, and no desk is ever filtered out of the rail. The two
 affordances above are decided by whether the desk list holds the active id
 (`activeIsDesk`), not by how the id is spelled, so a grandfathered desk keeps
 its lead badge and its org-chart link while `#general` proper still has neither.
+
+**A claim is by id *or* by display name**, because the host's own
+`resolve_desk_id` matches either — `deskClaimsGeneralChannel` in `lib/desks.ts`
+is that predicate, and `generalChannelId` and `buildChannels` both ask it so
+there is one answer to "which desk owns the line". A blueprint declaring
+`id = "ops", name = "General"` is as grandfathered as one declaring
+`id = "general"`: `deskFromDto` slugs that name into `channel: "general"`, so an
+id-only test rendered the built-in channel beside a desk row spelled the same
+way, over one host conversation. It is not cosmetic either — `everyone_desk`
+folds the console's `main` to `General` and `resolve_desk_id("General")` then
+selects `ops`, so `@everyone` on the built-in row would have expanded to that
+desk's members while the row beside it routed by `ops`.
+
+**A teammate whose id is a General spelling does not take the line with it.**
+`mint_agent_id` reserves `main` and `General`, but a manifest can still declare
+one, and `GET chat/history?desk=main` answers with the folded General
+conversation rather than that teammate's transcript — the fold is a fact about
+the address, not about who was addressed. So the bare key is the company's line
+(`responder_for` answers it as the orchestrator) and the teammate keeps its DM
+under `dm:<id>`. `channelIdForThread` mirrors that order — desk, then the
+General fold, then the roster — and `app-shell.tsx` resolves each DM's
+rehydration target through it, so a DM is only ever hydrated from a thread id
+that belongs to it.
 
 This is also why `defaultDesks()` no longer carries a `main` row. While it did,
 a console-invented desk and a blueprint-declared one were indistinguishable

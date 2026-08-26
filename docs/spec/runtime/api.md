@@ -120,6 +120,15 @@ unchanged. Deliberately not "every agent sees it": a message that woke the whole
 roster would cost one turn per teammate for a line that may be a greeting (cf.
 issue #1725), and the conservative default is the one this host already had.
 
+That holds even when a **teammate** is called `main` or `General`. `mint_agent_id`
+reserves both, but a manifest can still declare one, and `responder_for` used to
+match the roster on the bare key — so that teammate answered every unaddressed
+message while `GET …/chat/history?desk=main` returned the *folded General
+conversation* rather than its transcript: the responder and the transcript named
+different conversations. The fold is a fact about the address, not about who was
+addressed, so the bare key is the company's line and the teammate keeps its DM
+under `dm:<id>`, which `responder_for` still routes to it.
+
 **Every desk write aimed at it is refused with a reason** — `409` and a sentence,
 never a bare `404`, because "this id is reserved" and "no such desk" are
 different facts the caller needs to tell apart:
@@ -153,9 +162,21 @@ all. Such a desk is therefore:
 - **absent from `GET …/desks`**, so no desk-shaped surface offers it a control
   that the writes above would refuse;
 - **refused every write in the table**, with the channel's reason;
-- **not selected by `@everyone`** on the company-wide line, which keeps
-  expanding to the whole roster (`runtime::mentions`), even though
-  `resolve_desk_id` can still match it by name.
+- **not resolved by a General key at all.** `CompanyRecord::resolve_desk_id`
+  searches the manifest desks first and then the overlay ones, and it declines
+  the overlay half when the key asked for is a General spelling. Hiding the desk
+  from `GET …/desks` was not enough on its own: `desk_lead` → `responder_for`
+  resolves through that function, so such a desk's lead would have answered the
+  company-wide line while the console rendered `#general` and named the
+  orchestrator. One choke point rather than a guard per caller, so
+  `@everyone` (`runtime::mentions`), the responder, and `delegate_to_desk`
+  grounding (`delegation_tools::desk_ids`, which omits an id nothing can
+  resolve) all follow without their own special case.
+
+  Keyed on the **key**, not on the desk: the same desk still resolves under its
+  own non-General id, keeps its members, and still routes there. This narrows
+  one question; it does not retire a desk. A desk merely *named* `General` is
+  likewise still reachable by its own id.
 
 Nothing is deleted to achieve that. Its transcript was already folded into
 `#general` by `is_general_chat`, and that channel's membership is the whole
