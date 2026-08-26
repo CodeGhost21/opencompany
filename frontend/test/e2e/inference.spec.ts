@@ -151,3 +151,47 @@ test("changing provider asks before replacing a typed endpoint or model", async 
   await expect(page.locator("#inference-base-url")).toHaveValue("https://models.example.test/v1");
   await expect(page.locator("#inference-model-chat-v1")).toHaveValue("operator-draft");
 });
+
+test("OpenRouter models are selected from the registry and persist through reload", async ({
+  page,
+}) => {
+  await page.route("**/inference/models", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
+        { id: "provider/catalog-reasoning", name: "Catalog Reasoning" },
+      ]),
+    });
+  });
+  await openConnections(page);
+  await expect(page.locator("#inference-provider")).toBeVisible({ timeout: 30_000 });
+
+  await pickProvider(page, "OpenRouter");
+  const chat = page.getByTestId("inference-model-select-chat-v1");
+  await expect(chat).toBeEnabled();
+  await chat.click();
+  await page.getByRole("option", { name: /Catalog Chat/ }).click();
+  await page.getByTestId("inference-save").click();
+  await expect(
+    page.getByText(/Inference updated\.|Inference saved — restart the company/),
+  ).toBeVisible({ timeout: 30_000 });
+
+  const saved = await page.request.get("/api/v1/company/inference");
+  expect(saved.ok()).toBeTruthy();
+  expect((await saved.json()).models["chat-v1"]).toBe("provider/catalog-chat");
+
+  await page.reload();
+  await expect(page.getByTestId("inference-model-select-chat-v1")).toContainText("Catalog Chat", {
+    timeout: 30_000,
+  });
+
+  await pickProvider(page, "Custom (OpenAI-compatible)");
+  await expect(page.locator("input#inference-model-chat-v1")).toBeVisible();
+
+  // Leave the shared E2E company on its committed default for later specs.
+  await page.getByRole("button", { name: "Reset to default" }).click();
+  await expect(
+    page.getByText("Reverted to the committed manifest (or managed) configuration."),
+  ).toBeVisible({ timeout: 30_000 });
+});

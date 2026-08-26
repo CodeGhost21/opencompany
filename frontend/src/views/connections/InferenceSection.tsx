@@ -5,11 +5,13 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getInferenceStatus,
+  listInferenceModels,
   restartInference,
   revertInference,
   setInference,
   testInference,
   type InferenceMutation,
+  type InferenceModel,
   type InferenceProvider,
   type InferenceStatus,
   type UsageMetering,
@@ -157,6 +159,27 @@ type TestState =
   | { kind: "ok"; note: string }
   | { kind: "error"; message: string };
 
+type ModelCatalogState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; models: InferenceModel[] }
+  | { kind: "empty" }
+  | { kind: "error" };
+
+/** Keep a stored custom id selectable even after the registry no longer lists it. */
+function optionsForTier(catalog: InferenceModel[], current: string): InferenceModel[] {
+  if (!current || catalog.some((model) => model.id === current)) return catalog;
+  return [{ id: current, name: "Current custom model" }, ...catalog];
+}
+
+function modelLabel(model: InferenceModel): string {
+  return model.name ? `${model.name} — ${model.id}` : model.id;
+}
+
+function modelItems(models: InferenceModel[]): Record<string, string> {
+  return Object.fromEntries(models.map((model) => [model.id, modelLabel(model)]));
+}
+
 /**
  * Bring-Your-Own-Key inference (issue #56). Shows the company's effective
  * provider (with a source badge + tier→model rows + a "key set" indicator), a
@@ -191,6 +214,7 @@ export function InferenceSection({
     "save" | "reset" | "test" | "removeKey" | "restart" | null
   >(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogState>({ kind: "idle" });
 
   // Switch form.
   const [provider, setProvider] = useState<InferenceProvider>("managed");
@@ -273,6 +297,30 @@ export function InferenceSection({
     setLoad("loading");
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let current = true;
+    if (provider !== "openrouter") {
+      setModelCatalog({ kind: "idle" });
+      return () => {
+        current = false;
+      };
+    }
+
+    setModelCatalog({ kind: "loading" });
+    void listInferenceModels(client, company)
+      .then((catalog) => {
+        if (!current) return;
+        setModelCatalog(catalog.length ? { kind: "ready", models: catalog } : { kind: "empty" });
+      })
+      .catch(() => {
+        if (current) setModelCatalog({ kind: "error" });
+      });
+
+    return () => {
+      current = false;
+    };
+  }, [client, company, provider]);
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
@@ -702,20 +750,90 @@ export function InferenceSection({
                 </div>
 
                 {provider !== "managed" && (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {TIERS.map((tier) => (
-                      <div key={tier} className="space-y-1">
-                        <Label htmlFor={`inference-model-${tier}`} className="text-xs">
-                          {tier}
-                        </Label>
-                        <Input
-                          id={`inference-model-${tier}`}
-                          value={models[tier] ?? ""}
-                          placeholder="provider model id"
-                          onChange={(e) => setModel(tier, e.target.value)}
-                        />
-                      </div>
-                    ))}
+                  <div className="space-y-2">
+                    {provider === "openrouter" && modelCatalog.kind === "error" && (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-model-catalog-fallback"
+                      >
+                        OpenRouter&apos;s model list could not be loaded. Enter model ids directly.
+                      </p>
+                    )}
+                    {provider === "openrouter" && modelCatalog.kind === "empty" && (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-model-catalog-empty"
+                      >
+                        OpenRouter returned no models. Enter model ids directly.
+                      </p>
+                    )}
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {TIERS.map((tier) => {
+                        const value = models[tier] ?? "";
+                        const useFreeText =
+                          provider !== "openrouter" ||
+                          modelCatalog.kind === "error" ||
+                          modelCatalog.kind === "empty";
+                        const options =
+                          modelCatalog.kind === "ready"
+                            ? optionsForTier(modelCatalog.models, value)
+                            : value
+                              ? [{ id: value }]
+                              : [];
+
+                        return (
+                          <div key={tier} className="space-y-1">
+                            <Label htmlFor={`inference-model-${tier}`} className="text-xs">
+                              {tier}
+                            </Label>
+                            {useFreeText ? (
+                              <Input
+                                id={`inference-model-${tier}`}
+                                value={value}
+                                placeholder="provider model id"
+                                onChange={(e) => setModel(tier, e.target.value)}
+                              />
+                            ) : (
+                              <Select
+                                value={value || null}
+                                disabled={modelCatalog.kind !== "ready"}
+                                onValueChange={(next) => next && setModel(tier, String(next))}
+                                items={modelItems(options)}
+                              >
+                                <SelectTrigger
+                                  id={`inference-model-${tier}`}
+                                  className="w-full"
+                                  data-testid={`inference-model-select-${tier}`}
+                                >
+                                  <SelectValue
+                                    placeholder={
+                                      modelCatalog.kind === "loading"
+                                        ? "Loading OpenRouter models…"
+                                        : "Choose a model"
+                                    }
+                                  />
+                                  {modelCatalog.kind === "loading" && (
+                                    <Loader2 className="size-3.5 animate-spin" />
+                                  )}
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {options.map((model) => (
+                                    <SelectItem key={model.id} value={model.id}>
+                                      <span>{model.name ?? model.id}</span>
+                                      {model.name && (
+                                        <span className="font-mono text-xs text-muted-foreground">
+                                          {model.id}
+                                        </span>
+                                      )}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
 
