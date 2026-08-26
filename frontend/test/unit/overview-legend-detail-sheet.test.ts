@@ -95,8 +95,37 @@ describe("the graph legend and the detail panel (#1664)", () => {
     // …and cannot grow past the band that leaves: at its real cap the legend is
     // seven wrapped kinds plus an expanded caveat, and the desk selector is
     // directly above.
-    expect(classes).toContain("max-[820px]:max-h-[26%]");
+    //
+    // Two terms, not one (review of PR #1752). 26% of the card is the share the
+    // legend may take; `calc(45%-6rem)` is what is genuinely left once the desk
+    // selector has stood in the band above it, and on a short card that is the
+    // smaller of the two. A flat 26% put the legend 16px over the desk selector
+    // at 700x400 — measured, in
+    // `test/e2e/overview-responsive-chrome.spec.ts`, which is where the numbers
+    // behind both terms live.
+    expect(classes).toContain("max-[820px]:max-h-[min(26%,calc(45%-6rem))]");
     expect(classes).toContain("max-[820px]:overflow-y-auto");
+  });
+
+  it("keeps out of the paddles' columns rather than only above them", () => {
+    // Review of PR #1752. Separating the legend from the paddles vertically
+    // holds only while the band is tall enough to stack them, and the band is a
+    // percentage of a card that is shorter than the window: measured at 700x600
+    // the card is 522px, the sheet takes 287 and the legend's cap 136, leaving
+    // 21px between the desk selector and the legend for an 80px paddle. There
+    // is no percentage that fits. So they are separated on the axis that has
+    // room — the paddles hug the edges, and the legend starts inside the left
+    // one and stops short of the right one.
+    render(true);
+    const classes = legend().className;
+    expect(classes).toContain("max-[820px]:left-16");
+    expect(classes).toContain("max-[820px]:max-w-[calc(100%-8rem)]");
+    // The paddles narrow below 640px, and the legend follows them in.
+    expect(classes).toContain("max-[639px]:left-12");
+    expect(classes).toContain("max-[639px]:max-w-[calc(100%-6rem)]");
+    // And `left` had to leave the shared class list for the same reason
+    // `bottom` did: a `sm:left-5` there outranks `max-[820px]:left-16`.
+    expect(classes).not.toContain("sm:left-");
   });
 
   it("names the same fraction the sheet is capped at, so the two cannot drift", () => {
@@ -141,6 +170,10 @@ describe("the graph legend and the detail panel (#1664)", () => {
     render(true);
     expect(legend().className).not.toMatch(/\bsm:bottom-/);
     expect(legend().className).not.toMatch(/\bsm:max-w-/);
+    // `sm:left-` joined them in the review of PR #1752: it lived in the shared
+    // class list, outranked `max-[820px]:left-16` at 800px, and kept the legend
+    // sitting under the Previous-desk paddle.
+    expect(legend().className).not.toMatch(/\bsm:left-/);
   });
 
   it("returns to the bottom corner, full width, when the card closes", () => {

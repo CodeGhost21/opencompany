@@ -137,9 +137,19 @@ export function KnowledgeGraphFullscreen({
    *   traded being covered for covering, which is no better.
    * - **At or below 820px** the panel is the bottom sheet, so the legend lifts
    *   to sit on top of it — [`LEGEND_ABOVE_SHEET`] is the sheet's own cap plus a
-   *   gap, so the two cannot drift apart — and is capped at roughly the band
-   *   that is left, scrolling rather than climbing into the desk selector if a
-   *   future legend grows past it.
+   *   gap, so the two cannot drift apart — and is capped at the band that is
+   *   left, scrolling rather than climbing into the desk selector.
+   *
+   *   That cap is `min(26%,calc(45%-6rem))` rather than a flat 26% (review of
+   *   #1752). 45% is the band the 55% sheet leaves; 6rem is what stands in it
+   *   above the legend — the desk selector at `top-5`, about 50px of chips, and
+   *   a gap either side — so the second term is what is genuinely left. It only
+   *   binds on a SHORT card: it is 239px against the 26% term's 188px at
+   *   700x800 and does nothing, and 49px against 84px at 700x400, where a flat
+   *   26% put the legend 16px over the desk selector. The 18px it leaves spare
+   *   at that size is one more wrapped line of desk chips; past that the legend
+   *   would touch the selector again, and `overview-responsive-chrome.spec.ts`
+   *   is what would say so rather than a reader.
    *
    * Two things about how these classes are written are load-bearing rather than
    * stylistic, and both were caught by measuring a real browser rather than by
@@ -149,17 +159,46 @@ export function KnowledgeGraphFullscreen({
    *   *after* `max-[820px]`, so a `sm:bottom-5` alongside these wins at 700px
    *   and the lift silently does not happen. It was written that way first, and
    *   the 700px measurement is what caught it. Unconditional utilities are
-   *   emitted before every variant, so `max-[820px]` beats those.
+   *   emitted before every variant, so `max-[820px]` beats those. This is why
+   *   `left` moved out of the shared class list and into both branches: the
+   *   `sm:left-5` that used to sit there outranked the open-panel indent below
+   *   in exactly the same way, and the 800px measurement is what caught THAT.
    * - **The rail clearance is the unconditional value, overridden downward**,
    *   rather than a `min-[821px]` counterpart to `max-[820px]`. A viewport
    *   whose CSS width lands between the two — 820.5px, which is what Playwright
    *   reports for a "820px" viewport on a fractional device scale — matches
    *   neither, and the legend fell back to full width under the rail. There is
    *   no such gap when one side is the default.
+   *
+   * ## And out of the paddles' columns, not merely below them (review of #1752)
+   *
+   * At or below 820px the legend and the paddles share one band, and the first
+   * version of this kept them apart **vertically** — the legend under the
+   * paddles, the paddles at 17%. That holds only while the band is tall enough
+   * to stack them, and the band is a percentage of a card that is itself
+   * shorter than the window. Measured with a card open at 700x600 the card is
+   * 522px: the sheet takes 287, the legend's 26% cap takes 136, and what is
+   * left between the desk selector and the legend is 21px for an 80px paddle.
+   * There is no percentage that fits, because nothing in that sum scales with
+   * the card. The overlap ran from 700x800 downwards — 38px at 700x600, 40px at
+   * 700x500 and 800x420, 42px at 700x400.
+   *
+   * So they are separated on the axis where there IS room. The paddles hug the
+   * left and right edges and are 40px wide (32px below 640px); the legend now
+   * starts inside the left one and stops short of the right one, and the two
+   * are side by side rather than stacked. Vertical position stops mattering,
+   * which is what makes this hold at every height rather than at the ones that
+   * happened to be measured. The legend wraps to more lines for the width it
+   * gives up — and it already scrolls at its cap, so what it loses is width
+   * rather than reach.
+   *
+   * Only in the `hasDetail` branch, and only at or below 820px: with no panel
+   * open the legend keeps the full width it has always had, and above 820px the
+   * paddles are at mid-height and nowhere near it.
    */
   const legendClearOfDetail = hasDetail
-    ? `bottom-5 max-w-[calc(100%-21rem)] ${LEGEND_ABOVE_SHEET} max-[820px]:max-h-[26%] max-[820px]:overflow-y-auto max-[820px]:max-w-[calc(100%-2.5rem)] max-[639px]:max-w-[calc(100%-1.5rem)]`
-    : 'bottom-3 max-w-[calc(100%-1.5rem)] sm:bottom-5 sm:max-w-[calc(100%-2.5rem)]';
+    ? `bottom-5 min-[821px]:left-5 max-w-[calc(100%-21rem)] ${LEGEND_ABOVE_SHEET} max-[820px]:max-h-[min(26%,calc(45%-6rem))] max-[820px]:overflow-y-auto max-[820px]:left-16 max-[820px]:max-w-[calc(100%-8rem)] max-[639px]:left-12 max-[639px]:max-w-[calc(100%-6rem)]`
+    : 'bottom-3 left-3 max-w-[calc(100%-1.5rem)] sm:bottom-5 sm:left-5 sm:max-w-[calc(100%-2.5rem)]';
   const idx = deptList.findIndex((d) => d.teamId === currentTeamId);
   const step = (dir: number) => {
     if (deptList.length === 0) return;
@@ -219,7 +258,10 @@ export function KnowledgeGraphFullscreen({
             one the desk's node and label carry, so the chip and the desk are
             visibly the same thing. */}
         {!coreOpen && !emptyState && (
-          <div className="absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
+          <div
+            data-testid="kg-desk-selector"
+            className="absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur"
+          >
             <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
               {/* Names the group rather than instructing. "Pick a desk" was
                   an imperative with no visible object, and at zero desks it
@@ -279,7 +321,7 @@ export function KnowledgeGraphFullscreen({
         {!emptyState && legendSlot && (
           <div
             data-testid="kg-legend"
-            className={`absolute left-3 z-40 transition-[bottom] duration-200 ease-standard sm:left-5 ${legendClearOfDetail}`}
+            className={`absolute left-3 z-40 transition-[bottom,left] duration-200 ease-standard ${legendClearOfDetail}`}
           >
             {legendSlot}
           </div>

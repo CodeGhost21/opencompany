@@ -100,6 +100,8 @@ async function settled(locator: Locator) {
  */
 const WITH_DETAIL = [
   { width: 390, height: 844, panel: "sheet" },
+  { width: 700, height: 400, panel: "sheet" },
+  { width: 800, height: 420, panel: "sheet" },
   { width: 700, height: 800, panel: "sheet" },
   { width: 819, height: 800, panel: "sheet" },
   { width: 900, height: 800, panel: "rail" },
@@ -107,7 +109,7 @@ const WITH_DETAIL = [
 ] as const;
 
 for (const viewport of WITH_DETAIL) {
-  test(`keeps the legend clear of the detail ${viewport.panel} at ${viewport.width}px`, async ({ page }) => {
+  test(`keeps the legend clear of the detail ${viewport.panel} at ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/#/company/graph");
 
@@ -136,13 +138,23 @@ for (const viewport of WITH_DETAIL) {
       ).toBe(true);
 
       // Nor may lifting it push it under the chrome above: the desk selector
-      // names every desk, and the paddles are how you step between them.
-      for (const name of ["Previous desk", "Next desk"]) {
-        const other = await page.getByRole("button", { name, exact: true }).boundingBox();
+      // names every desk, and the paddles are how you step between them. The
+      // legend is `z-40` and both of those are below it, so an overlap here is
+      // the legend drawing OVER the two controls the graph is steered with —
+      // the same failure as being covered, with the roles swapped.
+      const chrome: [string, Awaited<ReturnType<Locator["boundingBox"]>>][] = [
+        ["Previous desk", await page.getByRole("button", { name: "Previous desk", exact: true }).boundingBox()],
+        ["Next desk", await page.getByRole("button", { name: "Next desk", exact: true }).boundingBox()],
+        ["the desk selector", await page.getByTestId("kg-desk-selector").boundingBox()],
+      ];
+      for (const [name, other] of chrome) {
         if (!other) continue;
         const ox = Math.min(legendBox.x + legendBox.width, other.x + other.width) - Math.max(legendBox.x, other.x);
         const oy = Math.min(legendBox.y + legendBox.height, other.y + other.height) - Math.max(legendBox.y, other.y);
-        expect(ox <= 0 || oy <= 0, `legend overlaps ${name} with the caveat ${openCaveat ? "open" : "shut"}`).toBe(true);
+        expect(
+          ox <= 0 || oy <= 0,
+          `legend ${JSON.stringify(legendBox)} overlaps ${name} ${JSON.stringify(other)} with the caveat ${openCaveat ? "open" : "shut"}`,
+        ).toBe(true);
       }
     }
   });
