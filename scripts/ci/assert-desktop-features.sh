@@ -32,6 +32,8 @@ cd "$(dirname "$0")/../.."
 RELEASE_WORKFLOW=.github/workflows/release-desktop-macos.yml
 CI_WORKFLOW=.github/workflows/ci.yml
 DEV_SCRIPT=scripts/desktop-dev.sh
+CONSOLE_MANIFEST=frontend/package.json
+DESKTOP_DOC=docs/spec/runtime/desktop.md
 
 # Comma-separated cargo feature lists are order-insensitive to cargo but not to
 # `=`, and a reordering is not a drift. Normalise before comparing so this
@@ -159,6 +161,47 @@ else
       status=1
     fi
   done <<< "$dev_invocations"
+fi
+
+# The developer PACKAGING path. `npm run tauri:build` is how a developer builds
+# the app locally, and the command `docs/spec/runtime/desktop.md` documents does
+# the same thing by hand.
+#
+# This is the entry point #1738 did not reach and the dev-launcher fix did not
+# cover. A `tauri build` with no `--features` packages the DEFAULT set, so the
+# artifact has Composio and ACP compiled out while looking in every other respect
+# like the shipped app — worse than the dev-window version of the bug, because
+# there is no dev server or console banner to hint that this is not the real
+# thing. Someone reproducing a user report against a locally-packaged build would
+# be testing a different product and have no way to know.
+#
+# CI's own `Package` steps (`tauri build --debug --no-bundle`) are deliberately
+# NOT checked here. They exist to prove `tauri.conf.json` executes from two
+# working directories (issue #616), not to compile a feature set, and the
+# `Clippy`/`Test` steps above them already build the shipped one.
+manifest_build="$(
+  grep -oE '"tauri:build"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONSOLE_MANIFEST" || true
+)"
+if [ -z "$manifest_build" ]; then
+  echo "assert-desktop-features: no 'tauri:build' script in $CONSOLE_MANIFEST." >&2
+  echo "  Either the console stopped offering a packaging script, or this" >&2
+  echo "  script's pattern is stale. Both need a human." >&2
+  exit 1
+fi
+manifest_features="$(printf '%s' "$manifest_build" | sed -n 's/.*--features[= ]\{1,\}\([^ "]*\).*/\1/p')"
+check "$CONSOLE_MANIFEST (tauri:build)" "$manifest_features"
+
+# The documented by-hand equivalent, which a developer is at least as likely to
+# copy as to run the npm script.
+doc_build="$(grep -nE '^cargo tauri build' "$DESKTOP_DOC" || true)"
+if [ -z "$doc_build" ]; then
+  echo "  BAD $DESKTOP_DOC -> documents no 'cargo tauri build' command to check" >&2
+  status=1
+else
+  while IFS= read -r line; do
+    value="$(printf '%s' "${line#*:}" | sed -n 's/.*--features[= ]\{1,\}\([^ ]*\).*/\1/p')"
+    check "$DESKTOP_DOC:${line%%:*}" "$value"
+  done <<< "$doc_build"
 fi
 
 if [ "$status" -ne 0 ]; then

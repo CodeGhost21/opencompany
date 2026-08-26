@@ -166,8 +166,16 @@ package**:
 
 ```sh
 npm --prefix frontend run build     # from the repository root
-cargo tauri build                   # or: frontend/node_modules/.bin/tauri build
+cargo tauri build -- --features opencompany/acp,opencompany/composio
 ```
+
+The `--features` is not optional decoration. `tauri build` without it packages
+the **default** set, so a locally-packaged app has Composio and ACP compiled out
+while looking in every other respect like the shipped one — #1738 at the
+packaging entry point, and harder to spot there than in a dev window. `npm run
+tauri:build` carries the same string, and
+`scripts/ci/assert-desktop-features.sh` fails if the two drift from
+`DESKTOP_RELEASE_FEATURES`.
 
 `frontendDist` is resolved relative to `src-tauri/`, where `tauri.conf.json`
 lives, so it means the same thing from every working directory. A hook does not:
