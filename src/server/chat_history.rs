@@ -714,9 +714,10 @@ impl AttributionAudit {
 /// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::WORKFLOW_REPLY_AUTHOR) is the same
 /// case as `SYSTEM_AUTHOR`: a delivered workflow report is journaled under it
 /// on purpose, not a destination that leaked into the author field, so it must
-/// not inflate the count either — and now that the id is reserved
-/// ([`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)), no roster
-/// entry will ever shadow it.
+/// not inflate the count either — and unlike `SYSTEM_AUTHOR`, no roster entry
+/// can *ever* shadow it, on this company or any other: the id is hyphenated,
+/// so neither a minted slug nor a manifest-declared one can equal it (see the
+/// constant's doc).
 ///
 /// This is the single predicate the audit and any presentation of its result
 /// must share; two copies would let the count and the rendering disagree about
@@ -1887,6 +1888,67 @@ mod test {
             );
             assert_eq!(audit.replies, 2);
             assert_eq!(audit.affected, 0);
+        }
+
+        /// Review on PR #1781 (Codex P2): a company that named an overlay
+        /// teammate "Workflow" before this reservation existed would have
+        /// minted the bare id `workflow` — the id `WORKFLOW_REPLY_AUTHOR`
+        /// itself used to be, until it was reshaped to the unmintable,
+        /// hyphenated `workflow-report`. That persisted teammate is not
+        /// migrated or renamed by this fix — there is nothing to migrate: the
+        /// pseudo-author a workflow report is now journaled under is a
+        /// **different, disjoint id** from the one that teammate holds, so
+        /// the collision this reservation exists to prevent cannot occur for
+        /// it, retroactively as well as going forward. Proven here rather than
+        /// asserted, since the whole point is that the two ids must never
+        /// again be able to resolve to the same author.
+        #[test]
+        fn a_persisted_teammate_named_workflow_does_not_shadow_the_reply_author() {
+            let mut record = record();
+            record
+                .overlay_agents
+                .push(crate::ports::types::OverlayAgent {
+                    id: "workflow".to_string(),
+                    name: "Workflow".to_string(),
+                    role: "Worker".to_string(),
+                    description: None,
+                    tools: Vec::new(),
+                    model: None,
+                    harness: None,
+                });
+
+            assert_ne!(
+                "workflow",
+                crate::runtime::WORKFLOW_REPLY_AUTHOR,
+                "the two ids must be disjoint for the rest of this test to mean anything"
+            );
+            assert!(
+                record.resolve_roster_agent_id("workflow").is_some(),
+                "the pre-existing teammate is still on the roster, unmigrated"
+            );
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::runtime::WORKFLOW_REPLY_AUTHOR)
+                    .is_none(),
+                "the reply-author id does not resolve to that (or any) teammate"
+            );
+
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    // The teammate's own reply — attributed to them, as before.
+                    reply(1, "workflow"),
+                    // A new workflow report, delivered after this fix ships —
+                    // journaled under the disjoint id, not theirs.
+                    reply(2, crate::runtime::WORKFLOW_REPLY_AUTHOR),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(
+                audit.affected, 0,
+                "both rows resolve, to two different authors"
+            );
         }
 
         #[test]

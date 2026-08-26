@@ -3637,11 +3637,10 @@ impl OverlayBlob {
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
 /// free the roster leaves them: the always-present operator channel, the two
-/// workspace system roots, the author the runtime speaks under, and the
-/// pseudo-author a workflow report is journaled under.
+/// workspace system roots, and the author the runtime speaks under.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the five moves this list with it instead of quietly
+/// rename of any of the four moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
 ///
@@ -3653,19 +3652,23 @@ impl OverlayBlob {
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
 ///
-/// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::WORKFLOW_REPLY_AUTHOR) is the same
-/// shape as `SYSTEM_AUTHOR`: an ordinary, mintable slug that a delivered
-/// workflow report is journaled under so the console can tell it apart from an
-/// agent's own reply. Left off this list, a teammate named "Workflow" could take
-/// the literal id, after which `senderOf` resolves every subsequent report to
-/// that teammate's name and avatar instead of the workflow — the same
-/// misattribution `SYSTEM_AUTHOR`'s entry exists to prevent, one seam over.
-pub const RESERVED_AGENT_IDS: [&str; 5] = [
+/// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::WORKFLOW_REPLY_AUTHOR) needs no
+/// entry here either, and for the same reason `CONFINED_AGENT_ID` doesn't: it
+/// used to be the ordinary, mintable slug `"workflow"` — the same shape as
+/// `SYSTEM_AUTHOR` — until review on issue #1757 pointed out the gap that
+/// shape leaves. A guard here only stops a *future* mint; it does nothing for
+/// a company that named a teammate "Workflow" before the guard existed, whose
+/// persisted id would still collide the day this constant's adapter shipped,
+/// with no validation pass that runs on load to catch it. Reshaping the
+/// constant to a hyphenated, unmintable value closes that retroactively as
+/// well as prospectively — nothing minted before this list existed, after it
+/// existed, or hand-written into a manifest can equal it — so there is no
+/// mint-time list to add it to.
+pub const RESERVED_AGENT_IDS: [&str; 4] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
-    crate::runtime::WORKFLOW_REPLY_AUTHOR,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -6427,23 +6430,39 @@ mod test {
         assert_eq!(record.mint_agent_id("System"), "system_2");
         assert_eq!(
             RESERVED_AGENT_IDS,
-            ["operator", "agents", "desks", "system", "workflow"]
+            ["operator", "agents", "desks", "system"]
         );
     }
 
-    /// A workflow report's pseudo-author is the same kind of trap
-    /// `SYSTEM_AUTHOR` guards against: an ordinary, mintable slug that
-    /// `senderOf` also reads by value. Before this reservation, a teammate
-    /// named "Workflow" took the bare `workflow` id and every subsequent
-    /// report resolved to *them* instead of the workflow.
+    /// The workflow-report pseudo-author is unmintable by construction, not
+    /// merely guarded: no display name run through `agent_slug` can ever
+    /// produce a hyphen, so nothing a console operator types — today, before
+    /// this constant existed, or after — can mint a teammate onto it. Before
+    /// this reservation shipped, the id was the bare, legal slug `"workflow"`,
+    /// which meant a teammate already named "Workflow" on an existing company
+    /// would still be holding it the day the adapter went live, with no
+    /// mint-time guard able to undo a mint that already happened. Reshaping
+    /// the constant closes that retroactively — see the constant's own doc.
     #[test]
-    fn mint_agent_id_never_returns_the_workflow_report_author() {
-        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
-        assert_eq!(
-            agent_slug("Workflow"),
-            crate::runtime::WORKFLOW_REPLY_AUTHOR,
-            "the guard is needed precisely because this is a legal slug"
+    fn workflow_reply_author_is_unmintable_by_construction() {
+        assert!(
+            crate::runtime::WORKFLOW_REPLY_AUTHOR.contains('-'),
+            "the id must contain a character agent_slug never emits"
         );
+        for name in [
+            "Workflow",
+            "workflow",
+            "WORKFLOW",
+            "Workflow Report",
+            "workflow-report",
+        ] {
+            assert_ne!(
+                agent_slug(name),
+                crate::runtime::WORKFLOW_REPLY_AUTHOR,
+                "agent_slug({name:?}) must never equal the workflow-report author id"
+            );
+        }
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
         assert_ne!(
             record.mint_agent_id("Workflow"),
             crate::runtime::WORKFLOW_REPLY_AUTHOR,

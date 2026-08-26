@@ -35,7 +35,21 @@ use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, Out
 /// agent's own reply. Shared by [`DeskChannel`] and [`DurableOperatorChannel`]
 /// so every workflow bubble names the same author whichever surface it lands
 /// on.
-pub const WORKFLOW_REPLY_AUTHOR: &str = "workflow";
+///
+/// Hyphenated on purpose, the same way
+/// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID) is: `agent_slug`
+/// (console-minted teammates) and `is_snake_case` (manifest-declared ones)
+/// both reject a hyphen, so no roster id — minted before this constant
+/// existed, minted after, or hand-written into a manifest — can ever equal
+/// this value. That is load-bearing, not cosmetic: the bare word `"workflow"`
+/// was a legal slug (`agent_slug("Workflow") == "workflow"`), so a company
+/// that named a teammate "Workflow" *before* this reservation shipped would
+/// otherwise still be holding the id today, and every workflow report
+/// delivered to it would misattribute to that teammate the moment this
+/// adapter went live — a collision no manifest-validation or mint-time guard
+/// can retroactively undo for data that already exists. Picking a value nothing
+/// could ever have minted sidesteps needing one.
+pub const WORKFLOW_REPLY_AUTHOR: &str = "workflow-report";
 
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
