@@ -53,7 +53,15 @@ import type { CompanyStreamEvent } from "@/hooks/use-events";
 import { withHostParam } from "@/hooks/use-host-route";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import type { ApprovalSummary, GrantScope, TeamMemberDto, Verdict } from "@/api/types";
+import type {
+  ApprovalSummary,
+  GrantScope,
+  NotificationDto,
+  TeamMemberDto,
+  Verdict,
+} from "@/api/types";
+import { Week1NudgeBanner } from "@/components/week1-nudge-banner";
+import { pickActiveNudge } from "@/lib/week1-nudge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -426,6 +434,63 @@ export function WorkflowsView({
   // fetch is keyed on) or by a list read that succeeds.
   const [listError, setListError] = useState<string | null>(null);
   const [graphError, setGraphError] = useState<string | null>(null);
+  // Issue #1845: the week-1 "save your first workflow" nudge, server-backed
+  // (`GET …/notifications?kind=workflow_nudge`) rather than the tour's
+  // `localStorage` flag — a signup earns this from `LifecycleScheduler` on the
+  // host, and dismissing/creating persists back through `markNotificationsRead`
+  // rather than a client-only flag, so it survives a reload.
+  const [nudge, setNudge] = useState<NotificationDto | null>(null);
+  // Readable from callbacks that must stay stable (`handleCreated`'s own
+  // deps), the same pattern `selectedIdRef`/`companyRef` use above.
+  const nudgeRef = useRef<NotificationDto | null>(null);
+  nudgeRef.current = nudge;
+  const refreshNudge = useCallback(() => {
+    const requestCompany = company;
+    client
+      .notifications(requestCompany, "workflow_nudge")
+      .then((feed) => {
+        if (requestCompany !== companyRef.current) return; // stale: company switched mid-flight
+        const rows = Array.isArray(feed?.notifications) ? feed.notifications : [];
+        setNudge(pickActiveNudge(rows));
+      })
+      .catch(() => {
+        // An older host (404) or a transient failure: no banner, and nothing
+        // else about the view changes — this is the least important thing on
+        // screen, same reasoning the mention badge's own poll follows.
+      });
+  }, [client, company]);
+  useEffect(() => {
+    setNudge(null);
+    refreshNudge();
+  }, [company, refreshNudge]);
+  // Marks the current nudge read (best-effort) and hides it locally at once,
+  // rather than waiting for the next poll to confirm the write. Shared by the
+  // banner's own Dismiss button and by a workflow actually getting created
+  // (below) — both are "stop asking", the same action either way.
+  const clearNudge = useCallback(() => {
+    const current = nudgeRef.current;
+    if (!current) return;
+    setNudge(null);
+    void client.markNotificationsRead([current.id], company).catch(() => {
+      // The optimistic clear could be wrong (offline, older host); the next
+      // poll below reconciles rather than leaving a stale local `null`.
+      refreshNudge();
+    });
+  }, [client, company, refreshNudge]);
+  // Issue #1845: `listEventTick` bumps on every `workflow_created` frame —
+  // this session's own create, another session's, or the orchestrator's. Any
+  // of those is signal enough to stop nudging: skip the tick this effect
+  // mounts with (there is nothing to clear yet), and on every later one, if a
+  // nudge is still showing, clear it the same way Dismiss does.
+  const nudgeListTickMounted = useRef(false);
+  useEffect(() => {
+    if (!nudgeListTickMounted.current) {
+      nudgeListTickMounted.current = true;
+      return;
+    }
+    if (nudgeRef.current) clearNudge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on the tick, reads current nudge via ref
+  }, [listEventTick]);
   const [createOpen, setCreateOpen] = useState(false);
   // Issue #259: the same dialog, hydrated from the selected graph. Separate
   // state from `createOpen` rather than a mode flag, so the create path keeps
@@ -1748,7 +1813,11 @@ export function WorkflowsView({
     } else {
       toast.success("Workflow created.");
     }
-  }, [announceDisarm]);
+    // Issue #1845: this console's own create is the clearest possible signal
+    // — do not wait for the `workflow_created` SSE round trip to clear the
+    // nudge when we already know it landed.
+    clearNudge();
+  }, [announceDisarm, clearNudge]);
 
   // Issue #1110: leave the workflow on screen and go back to the index.
   //
@@ -2954,6 +3023,16 @@ export function WorkflowsView({
               </Button>
             </AlertDescription>
           </Alert>
+        </div>
+      )}
+
+      {/* Issue #1845: the week-1 "save your first workflow" nudge. Index only
+          (not the canvas detail) — it points at the same CTA the empty state
+          offers, which only exists there, and a nudge to create a workflow
+          while one is already open on screen would be an odd thing to say. */}
+      {nudge && !detailOpen && (
+        <div className="px-4 pt-3">
+          <Week1NudgeBanner onCreate={() => setCreateOpen(true)} onDismiss={clearNudge} />
         </div>
       )}
 
