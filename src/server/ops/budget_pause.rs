@@ -505,7 +505,10 @@ mod tests {
             &state,
             company,
             "POST",
-            &format!("/api/v1/company/agents/ceo/budget-pause/redeem?id={}", chat_marker.id),
+            &format!(
+                "/api/v1/company/agents/ceo/budget-pause/redeem?id={}",
+                chat_marker.id
+            ),
         )
         .await;
         assert_eq!(
@@ -519,7 +522,9 @@ mod tests {
              message must not be silently redispatched under a click meant for the chat one"
         );
         // Left completely untouched — still there, still the background one.
-        let still_parked = budget_pauses_for(&id).peek("ceo").expect("survives the refusal");
+        let still_parked = budget_pauses_for(&id)
+            .peek("ceo")
+            .expect("survives the refusal");
         assert_eq!(still_parked.id, background_marker.id);
 
         // The console re-reads the live marker and redeems with ITS id.
