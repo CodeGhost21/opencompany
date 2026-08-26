@@ -93,14 +93,28 @@ export function ConnectionConsole({
   const reBoot = useCallback(
     (result?: SignIn) => {
       // Store the session *before* probing. A cross-origin sign-in's token is
-      // the only proof this connection has — no cookie was set — and adopting
-      // it replaces the client, so a probe that ran first would authenticate
-      // with the pre-sign-in client and conclude the host still refuses us.
-      if (result?.session) adoptSession(connectionId, result.session);
-      void probe(connectionId).then(() => {
+      // the only proof this connection has — no cookie was set — and adoption
+      // replaces the credential (in the client here, in the core on the
+      // desktop), so a probe that ran first would authenticate with the
+      // pre-sign-in credential and conclude the host still refuses us. Hence
+      // awaited, not fired: on the desktop the adoption is an IPC round trip,
+      // and "before" has to mean before.
+      void (async () => {
+        if (result?.session) {
+          try {
+            await adoptSession(connectionId, result.session);
+          } catch (error) {
+            // The session could not be stored (a keychain refusal, a plain-HTTP
+            // host the core will not carry a credential to). Probing anyway
+            // would 401 and land back on this sign-in screen with no
+            // explanation; the console names the reason instead.
+            console.error("[sign-in] the session could not be adopted", error);
+          }
+        }
+        await probe(connectionId);
         setPhase({ kind: "loading" });
         setBootEpoch((n) => n + 1);
-      });
+      })();
     },
     [connectionId],
   );

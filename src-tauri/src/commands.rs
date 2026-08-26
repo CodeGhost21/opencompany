@@ -271,6 +271,66 @@ pub async fn oc_pair_device(
     })
 }
 
+/// Adopts a session a sign-in just returned, as this connection's credential.
+///
+/// The desktop's sign-in flow asks the host for the header carrier — there is
+/// no cookie jar behind [`oc_request`], so the cookie the host would otherwise
+/// set has nowhere to live — and the readable session it gets back is handed
+/// here rather than kept in the webview. That is the property the proxy's
+/// `RESERVED_HEADERS` exists to hold: the page never holds a credential, so a
+/// script injected into rendered agent markdown cannot exfiltrate one, and it
+/// cannot choose what a request authenticates as either, because the proxy
+/// attaches the credential itself.
+///
+/// This is `oc_pair_device` minus the pairing ceremony. A sign-in's session and
+/// a paired device's are the same thing to every layer below: the host renders
+/// both as `<company>.<token>`, the keychain stores both under the connection
+/// id, and [`Credential::Device`] carries both in the same header. The claim
+/// step is the only difference, and the sign-in already did its own.
+#[tauri::command]
+pub async fn oc_adopt_session(
+    proxy: State<'_, SharedProxy>,
+    connection_id: String,
+    session: String,
+) -> Result<(), String> {
+    // Refused before anything is stored: a session that authenticates as
+    // nobody must not survive into the keychain, where the next launch would
+    // dutifully present it and read the host's 401 as a revoked sign-in.
+    if session.trim().is_empty() {
+        return Err("a sign-in session cannot be empty".to_string());
+    }
+    crate::keychain::remember_device(&connection_id, &session)
+        .map_err(|error| error.to_string())?;
+
+    // Re-register so the credential takes effect without waiting for a reload,
+    // exactly as `oc_pair_device` does — and like there, the session is read
+    // back from the keychain rather than reused from the argument: what
+    // matters is what the store will hand out on the *next* boot, so a write
+    // that did not survive surfaces here rather than as a mysterious 401
+    // later.
+    let base_url = proxy
+        .base_url(&connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let credential = match crate::keychain::device_session(&connection_id) {
+        Some(session) => Credential::Device(session),
+        None => Credential::None,
+    };
+    // `upsert` re-runs the transport gate, so a plain-HTTP remote host refuses
+    // the credential here — at sign-in, where the person is still looking —
+    // rather than silently carrying a secret over a wire anyone can read.
+    proxy
+        .upsert(
+            connection_id,
+            Connection {
+                base_url,
+                credential,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Forgets this machine's stored session for a connection.
 ///
 /// Local only. The session record on the host outlives it — revoking that is
