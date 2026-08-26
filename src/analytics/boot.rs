@@ -74,15 +74,32 @@ pub fn install(state: &AppState, handle: &DeferredTracker, env: &dyn EnvSource) 
 /// default is how an operator spends an afternoon on a tenant that was never
 /// going to report — and, in the other direction, a hosted tenant's operator is
 /// entitled to see in their own logs that reporting is on.
+///
+/// It reports what the process will actually **do**, not what was configured,
+/// and those differ in exactly one case: a build compiled without the
+/// `analytics` feature resolves [`Decision::Report`] and then gets a
+/// [`NullTracker`](crate::analytics::NullTracker) from
+/// [`mixpanel::build`](crate::analytics::mixpanel::build), because there is no
+/// transport in it to hand back. Saying "reporting to …" there is the exact
+/// opposite of the truth, and the `mixpanel::build` line that explains it is a
+/// `tracing::info!` the CLI's default `EnvFilter` swallows — which is why every
+/// other boot line here is a `println!`. So the build is named on this line
+/// instead.
 pub fn describe(decision: &Decision) -> String {
     match decision {
         Decision::Silent(reason) => {
             format!("analytics: off ({})", reason.as_str())
         }
-        Decision::Report { endpoint, .. } => {
-            // The endpoint, never the token.
+        // The endpoint, never the token — in either arm.
+        Decision::Report { endpoint, .. }
+            if crate::analytics::BuildFlags::of_this_build().analytics =>
+        {
             format!("analytics: reporting to {endpoint}")
         }
+        Decision::Report { endpoint, .. } => format!(
+            "analytics: off (reporting to {endpoint} was configured, but this build was \
+             compiled without the `analytics` feature)"
+        ),
     }
 }
 
@@ -140,6 +157,59 @@ mod test {
             "the boot line must not carry the token: {}",
             describe(&decision)
         );
+    }
+
+    /// **The boot line reports behaviour, not configuration.** A build with no
+    /// `analytics` feature installs a `NullTracker` for a reporting decision, so
+    /// the line must not claim it is reporting; a build with the feature must.
+    /// The two halves are asserted from one `cfg!`, so the default lane and the
+    /// scoped `analytics` lane each exercise their own branch and neither can
+    /// pass by ignoring the build.
+    #[test]
+    fn the_boot_line_says_when_the_build_has_no_transport() {
+        let decision = Decision::Report {
+            endpoint: "https://collector.invalid/track".to_string(),
+            token: crate::analytics::config::ProjectToken::new("not-a-real-token"),
+        };
+        let line = describe(&decision);
+        assert!(!line.contains("not-a-real-token"), "{line}");
+
+        if cfg!(feature = "analytics") {
+            assert_eq!(
+                line,
+                "analytics: reporting to https://collector.invalid/track"
+            );
+        } else {
+            assert!(
+                line.starts_with("analytics: off ("),
+                "a build with no transport must not read as reporting: {line}"
+            );
+            assert!(line.contains("without the `analytics` feature"), "{line}");
+            assert!(
+                line.contains("https://collector.invalid/track"),
+                "the configured endpoint is still named, so the operator can see \
+                 what was intended: {line}"
+            );
+        }
+    }
+
+    /// An unreadable switch says so at boot, rather than looking like a
+    /// deliberate opt-out or like a working opt-in.
+    #[test]
+    fn an_unreadable_switch_says_so() {
+        let (state, _home) = state();
+        let handle = DeferredTracker::new();
+        let decision = install(
+            &state,
+            &handle,
+            &MapEnv::new([
+                (DEPLOYMENT_ENV, "hosted-tenant"),
+                (ENABLE_ENV, "of"),
+                (TOKEN_ENV, "not-a-real-token"),
+            ]),
+        );
+        assert_eq!(decision, Decision::Silent(Silence::Unreadable));
+        assert!(describe(&decision).contains("not recognised"));
     }
 
     /// The instance id is what a host with no tenant namespace is known by, and
