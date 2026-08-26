@@ -14,7 +14,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent } from "@/api/tasks";
+import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
@@ -259,6 +259,18 @@ interface Props {
     loadedMessageIds?: ReadonlySet<string>,
   ) => void;
   /**
+   * Reports whether the transcript is actually on screen right now — below
+   * `lg`, `mobilePane === "rail"` hides it behind the channel list even
+   * though `onChannelViewed`'s last report still names that channel.
+   * Distinct from `onChannelViewed`'s own channel memory (which the shell
+   * also uses to address an unaddressed system line after the operator walks
+   * off to Approvals, and must keep doing even while the rail is showing):
+   * this is only for "is a completion's inline marker visible right now",
+   * so a stale-but-correct channel name does not suppress its toast for a
+   * transcript the operator cannot see (#1768 codex review).
+   */
+  onChatPaneVisibilityChange?: (visible: boolean) => void;
+  /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
    *
@@ -271,6 +283,8 @@ interface Props {
    */
   approvals?: ApprovalSummary[];
   chatChannelByThread?: Record<string, string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -332,8 +346,10 @@ export function ChatView({
   mentions,
   mentionFeedRevision,
   onChannelViewed,
+  onChatPaneVisibilityChange,
   approvals,
   chatChannelByThread,
+  taskStatusByTaskId,
   now,
   onDecideApproval,
   decidingApprovals,
@@ -1034,6 +1050,17 @@ export function ChatView({
     loadedMessageIds,
     chatPaneVisible,
   ]);
+
+  // The visibility half of the report above: `onChannelViewed` only ever says
+  // *which* channel, and only while it is visible, so nothing tells the shell
+  // the moment that stops being true — its "last channel seen" memory keeps
+  // naming whatever was visible before the operator dropped to the rail. A
+  // plain mirror of `chatPaneVisible`, not folded into that report, because
+  // the two callbacks answer different questions the shell must not conflate
+  // (see the prop doc).
+  useEffect(() => {
+    onChatPaneVisibilityChange?.(chatPaneVisible);
+  }, [chatPaneVisible, onChatPaneVisibilityChange]);
 
   // Upload one attachment's bytes for the composer (issue #1682). Bound to the
   // active connection's client/company so the composer stays agnostic of both.
@@ -1816,6 +1843,7 @@ export function ChatView({
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
               resolveAttachmentUrl={resolveAttachmentUrl}
+              taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
                 setComposerPrefill((current) => ({
                   text: FIRST_TEAM_BRIEF,

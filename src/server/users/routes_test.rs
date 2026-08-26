@@ -2280,3 +2280,130 @@ async fn a_profile_edit_needs_a_session() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------------------
+// Materialization races (issue #1833)
+// ---------------------------------------------------------------------------
+
+/// A runtime over a company with no `[users] admins`, which is all these need:
+/// `local_owner_record` answers a mode question nobody asks it, so the manifest
+/// only has to produce a store.
+async fn users_runtime(home: &std::path::Path) -> Arc<crate::CompanyRuntime> {
+    let (connections, _sender) = mail_connections();
+    let state = state_from(
+        home,
+        manifest_without_admins(),
+        AppConfig::default(),
+        connections,
+    )
+    .await;
+    state.registry().get(&CompanyId::new("acme")).unwrap()
+}
+
+/// The loser of a race adopts the winner rather than being refused.
+///
+/// Deterministic where the race itself is not: it stages the exact state a
+/// losing caller finds itself in — an address already held, by an id that is not
+/// the one this caller minted — and asserts the outcome is the winner's record
+/// rather than a `Conflict`.
+///
+/// Before #1833 this returned `Err(Conflict)`, `graphql::auth` turned that into
+/// `GatesRefused`, and the desktop console reported the healthy host it was
+/// talking to as "Unreachable".
+#[tokio::test]
+async fn a_lost_materialization_race_adopts_the_winner() {
+    use crate::ports::users::{UserRecord, UserRole, UserStatus};
+
+    let home = home();
+    let runtime = users_runtime(home.path()).await;
+    let id = runtime.id();
+    let email = crate::ports::users::LoginIdentity::Local.key();
+
+    let winner = UserRecord {
+        id: "winner-id".to_string(),
+        email: email.clone(),
+        display_name: None,
+        avatar: None,
+        role: UserRole::Admin,
+        status: UserStatus::Active,
+        password_hash: None,
+        must_change_password: false,
+        created_at_millis: 1,
+        last_seen_at_millis: Some(1),
+        updated_at_millis: 1,
+    };
+    runtime.users().upsert_user(id, &winner).await.unwrap();
+
+    // The loser: same address, its own freshly generated id — which is exactly
+    // what makes the store refuse it.
+    let loser = UserRecord {
+        id: "loser-id".to_string(),
+        created_at_millis: 2,
+        ..winner.clone()
+    };
+
+    let adopted = crate::server::users::routes::insert_or_adopt(&runtime, loser)
+        .await
+        .expect("a lost race is not an error — the owner exists");
+
+    assert_eq!(
+        adopted.id, "winner-id",
+        "the loser must return the record that won, not its own"
+    );
+
+    // And the store still holds exactly one owner: adopting must not have
+    // written the loser's id alongside the winner's.
+    let held = runtime.users().list_users(id).await.unwrap();
+    let owners: Vec<_> = held.iter().filter(|u| u.email == email).collect();
+    assert_eq!(owners.len(), 1, "exactly one owner record: {held:?}");
+    assert_eq!(owners[0].id, "winner-id");
+}
+
+/// Concurrent callers converge on one owner.
+///
+/// The shape of the original bug: N requests arrive together on a cold store,
+/// all miss `find_user_by_email`, and each presents a different `generate_id()`
+/// for one address. On the desktop's first boot three of them raced; one won and
+/// two were refused 16ms later.
+///
+/// Timing-dependent by nature — it cannot *guarantee* an interleaving — so it is
+/// the companion to the deterministic test above rather than the proof. What it
+/// does catch is a regression that reintroduces the shape, and it fails reliably
+/// against the pre-#1833 code at this width.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_local_owner_materialization_yields_one_record() {
+    let home = home();
+    let runtime = users_runtime(home.path()).await;
+
+    let racers = 16;
+    let mut tasks = Vec::with_capacity(racers);
+    for _ in 0..racers {
+        let runtime = Arc::clone(&runtime);
+        tasks.push(tokio::spawn(async move {
+            crate::server::users::routes::local_owner_record(&runtime).await
+        }));
+    }
+
+    let mut ids = Vec::with_capacity(racers);
+    for task in tasks {
+        let record = task
+            .await
+            .expect("no racer panics")
+            .expect("no racer is refused its own company's owner");
+        ids.push(record.id);
+    }
+
+    let first = &ids[0];
+    assert!(
+        ids.iter().all(|id| id == first),
+        "every racer must see one owner, got {ids:?}"
+    );
+
+    let held = runtime.users().list_users(runtime.id()).await.unwrap();
+    let key = crate::ports::users::LoginIdentity::Local.key();
+    assert_eq!(
+        held.iter().filter(|u| u.email == key).count(),
+        1,
+        "exactly one owner record survives the race: {held:?}"
+    );
+}
