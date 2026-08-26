@@ -1018,8 +1018,8 @@ function AddMemberDialog({
                 // No id to address — this teammate does not exist yet — so the
                 // fields being typed ride the request. Everything else the
                 // draft is grounded in still comes from the record host-side.
-                onDraft={(hint) =>
-                  draftNewAgentField(client, company, key, hint, {
+                onTurn={(conversation) =>
+                  draftNewAgentField(client, company, key, conversation, {
                     role: draft.role,
                     name: draft.name,
                     description: draft.description,

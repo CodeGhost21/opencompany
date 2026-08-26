@@ -15,6 +15,19 @@
 // copilot's proposal protocol takes: the model's output is data in a reply, and
 // the operator's own action is what writes.
 //
+// ## A conversation, not a hint box
+//
+// It started as one shot: a note box, a Draft button, one answer. Using it made
+// the problem obvious — a single note cannot say "no, more like this", and
+// refining meant retyping the whole instruction each time, because nothing
+// carried. So each request now sends the transcript, and the copilot answers in
+// turns: a sentence about what it changed, and the whole field rewritten. It
+// may also ASK, and answer with no draft at all, which is the part a one-shot
+// pass structurally cannot do.
+//
+// The transcript lives in the panel's state and nowhere else. The host stores
+// nothing, which is why this needed no journal, no thread id, and no cleanup.
+//
 // ## The grounding is the host's, not ours
 //
 // The console holds the roster, the company name and this teammate's fields
@@ -28,6 +41,49 @@ import type { OpenCompanyClient } from "./client";
 
 /** The teammate fields a draft can be asked for. */
 export type DraftableField = "description" | "instructions";
+
+/** Who said one thing in a copilot conversation. */
+export type TurnRole = "operator" | "copilot";
+
+/**
+ * One turn, as the panel holds it and as the host is told about it.
+ *
+ * The console owns the transcript and sends it back each turn — the host stores
+ * nothing. That is the whole of "in-session": closing the form ends the
+ * conversation, and there is no journal to rehydrate, no thread id to collide,
+ * and nothing to clean up.
+ */
+export interface CopilotTurn {
+  role: TurnRole;
+  /** What was said. For a copilot turn, its reply and the draft it produced. */
+  text: string;
+  /**
+   * The field text this turn produced, when it drafted rather than asked.
+   *
+   * Held apart from {@link text} because the two are for different readers:
+   * `text` is what goes back to the model as its own prior turn, and this is
+   * what "Use it" puts in the box.
+   */
+  draft?: string;
+}
+
+/**
+ * What a copilot turn is sent back to the model as.
+ *
+ * Its reply *and* its draft, because "shorter" has to mean shorter than
+ * something the model can see. Sending only the reply would leave it iterating
+ * on a description of a draft rather than on the draft.
+ */
+export function turnForWire(turn: CopilotTurn): { role: TurnRole; text: string } {
+  return { role: turn.role, text: turn.text };
+}
+
+/** Composes a copilot turn's wire text from what it said and what it drafted. */
+export function copilotTurnText(reply: string, draft?: string): string {
+  return [reply.trim(), draft?.trim() ? `Draft:\n${draft.trim()}` : ""]
+    .filter(Boolean)
+    .join("\n\n");
+}
 
 /**
  * Why there is no draft.
@@ -44,7 +100,7 @@ export type DraftRefusal =
   /** A model answered and the answer could not be used. Say more, or write it. */
   | "unreadable";
 
-/** One drafted field, as the host answers. */
+/** One copilot turn, as the host answers. */
 export interface ProfileDraft {
   /**
    * The field this draft is for, echoed by the host.
@@ -54,7 +110,19 @@ export interface ProfileDraft {
    * matched to the box it was asked for.
    */
   field: DraftableField;
-  /** The drafted text, already clamped host-side. Absent on a refusal. */
+  /**
+   * What the copilot says — what it changed, or what it needs to know. Absent
+   * on a refusal.
+   */
+  reply?: string;
+  /**
+   * The whole field as it now stands, already clamped host-side.
+   *
+   * Absent on two different occasions, and `source` is what tells them apart: a
+   * turn that asked a question instead of drafting (`source: "model"`), and a
+   * turn that could not happen at all (`source: "unavailable"`). Letting the
+   * copilot ask is what makes this a conversation rather than a slot machine.
+   */
   text?: string;
   /**
    * Who wrote this.
@@ -107,11 +175,11 @@ export function draftAgentField(
   company: string | null,
   agentId: string,
   field: DraftableField,
-  hint: string,
+  conversation: CopilotTurn[],
 ): Promise<ProfileDraft> {
   return client.post<ProfileDraft>(
     `${client.scopeFor(company)}/team/${encodeURIComponent(agentId)}/draft`,
-    { field, hint: hint.trim() || undefined },
+    { field, messages: conversation.map(turnForWire) },
   );
 }
 
@@ -132,7 +200,7 @@ export function draftNewAgentField(
   client: OpenCompanyClient,
   company: string | null,
   field: DraftableField,
-  hint: string,
+  conversation: CopilotTurn[],
   teammate: {
     role: string;
     name?: string;
@@ -142,7 +210,7 @@ export function draftNewAgentField(
 ): Promise<ProfileDraft> {
   return client.post<ProfileDraft>(`${client.scopeFor(company)}/team/draft`, {
     field,
-    hint: hint.trim() || undefined,
+    messages: conversation.map(turnForWire),
     role: teammate.role.trim(),
     name: teammate.name?.trim() || undefined,
     description: teammate.description?.trim() || undefined,

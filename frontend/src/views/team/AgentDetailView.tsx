@@ -852,8 +852,8 @@ export function AgentDetailView({
                           // Addressed by id: this teammate exists, so the host
                           // grounds the draft in its own record rather than in
                           // anything this console sends.
-                          onDraft={(hint) =>
-                            draftAgentField(client, company, agentId, key, hint)
+                          onTurn={(conversation) =>
+                            draftAgentField(client, company, agentId, key, conversation)
                           }
                           // Fills the form draft and nothing else. The Save
                           // below is still what writes, which is what makes a
