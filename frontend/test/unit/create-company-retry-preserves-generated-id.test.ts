@@ -27,11 +27,13 @@ import { CreateCompanyDialog } from "@/components/create-company-dialog";
  * of reconciling the first company it provisioned a second one, consuming
  * quota and leaving an unintended duplicate.
  *
- * Sibling-path check: a reset does NOT have this bug — its id is seeded into
+ * Sibling-path check: a reset survives a retry unchanged *as long as the
+ * operator never touches the Advanced field* — its id is seeded into
  * `explicitId` state at open time and is never regenerated inline the way a
- * plain create's was, so it already survives a retry unchanged. Only the
- * plain-create path needed the fix (mirrored here: seed `explicitId` from
- * the first self-generated id too).
+ * plain create's was. A reset whose field gets cleared back to blank has the
+ * same bug this test guards, for the same reason; see
+ * `create-company-reset-blank-id-retry.test.ts` (issue #1828 comment
+ * 3865689239) for that case and the fix that also covers it.
  */
 
 type ProvisionBody = { manifest_toml: string; id?: string };

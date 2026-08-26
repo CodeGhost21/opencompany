@@ -263,21 +263,25 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     const selfGenerated = !idTouched || explicit === "";
     const autoId = selfGenerated ? id : "";
 
-    // Persist a plain create's self-generated id into state immediately, so
-    // a *retry* reuses this exact id instead of minting a fresh one.
-    // `explicit` starts blank on `create` (unlike `resetReplacementId`,
-    // which a reset seeds into `explicitId` the moment the dialog opens —
-    // see the `useEffect` above), so without this every retry recomputed
-    // `autoCompanyId(trimmedName)` with a brand-new random suffix. That
-    // mattered whenever a retry was actually needed: a default create whose
-    // request succeeded on the host but lost its response, where the
-    // immediate reconciliation lookup below *also* failed transiently,
-    // left the dialog open for the operator to retry — and that retry, with
-    // a different id, provisioned a second company instead of reconciling
-    // the first (issue #1828 comment 3865401532). Skipped once the operator
-    // has typed an id themselves (`explicit` non-blank): that value is
-    // already theirs to keep across a retry, same as it is for a reset.
-    if (request.kind === "create" && !explicit) {
+    // Persist a self-generated id into state immediately, so a *retry*
+    // reuses this exact id instead of minting a fresh one. A plain `create`
+    // starts `explicitId` blank, and a `reset` normally doesn't — the
+    // `useEffect` above seeds it with `resetReplacementId(request.company)`
+    // the moment the dialog opens — but the Advanced field is editable on
+    // both, and the reset dialog explicitly permits clearing it back to
+    // blank. Either way, without this every submit with a blank field
+    // recomputes `id` fresh (`autoCompanyId`/`resetReplacementId`, both
+    // random-suffixed), so a retry after an ambiguous outcome mints a
+    // *different* id than the one actually sent. That mattered whenever a
+    // retry was actually needed: a request that succeeded on the host but
+    // lost its response, where the immediate reconciliation lookup below
+    // *also* failed transiently, left the dialog open for the operator to
+    // retry — and that retry, with a different id, provisioned a second
+    // company instead of reconciling the first (issue #1828 comments
+    // 3865401532 and 3865689239). Skipped once the operator has typed an id
+    // themselves (`explicit` non-blank): that value is already theirs to
+    // keep across a retry.
+    if (!explicit) {
       setExplicitId(id);
     }
 
