@@ -1,8 +1,11 @@
 //! The notification feed: `GET`/`PUT {scope}/notifications`.
 //!
-//! The first and so far only consumer is the mention badge. `NotificationStore`
-//! has been wired into the runtime and unused since it was written; this is the
-//! surface that makes it reachable.
+//! The first consumer was the mention badge (`kind="mention"`, the default —
+//! see [`ListQuery`]); the second is the week-1 nudge banner (issue #1845,
+//! `?kind=workflow_nudge`). `NotificationStore` was wired into the runtime and
+//! unused since it was written (issue #749); this is the surface that makes
+//! it reachable, generalized past its first single-purpose caller rather than
+//! growing a second near-identical route.
 //!
 //! # Why this exists at all, when there is an SSE feed
 //!
@@ -27,6 +30,7 @@
 //! Same `401` as [`read_state`](super::read_state): a notification is addressed
 //! to a person, and a machine credential names none.
 
+use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -42,6 +46,26 @@ use crate::server::ops::scope::{ScopedCompany, scoped};
 pub fn router() -> Router<AppState> {
     scoped("/notifications", get(list).put(mark_read))
 }
+
+/// `GET {scope}/notifications?kind=` — which
+/// [`Notification::kind`](crate::ports::notifications::Notification::kind) to
+/// list.
+///
+/// Additive (issue #1845): the route's first and, until now, only consumer
+/// was the mention badge, so this stayed hardcoded to `"mention"`. The week-1
+/// nudge banner (`?kind=workflow_nudge`) is the second consumer, and a route
+/// per kind would duplicate `list`'s auth/audience/unread-filter logic for no
+/// reason — so the kind becomes a parameter instead. Absent means `"mention"`,
+/// which keeps every caller that predates this parameter byte-for-byte
+/// unchanged.
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// The `kind` [`list`] filters to when the caller does not name one.
+const DEFAULT_LIST_KIND: &str = "mention";
 
 /// One notification, as the person it is for reads it.
 #[derive(Debug, Serialize)]
@@ -124,24 +148,28 @@ struct MarkReadDto {
     unread: u64,
 }
 
-async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, crate::server::Rejection> {
+async fn list(
+    company: ScopedCompany,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<FeedDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
         return Err(unauthorized().into());
     };
+    let wanted_kind = q.kind.as_deref().unwrap_or(DEFAULT_LIST_KIND);
     let rows = company
         .runtime
         .notifications()
         .list(company.id(), &user)
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    // This endpoint is the unread-mention badge contract. The store list is
-    // intentionally broader, so filter at the API boundary rather than making
-    // every store implementation know which notification kinds this consumer
-    // wants. Read rows are excluded here because the client only needs the
-    // actionable, unread mention set.
+    // The store list is intentionally broader than any one consumer — filter
+    // at the API boundary to `wanted_kind` rather than making every store
+    // implementation know which notification kinds a given caller wants.
+    // Read rows are excluded here because every consumer today (the mention
+    // badge, the week-1 nudge banner) only needs the actionable, unread set.
     let rows: Vec<_> = rows
         .into_iter()
-        .filter(|view| view.read_at.is_none() && view.notification.kind == "mention")
+        .filter(|view| view.read_at.is_none() && view.notification.kind == wanted_kind)
         .collect();
     let unread = rows.len();
     Ok(Json(FeedDto {
@@ -339,6 +367,50 @@ mod tests {
             .expect("append");
     }
 
+    /// Like [`file`], but for a chosen `kind` — the week-1 nudge row shape
+    /// (issue #1845) rather than `file`'s hardcoded `"mention"`.
+    async fn file_kind(state: &AppState, id: &str, kind: &str, audience: Option<Vec<String>>) {
+        state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("company")
+            .notifications()
+            .append(
+                &CompanyId::new("acme"),
+                &Notification {
+                    id: id.to_string(),
+                    kind: kind.to_string(),
+                    subject: Subject {
+                        kind: SubjectKind::Workflow,
+                        id: "week1-first-workflow".to_string(),
+                    },
+                    created_at: 1_000,
+                    title: format!("{kind} {id}"),
+                    audience,
+                    context: None,
+                },
+            )
+            .await
+            .expect("append");
+    }
+
+    /// A signed-in `GET` with `?kind=`.
+    async fn call_kind(state: &AppState, kind: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/company/notifications?kind={kind}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
     async fn call(
         state: &AppState,
         method: &str,
@@ -495,5 +567,55 @@ mod tests {
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{method}");
             assert_eq!(body["code"], "unauthorized", "{method}");
         }
+    }
+
+    // --- issue #1845: `?kind=` generalizes the route past the mention badge ---
+
+    /// `?kind=workflow_nudge` returns only the week-1 nudge row, and the
+    /// unparametrized default stays exactly what it was: mention-only. Proves
+    /// the route change is additive rather than a behaviour change for the
+    /// mention badge, the caller that predates this parameter.
+    #[tokio::test]
+    async fn a_kind_query_filters_to_that_kind_and_the_default_is_unchanged() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file(&state, "a-mention", Some(vec![mine.clone()])).await;
+        file_kind(&state, "a-nudge", "workflow_nudge", Some(vec![mine])).await;
+
+        let (status, feed) = call_kind(&state, "workflow_nudge").await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = feed["notifications"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1, "only the nudge-kind row, {rows:?}");
+        assert_eq!(rows[0]["id"], "a-nudge");
+        assert_eq!(rows[0]["kind"], "workflow_nudge");
+
+        // No query at all: the mention badge's own contract, unaffected by
+        // the nudge row existing.
+        let (_, default_feed) = call(&state, "GET", None, true).await;
+        let default_rows = default_feed["notifications"].as_array().expect("rows");
+        assert_eq!(default_rows.len(), 1, "{default_rows:?}");
+        assert_eq!(default_rows[0]["id"], "a-mention");
+    }
+
+    /// Mark-read is not kind-scoped — it already marks by id or "everything
+    /// visible", so a nudge row marked read must disappear from a
+    /// `?kind=workflow_nudge` re-list exactly like a mention does from the
+    /// default list.
+    #[tokio::test]
+    async fn marking_a_nudge_read_clears_it_from_the_kind_scoped_list() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file_kind(&state, "a-nudge", "workflow_nudge", Some(vec![mine])).await;
+
+        let (_, marked) = call(&state, "PUT", Some(json!({"ids": ["a-nudge"]})), true).await;
+        assert_eq!(marked["unread"], 0);
+
+        let (_, feed) = call_kind(&state, "workflow_nudge").await;
+        assert!(
+            feed["notifications"].as_array().unwrap().is_empty(),
+            "a read nudge must not still show as unread, {feed}"
+        );
     }
 }
