@@ -1915,24 +1915,18 @@ impl CompanyRuntime {
                 );
             }
         }
-        // Drop the stash whatever the verdict — a refused block has nothing to
-        // continue, and a spawned one has consumed it. Both halves go: the
-        // in-memory fast path here and (issue #1816) the durable journal record
-        // beneath it, so a later boot does not rehydrate a block this decision
-        // already retired. Best-effort on the durable clear, matching the park's
-        // own stance — the in-memory drop is what this cycle acts on, and a lost
-        // release record at worst rehydrates a stash whose approvals are already
-        // resolved, which no resolve event will ever release again.
-        let stashed = self.blocked_nodes.release(turn);
-        if let Err(error) = self.journal.record_blocked_node_released(turn).await {
-            tracing::warn!(
-                company = %self.id,
-                %turn,
-                %error,
-                "[approval] a blocked node's durable stash could not be retired; a boot may \
-                 rehydrate an already-resolved block, which no resolve will re-release"
-            );
-        }
+        // Issue #1816 (Stage 4): read the stash without taking it yet. Retiring
+        // it — both the in-memory fast path and the durable journal record
+        // beneath it — used to happen right here, unconditionally, before the
+        // spawn attempt below was even made. A crash strictly during that
+        // awaited spawn then left the release already recorded and the stash
+        // already gone, so a restart rehydrated neither: no pending decision
+        // (already resolved), no stash (already released), nothing left to
+        // retry — exactly the stranding this queue exists to prevent, just
+        // moved one step later. Each branch below now calls
+        // `retire_blocked_stash` itself, only once its own outcome (spawned,
+        // refused, or genuinely un-continuable) is actually final.
+        let stashed = self.blocked_nodes.peek(turn);
         // The stash's own flag (banked at decide time, and rehydrated across a
         // restart alongside the stash itself) carries an earlier approve the
         // batch above may have lost. Either source is enough — the point is
@@ -1946,6 +1940,7 @@ impl CompanyRuntime {
                 "[approval] every gated call on this blocked node was refused or expired, so no \
                  continuation runs"
             );
+            self.retire_blocked_stash(turn).await;
             return Ok(CycleRunner::new(self).already_resolved_report());
         }
         let Some(stashed) = stashed else {
@@ -1960,31 +1955,122 @@ impl CompanyRuntime {
                  continue — re-run the workflow to pick it back up.",
             )
             .await;
+            // Nothing was in the queue to take, but the durable side may still
+            // hold a record naming this turn (the genuine no-lineage case is
+            // driven by the in-memory queue being empty, not necessarily the
+            // journal) — retire it so a later boot does not rehydrate it.
+            self.retire_blocked_stash(turn).await;
             return Ok(CycleRunner::new(self).already_resolved_report());
         };
-        if let Err(error) = crate::runtime::workflow_resume::spawn_blocked_node_continuation(
+        match crate::runtime::workflow_resume::spawn_blocked_node_continuation(
             self,
             &stashed.workflow_id,
             stashed.input,
         )
         .await
         {
-            tracing::error!(
+            Ok(()) => {
+                // Only now — spawn has actually taken hold — is the stash
+                // truly spent. Retiring it here rather than up front is what
+                // lets a crash mid-spawn rehydrate the very stash it needs to
+                // retry from, instead of finding both halves already gone.
+                self.retire_blocked_stash(turn).await;
+                Ok(CycleRunner::new(self).already_resolved_report())
+            }
+            Err(error) => {
+                tracing::error!(
+                    company = %self.id,
+                    %turn,
+                    %error,
+                    "[approval] the workflow run released by a blocked node's approval could \
+                     not be continued"
+                );
+                self.announce_to_operator(&format!(
+                    "That workflow step's approval is in, but the run could not be restarted: \
+                     {error}. Nothing else is waiting on you — re-run the workflow to pick it \
+                     back up."
+                ))
+                .await;
+                // A handled, in-process failure (as opposed to a crash) — the
+                // operator has already been told to re-run manually, so the
+                // stash is spent exactly as it was on `main`.
+                self.retire_blocked_stash(turn).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Retires a blocked-node stash — the in-memory fast path and the durable
+    /// journal record beneath it — once its outcome is truly final (issue
+    /// #1816, Stage 4).
+    ///
+    /// Split out of [`resume_blocked_agent_node`](Self::resume_blocked_agent_node)
+    /// so every one of its terminal branches retires the stash at the same,
+    /// late point rather than up front: see that function's doc comment for
+    /// why firing this before the spawn attempt is the gap this exists to
+    /// close. Best-effort on the durable clear, matching the park's own
+    /// stance — the in-memory drop is what this cycle acts on, and a lost
+    /// release record at worst rehydrates a stash whose approvals are already
+    /// resolved, which no resolve event will ever release again.
+    async fn retire_blocked_stash(&self, turn: &str) {
+        self.blocked_nodes.release(turn);
+        if let Err(error) = self.journal.record_blocked_node_released(turn).await {
+            tracing::warn!(
                 company = %self.id,
                 %turn,
                 %error,
-                "[approval] the workflow run released by a blocked node's approval could not be \
-                 continued"
+                "[approval] a blocked node's durable stash could not be retired; a boot may \
+                 rehydrate an already-resolved block, which no resolve will re-release"
             );
-            self.announce_to_operator(&format!(
-                "That workflow step's approval is in, but the run could not be restarted: \
-                 {error}. Nothing else is waiting on you — re-run the workflow to pick it back \
-                 up."
-            ))
-            .await;
-            return Err(error);
         }
-        Ok(CycleRunner::new(self).already_resolved_report())
+    }
+
+    /// Boot-time reconciliation for issue #1816's narrowest gap (Stage 3): a
+    /// restart landing between the durable approval bank
+    /// (`record_blocked_node_approved`) and the in-memory decision that would
+    /// have released the block (`ContinuationQueue::decide`) rehydrates an
+    /// approved stash that nothing then triggers.
+    ///
+    /// `record_blocked_node_approved` exists precisely to survive a restart
+    /// that lands on a decision that is *not* the turn's last (its own doc
+    /// comment). What it does not cover on its own is the case where the
+    /// crash lands on the decision that *was* the last one: the journal's
+    /// `parked_turns()` has already dropped every approval for this turn —
+    /// there was nothing left to be parked — so the boot rearm gives
+    /// `ContinuationQueue` nothing to fire on, and only a *future* decision on
+    /// the same turn used to notice the gap. A node whose last call is also
+    /// its only (or final) call has no future decision coming, so the run
+    /// sits stranded rather than resuming the moment the operator's approval
+    /// — which they already gave — should have redeemed it.
+    ///
+    /// Run once per boot, after every other queue is rearmed: a turn whose
+    /// stash is durably marked `approved` and has nothing left parked in the
+    /// journal is exactly that stranded case, resumed the same way a live
+    /// release would resume it, with an empty batch — its decision is already
+    /// durable in the event log and owes nothing further there.
+    pub(crate) async fn reconcile_stranded_blocked_nodes(&self) {
+        let still_parked: std::collections::HashSet<String> =
+            self.journal.parked_turns().into_iter().collect();
+        for turn in self.blocked_nodes.approved_turns() {
+            if still_parked.contains(&turn) {
+                // Still waiting on a sibling decision — not stranded, just
+                // mid-turn; the eventual last decision will release it.
+                continue;
+            }
+            let placeholder = ApprovalId::new(format!("boot-reconcile:{turn}"));
+            if let Err(error) = self
+                .resume_blocked_agent_node(&placeholder, &turn, Vec::new())
+                .await
+            {
+                tracing::error!(
+                    company = %self.id,
+                    %turn,
+                    %error,
+                    "[approval] a blocked node stranded by a restart between its last \
+                     approval and its release could not be resumed at boot"
+                );
+            }
+        }
     }
 
     /// Runs one turn's continuation over the decisions it was blocked on, and

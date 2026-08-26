@@ -3597,6 +3597,21 @@ impl RuntimeBuilder {
             runtime.hydrate_emergency(engaged);
         }
 
+        // Issue #1816 (Stage 3): a blocked-node stash the journal durably
+        // marks approved, with nothing left parked for its turn, is a run a
+        // restart stranded between its last approval banking and the release
+        // that should have followed. A rebuild skips this for the same reason
+        // it skips the rearms above: the live queues it inherits already
+        // reflect every decision taken since the last replay, so there is
+        // nothing here a fresh boot's journal-only view would find that the
+        // live one has not already acted on. Placed last, after every queue
+        // above (and the workflow runner, wired earlier in this function
+        // under the `openhuman` harness arm) is in place, so a stash this
+        // finds ready has somewhere real to resume to.
+        if handover.is_none() {
+            runtime.reconcile_stranded_blocked_nodes().await;
+        }
+
         Ok(runtime)
     }
 }
