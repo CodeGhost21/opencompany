@@ -64,7 +64,14 @@ use super::inference::{UNATTRIBUTED_AGENT, inference_ledger_entry};
 /// `agent` is not a parameter, and the teammate the draft is *about* is
 /// deliberately not reachable from here — see the module docs. No caller can
 /// bill a draft to the teammate it describes.
-pub fn profile_draft_sample(usage: &TokenUsage, provider: &str) -> Option<UsageSample> {
+///
+/// `model` is the classified [`ModelSlug`](crate::metering::ModelSlug) the turn
+/// ran against, or `None` when the caller cannot name one (issue #1749).
+pub fn profile_draft_sample(
+    usage: &TokenUsage,
+    provider: &str,
+    model: Option<crate::metering::ModelSlug>,
+) -> Option<UsageSample> {
     if usage.is_zero() {
         return None;
     }
@@ -78,6 +85,7 @@ pub fn profile_draft_sample(usage: &TokenUsage, provider: &str) -> Option<UsageS
         cost_usd: usage.cost_usd,
         kind: SampleKind::AuthoringCall,
         run_id: None,
+        model,
     })
 }
 
@@ -94,6 +102,7 @@ pub fn profile_draft_sample(usage: &TokenUsage, provider: &str) -> Option<UsageS
 pub async fn record_profile_draft_usage(
     usage: &TokenUsage,
     provider: &str,
+    model: Option<crate::metering::ModelSlug>,
     company: &CompanyId,
     store: &dyn CompanyStore,
     meter: &dyn UsageMeter,
@@ -119,7 +128,7 @@ pub async fn record_profile_draft_usage(
             "[usage] failed to append the draft spend entry; the draft itself was returned"
         );
     }
-    if let Some(sample) = profile_draft_sample(usage, provider)
+    if let Some(sample) = profile_draft_sample(usage, provider, model)
         && let Err(err) = meter.record(company, &sample).await
     {
         tracing::warn!(
@@ -149,7 +158,7 @@ mod test {
     #[test]
     fn a_draft_is_charged_to_the_company_and_to_no_teammate() {
         let sample =
-            profile_draft_sample(&usage_with(0.02), "managed").expect("a real draft meters");
+            profile_draft_sample(&usage_with(0.02), "managed", None).expect("a real draft meters");
         assert_eq!(sample.agent, UNATTRIBUTED_AGENT);
         assert_eq!(sample.kind, SampleKind::AuthoringCall);
         assert_eq!(sample.run_id, None, "a draft mints no run");
@@ -161,7 +170,7 @@ mod test {
     /// question [`SampleKind::SetupCall`] was split out to keep answerable.
     #[test]
     fn a_draft_is_not_filed_as_a_setup_pass() {
-        let sample = profile_draft_sample(&usage_with(0.02), "managed").expect("sample");
+        let sample = profile_draft_sample(&usage_with(0.02), "managed", None).expect("sample");
         assert_ne!(sample.kind, SampleKind::SetupCall);
         assert_ne!(sample.kind, SampleKind::Inference);
     }
@@ -170,7 +179,7 @@ mod test {
     /// report drafting spend for a company that has none.
     #[test]
     fn a_pass_that_spent_nothing_writes_no_row() {
-        assert!(profile_draft_sample(&TokenUsage::default(), "managed").is_none());
+        assert!(profile_draft_sample(&TokenUsage::default(), "managed", None).is_none());
     }
 
     /// Drafting counts toward the tier ceiling: an excluded kind would let an
@@ -178,7 +187,7 @@ mod test {
     /// else.
     #[test]
     fn a_draft_counts_toward_the_tier_ceiling() {
-        let sample = profile_draft_sample(&usage_with(0.02), "managed").expect("sample");
+        let sample = profile_draft_sample(&usage_with(0.02), "managed", None).expect("sample");
         assert_eq!(super::super::capability::tokens_in(&[sample]), 520);
     }
 }

@@ -98,6 +98,12 @@ impl ProfileDrafter {
         self.model.telemetry_provider_id()
     }
 
+    /// The classified model this pass runs on, for the usage sample (issue
+    /// #1749). `None` when the provider cannot name one.
+    pub fn model_slug(&self) -> Option<crate::metering::ModelSlug> {
+        self.model.telemetry_model()
+    }
+
     /// Drafts `field` for `subject`.
     ///
     /// **Infallible by design**, like the roster pass: there is no failure a

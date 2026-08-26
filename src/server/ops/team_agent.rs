@@ -1624,11 +1624,15 @@ async fn build_draft(
     };
     let provider = drafter.provider_slug();
     let (draft, usage) = drafter.draft(field, subject).await;
+    // Read *after* the turn, so it names the model the turn actually ran on —
+    // the same ordering the roster pass uses (issue #1749).
+    let model = drafter.model_slug();
     // Metered whatever came back: an unreadable answer was still billed, and a
     // refusal that never reached a provider moved no tokens and writes no row.
     crate::metering::record_profile_draft_usage(
         &usage,
         &provider,
+        model,
         company.id(),
         company.runtime.store().as_ref(),
         company.runtime.usage().as_ref(),
