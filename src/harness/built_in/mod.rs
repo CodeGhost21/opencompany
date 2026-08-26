@@ -3497,6 +3497,12 @@ impl HarnessPool {
                 message.to_string(),
                 pause.summary.clone(),
                 crate::ports::now_millis(),
+                // Issue #1846 review (Codex #3865812419/#3865812423/
+                // #3865812432): the ambient parent/deliverable/mentions the
+                // cycle was started with, so a redeem replays the operator's
+                // ORIGINAL thread/intent/audience instead of the empty
+                // defaults `redeem_budget_pause` used to fall back to.
+                crate::runtime::grants::current_redeem_context(),
             );
             tracing::info!(
                 company = %company,
@@ -6990,6 +6996,130 @@ description = "Builds the product."
         assert_eq!(marker.agent, "ceo");
         assert_eq!(marker.message, "Please summarize today's standup notes.");
         assert_eq!(marker.summary, pause.summary);
+    }
+
+    /// This file's own default `park()` call site — the top-level turn, not
+    /// a delegated re-park — stamps the marker with the ambient
+    /// `RedeemContext` a cycle sets around it (issue #1846 review, Codex
+    /// #3865812419/#3865812423/#3865812432). Same fixture as the test
+    /// above, wrapped in `with_redeem_context` the way
+    /// `CycleRunner::run_bracketed` does in production, with a non-default
+    /// parent/deliverable/mentions to prove they land on the marker instead
+    /// of being silently dropped the way the pre-fix `redeem_budget_pause`
+    /// dropped them on the OTHER side of a redeem.
+    #[tokio::test]
+    async fn a_top_level_budget_pause_parks_the_ambient_redeem_context() {
+        use crate::ports::types::{EventSeq, Mention, MentionTarget, MessageIntent};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-redeem-context");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(ScriptedProvider::new(vec![
+                Err(
+                    "USER_INSUFFICIENT_CREDITS: insufficient budget for this account — add \
+                     credits to continue"
+                        .to_string(),
+                );
+                10
+            ])),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        let redeem = crate::runtime::grants::RedeemContext {
+            parent: Some(EventSeq::new(42)),
+            deliverable: Some(MessageIntent::Workflow),
+            mentions: vec![Mention {
+                target: MentionTarget::Agent {
+                    id: "researcher".to_string(),
+                },
+                text: "@researcher".to_string(),
+                offset: 0,
+                quiet: false,
+            }],
+        };
+
+        crate::runtime::grants::with_redeem_context(redeem.clone(), async {
+            pool.run(
+                &company,
+                "ceo",
+                "@researcher please summarize today's standup notes.",
+                &deps,
+                None,
+            )
+            .await
+            .expect("a budget pause is a graceful stop, not an error")
+        })
+        .await;
+
+        let marker = crate::runtime::grants::budget_pauses_for(&company)
+            .peek("ceo")
+            .expect("a re-issue marker must be parked for the paused agent");
+        assert_eq!(
+            marker.parent, redeem.parent,
+            "the marker must carry the ambient cycle's thread parent"
+        );
+        assert_eq!(
+            marker.deliverable, redeem.deliverable,
+            "the marker must carry the ambient cycle's deliverable choice"
+        );
+        assert_eq!(
+            marker.mentions, redeem.mentions,
+            "the marker must carry the ambient cycle's resolved mentions"
+        );
     }
 
     /// No-regression on the delegated path: a turn that finishes normally
