@@ -45,6 +45,7 @@ import {
   type FinancesDto,
   type GrantScope,
   type HarnessDto,
+  type BudgetPauseMarker,
   type InboxDto,
   type InboxMessageDto,
   type PageManifestDto,
@@ -878,6 +879,35 @@ export class OpenCompanyClient {
       body,
     );
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
+  }
+
+  /**
+   * The parked budget-pause marker for an agent (issue #1846), or `null` when
+   * nothing is paused. Read-only — does not consume the marker.
+   */
+  getBudgetPause(
+    agentId: string,
+    company?: string | null,
+  ): Promise<BudgetPauseMarker | null> {
+    return this.request<BudgetPauseMarker | null>(
+      "GET",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause`,
+    );
+  }
+
+  /**
+   * The Add-Credits CTA (issue #1846): redeems the parked marker and
+   * re-dispatches the original message. Not true resume (#561) — a fresh
+   * turn runs from the top on the same chat thread the pause happened on.
+   */
+  redeemBudgetPause(
+    agentId: string,
+    company?: string | null,
+  ): Promise<BudgetPauseMarker> {
+    return this.request<BudgetPauseMarker>(
+      "POST",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause/redeem`,
+    );
   }
 
   /** The live standing permissions, newest first (#374). */
