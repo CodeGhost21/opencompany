@@ -167,7 +167,7 @@ describe("the workspace tree's agent provenance badge", () => {
     // `artifacts/<agent>/<task>/<file>` is attributed wholesale by the folder
     // it hangs under, so a per-row pill repeats the same fact once per row —
     // four identical pills stacked down a 256px pane, each eating the width
-    // the *name* needs. That is the redundancy that made a `<title>-<id>`
+    // the *name* needs. That is the redundancy that made a `<title>.<id>`
     // folder name unreadable at depth in the first place.
     const tree = [
       node({ id: "artifacts-root", name: "artifacts", kind: "folder" }),
@@ -180,7 +180,7 @@ describe("the workspace tree's agent provenance badge", () => {
       }),
       node({
         id: "n-task",
-        name: "checkout-flow-redesign-spike-01hq8zm4xk3n7y2p9v1w5c8t01",
+        name: "checkout-flow-redesign-spike.01hq8zm4xk3n7y2p9v1w5c8t01",
         kind: "folder",
         parentId: "n-fe",
         createdBy: { kind: "agent", id: "frontend_engineer" },
@@ -203,6 +203,46 @@ describe("the workspace tree's agent provenance badge", () => {
     }
 
     expect(container.textContent).toContain("checkout-flow-redesign-spike");
+    expect(badges()).toHaveLength(0);
+  });
+
+  it("says nothing inside a folder minted under the kebab spelling of the id", async () => {
+    // `ensure_artifact_folder` puts the roster id through `kebab_name`
+    // (`src/company/workspace_names.rs`), so a company provisioned since that
+    // rule shipped carries `artifacts/frontend-engineer/` while its roster says
+    // `frontend_engineer`. That is the *same* teammate, and the suppression has
+    // to see it as one — otherwise every row of every such company's artifacts
+    // subtree wears a pill repeating its own enclosing folder.
+    //
+    // Comparing the raw ids instead would reopen it: the two spellings can
+    // never be two teammates, because a roster id is `[a-z0-9_]` starting with
+    // a letter (`manifest::is_snake_case`, and `ids::agent_slug` for the minted
+    // ones), so no legal id contains a hyphen at all.
+    const tree = [
+      node({ id: "artifacts-root", name: "artifacts", kind: "folder" }),
+      node({
+        id: "n-fe",
+        name: "frontend-engineer",
+        kind: "folder",
+        parentId: "artifacts-root",
+        createdBy: { kind: "agent", id: "frontend_engineer" },
+      }),
+      node({
+        id: "n-file",
+        name: "spike.md",
+        kind: "file",
+        parentId: "n-fe",
+        createdBy: { kind: "agent", id: "frontend_engineer" },
+      }),
+    ];
+
+    await render(client(tree, [member("frontend_engineer", "Frontend Engineer")]));
+
+    const rows = Array.from(container.querySelectorAll("button"));
+    const folderRow = rows.find((b) => b.textContent?.includes("Frontend Engineer"));
+    await act(async () => folderRow?.click());
+
+    expect(container.textContent).toContain("spike");
     expect(badges()).toHaveLength(0);
   });
 
