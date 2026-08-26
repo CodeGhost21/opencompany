@@ -860,7 +860,16 @@ export function RunHistoryRow({
                 // either would be a diagnosis the console cannot make. Re-run
                 // is offered as an option, not as a remedy for a stated cause.
                 "Nothing here is waiting on you any more, and this run cannot be continued. Run the workflow again if you still need it."
-              : "Nothing here can be approved; change the policy and run the workflow again."}
+              : // Codex review on #1821 (eighth pass, same site as the sixth):
+                // `parkFailed` fires both when the approvals queue itself
+                // refused the write AND when this runtime never wired one at
+                // all — the frontend has no field naming which, per the
+                // legend definition's own hedge two rounds ago ("the
+                // approvals queue itself can refuse the write, and no
+                // workflow change fixes that"). "Change the policy" names a
+                // cause that is never the one in either code path; nothing
+                // about policy content is what failed here.
+                "Nothing here could be queued for approval — the approvals queue itself may have refused it, which no workflow change fixes. Run it again once that's resolved."}
         </p>
         {/* Issue #1014 (PR-B): the gated tool names per blocked node and a link
             per parked card to the Approvals queue — the sentence above says
