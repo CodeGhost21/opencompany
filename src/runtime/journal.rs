@@ -350,6 +350,30 @@ enum JournalRecord {
         /// The turn key whose stash this drops.
         turn: String,
     },
+    /// At least one of a blocked agent node's parked calls has been approved,
+    /// banked durably the moment that decision lands (issue #1816).
+    ///
+    /// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)'s
+    /// batch only carries the verdicts a single process happened to hold in
+    /// memory when the turn's last decision released it — a restart between
+    /// two decisions on the same node drops the earlier ones from that batch
+    /// exactly as [`WorkflowGateQueue`](crate::runtime::workflow_gates::WorkflowGateQueue)'s
+    /// own docs describe. That queue can afford the loss: the workflow graph
+    /// replay re-parks whatever the batch forgot, so the operator is asked
+    /// again rather than never. A blocked agent node has no such re-park —
+    /// [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)
+    /// either spawns the continuation or does not, once — so losing an earlier
+    /// approval from the batch would silently strand a grant the operator
+    /// already minted: an approved tool call that runs to redeem it never
+    /// executes and nothing re-asks. This record is the fact the batch cannot
+    /// carry, kept durable on its own so a restart mid-decision cannot erase
+    /// it. Written from the same place [`ContinuationQueue::decide`] is told
+    /// about the verdict, not deferred to release time, so it survives a
+    /// restart that lands on any decision but the last.
+    BlockedNodeApproved {
+        /// The turn key whose node had at least one call approved.
+        turn: String,
+    },
 }
 
 impl JournalRecord {
@@ -496,6 +520,12 @@ impl JournalRecord {
             // re-dispatched and could double-spawn under a boot sweep. Host, to
             // match `BlockedNodeStashed`.
             Self::BlockedNodeReleased { .. } => Durability::Host,
+            // Protects against exactly the failure `BlockedNodeStashed` does —
+            // the fact this exists to carry is only needed across the same
+            // restart window, and a `Process`-tier write could be lost to the
+            // same pod-roll that motivated the stash's own Host tier, silently
+            // reopening the gap this record closes.
+            Self::BlockedNodeApproved { .. } => Durability::Host,
         }
     }
 }
@@ -861,6 +891,16 @@ struct State {
     /// boot, so retaining a released one would rehydrate a run that already
     /// re-dispatched.
     blocked_stashes: HashMap<String, BlockedStash>,
+    /// Blocked agent-node turns with at least one approved decision banked so
+    /// far, keyed the same as [`blocked_stashes`](Self::blocked_stashes)
+    /// (issue #1816).
+    ///
+    /// Inserted by [`BlockedNodeApproved`](JournalRecord::BlockedNodeApproved)
+    /// and removed by its stash's paired
+    /// [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased) — the release
+    /// that retires the stash also retires whatever this set knows about it,
+    /// so a turn never lingers here past the continuation it describes.
+    blocked_node_approvals: HashSet<String>,
 }
 
 /// One blocked agent node's durable continuation facts (issue #1816).
@@ -1176,6 +1216,10 @@ impl RuntimeJournal {
             }
             JournalRecord::BlockedNodeReleased { turn } => {
                 state.blocked_stashes.remove(&turn);
+                state.blocked_node_approvals.remove(&turn);
+            }
+            JournalRecord::BlockedNodeApproved { turn } => {
+                state.blocked_node_approvals.insert(turn);
             }
         }
     }
@@ -1560,6 +1604,46 @@ impl RuntimeJournal {
             .blocked_stashes
             .remove(turn);
         self.append(&JournalRecord::BlockedNodeReleased {
+            turn: turn.to_string(),
+        })
+        .await
+    }
+
+    /// Every blocked-node turn durably known to have at least one approved
+    /// decision banked (issue #1816).
+    ///
+    /// The builder folds this at boot into the live
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)
+    /// (via [`mark_approved`](crate::runtime::blocked_nodes::BlockedNodeQueue::mark_approved),
+    /// once per turn) alongside [`blocked_stashes`](Self::blocked_stashes), so a
+    /// restart that landed between an approval and the node's last decision
+    /// still knows that approval happened when the last one lands.
+    pub fn blocked_node_approvals(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_approvals
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Records durably that a blocked agent node's turn has at least one
+    /// approved decision, the moment that decision lands (issue #1816).
+    ///
+    /// Called beside [`ContinuationQueue::decide`](crate::runtime::continuation::ContinuationQueue::decide),
+    /// not deferred to the turn's release — the whole point is to survive a
+    /// restart that lands on a decision that is not the turn's last, which is
+    /// exactly the window release-time bookkeeping cannot cover. Idempotent by
+    /// construction (a set insert), so a node whose second call is also
+    /// approved writes this again harmlessly.
+    pub async fn record_blocked_node_approved(&self, turn: &str) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_approvals
+            .insert(turn.to_string());
+        self.append(&JournalRecord::BlockedNodeApproved {
             turn: turn.to_string(),
         })
         .await
@@ -3798,6 +3882,14 @@ mod test {
                 at_millis: 9,
                 error: None,
             },
+            JournalRecord::BlockedNodeStashed {
+                turn: "t".into(),
+                workflow_id: "w".into(),
+                input: serde_json::json!({}),
+                at_millis: 10,
+            },
+            JournalRecord::BlockedNodeReleased { turn: "t".into() },
+            JournalRecord::BlockedNodeApproved { turn: "t".into() },
         ]
     }
 
@@ -3838,7 +3930,7 @@ mod test {
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
             tags.len(),
-            13,
+            16,
             "every JournalRecord variant must appear once in every_record_kind"
         );
 
@@ -3851,13 +3943,17 @@ mod test {
         assert_eq!(
             host,
             vec![
+                "BlockedNodeApproved".to_string(),
+                "BlockedNodeReleased".to_string(),
+                "BlockedNodeStashed".to_string(),
                 "EffectExecuted".to_string(),
                 "GrantConsumed".to_string(),
                 "StandingGrantRevoked".to_string()
             ],
-            "the host-durable set is these three kinds and nothing else; \
-             widening it taxes the hot path, narrowing it lets an effect duplicate \
-             or a spent grant re-arm"
+            "the host-durable set is these six kinds and nothing else; \
+             widening it taxes the hot path, narrowing it lets an effect duplicate, \
+             a spent grant re-arm, or a blocked node's stash/approval survive a \
+             process restart but not the host crash it also promises to survive"
         );
     }
 
