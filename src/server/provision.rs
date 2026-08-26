@@ -17,6 +17,8 @@
 //! [`WebhookSink`](crate::server::webhook::WebhookSink); the default build
 //! records deliveries in memory.
 
+use std::sync::Arc;
+
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
@@ -29,6 +31,7 @@ use serde_json::json;
 
 use crate::AppState;
 use crate::company::CompanyManifest;
+use crate::ports::CompanyStore;
 use crate::ports::types::{Actor, ActorKind, CompanyId};
 use crate::runtime::types::CycleReport;
 use crate::runtime::{RuntimeBuilder, company_id_from_name};
@@ -36,6 +39,7 @@ use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::platform_auth::{PlatformScope, acting_tenant, authorize_address};
 use crate::server::webhook::{WebhookEvent, WebhookKind};
+use crate::store::FsCompanyStore;
 
 /// Builds the provisioning + lifecycle route fragment.
 pub fn router() -> Router<AppState> {
@@ -208,13 +212,44 @@ async fn provision(
     // prefixed explicit id.
     let id = state.config().namespaced_company_id(id);
 
-    // Reject a duplicate id.
+    // Reject a duplicate id — checked against BOTH the live registry (a
+    // company currently running) and the durable store (any company, live or
+    // archived, that has ever existed under this id). Registry-only used to
+    // miss the second case entirely: an archive removes a company from the
+    // registry but never deletes its durable record, and `RuntimeBuilder::
+    // build` loads any existing durable record for `id` before building over
+    // it — so provisioning over an archived company's id, whether it is the
+    // company this very request just reset or any OTHER company's old id
+    // typed into Advanced, silently carried that record's old lifecycle,
+    // ledger and overlays into the supposedly clean replacement instead of
+    // being refused (issue #1828 comment 3865803905).
+    //
+    // The store lookup mirrors `RuntimeBuilder::build`'s own inherit-or-
+    // construct fallback (`self.store.unwrap_or_else(FsCompanyStore::new)`)
+    // so this check sees exactly the durable record the build below would
+    // load, on every storage backend including the fs default, which never
+    // populates `state.stores()`.
     if state.registry().get(&id).is_some() {
         return envelope(
             StatusCode::CONFLICT,
             "company_exists",
             &format!("company already exists: {id}"),
         );
+    }
+    let company_store: Arc<dyn CompanyStore> = match state.stores() {
+        Some(stores) => stores.company.clone(),
+        None => Arc::new(FsCompanyStore::new(state.home().to_path_buf())),
+    };
+    match company_store.load(&id).await {
+        Ok(Some(_)) => {
+            return envelope(
+                StatusCode::CONFLICT,
+                "company_exists",
+                &format!("company already exists: {id}"),
+            );
+        }
+        Ok(None) => {}
+        Err(err) => return ApiError(err).into_response(),
     }
 
     // Quota: per-tenant then global.

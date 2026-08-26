@@ -206,6 +206,87 @@ async fn provisioning_a_none_mode_company_on_a_routable_bind_is_refused() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// Builds a JSON-envelope provision request naming an explicit id.
+fn provision_req_json(token: Option<&str>, toml: &str, id: &str) -> Request<Body> {
+    let body = serde_json::json!({ "manifest_toml": toml, "id": id }).to_string();
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/api/v1/companies")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header("content-type", "application/json");
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    builder.body(Body::from(body)).unwrap()
+}
+
+/// An archived company's durable record must block ANY later provision that
+/// asks for its id — not just a reset of that same company reusing its own
+/// id, but a wholly unrelated company typing the archived id into Advanced.
+///
+/// Archive removes a company from the live registry, which is all the old
+/// duplicate-id check consulted, but never deletes its durable record — and
+/// `RuntimeBuilder::build` loads any existing durable record for an id before
+/// building over it. So a registry-only check let a second, unrelated
+/// "clean" company come back carrying the archived company's old lifecycle,
+/// ledger and overlays (issue #1828 comment 3865803905). This proves the
+/// server refuses regardless of which company is asking, not just the one
+/// that owned the id originally.
+#[tokio::test]
+async fn archived_company_id_rejected_for_unrelated_provision() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    // Provision and then archive "acme".
+    let created = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(json_body(created).await["id"], "acme");
+
+    let archived = app
+        .clone()
+        .oneshot(post_req(
+            "/api/v1/companies/acme/archive",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), StatusCode::OK);
+
+    // "acme" is gone from the live registry ...
+    let missing = app
+        .clone()
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    // ... but a totally unrelated new company ("Beta") asking for that same
+    // id must still be refused, not silently built over the archived record.
+    const BETA_TOML: &str = "[company]\nname = \"Beta\"\n[policy]\nmode = \"full\"\n";
+    let collision = app
+        .clone()
+        .oneshot(provision_req_json(Some(PLATFORM_SECRET), BETA_TOML, "acme"))
+        .await
+        .unwrap();
+    assert_eq!(collision.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(collision).await["code"], "company_exists");
+
+    // And the archived record's own history was not disturbed: a fresh
+    // provision of "acme" cleanly denied above means nothing overwrote it, so
+    // the id is still not addressable as a live company.
+    let still_missing = app
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(still_missing.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn provision_accepts_json_envelope_with_explicit_id() {
     let home_dir = home();
