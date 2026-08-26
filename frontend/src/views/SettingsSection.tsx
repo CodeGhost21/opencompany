@@ -33,6 +33,8 @@ interface Props {
   /** The hash's second segment, e.g. `people` in `#/settings/people`. */
   sub: string | null;
   onFlag: () => void;
+  /** Start the reset (archive + start clean) flow for the active company (#1807). */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 /**
@@ -44,7 +46,7 @@ interface Props {
  * Each is its own route (`#/settings/people`), so a sub-page is linkable and
  * survives a refresh exactly as a top-level view does.
  */
-export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
+export function SettingsSection({ client, company, feed, sub, onFlag, onResetCompany }: Props) {
   const page = resolveSettingsPage(sub);
   const activePage = SETTINGS_PAGES.find((item) => item.id === page)!;
 
@@ -122,7 +124,13 @@ export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
         </div>
 
         {page === "general" && (
-          <SettingsView client={client} company={company} feed={feed} onFlag={onFlag} />
+          <SettingsView
+            client={client}
+            company={company}
+            feed={feed}
+            onFlag={onFlag}
+            onResetCompany={onResetCompany}
+          />
         )}
         {page === "people" && <PeopleView client={client} company={company} />}
         {page === "oauth" && <OAuthView client={client} company={company} />}
