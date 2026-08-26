@@ -2410,9 +2410,24 @@ impl HarnessBrain {
     /// broadcast from the console's default thread — which sends
     /// `chat: "main"`, an alias `resolve_desk_id` does not know — expands
     /// against the General desk rather than no desk at all.
-    fn everyone_desk(chat: Option<&str>) -> &str {
+    ///
+    /// **A real desk answering to that key wins, whatever it is spelled like.**
+    /// A blueprint may declare `[[group_chat]] id = "main"` (or `"general"`),
+    /// which this host grandfathers — `is_general_channel` is guarded on
+    /// `!desk_exists`, so the desk keeps its members and `responder_for` routes
+    /// to its lead. Folding that key to `General` asks `resolve_desk_id` for a
+    /// name no such desk has, which misses, and `@everyone` then expands to the
+    /// **whole roster** instead of the desk that was actually addressed — a
+    /// broadcast escaping the scope of the one case the fold exists to keep
+    /// working. Asking the record first costs one lookup and cannot be wrong.
+    fn everyone_desk<'a>(record: &CompanyRecord, chat: Option<&'a str>) -> &'a str {
         match chat {
-            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
+            Some(chat)
+                if record.resolve_desk_id(chat).is_some()
+                    || !crate::server::chat_history::is_general_chat(Some(chat)) =>
+            {
+                chat
+            }
             _ => crate::server::ops::language::DEFAULT_DESK,
         }
     }
@@ -2893,7 +2908,7 @@ impl HarnessBrain {
                     // `resolve_desk_id` does not recognise that console-only
                     // alias, so a broadcast from the main thread would otherwise
                     // expand against no desk at all.
-                    let addressed_desk = Self::everyone_desk(chat.as_deref());
+                    let addressed_desk = Self::everyone_desk(&self.record(), chat.as_deref());
                     let also_mentioned = crate::runtime::mentions::mentioned_agents(
                         &self.record(),
                         addressed_desk,
@@ -5835,11 +5850,90 @@ members = ["engineer"]
     /// other General-desk spellings — to the General desk id before expanding.
     #[test]
     fn everyone_desk_folds_the_main_thread_alias_to_general() {
-        assert_eq!(HarnessBrain::everyone_desk(None), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("main")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("General")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("eng_desk")), "eng_desk");
+        let record = record_with_desk();
+        assert_eq!(HarnessBrain::everyone_desk(&record, None), "General");
+        assert_eq!(HarnessBrain::everyone_desk(&record, Some("")), "General");
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("main")),
+            "General"
+        );
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("General")),
+            "General"
+        );
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("eng_desk")),
+            "eng_desk"
+        );
+    }
+
+    /// A blueprint that declares a desk under one of the General spellings is
+    /// grandfathered by this host — `is_general_channel` is guarded on
+    /// `!desk_exists`, the desk keeps its members, and `responder_for` routes
+    /// to its lead. The fold must not run over it: asking `resolve_desk_id`
+    /// for the *name* `General` misses a desk called anything else, and
+    /// `@everyone` would then expand to the whole roster instead of the two
+    /// people actually on the line — a broadcast escaping the scope of the one
+    /// case the fold exists to preserve.
+    #[test]
+    fn a_grandfathered_general_desk_keeps_its_own_membership() {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[group_chat]]
+id = "main"
+name = "Front office"
+members = ["ceo", "engineer"]
+"#,
+        )
+        .expect("valid manifest");
+        let mut record = record_with_desk();
+        record.manifest.group_chats = manifest.group_chats;
+
+        // The raw key, not the General fold: this desk answers to it.
+        assert_eq!(HarnessBrain::everyone_desk(&record, Some("main")), "main");
+        // And with no such desk, the fold still applies as before.
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record_with_desk(), Some("main")),
+            "General"
+        );
+
+        let mentions = [crate::ports::types::Mention {
+            target: crate::ports::types::MentionTarget::Everyone,
+            text: "@everyone".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let expanded = crate::runtime::mentions::mentioned_agents(
+            &record,
+            HarnessBrain::everyone_desk(&record, Some("main")),
+            &mentions,
+            None,
+        );
+        assert_eq!(
+            expanded,
+            vec!["ceo".to_string(), "engineer".to_string()],
+            "a broadcast stays inside the desk that was addressed"
+        );
+        assert!(
+            !expanded.contains(&"chief".to_string()),
+            "and does not reach a teammate who is not on it: {expanded:?}"
+        );
     }
 
     /// The default responder is the `orchestrator`-tier agent, even when it is

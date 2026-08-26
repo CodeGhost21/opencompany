@@ -183,6 +183,26 @@ describe("resolving a host thread to the general channel", () => {
     ];
     expect(channelIdForThread("general", authored, ROSTER)).toBe("general");
   });
+
+  it("sends every other spelling to that desk too, since nothing else renders the line", () => {
+    // `buildChannels` adds no built-in channel beside a grandfathered desk, so
+    // answering `main` here would name a channel that does not exist — and a
+    // live frame, an unread badge or an approval link addressed to it would
+    // land in a bucket the operator cannot open.
+    const authored: Desk[] = [
+      { id: "general", channel: "ops-room", name: "Ops lead", blurb: "", members: ["ceo"] },
+    ];
+    for (const spelling of ["", "main", "General", "general", "  MAIN  "]) {
+      expect(channelIdForThread(spelling, authored, ROSTER)).toBe("general");
+    }
+    // And the same, the other way round, for a desk that authored `main`.
+    const authoredMain: Desk[] = [
+      { id: "main", channel: "front-office", name: "Front office", blurb: "", members: ["eng"] },
+    ];
+    for (const spelling of ["", "main", "General", "general"]) {
+      expect(channelIdForThread(spelling, authoredMain, ROSTER)).toBe("main");
+    }
+  });
 });
 
 describe("isGeneralChannel", () => {
@@ -268,16 +288,22 @@ describe("the shell maps the main line to #general, not to the first desk", () =
   });
 
   it("maps every spelling the host journals the general line under", () => {
+    // Through `channelIdForThread`, so the one rule above decides — not a
+    // second copy that can disagree with the rail about where the line renders.
     expect(shell).toContain(
-      'for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) { map[spelling] = MAIN_THREAD_ID; }',
+      'for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) { const channelId = channelIdForThread(spelling, desks, members); if (channelId) map[spelling] = channelId; }',
     );
   });
 
   it("lands an unaddressed system line in #general rather than the first desk", () => {
-    expect(shell).toContain("setFirstDeskChannelId(MAIN_THREAD_ID);");
+    expect(shell).toContain(
+      "setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));",
+    );
   });
 
   it("names #general as a rehydration target, since it is in no desk list", () => {
-    expect(shell).toContain("{ channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },");
+    expect(shell).toContain(
+      "channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,",
+    );
   });
 });

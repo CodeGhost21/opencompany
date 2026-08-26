@@ -131,6 +131,22 @@ export interface ChannelSection {
 }
 
 /**
+ * The channel the company-wide line actually renders in.
+ *
+ * `main` — the built-in channel — in every ordinary company. A blueprint that
+ * declares a `[[group_chat]]` under a General id is grandfathered by the host
+ * (`is_general_channel` is guarded on `!record.desk_exists`), and
+ * {@link buildChannels} then lets that desk own the line and adds no built-in
+ * channel beside it; here that desk's own id is the answer.
+ *
+ * One place, because two answers to "where does the main line render" is
+ * precisely how a message ends up somewhere nothing is listening.
+ */
+function generalChannelId(desks: Desk[]): string {
+  return desks.find((d) => isGeneralChannel(d.id))?.id ?? MAIN_THREAD_ID;
+}
+
+/**
  * The built-in `#general` channel: the company-wide line, in every company,
  * from first boot (issue #1743).
  *
@@ -371,8 +387,15 @@ export function channelIdForThread(
   // matched no channel and stayed stranded on the Approvals page.
   //
   // After the desk scan, deliberately: a blueprint desk that authored one of
-  // those ids keeps its own thread.
-  if (isGeneralChannel(threadId)) return MAIN_THREAD_ID;
+  // those ids keeps its own thread. And when it did, every *other* spelling has
+  // to follow it there — `buildChannels` renders no built-in channel beside
+  // such a desk, so answering `main` for a company whose line is `#general`
+  // names a channel that does not exist, and whatever was addressed there (a
+  // live frame, an unread badge, an approval's "Asked in" link) lands in a
+  // bucket the operator cannot open.
+  if (isGeneralChannel(threadId)) {
+    return generalChannelId(desks);
+  }
   const member = members.find((m) => m.id === threadId);
   return member ? dmChannelId(member) : null;
 }

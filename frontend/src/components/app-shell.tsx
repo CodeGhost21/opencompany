@@ -402,8 +402,15 @@ function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string
   // now actively wrong — an unaddressed message and its reply were rendered in
   // `#engineering`, complete with an unread badge, while the host's own
   // history for that desk was empty. Verified in a browser before and after.
+  //
+  // Resolved through `channelIdForThread` rather than answered here, so there
+  // is one rule and not two: a blueprint desk grandfathered under a General id
+  // owns the line in its own company, and `buildChannels` renders no built-in
+  // channel beside it — pointing these spellings at a `main` nothing renders
+  // parks live frames and their unread badges where they cannot be opened.
   for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) {
-    map[spelling] = MAIN_THREAD_ID;
+    const channelId = channelIdForThread(spelling, desks, members);
+    if (channelId) map[spelling] = channelId;
   }
   for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
     const channelId = channelIdForThread(threadId, desks, members);
@@ -1059,14 +1066,20 @@ export function AppShell({
         // The channel `ChatView` lands on when the hash names none, which since
         // issue #1743 is the built-in `#general` rather than the first desk —
         // the two must agree, or a line with nowhere else to go lands in a
-        // channel the operator is not looking at.
-        setFirstDeskChannelId(MAIN_THREAD_ID);
+        // channel the operator is not looking at. Resolved rather than
+        // hard-coded, for the reason `generalChannelId` gives: a grandfathered
+        // blueprint desk owns the line in its own company, and `main` is then
+        // not a channel at all.
+        setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
         const threadIds = resolved.map((t) => t.id);
         const channels = [
           // `#general` is not in the desk list (it is not a desk), so its
           // history has to be named here or nothing would rehydrate it on
           // reload — the one channel every company has would come back empty.
-          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
+          {
+            channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
+            threadId: MAIN_THREAD_ID,
+          },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
           ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
         ];
