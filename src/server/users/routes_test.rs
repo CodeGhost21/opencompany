@@ -8,7 +8,7 @@ use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
 use crate::runtime::RuntimeBuilder;
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
@@ -117,7 +117,7 @@ fn mail_connections() -> (ConnectionsRuntime, RecordingMailSender) {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
             from_name: "Acme".into(),
             from_email: "noreply@acme.test".into(),
         }));
@@ -903,7 +903,7 @@ async fn a_https_deployment_marks_the_cookie_secure() {
                 port: 587,
                 security: SmtpSecurity::Starttls,
                 username: "u".into(),
-                password: "p".into(),
+                password: SecretValue("p".into()),
                 from_name: "Acme".into(),
                 from_email: "noreply@acme.test".into(),
             })),
@@ -1754,7 +1754,7 @@ async fn state_refusing_mail_to(
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
             from_name: "Acme".into(),
             from_email: "noreply@acme.test".into(),
         }));
@@ -2036,7 +2036,7 @@ async fn an_invite_revoked_while_its_mail_is_in_flight_stays_revoked() {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
             from_name: "Acme".into(),
             from_email: "noreply@acme.test".into(),
         }));

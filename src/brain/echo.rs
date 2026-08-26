@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 
 use crate::Result;
-use crate::ports::brain::{Brain, Cognition, CycleHost, UsageMetering};
+use crate::ports::brain::{Brain, Cognition, CycleHost, ECHO_PATH, UsageMetering};
 use crate::ports::types::{
     CompanyEvent, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup, OutboundMessage,
     TokenUsage,
@@ -107,8 +107,10 @@ impl Brain for EchoBrain {
     /// broken" (issue #174).
     fn cognition(&self) -> Cognition {
         Cognition {
-            path: "echo",
+            path: ECHO_PATH,
             provider: "none",
+            // No model is called on this path, so there is no model to name.
+            model: None,
             metering: UsageMetering::None,
         }
     }

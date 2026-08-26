@@ -36,13 +36,13 @@ use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
 use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
-    CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
-    PolicyDecision, TokenUsage, ToolCall, ToolResult, Verdict,
+    CycleRequest, CycleResult, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry,
+    OutboundMessage, PolicyDecision, TokenUsage, ToolCall, ToolResult, Verdict,
 };
 use crate::ports::{generate_id, now_millis};
 use crate::runtime::channel::OPERATOR_CHANNEL;
 use crate::runtime::delegation_tools::{
-    DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, desk_lead,
+    DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, chat_responder, desk_lead,
     unknown_desk_message,
 };
 use crate::runtime::grants::{GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant};
@@ -259,6 +259,117 @@ fn single_agent(events: &[(Option<EventSeq>, CompanyEvent)]) -> Option<String> {
         }
     }
     found.map(str::to_owned)
+}
+
+/// The answer to a bare pleasantry, when this batch is one (issue #1725) — and
+/// `None` whenever anything about it says a real turn is owed.
+///
+/// # Why the runtime answers this itself
+///
+/// On staging, "hi" ran the full agentic pipeline: memory retrieval, a tool
+/// step, and a long analysis belonging to a task nobody had asked about in that
+/// turn. Two things produced that, and only one of them is in this repository.
+/// The vendored turn re-injects an uncompleted per-thread goal on **every**
+/// turn (`threads::goals::runtime::load_for_current_thread`, which also
+/// *resumes* a paused one), and the pooled agent's transcript is keyed by agent
+/// id alone, so a prior task's fetched page is still in the context window. A
+/// greeting therefore did not merely cost a model call — it inherited somebody
+/// else's objective and continued it.
+///
+/// Both of those are properties of a turn that runs. The one fix available on
+/// this side of the seam, and the one that holds regardless of what the vendored
+/// runtime does with its goals, is not to run the turn: no model call, no tool,
+/// no memory read, no goal to inherit, and nothing written back for a later turn
+/// to retrieve.
+///
+/// # The conditions are narrow on purpose
+///
+/// A fast path that fires on a message that *was* work is a far worse bug than
+/// the one it fixes — the operator's request is answered with a canned
+/// pleasantry and silently dropped. So every arm here is a reason NOT to
+/// short-circuit:
+///
+/// * **One event, and an operator message.** A batch is a scheduler tick, a
+///   dispatch, or several messages at once; none of those are small talk.
+/// * **Nothing attached.** A file with "hi" over it is a request to look at the
+///   file.
+/// * **No explicit work choice.** The composer's "Build me the workflow" /
+///   "one-off" is a positive statement by the person who wrote the message
+///   (issue #845's reasoning, in the other direction), and it outranks anything
+///   read out of the words. Only an absent choice and "Just chatting" reach
+///   here.
+/// * **Not a workflow copilot thread**, whose turns are confined and answered
+///   by an ephemeral agent this has no way to speak as (issue #416).
+/// * **A pleasantry, by [`small_talk`](crate::company::task_intent::small_talk)** —
+///   which is narrower than the triage's greeting list, and excludes every
+///   acknowledgement, because "yes" answering *"shall I ship it?"* is an
+///   instruction.
+/// * **Somebody to say it.** A company whose roster resolves to nobody has no
+///   voice to answer in, and an unattributed bubble is journaled under the
+///   operator (issue #885).
+fn small_talk_result(record: &CompanyRecord, events: &[CompanyEvent]) -> Option<CycleResult> {
+    let [
+        CompanyEvent::OperatorMessage {
+            text,
+            chat,
+            deliverable,
+            attachments,
+            ..
+        },
+    ] = events
+    else {
+        return None;
+    };
+    if !attachments.is_empty() {
+        return None;
+    }
+    if !matches!(deliverable, None | Some(MessageIntent::Chat)) {
+        return None;
+    }
+    if crate::company::copilot::is_copilot_thread(chat.as_deref()) {
+        return None;
+    }
+    let talk = crate::company::task_intent::small_talk(text)?;
+
+    // Who speaks. The same resolution the harness brain's `responder_for` runs,
+    // so the greeting comes back in the voice the turn it replaced would have
+    // used.
+    //
+    // A company with nobody to speak as declines the fast path rather than
+    // answering anonymously: `agent: None` is read by `journal_chat_replies` as
+    // the destination channel, so an unattributed bubble on the operator
+    // channel is filed as though the operator had written it — permanently, and
+    // in the transcript rather than only on screen (issue #885). Better to run
+    // the turn a roster-less company was always going to run.
+    let responder = chat
+        .as_deref()
+        .and_then(|chat| chat_responder(record, chat))
+        .or_else(|| {
+            crate::company::orchestrator_id(&record.effective_agents()).map(str::to_string)
+        })?;
+
+    Some(CycleResult {
+        channel_responses: vec![OutboundMessage {
+            message_id: None,
+            task_id: None,
+            channel: OPERATOR_CHANNEL.to_string(),
+            agent: Some(responder),
+            text: talk.reply().to_string(),
+            // No tool ran, so the timeline is empty rather than the "1 step"
+            // the console showed for a greeting.
+            steps: Vec::new(),
+            reply_to: None,
+            mentions: Vec::new(),
+        }],
+        // Nothing is written back to memory. A pleasantry is not something a
+        // later turn should retrieve, and the whole point of skipping the turn
+        // is that this exchange leaves no context behind it.
+        new_traces: Vec::new(),
+        ledger_deltas: Vec::new(),
+        // No model was called. A zero here is the truth, and `record_cycle_usage`
+        // meters it as such.
+        token_usage: TokenUsage::default(),
+    })
 }
 
 impl<'a> CycleRunner<'a> {
@@ -530,22 +641,37 @@ impl<'a> CycleRunner<'a> {
                 .apply_effective_policy(record.effective_policy());
         }
 
-        // Issue #176 (handed-task awareness): when an operator message is
-        // addressed to a desk/agent that already has open work handed to it,
-        // fold a briefing of that work into the message the brain sees — so a
-        // direct "what are you working on?" surfaces the handed task truthfully.
-        // Brain-agnostic (both brains read `req.events`); mutates only the
-        // in-memory copy handed to the brain, never the durable log persisted
-        // above.
-        if let Some(record) = &record {
-            self.inject_handed_task_awareness(record, &mut events).await;
+        // Issue #1725: is this batch a bare pleasantry? Decided HERE — before
+        // the injections below and before any brain — because both of those
+        // are how "hi" turned into a full agentic turn on staging.
+        //
+        // Ordering, not tidiness: `inject_handed_task_awareness` appends a
+        // briefing of the desk's open work to the message text, so a "hi" sent
+        // to a desk that is mid-task stops looking like "hi" one statement
+        // later. Reading the events first is what makes the fast path fire on
+        // exactly the messages it is for.
+        let small_talk = record
+            .as_ref()
+            .and_then(|record| small_talk_result(record, &events));
+
+        if small_talk.is_none() {
+            // Issue #176 (handed-task awareness): when an operator message is
+            // addressed to a desk/agent that already has open work handed to it,
+            // fold a briefing of that work into the message the brain sees — so a
+            // direct "what are you working on?" surfaces the handed task truthfully.
+            // Brain-agnostic (both brains read `req.events`); mutates only the
+            // in-memory copy handed to the brain, never the durable log persisted
+            // above.
+            if let Some(record) = &record {
+                self.inject_handed_task_awareness(record, &mut events).await;
+            }
+            // Issue #845: and when the operator asked for a workflow rather than a
+            // one-off, tell the turn that the builder pass owns authoring it — so it
+            // answers the substance instead of denying a capability that is being
+            // exercised on this very message. Same terms as the injection above:
+            // brain-agnostic, in-memory only, never journaled.
+            Self::inject_workflow_builder_awareness(&mut events);
         }
-        // Issue #845: and when the operator asked for a workflow rather than a
-        // one-off, tell the turn that the builder pass owns authoring it — so it
-        // answers the substance instead of denying a capability that is being
-        // exercised on this very message. Same terms as the injection above:
-        // brain-agnostic, in-memory only, never journaled.
-        Self::inject_workflow_builder_awareness(&mut events);
 
         // Issue #390: `cycle_id` is now minted by `run` before the serial lock,
         // so the journal's bracket can cover the wait on that lock. Nothing
@@ -600,7 +726,21 @@ impl<'a> CycleRunner<'a> {
                 self.rt.journal.approval_conversation(id)
             }),
         );
-        let result = self.rt.brain.run_cycle(request, &host).await;
+        // Issue #1725: a bare pleasantry answers from here and the brain is
+        // never called. Everything below — metering, response routing, the
+        // terminality backstop — runs exactly as it does for a real turn, so
+        // the reply is journaled, delivered and settled by one code path; what
+        // is skipped is the thinking, which is the whole of the bug.
+        let result = match small_talk {
+            Some(result) => {
+                tracing::debug!(
+                    company = %company,
+                    "[small-talk] answered a bare pleasantry without a turn"
+                );
+                Ok(result)
+            }
+            None => self.rt.brain.run_cycle(request, &host).await,
+        };
         // Issue #242: the terminality backstop. Whatever the brain did — settled
         // the run richly (the harness path), ignored `TaskDispatched` entirely
         // (the echo brain), or errored out — no attempt row may be left claiming
@@ -834,6 +974,7 @@ impl<'a> CycleRunner<'a> {
             usage,
             crate::metering::UNATTRIBUTED_AGENT,
             cognition.provider,
+            cognition.model,
             company,
             self.rt.store.as_ref(),
             self.rt.usage().as_ref(),
@@ -2989,6 +3130,245 @@ mod test {
         assert!(matches!(events[4], CompanyEvent::ScheduleFired { .. }));
     }
 
+    // ── Issue #1725: a bare greeting must not run the agentic loop ──
+
+    /// The reported bug, end to end and at the level that costs money: "hi"
+    /// reaches the cycle, an answer comes back, and **the brain is never
+    /// called**.
+    ///
+    /// A turn count rather than a reply assertion, deliberately. The observed
+    /// failure was not "the wording is wrong" — it was a greeting spending a
+    /// full agentic turn (memory retrieval, a tool step, a long answer carried
+    /// over from a task nobody had asked about). `CountingBrain` bills 4,500
+    /// tokens and writes a memory trace per call, so a regression shows up as a
+    /// call count, a metered spend and a trace that should not exist.
+    #[tokio::test]
+    async fn a_bare_greeting_answers_without_calling_the_brain() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "hi".into(),
+                by: Some(operator()),
+                chat: None,
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            brain.calls(),
+            0,
+            "a greeting must not spend a turn: the brain was called"
+        );
+        assert_eq!(
+            report.responses.len(),
+            1,
+            "the operator still gets an answer"
+        );
+        let reply = &report.responses[0];
+        assert_eq!(
+            reply.text,
+            crate::company::task_intent::SmallTalk::Hello.reply()
+        );
+        assert!(
+            reply.steps.is_empty(),
+            "no tool ran, so the timeline is empty: {:?}",
+            reply.steps
+        );
+        // Issue #885: the reply is the company's, not the operator's.
+        assert_eq!(
+            reply.agent.as_deref(),
+            Some("ceo"),
+            "the greeting comes back in the voice the turn would have used"
+        );
+        // Nothing was written back for a later turn to retrieve.
+        assert!(
+            rt.memory
+                .recent_traces(rt.id(), 8)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a pleasantry must leave no memory behind it"
+        );
+    }
+
+    /// The other half, and the one that matters more: everything that is not a
+    /// bare pleasantry still runs the full turn.
+    ///
+    /// A fast path that swallowed a real request would answer "Hey! What can I
+    /// help you with?" to "build the landing page" and drop the work on the
+    /// floor — worse than the bug it fixes. Each case here is one of the
+    /// conditions in `small_talk_result`, driven through the real cycle.
+    #[tokio::test]
+    async fn everything_that_is_not_a_pleasantry_still_runs_the_turn() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let message =
+            |text: &str, deliverable, attachments: Vec<crate::ports::types::Attachment>| {
+                CompanyEvent::OperatorMessage {
+                    text: text.into(),
+                    by: Some(operator()),
+                    chat: None,
+                    parent: None,
+                    deliverable,
+                    mentions: Vec::new(),
+                    attachments,
+                }
+            };
+        let attached = vec![crate::ports::types::Attachment {
+            node_id: "node-1".into(),
+            name: "brief.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 12,
+            extracted_text: None,
+        }];
+
+        let cases = vec![
+            (
+                "a real request",
+                message("build the landing page", None, Vec::new()),
+            ),
+            // A greeting with an ask under it is an ask.
+            (
+                "a greeting with an ask",
+                message("hi, build the landing page", None, Vec::new()),
+            ),
+            // "yes" answering a teammate's question is an instruction.
+            ("an acknowledgement", message("yes", None, Vec::new())),
+            // The operator said, positively, that this message asks for work.
+            (
+                "an explicit work choice",
+                message("hi", Some(MessageIntent::Once), Vec::new()),
+            ),
+            (
+                "an explicit workflow choice",
+                message("hi", Some(MessageIntent::Workflow), Vec::new()),
+            ),
+            // A file with "hi" over it is a request to look at the file.
+            ("an attachment", message("hi", None, attached)),
+        ];
+
+        for (i, (label, event)) in cases.into_iter().enumerate() {
+            rt.run_cycle(vec![event]).await.unwrap();
+            assert_eq!(brain.calls(), i + 1, "{label} must still run a full turn");
+        }
+    }
+
+    /// The conditions `small_talk_result` decides on its own, driven directly
+    /// so the ones a live cycle cannot easily reach are still pinned: a
+    /// confined workflow-copilot thread, a batch of more than one event, and
+    /// who the reply is attributed to on an addressed thread.
+    #[test]
+    fn the_fast_path_declines_a_copilot_thread_and_a_batch() {
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+
+[[group_chat]]
+id = "content"
+name = "Content desk"
+members = ["writer"]
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        };
+        let hi = |chat: Option<&str>| CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: None,
+            chat: chat.map(str::to_string),
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        };
+
+        // An addressed desk answers in that desk's lead's voice, not the
+        // orchestrator's — the same routing `responder_for` does.
+        let desk = small_talk_result(&record, &[hi(Some("content"))]).expect("a pleasantry");
+        assert_eq!(desk.channel_responses[0].agent.as_deref(), Some("writer"));
+        assert!(desk.token_usage.is_zero(), "no model was called");
+
+        // Unaddressed falls to the orchestrator.
+        let main = small_talk_result(&record, &[hi(None)]).expect("a pleasantry");
+        assert_eq!(main.channel_responses[0].agent.as_deref(), Some("ceo"));
+
+        // A workflow copilot thread is confined and answered by an ephemeral
+        // agent this cannot speak as, so it declines (issue #416).
+        assert!(
+            small_talk_result(&record, &[hi(Some("workflow-copilot:weekly-aeo-audit"))]).is_none(),
+            "a copilot thread keeps its confined turn"
+        );
+
+        // A batch is a scheduler tick or several messages at once; neither is
+        // small talk, even when one of its members looks like it.
+        assert!(small_talk_result(&record, &[hi(None), hi(None)]).is_none());
+        assert!(
+            small_talk_result(
+                &record,
+                &[CompanyEvent::ScheduleFired {
+                    cron: "0 6 * * 5".into(),
+                    prompt: "run the audit".into(),
+                }]
+            )
+            .is_none()
+        );
+        assert!(small_talk_result(&record, &[]).is_none());
+
+        // A company with nobody on the roster has no voice to answer in, so it
+        // declines rather than journaling an unattributed bubble (issue #885).
+        let mut empty = record.clone();
+        empty.manifest.agents.clear();
+        empty.manifest.group_chats.clear();
+        assert!(small_talk_result(&empty, &[hi(None)]).is_none());
+    }
+
     /// Issue #845, the wiring: the briefing actually reaches the brain.
     ///
     /// [`only_a_workflow_message_gets_the_builder_briefing`] pins what the
@@ -3107,6 +3487,7 @@ mod test {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::ChannelAdapter;
     use crate::ports::brain::Brain;
+    use crate::ports::types::SecretValue;
     use crate::ports::types::{
         ActorKind, ChunkAddr, ChunkHit, ChunkMeta, CompressedTrace, ContextChunk, CycleResult,
         EffectGroup, EventSeq, EvictionPolicy, ReplyTo, TaskResult, TokenUsage,
@@ -3179,6 +3560,47 @@ mod test {
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "effect cycle")],
                 ledger_deltas: Vec::new(),
                 token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// A brain that counts how many times it was asked to think, and bills for
+    /// it — the instrument for issue #1725, where the cost of a turn is the
+    /// thing under test.
+    #[derive(Default)]
+    struct CountingBrain {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingBrain {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Brain for CountingBrain {
+        async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> Result<CycleResult> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CycleResult {
+                channel_responses: vec![OutboundMessage {
+                    message_id: None,
+                    task_id: None,
+                    channel: "operator".into(),
+                    agent: Some("ceo".into()),
+                    text: "a full turn ran".into(),
+                    steps: Vec::new(),
+                    reply_to: None,
+                    mentions: Vec::new(),
+                }],
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "a turn's memory")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage {
+                    input: 4_000,
+                    output: 500,
+                    cached_input: 0,
+                    cost_usd: 0.12,
+                },
             })
         }
     }
@@ -3821,7 +4243,9 @@ mod test {
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
             parent: None,
-            text: "hi".into(),
+            // Issue #1725: not "hi". A bare pleasantry is now answered without
+            // a turn at all, and this test is about what a turn costs.
+            text: "ship the landing page".into(),
             by: None,
             chat: None,
             deliverable: None,
@@ -3859,7 +4283,9 @@ mod test {
             .run_cycle(vec![CompanyEvent::OperatorMessage {
                 mentions: Vec::new(),
                 parent: None,
-                text: "hi".into(),
+                // Issue #1725: not "hi". A bare pleasantry never reaches the
+                // brain now, and the echo this asserts is the brain's.
+                text: "ship the landing page".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
@@ -3871,7 +4297,7 @@ mod test {
         // (a) an operator response came back.
         assert_eq!(report.responses.len(), 1);
         assert_eq!(report.responses[0].channel, "operator");
-        assert_eq!(report.responses[0].text, "You said: hi");
+        assert_eq!(report.responses[0].text, "You said: ship the landing page");
 
         // (b) the event was appended to the log.
         //
@@ -3893,7 +4319,7 @@ mod test {
             CompanyEvent::OperatorMessage {
                 mentions: Vec::new(),
                 parent: None,
-                text: "hi".into(),
+                text: "ship the landing page".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
@@ -5139,6 +5565,7 @@ mod test {
             crate::ports::Cognition {
                 path: "test",
                 provider: "medulla",
+                model: None,
                 metering: self.metering,
             }
         }
@@ -5510,7 +5937,7 @@ mod test {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "user".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: from_email.into(),
         }
