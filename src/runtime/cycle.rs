@@ -1187,6 +1187,14 @@ approval.]"
             }
             _ => {}
         }
+        // Issue #1825: bank a blocked-node approval here, inline and durable,
+        // rather than leaving it to `continue_turn` on the detached follow-up
+        // task this function's caller (`resolve_approval_spawned`) is about to
+        // spawn. A restart between that spawn and the task's first poll used to
+        // leave the verdict durable above but this bank never run — see
+        // `CompanyRuntime::bank_blocked_node_approval` for the full window this
+        // closes.
+        self.rt.bank_blocked_node_approval(id, verdict).await;
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
         // the cycle that runs it is the thing that appends it.
@@ -1751,6 +1759,14 @@ approval.]"
                 .await?;
         }
 
+        // Issue #1825: same inline, durable bank as the plain approve path —
+        // see `settle_approval` and `CompanyRuntime::bank_blocked_node_approval`.
+        // An amend is always an approve, so this is never a no-op on that
+        // account; it still no-ops for an id this journal never parked under a
+        // blocked-node turn.
+        self.rt
+            .bank_blocked_node_approval(id, Verdict::Approve)
+            .await;
         // The follow-up event, so the brain learns the approval resolved (with
         // an edit). `CompanyEvent` is closed, so the verdict rides as `Approve`;
         // the edit itself lives in the journal audit trail.
