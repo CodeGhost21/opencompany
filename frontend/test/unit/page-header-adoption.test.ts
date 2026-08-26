@@ -201,6 +201,22 @@ describe("page headers come from PageHeader (#1763)", () => {
  * wrapper for several of these (`CompanyView`, `SettingsSection`,
  * `TaskDetailRoute`) and the header lives one level down, which is a fact
  * about the component tree that no grep over route names can see.
+ *
+ * # What this still cannot see, and what covers it
+ *
+ * **Control flow.** Everything in this file reads source text, so a view
+ * satisfies it by *containing* `<PageHeader` — not by rendering one. A file
+ * with an early `return` for a loading or error state above its header passes
+ * here while shipping a state with no `h1` at all, which is exactly what
+ * `SearchView`, `HostingView`, `WalletView` and `InvoicingView` were doing
+ * (codex review on #1785).
+ *
+ * That gap is closed by rendering, not by scanning:
+ * `settings-page-named-in-every-state.test.ts` mounts those pages in their
+ * loading and error states and asks the DOM for the `h1`. Do not extend this
+ * file to try to reach it — a scan that tried to follow branches would be
+ * wrong in a way nobody could see, which is the failure mode it exists to
+ * prevent.
  */
 type Names =
   /** The file that renders this view's `<PageHeader>`. */
