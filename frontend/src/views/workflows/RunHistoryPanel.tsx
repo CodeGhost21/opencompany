@@ -81,9 +81,9 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
   running: "Still working through its steps — nothing here is final yet.",
   ok: "Finished, and every report reached its destination.",
   failed:
-    "A step errored and the run stopped. Review the error, correct the workflow, and run it again.",
+    "The run ended in error — usually a step that failed, but sometimes nothing in the graph got the chance to run. Review the error, correct the workflow, and run it again.",
   stopped:
-    "An operator stopped this run before it finished; the step that was mid-flight was dropped where it was.",
+    "An operator stopped this run before it finished; the step that was mid-flight normally ran to completion and was recorded — only a step stuck waiting on an outside call is cut off where it was.",
   blocked:
     "A step is waiting on your approval before the run can go on — decide it in Approvals.",
   stranded:

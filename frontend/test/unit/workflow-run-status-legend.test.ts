@@ -37,6 +37,15 @@ function stoppedRun(): WorkflowRunOutcome {
   return baseRun({ seq: 2, cancelled: true });
 }
 
+/** A run that failed before any node ran at all — a graph that would not
+ * compile, or a capability that could not be built (`graph.ts`'s
+ * `failureLocation`/`failedNodeOf` name this case explicitly: `nodes` is
+ * empty and no node is at fault). `verdictOf` reads a run with `error` set as
+ * `failed` regardless of whether any node ran. */
+function failedRun(): WorkflowRunOutcome {
+  return baseRun({ seq: 4, error: "graph failed to compile" });
+}
+
 /** A finished run whose one output report was refused — `undeliveredCount` is 1,
  * so the row falls to the delivery block and badges "1 not delivered". */
 function undeliveredRun(): WorkflowRunOutcome {
@@ -110,6 +119,37 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).toContain("stopped");
     // …and a plain-English definition, not just the word again.
     expect(title).toContain("stopped this run");
+  });
+
+  // Codex review on #1821: `RunCancel` (`src/ports/workflow_runner.rs`) stops
+  // a run at the next node boundary — the node already executing normally
+  // finishes and is journaled. Only a node wedged past the hard-abort grace
+  // period is actually dropped mid-flight. The old wording claimed the
+  // mid-flight step was *always* dropped, which misleads an operator into
+  // thinking its work or side effects never completed.
+  it("does not claim the mid-flight step was unconditionally dropped", async () => {
+    await renderHistory(stoppedRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).toContain("normally ran to completion");
+    expect(title).not.toContain("was dropped where it was");
+  });
+
+  // Codex review on #1821: `failureLocation`/`failedNodeOf` (`graph.ts`)
+  // explicitly preserve the case where a run's `error` names no node at all —
+  // a graph that would not compile, a capability that could not be built, or
+  // an interrupted run the boot sweep recorded. The old wording said
+  // unconditionally "a step errored", misdiagnosing those runs.
+  it("does not claim a step errored when the run failed before any step ran", async () => {
+    await renderHistory(failedRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).toContain("failed");
+    expect(title).not.toContain("A step errored");
   });
 });
 
