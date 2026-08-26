@@ -12,10 +12,10 @@ import { Badge } from "@/components/ui/badge";
 import { observatoryHref } from "@/views/observatory/hash";
 import { Button } from "@/components/ui/button";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   fetchRunArtifacts,
@@ -120,15 +120,27 @@ function statusDotTitle(label: string): string {
 }
 
 /** The discoverable half of issue #1798: an info affordance in the panel header
- * whose tooltip is a short key to the run statuses. The per-badge hover titles
+ * whose popover is a short key to the run statuses. The per-badge hover titles
  * answer "what is THIS one"; this answers "what are all of them" for an
- * operator who does not know a badge is hoverable. Reuses the app's tooltip
- * primitive, so it themes and positions like every other tooltip in the
- * console. */
+ * operator who does not know a badge is hoverable.
+ *
+ * Codex review on #1821 (fifth pass): Base UI's `Tooltip.Trigger` only opens
+ * on hover or focus — by design, per Base UI's own split between Tooltip
+ * (glance-only) and Popover (press-activatable, and the one that focuses the
+ * popup itself rather than the virtual keyboard when opened by touch). A tap
+ * satisfies neither, and `closeOnClick` on the tooltip trigger actively
+ * cancels a pending open on click rather than starting one — so on a
+ * touch-only device this affordance, the ONE place the parked/blocked/
+ * stranded/not-delivered definitions previously described as "the panel's
+ * one keyboard- and touch-reachable affordance" (see the "make the parked
+ * badge discoverable" commit), was itself unreachable by touch. `Popover`
+ * opens on press out of the box; `openOnHover` keeps the existing hover
+ * discovery for the mouse case. */
 function RunStatusLegend() {
   return (
-    <Tooltip>
-      <TooltipTrigger
+    <Popover>
+      <PopoverTrigger
+        openOnHover
         render={
           <button
             type="button"
@@ -139,8 +151,8 @@ function RunStatusLegend() {
         }
       >
         <Info className="size-3.5" aria-hidden="true" />
-      </TooltipTrigger>
-      <TooltipContent className="flex max-h-(--available-height) max-w-xs flex-col items-start gap-1 overflow-y-auto text-left">
+      </PopoverTrigger>
+      <PopoverContent className="flex max-h-(--available-height) max-w-xs flex-col items-start gap-1 overflow-y-auto text-left">
         <span className="font-medium">What these statuses mean</span>
         {RUN_STATUS_LEGEND.map((term) => (
           <span key={term} className="block">
@@ -148,8 +160,8 @@ function RunStatusLegend() {
             {RUN_STATUS_DEFINITIONS[term]}
           </span>
         ))}
-      </TooltipContent>
-    </Tooltip>
+      </PopoverContent>
+    </Popover>
   );
 }
 
