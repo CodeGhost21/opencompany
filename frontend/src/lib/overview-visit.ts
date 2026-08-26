@@ -80,21 +80,47 @@ const openedThisLoad = new Map<string, number | null>();
  * Open the overview for `scope`, returning the boundary to compare against.
  *
  * Idempotent for the rest of this page load: the first call takes the stored
- * boundary and replaces it with `atMillis`; every later call for the same scope
- * returns that same boundary and writes nothing. That idempotency is what makes
- * it safe to call from a render — React may double-invoke a render or discard
- * one, and neither can move the boundary.
+ * boundary and remembers it; every later call for the same scope hands back the
+ * same value. That idempotency is what makes it safe to call from a render —
+ * React may double-invoke a render or discard one, and neither can move the
+ * boundary.
  *
- * Read and write live in one call on purpose. Splitting them was what #1700
- * actually was: a lazy `useState` read and a `useEffect` write, each correct
- * alone, that between them advanced the boundary on every mount.
+ * It writes NOTHING. #1700 was a lazy `useState` read and a `useEffect` write
+ * with no memory between them, so each mount read what the previous mount had
+ * just written; the map above is what fixes that, and it fixes it from the read
+ * side alone. Keeping the write here as well would have made a render that
+ * React never commits — a descendant throwing, and the operator reloading out
+ * of the error boundary — durable: the next page load would compare against an
+ * Overview nobody ever saw. `commitOverviewVisit` is the other half, and it
+ * runs from an effect, because only a mount that commits is a visit.
  */
-export function openOverviewVisit(scope: LocalScope, atMillis: number = Date.now()): number | null {
+export function openOverviewVisit(scope: LocalScope): number | null {
   const key = keyFor(scope);
   const opened = openedThisLoad.get(key);
   if (opened !== undefined) return opened;
   const previous = readOverviewVisit(scope);
-  writeOverviewVisit(scope, atMillis);
   openedThisLoad.set(key, previous);
   return previous;
+}
+
+/** Scopes whose open has reached the screen, and so has been recorded. */
+const committedThisLoad = new Set<string>();
+
+/**
+ * Record that the overview for `scope` actually reached the screen.
+ *
+ * Call from an effect, never from a render. The pairing with
+ * `openOverviewVisit` is what keeps the boundary honest in both directions:
+ * `open` settles what this load compares against, `commit` settles what the
+ * NEXT load will, and neither can be moved by a render React discards.
+ *
+ * Idempotent for the rest of this page load for the same reason `open` is —
+ * a remount must not push the recorded visit forward, or a trip to Chat and
+ * back would leave the next load comparing against a moment ago.
+ */
+export function commitOverviewVisit(scope: LocalScope, atMillis: number = Date.now()): void {
+  const key = keyFor(scope);
+  if (committedThisLoad.has(key)) return;
+  committedThisLoad.add(key);
+  writeOverviewVisit(scope, atMillis);
 }

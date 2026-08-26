@@ -326,6 +326,22 @@ describe("the operator overview landing page (#1321)", () => {
     expect(container.querySelector('[href="#/tasks/failed-1?run=failed-1"]')).not.toBeNull();
   });
 
+  it("records the visit only once the mount commits (#1700)", async () => {
+    // Review of PR #1752: the durable write moved out of the render
+    // initializer and into an effect, so a render React discards cannot become
+    // the boundary the next page load hides failures behind. This is the other
+    // side of that — a mount that DOES commit still has to record itself, or
+    // the next page load would have no boundary at all.
+    expect(window.localStorage.getItem("oc.overview.last-visit:test-host::acme")).toBeNull();
+
+    await render(client(Promise.resolve([])), readyFeed);
+    await settle();
+
+    const recorded = window.localStorage.getItem("oc.overview.last-visit:test-host::acme");
+    expect(recorded).not.toBeNull();
+    expect(Number(recorded)).toBeGreaterThan(0);
+  });
+
   it("re-reads the boundary when the company changes under a mounted view (#1700)", async () => {
     // `scope` is a connection plus a company, and switching company changes it
     // while this component stays mounted. The panel would otherwise keep
