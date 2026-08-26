@@ -2280,11 +2280,30 @@ async fn async_main() -> Result<()> {
                 }
             }
 
-            // Issue #1739: with the companies registered, this host knows who it
-            // is, which brain it is on and how much it is serving — so the
-            // tracker can be chosen and `instance_started` reported. On every
-            // build but a hosted tenant's this installs a no-op and the line
-            // below says so.
+            // Take the port BEFORE anything is reported. `instance_started`
+            // means an instance that started, and a host whose address is
+            // occupied or malformed never listened and never answered
+            // `/healthz` — but the shutdown flush below still runs on the way
+            // out, so an event queued above the bind would be sent for a
+            // process that served nothing, and hosted install counts would
+            // include every crash-looping container.
+            //
+            // Binding here rather than inside `server::serve` also fails fast:
+            // a refused address now aborts before four background tasks are
+            // spawned, instead of after. Nothing between this and
+            // `serving.run()` can return early, so the port is never taken and
+            // then abandoned. The state is cloned rather than moved because
+            // `install_analytics` below needs it — `AppState` is `Clone` by
+            // design, and its registry is `Arc`-shared, so both handles see the
+            // same companies.
+            let (_bound, serving) =
+                opencompany::server::bind(&state.config().bind, state.clone()).await?;
+
+            // Issue #1739: with the companies registered and the port taken,
+            // this host knows who it is, which brain it is on and how much it is
+            // serving — so the tracker can be chosen and `instance_started`
+            // reported. On every build but a hosted tenant's this installs a
+            // no-op and the line below says so.
             println!(
                 "{}",
                 opencompany::analytics::boot::describe(&opencompany::analytics::install_analytics(
@@ -2329,7 +2348,7 @@ async fn async_main() -> Result<()> {
             // refused connection. `println!` for the same reason as the lines
             // above — the default `EnvFilter` would swallow an `info!`.
             println!("listening on {} (from {bind_source})", state.config().bind);
-            let served = opencompany::server::serve(state).await;
+            let served = serving.run().await;
             // Issue #1739: after the server has drained, so anything a
             // last-moment turn reported still leaves. Infallible and bounded by
             // the client's own timeout — a dead collector costs a few seconds of
