@@ -168,6 +168,16 @@ test("OpenRouter models are selected from the registry and persist through reloa
   await expect(page.locator("#inference-provider")).toBeVisible({ timeout: 30_000 });
 
   await pickProvider(page, "OpenRouter");
+  // A key is required before the catalog picker offers itself (issue #1838
+  // follow-up): with none typed and no key already stored server-side, a
+  // save would ride the platform's subscription proxy, which rejects the
+  // raw `<author>/<model>` id the catalog select writes — so the free-text
+  // inputs stay up instead until a key makes that pick safe to store. This
+  // spec runs against the shared E2E company, whose key state a prior spec
+  // in this file (or an earlier run of this one) can have left cleared, so
+  // typing one here is what makes the picker's availability deterministic
+  // rather than an accident of what state a previous test left behind.
+  await page.locator("#inference-key").fill(`pw-e2e-${Date.now()}`);
   const chat = page.getByTestId("inference-model-select-chat-v1");
   await expect(chat).toBeEnabled();
   await chat.click();
