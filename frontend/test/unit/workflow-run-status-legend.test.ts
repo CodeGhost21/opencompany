@@ -362,3 +362,37 @@ describe("the legend trigger opens without hover or focus", () => {
     }
   });
 });
+
+describe("the legend popup names itself for assistive technology", () => {
+  // Codex review on #1821 (sixth pass): `Popover.Popup` renders `role="dialog"`
+  // and only sets its own `aria-labelledby` when a `Popover.Title` supplied the
+  // id via the shared store — a heading rendered as a plain element supplies
+  // nothing, and React drops an `undefined` attribute rather than emitting an
+  // empty one. So a screen-reader user who opened this dialog heard "dialog"
+  // with no name at all. Proven against the popup Base UI actually renders
+  // (not the heading text alone, which was already present either way) —
+  // reverting the `PopoverTitle` swap in `RunHistoryPanel.tsx` fails this on
+  // the `aria-labelledby` assertion while leaving the "opens on click" test
+  // above green, which is exactly the gap the earlier test didn't catch.
+  it("labels the dialog via aria-labelledby pointing at the heading", async () => {
+    await renderHistory(baseRun());
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-testid="workflow-run-legend"]',
+    );
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+
+    const labelledBy = dialog?.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+
+    const heading = labelledBy
+      ? document.getElementById(labelledBy)
+      : null;
+    expect(heading).not.toBeNull();
+    expect(heading?.textContent).toBe("What these statuses mean");
+  });
+});
