@@ -585,6 +585,17 @@ export function AppShell({
   // because it outlives `ChatView`: it is what an unaddressed system line is
   // addressed to after the operator has walked off to Approvals (issue #368).
   const activeChatChannelRef = useRef<string | null>(null);
+  // Whether `ChatView`'s transcript is actually rendered right now, as opposed
+  // to `activeChatChannelRef` merely still *naming* the channel last shown
+  // before the operator dropped to the mobile channel rail. Starts `true` to
+  // match `ChatView`'s own initial pane state; kept out of `activeChatChannelRef`
+  // because that ref has a second job — addressing an unaddressed system line
+  // after a walk to Approvals — that must keep using the last channel even
+  // while the rail is what's on screen (#1768 codex review).
+  const chatPaneVisibleRef = useRef(true);
+  const onChatPaneVisibilityChange = useCallback((visible: boolean) => {
+    chatPaneVisibleRef.current = visible;
+  }, []);
   // When each channel was last looked at, and the floor for a channel never
   // looked at. Together with `transcripts` these *derive* the unread counts
   // below — nothing increments a counter, so a message that turns out to be a
@@ -2341,6 +2352,11 @@ export function AppShell({
     isViewingTaskOrigin: useCallback(
       (event: CompanyStreamEvent) => {
         if (event.type !== "desk_task_completed" || view !== "chat") return false;
+        // Below `lg`, selecting the channel rail hides the transcript while
+        // leaving `activeChatChannelRef` naming whatever was last shown — a
+        // completion from that channel must not suppress its toast while the
+        // operator cannot actually see the inline marker (#1768 codex review).
+        if (!chatPaneVisibleRef.current) return false;
         const origin = dispatchMarkerPlacement(event, chatChannelByThread)?.channelId;
         return origin != null && activeChatChannelRef.current === origin;
       },
@@ -2614,6 +2630,7 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
+              onChatPaneVisibilityChange={onChatPaneVisibilityChange}
               mentionFeedRevision={mentionFeedVersion}
               mentions={mentionCounts}
               approvals={feed.approvals}

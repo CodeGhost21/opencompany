@@ -256,6 +256,18 @@ interface Props {
     loadedMessageIds?: ReadonlySet<string>,
   ) => void;
   /**
+   * Reports whether the transcript is actually on screen right now — below
+   * `lg`, `mobilePane === "rail"` hides it behind the channel list even
+   * though `onChannelViewed`'s last report still names that channel.
+   * Distinct from `onChannelViewed`'s own channel memory (which the shell
+   * also uses to address an unaddressed system line after the operator walks
+   * off to Approvals, and must keep doing even while the rail is showing):
+   * this is only for "is a completion's inline marker visible right now",
+   * so a stale-but-correct channel name does not suppress its toast for a
+   * transcript the operator cannot see (#1768 codex review).
+   */
+  onChatPaneVisibilityChange?: (visible: boolean) => void;
+  /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
    *
@@ -331,6 +343,7 @@ export function ChatView({
   mentions,
   mentionFeedRevision,
   onChannelViewed,
+  onChatPaneVisibilityChange,
   approvals,
   chatChannelByThread,
   taskStatusByTaskId,
@@ -915,6 +928,17 @@ export function ChatView({
     loadedMessageIds,
     chatPaneVisible,
   ]);
+
+  // The visibility half of the report above: `onChannelViewed` only ever says
+  // *which* channel, and only while it is visible, so nothing tells the shell
+  // the moment that stops being true — its "last channel seen" memory keeps
+  // naming whatever was visible before the operator dropped to the rail. A
+  // plain mirror of `chatPaneVisible`, not folded into that report, because
+  // the two callbacks answer different questions the shell must not conflate
+  // (see the prop doc).
+  useEffect(() => {
+    onChatPaneVisibilityChange?.(chatPaneVisible);
+  }, [chatPaneVisible, onChatPaneVisibilityChange]);
 
   // Upload one attachment's bytes for the composer (issue #1682). Bound to the
   // active connection's client/company so the composer stays agnostic of both.
