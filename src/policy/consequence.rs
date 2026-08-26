@@ -45,8 +45,14 @@
 //! An undeclared tool keeps the old name heuristics for [`Reach`] — dropping
 //! them would park a `read_*` tool from a build configuration nobody tested —
 //! but it is **never** [`Standing::Grantable`]. A tool nobody has thought about
-//! must not inherit a week-long capability by omission. Likewise an unrecognised
-//! Composio action slug is a **send**, not a read.
+//! must not inherit a week-long capability by omission.
+//!
+//! The Composio arm says the same thing with one more step (issue #1818). A slug
+//! the curated catalogue cannot place is read for the *verb it names*: an action
+//! that positively says it lists, gets, fetches or searches is an
+//! [`Reach::ExternalRead`], and anything else — a mutating verb, or no verb this
+//! module recognises at all — is still a **send**. Cautious is the default, but
+//! the default is not applied to a slug that has already told you it only reads.
 
 use crate::ports::types::EffectGroup;
 
@@ -994,14 +1000,45 @@ pub fn denial_reason(tool: &str) -> Option<&'static str> {
 /// drift the way a list maintained here would the moment a toolkit gains an
 /// action.
 ///
-/// ## Anything the catalogue does not name is a send
+/// ## What the catalogue does not name is read for its verb (issue #1818)
 ///
-/// Deliberately **not** upstream's `classify_unknown`, whose fallback for an
-/// unrecognised slug is `Read`. That is the convenient verdict, and this is the
-/// place where the cautious one has to win: an action nobody has classified
-/// might do anything, so it parks and it cannot be granted standing. Same for a
-/// slug whose toolkit has no catalogue, a missing or non-string `tool`
-/// argument, and — in a build without the harness compiled in — every slug.
+/// The catalogue is ~660 hand-classified actions; Composio publishes thousands
+/// and renames them without asking. So the miss is not the exception it reads
+/// as: an agent fetching a repository's issues under a live slug that is one
+/// rename away from the curated one used to land on a blanket
+/// `Send + Consequence + PerCall` — a park whose card says *leaves the company
+/// or spends money* for what is a read, and which `PerCall` makes impossible to
+/// grant standing on, so the desk stops. Catalogue drift, not agent behaviour,
+/// was deciding whether a company could read its own GitHub issues.
+///
+/// A miss now falls to [`composio_slug_reads_by_verb`], which asks what the
+/// slug's own verb says. `..._LIST_...`, `..._GET_...`, `..._FETCH_...`,
+/// `..._SEARCH_...` are reads and classify as [`Reach::ExternalRead`] —
+/// `readonly` still denies them, `supervised` and `auto` run them. Everything
+/// else is a send, exactly as before.
+///
+/// This is deliberately **not** upstream's `classify_unknown`, whose fallback
+/// arm returns `Read` for any slug carrying no *write* verb — that hands the
+/// read verdict to every slug nobody has classified, including the ones whose
+/// verbs mean nothing to us. The rule here is the opposite polarity: a read
+/// needs positive evidence, and its absence is still a send.
+/// `we_do_not_fall_back_to_the_upstream_read_default` pins the difference on
+/// `GITHUB_INVENT_A_NEW_VERB`, which upstream calls a read and this calls a
+/// send.
+///
+/// ## An inferred read is never grantable
+///
+/// A catalogued read is [`Standing::Grantable`]; an inferred one is
+/// [`Standing::PerCall`]. Both run unattended — [`Reach::ExternalRead`] does
+/// not park, so [`Consequence::parks_under_auto`] is `false` either way and the
+/// stall this issue is about is gone. What `PerCall` withholds is the **mint**:
+/// no standing grant may be cut from a verb guess, because a grant outlives the
+/// call it was minted for and a guess should not. The narrow reading is the one
+/// that expires with the turn.
+///
+/// The other cautious paths are untouched: a missing or non-string `tool`
+/// argument has no verb to read and stays a send, and so does every slug in a
+/// build with no catalogue compiled in — see [`CatalogLookup::CatalogueAbsent`].
 ///
 /// ## Two different reasons for the same verdict
 ///
@@ -1033,35 +1070,88 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
         }
     };
     let lookup = composio_catalog_lookup(slug);
-    // Issue #754: a catalogue miss is recorded, not silent. It changes no
-    // verdict — everything below still parks exactly as it did — but a drifted
-    // read and a correct refusal are the same `send` at the approval card, so
+    // Issue #754: a catalogue miss is recorded, not silent. A drifted read and
+    // a correct refusal used to be the same `send` at the approval card, so
     // without this nobody learns the curated names and Composio's live names
     // have moved apart. The slug and toolkit are the dataset any future alias
     // mapping would be designed from.
     //
+    // Issue #1818 gave the miss a second job: it is also the point where the
+    // verb fallback decides, so each line below now says which way it went. The
+    // miss is still worth logging when the fallback rescues it — a rescued read
+    // is drift that has already cost nothing, and it is the clearest possible
+    // evidence of *which* curated name went stale.
+    //
     // Deliberately NOT emitted for a curated write: that is the gate working,
     // and logging it would bury the real signal under every `GMAIL_SEND_EMAIL`.
-    match &lookup {
-        CatalogLookup::UncuratedAction { toolkit } => tracing::warn!(
-            composio_slug = %slug,
-            composio_toolkit = %toolkit,
-            catalogue_miss = true,
-            "[policy] '{slug}' is not in the '{toolkit}' curated catalogue; classifying it as a \
-             send. That is the cautious answer, and it is the right one for an action nobody has \
-             classified — but it is also what a catalogued read looks like once its live slug has \
-             drifted from the curated one (issue #754)."
-        ),
-        CatalogLookup::UnknownToolkit { toolkit } => tracing::warn!(
-            composio_slug = %slug,
-            composio_toolkit = toolkit.as_deref().unwrap_or("<unrecognised>"),
-            catalogue_miss = true,
-            "[policy] no curated catalogue to classify '{slug}' against; classifying it as a send \
-             (issue #754)."
-        ),
-        CatalogLookup::Curated { .. } => {}
+    let inferred_read = match &lookup {
+        CatalogLookup::Curated { .. } => return curated(lookup.is_read()),
+        CatalogLookup::UncuratedAction { toolkit } => {
+            let reads = composio_slug_reads_by_verb(slug);
+            tracing::warn!(
+                composio_slug = %slug,
+                composio_toolkit = %toolkit,
+                catalogue_miss = true,
+                inferred_read = reads,
+                "[policy] '{slug}' is not in the '{toolkit}' curated catalogue; its own verb \
+                 says it {} (issues #754, #1818). A miss here is what a catalogued read looks \
+                 like once its live slug has drifted from the curated one, so the curated name \
+                 is the thing to fix.",
+                if reads { "only reads, so it runs as an external read" } else { "is a send" }
+            );
+            reads
+        }
+        CatalogLookup::UnknownToolkit { toolkit } => {
+            let reads = composio_slug_reads_by_verb(slug);
+            tracing::warn!(
+                composio_slug = %slug,
+                composio_toolkit = toolkit.as_deref().unwrap_or("<unrecognised>"),
+                catalogue_miss = true,
+                inferred_read = reads,
+                "[policy] no curated catalogue to classify '{slug}' against; its own verb says \
+                 it {} (issues #754, #1818).",
+                if reads { "only reads, so it runs as an external read" } else { "is a send" }
+            );
+            reads
+        }
+        // The build seam, said out loud rather than left to look like drift
+        // (issue #1818). Without the catalogue linked in *every* Composio
+        // action over-gates, including ones the curated table names — so this
+        // is a fact about the binary, not about the slug, and the verb
+        // fallback is deliberately not consulted: a build that cannot tell a
+        // curated read from an uncurated one has no business inferring either.
+        CatalogLookup::CatalogueAbsent => {
+            catalogue_absent_warning();
+            tracing::warn!(
+                composio_slug = %slug,
+                catalogue_absent = true,
+                "[policy] '{slug}' is classified as a send because this build links no curated \
+                 Composio catalogue, not because the action sends (issue #1818)."
+            );
+            return send;
+        }
+    };
+    if inferred_read {
+        // Same reach as a catalogued read — it does not park, so the desk keeps
+        // moving — but `PerCall`, because a verb is evidence and not a
+        // classification. See "An inferred read is never grantable" above.
+        return Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::ExternalRead,
+            standing: Standing::PerCall,
+        };
     }
-    if lookup.is_read() {
+    send
+}
+
+/// The verdict for a slug the curated catalogue *does* name.
+///
+/// Split out so the catalogued read keeps its own argument — which is about a
+/// hand-assigned scope — separate from the inferred read's, which is about a
+/// verb. They agree on [`Reach`] and differ on [`Standing`], and that is the
+/// whole of the distinction issue #1818 introduces.
+fn curated(read: bool) -> Consequence {
+    if read {
         // A read reaches a third-party account, so `readonly` denies it — but
         // it changes nothing and is billed for nothing, so `supervised` lets it
         // through (issue #559).
@@ -1094,7 +1184,11 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
             standing: Standing::Grantable,
         }
     } else {
-        send
+        Consequence {
+            group: EffectGroup::Send,
+            reach: Reach::Consequence,
+            standing: Standing::PerCall,
+        }
     }
 }
 
@@ -1112,22 +1206,31 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
 /// bury the second in the first — every `GMAIL_SEND_EMAIL` would look like
 /// drift.
 ///
-/// Both miss arms are constructed only by the `openhuman` build of
+/// The first three arms are constructed only by the `openhuman` build of
 /// [`composio_catalog_lookup`]; without that feature the curated catalogue is
-/// not linked in, so the only reachable answer is [`UnknownToolkit`](Self::UnknownToolkit)
-/// and the other two are dead there. The type stays whole across both builds
-/// on purpose — the call site matches one shape, and `is_read` keeps one
-/// definition, so the feature cannot change what classifies as a read. The
-/// expectation is `expect` rather than `allow` and is scoped to the build that
-/// earns it: if a non-`openhuman` build ever does construct these, the
-/// unfulfilled expectation says so instead of staying quietly stale.
+/// not linked in, so the only reachable answer is
+/// [`CatalogueAbsent`](Self::CatalogueAbsent) and the others are dead there.
+/// The type stays whole across both builds on purpose — the call site matches
+/// one shape, and `is_read` keeps one definition, so the feature cannot change
+/// what classifies as a read. The expectations are `expect` rather than `allow`
+/// and each is scoped to the build that earns it: if the build that cannot
+/// construct an arm ever does, the unfulfilled expectation says so instead of
+/// staying quietly stale.
+///
+/// [`CatalogueAbsent`](Self::CatalogueAbsent) split off from
+/// `UnknownToolkit { toolkit: None }` for issue #1818. They were the same value
+/// and they are not the same fact: one is a slug this build could not place,
+/// the other is a build that can place nothing. Only the first is a candidate
+/// for the verb fallback, and only the second is worth telling an operator
+/// about — "every Composio action over-gates in this binary" is a deployment
+/// bug, and it used to be indistinguishable from an unrecognised toolkit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     not(feature = "openhuman"),
     expect(
         dead_code,
         reason = "without the harness feature there is no catalogue to hit, so only \
-                  UnknownToolkit is constructible; see the note above"
+                  CatalogueAbsent is constructible; see the note above"
     )
 )]
 pub(crate) enum CatalogLookup {
@@ -1136,10 +1239,25 @@ pub(crate) enum CatalogLookup {
     /// The toolkit has a catalogue and this slug is not in it — the drift case
     /// #754 is about, and the one worth recording.
     UncuratedAction { toolkit: String },
-    /// No catalogue to consult: the slug named no toolkit this build knows, or
-    /// the toolkit has no curated surface at all. `None` also covers the
-    /// non-`openhuman` build, where the catalogue is not linked in.
+    /// A catalogue was consulted and had nothing to say: the slug named no
+    /// toolkit this build knows (`None`), or the toolkit it named has no
+    /// curated surface at all.
     UnknownToolkit { toolkit: Option<String> },
+    /// There is no catalogue in this build to consult — the `openhuman`
+    /// feature is off, so nothing can be classified and every Composio action
+    /// is a send by construction rather than by verdict (issue #1818).
+    // `not(test)` because the harness build's own tests *do* construct it —
+    // `a_catalogued_build_never_reports_the_catalogue_absent` asserts nothing
+    // ever equals it — so the lint fires only in the build where no test does.
+    #[cfg_attr(
+        all(feature = "openhuman", not(test)),
+        expect(
+            dead_code,
+            reason = "with the harness feature the catalogue is always linked in, so this \
+                      arm is matched but never constructed; see the note above"
+        )
+    )]
+    CatalogueAbsent,
 }
 
 impl CatalogLookup {
@@ -1970,9 +2088,171 @@ fn composio_catalog_lookup(slug: &str) -> CatalogLookup {
 /// Without the harness feature the curated catalogue is not linked in, and no
 /// `composio_execute` call can be made either — only replayed from a journal
 /// line an openhuman build wrote. Cautious is the only honest answer.
+///
+/// [`CatalogueAbsent`](CatalogLookup::CatalogueAbsent) rather than
+/// `UnknownToolkit { toolkit: None }` since issue #1818: the caller says so in
+/// the log and skips the verb fallback here, because a build that cannot place
+/// `GITHUB_LIST_PULL_REQUESTS` either has not earned the right to infer
+/// anything from `GITHUB_LIST_SOMETHING_ELSE`.
 #[cfg(not(feature = "openhuman"))]
 fn composio_catalog_lookup(_slug: &str) -> CatalogLookup {
-    CatalogLookup::UnknownToolkit { toolkit: None }
+    CatalogLookup::CatalogueAbsent
+}
+
+/// Say once, loudly, that this binary gates every Composio action as a send
+/// because it links no catalogue (issue #1818).
+///
+/// Per-call the fact is already in the log line beside the slug; this is the
+/// one an operator greps for when a whole desk has stalled. `Once`, because the
+/// answer is a property of the build and repeating it per call would bury the
+/// slug lines it is meant to explain.
+fn catalogue_absent_warning() {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        tracing::warn!(
+            catalogue_absent = true,
+            "[policy] this build links no curated Composio action catalogue (the `openhuman` \
+             feature is off), so EVERY `{COMPOSIO_EXECUTE}` call classifies as a send and parks \
+             — including reads. That is an over-gate, not a verdict about any action (issue \
+             #1818)."
+        );
+    });
+}
+
+/// Does this action slug's own verb say it only reads (issue #1818)?
+///
+/// The fallback for a slug the curated catalogue cannot place. Composio action
+/// slugs are `TOOLKIT_VERB_OBJECT` by convention — `GITHUB_LIST_REPOSITORY_ISSUES`,
+/// `GMAIL_SEND_EMAIL` — and that verb is the most reliable thing about a name
+/// nobody has classified.
+///
+/// # Positive evidence, and the first verb wins
+///
+/// Segments are matched **whole**, left to right, and the first one that is a
+/// verb this module knows decides. Whole-segment matching is what keeps
+/// `GITHUB_LIST_STARGAZERS` a read (`STARGAZERS` is not `STAR`) and
+/// `GMAIL_LIST_DRAFTS` a read (`DRAFTS` is not `DRAFT`); first-verb-wins is
+/// what keeps `GMAIL_GET_DRAFT` one, since the verb is `GET` and `DRAFT` is
+/// what it gets. A slug with no verb in either list — `GITHUB_INVENT_A_NEW_VERB`
+/// — is **not** a read: this asks for evidence and takes its absence as a send,
+/// which is the whole difference from upstream's `classify_unknown`.
+///
+/// # One rule that ignores position
+///
+/// A destructive segment anywhere makes it a send whatever came first, so a
+/// hypothetical `..._GET_AND_DELETE_...` cannot ride in on its opening verb.
+/// Nothing in the catalogue needs this; it is here because first-verb-wins is
+/// the kind of rule a compound slug is built to defeat, and the cost of the
+/// belt is one `any`.
+///
+/// # Why over-gating is the safe direction
+///
+/// Every verdict this returns `false` for is the behaviour before #1818 —
+/// a park an operator can approve. Every verdict it returns `true` for runs
+/// unattended, so the lists are asymmetric on purpose: the read verbs are few
+/// and unambiguous, the mutating list is generous, and anything unrecognised
+/// falls to the cautious side.
+fn composio_slug_reads_by_verb(slug: &str) -> bool {
+    /// Verbs that positively say an action only reads.
+    const READS: &[&str] = &[
+        "COUNT", "DESCRIBE", "FETCH", "FIND", "GET", "LIST", "LOOKUP", "QUERY", "READ", "RETRIEVE",
+        "SEARCH", "VIEW",
+    ];
+    /// Verbs that say it mutates, spends, or reaches a counterparty. Generous
+    /// on purpose: a false entry here only over-gates.
+    const MUTATES: &[&str] = &[
+        "ACCEPT",
+        "ACTIVATE",
+        "ADD",
+        "APPEND",
+        "APPROVE",
+        "ARCHIVE",
+        "ASSIGN",
+        "CANCEL",
+        "CHARGE",
+        "CLEAR",
+        "CLOSE",
+        "COMPLETE",
+        "CONFIRM",
+        "COPY",
+        "CREATE",
+        "DEACTIVATE",
+        "DECLINE",
+        "DEPLOY",
+        "DISABLE",
+        "DISMISS",
+        "DISPATCH",
+        "DRAFT",
+        "DUPLICATE",
+        "EDIT",
+        "ENABLE",
+        "EXECUTE",
+        "FOLLOW",
+        "FORK",
+        "GRANT",
+        "IMPORT",
+        "INSERT",
+        "INVITE",
+        "JOIN",
+        "KICK",
+        "LEAVE",
+        "LOCK",
+        "MARK",
+        "MERGE",
+        "MODIFY",
+        "MOVE",
+        "MUTE",
+        "PATCH",
+        "PAY",
+        "PIN",
+        "POST",
+        "PUBLISH",
+        "PUT",
+        "REACT",
+        "REFUND",
+        "REJECT",
+        "RENAME",
+        "REOPEN",
+        "REPLY",
+        "RESET",
+        "RESTORE",
+        "RUN",
+        "SEND",
+        "SET",
+        "SHARE",
+        "STAR",
+        "START",
+        "STOP",
+        "SUBMIT",
+        "SUBSCRIBE",
+        "TRANSFER",
+        "TRIGGER",
+        "UNARCHIVE",
+        "UNFOLLOW",
+        "UNLOCK",
+        "UNPIN",
+        "UNSHARE",
+        "UNSTAR",
+        "UNSUBSCRIBE",
+        "UPDATE",
+        "UPLOAD",
+        "UPSERT",
+        "WRITE",
+    ];
+    /// Segments that make an action a send wherever they appear, not just
+    /// when they come first.
+    const DESTROYS: &[&str] = &[
+        "DELETE", "DESTROY", "PURGE", "REMOVE", "REVOKE", "TRASH", "WIPE",
+    ];
+
+    let upper = slug.trim().to_ascii_uppercase();
+    let segments = || upper.split('_').filter(|segment| !segment.is_empty());
+    if segments().any(|segment| DESTROYS.contains(&segment)) {
+        return false;
+    }
+    segments()
+        .find(|segment| READS.contains(segment) || MUTATES.contains(segment))
+        .is_some_and(|verb| READS.contains(&verb))
 }
 
 /// A tool with no declaration.
@@ -2668,14 +2948,21 @@ mod tests {
         assert_eq!(send.reach, Reach::Consequence);
     }
 
-    /// The cautious direction, four ways. An action the catalogue does not
-    /// name, a toolkit it has never heard of, a missing slug and a slug of the
-    /// wrong type all read as sends.
+    /// The cautious direction, four ways: an action whose slug says nothing
+    /// this module recognises, a missing slug, a slug of the wrong type, and
+    /// arguments with no slug at all.
+    ///
+    /// Narrowed by issue #1818, and the narrowing is the point. `..._LIST_...`
+    /// left this list because a slug that names a read verb is no longer
+    /// "unclassifiable" — see
+    /// [`a_drifted_read_runs_instead_of_parking_as_spend`]. What stayed is
+    /// every shape that offers no evidence either way, and for those the answer
+    /// is the same one it always was.
     #[test]
     fn an_unrecognised_composio_action_is_a_send() {
         for args in [
             json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" }),
-            json!({ "tool": "NOTAREALTOOLKIT_LIST_THINGS" }),
+            json!({ "tool": "NOTAREALTOOLKIT_DO_SOMETHING" }),
             json!({ "tool": "" }),
             json!({ "tool": 7 }),
             json!({ "arguments": { "owner": "acme" } }),
@@ -2688,6 +2975,152 @@ mod tests {
                 "an unclassifiable action must read as a send: {args}"
             );
             assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        }
+    }
+
+    /// **Issue #1818, the headline.** A Composio *read* whose slug the curated
+    /// catalogue cannot place no longer parks under a card that says it leaves
+    /// the company or spends money.
+    ///
+    /// `GITHUB_ISSUES_LIST_FOR_REPO` is the live evidence from the issue: the
+    /// same GitHub operation as the curated `GITHUB_LIST_REPOSITORY_ISSUES`,
+    /// under Composio's `operationId`-derived spelling. Before this it was a
+    /// `Send + Consequence + PerCall` — parked, labelled as spend, and
+    /// un-grantable, so the desk could not even be unblocked by consenting once.
+    ///
+    /// The two halves that must both hold: the reach is the one a read
+    /// deserves, and the group never says spend.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_drifted_read_runs_instead_of_parking_as_spend() {
+        for slug in [
+            // Every slug here is absent from the curated catalogue — checked,
+            // not assumed: `a_drifted_read_is_a_miss_and_its_curated_twin_is_not`
+            // pins the first one as an `UncuratedAction`, and a slug that
+            // quietly gained a curated entry would make this test pass for the
+            // wrong reason.
+            "GITHUB_ISSUES_LIST_FOR_REPO",
+            "GITHUB_GET_ISSUE",
+            "GITHUB_LIST_ISSUES",
+            "SLACK_SEARCH_MESSAGES",
+            "NOTION_SEARCH_PAGES",
+        ] {
+            assert!(
+                matches!(
+                    composio_catalog_lookup(slug),
+                    CatalogLookup::UncuratedAction { .. } | CatalogLookup::UnknownToolkit { .. }
+                ),
+                "`{slug}` is curated now, so it no longer exercises the fallback — \
+                 pick another uncurated read"
+            );
+            let verdict = consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": slug }));
+            assert_eq!(
+                verdict.reach,
+                Reach::ExternalRead,
+                "`{slug}` names a read verb; it must not be priced as a send"
+            );
+            assert_eq!(
+                verdict.group,
+                EffectGroup::Other,
+                "`{slug}` is a read — the card must not say spend"
+            );
+            assert!(
+                !verdict.parks_under_auto(),
+                "`{slug}` must not stall an auto desk"
+            );
+            assert!(
+                !verdict.reach.parks_under_supervision(),
+                "`{slug}` must not interrupt a supervised operator either"
+            );
+            // The tier that still says no, and should: `readonly` promises the
+            // desk reaches into nobody's account, drifted slug or not.
+            assert!(verdict.reach.denied_under_readonly(), "{slug}");
+        }
+    }
+
+    /// The other half of #1818: an inferred read runs, but it can never be
+    /// minted into a standing grant.
+    ///
+    /// A curated read is `Grantable` because a person classified it. A verb is
+    /// evidence, not a classification, and a standing grant outlives the call
+    /// it was cut from — so the guess gets the narrow reading, which expires
+    /// with the turn. `PerCall` costs nothing here precisely because
+    /// `ExternalRead` does not park: there is no approval to save.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn an_inferred_read_is_never_grantable() {
+        let inferred = consequence_of(
+            COMPOSIO_EXECUTE,
+            &json!({ "tool": "GITHUB_ISSUES_LIST_FOR_REPO" }),
+        );
+        assert_eq!(inferred.standing, Standing::PerCall);
+        let curated = consequence_of(
+            COMPOSIO_EXECUTE,
+            &json!({ "tool": "GITHUB_LIST_REPOSITORY_ISSUES" }),
+        );
+        assert_eq!(
+            curated.standing,
+            Standing::Grantable,
+            "the curated twin keeps the grant a person's classification earned"
+        );
+        assert_eq!(
+            inferred.reach, curated.reach,
+            "they differ on standing and on nothing else — that is the whole distinction"
+        );
+        assert_eq!(inferred.group, curated.group);
+    }
+
+    /// The fallback's own table, stated rather than sampled through
+    /// `consequence_of` (issue #1818).
+    ///
+    /// Both directions matter and they are not symmetric: a `true` here runs
+    /// unattended, a `false` is the pre-#1818 park an operator can still
+    /// approve. So the read side is checked for the shapes that must run, and
+    /// the send side for every shape that must not — including the two the
+    /// rules exist for, whole-segment matching and first-verb-wins.
+    #[test]
+    fn the_verb_fallback_asks_for_evidence_of_a_read() {
+        for slug in [
+            "GITHUB_ISSUES_LIST_FOR_REPO",
+            "GITHUB_LIST_REPOSITORY_ISSUES",
+            "GITHUB_GET_A_PULL_REQUEST",
+            "GMAIL_FETCH_EMAILS",
+            "SLACK_SEARCH_MESSAGES",
+            "NOTION_QUERY_DATABASE",
+            "linear_list_issues",
+            // Whole-segment matching: the mutating verb is a prefix of the
+            // object, not the verb. A `contains` rule would send both.
+            "GITHUB_LIST_STARGAZERS",
+            "GMAIL_LIST_DRAFTS",
+            // First verb wins: `DRAFT` is what `GET` gets.
+            "GMAIL_GET_DRAFT",
+        ] {
+            assert!(
+                composio_slug_reads_by_verb(slug),
+                "`{slug}` names a read verb and nothing that mutates"
+            );
+        }
+        for slug in [
+            "GMAIL_SEND_EMAIL",
+            "GITHUB_CREATE_AN_ISSUE",
+            "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS",
+            "STRIPE_CREATE_A_CHARGE",
+            "TWITTER_POST_TWEET",
+            "GOOGLECALENDAR_QUICK_ADD",
+            // No verb either list knows: absence of evidence is a send here,
+            // which is the whole difference from upstream's `classify_unknown`.
+            "GITHUB_INVENT_A_NEW_VERB",
+            "NOTAREALTOOLKIT_DO_SOMETHING",
+            "",
+            "_",
+            // A destructive segment sends it whatever verb came first.
+            "GMAIL_GET_AND_DELETE_THREAD",
+            "GITHUB_LIST_AND_REMOVE_LABELS",
+        ] {
+            assert!(
+                !composio_slug_reads_by_verb(slug),
+                "`{slug}` is not evidence of a read"
+            );
         }
     }
 
@@ -2757,10 +3190,49 @@ mod tests {
     #[test]
     #[cfg(not(feature = "openhuman"))]
     fn without_the_catalogue_every_composio_action_is_a_send() {
-        for slug in ["GITHUB_LIST_PULL_REQUESTS", "GMAIL_SEND_EMAIL"] {
+        // Including one whose verb the #1818 fallback would happily call a
+        // read. The fallback is deliberately not consulted here: a build that
+        // cannot place `GITHUB_LIST_PULL_REQUESTS` has not earned the right to
+        // infer anything, and `CatalogueAbsent` is the arm that says so.
+        for slug in [
+            "GITHUB_LIST_PULL_REQUESTS",
+            "GITHUB_ISSUES_LIST_FOR_REPO",
+            "GMAIL_SEND_EMAIL",
+        ] {
+            assert_eq!(
+                composio_catalog_lookup(slug),
+                CatalogLookup::CatalogueAbsent,
+                "`{slug}` cannot be looked up in a build with no catalogue, and the \
+                 record must say that rather than blaming the slug (issue #1818)"
+            );
             let verdict = consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": slug }));
             assert_eq!(verdict.group, EffectGroup::Send, "{slug}");
             assert_eq!(verdict.standing, Standing::PerCall, "{slug}");
+        }
+    }
+
+    /// The seam named from the other side (issue #1818): with the catalogue
+    /// linked in, no lookup may ever answer "there is no catalogue".
+    ///
+    /// `CatalogueAbsent` is a fact about the binary. If it could also arise
+    /// from a slug, the operator-facing warning it triggers — *every* Composio
+    /// action over-gates in this build — would be a lie told once per stale
+    /// slug, and the deployment bug it exists to surface would be unfindable.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_catalogued_build_never_reports_the_catalogue_absent() {
+        for slug in [
+            "GITHUB_LIST_PULL_REQUESTS",
+            "GITHUB_ISSUES_LIST_FOR_REPO",
+            "GMAIL_SEND_EMAIL",
+            "NOTAREALTOOLKIT_DO_SOMETHING",
+            "noUnderscore",
+        ] {
+            assert_ne!(
+                composio_catalog_lookup(slug),
+                CatalogLookup::CatalogueAbsent,
+                "`{slug}` was looked up against a catalogue that is present"
+            );
         }
     }
 
@@ -2782,6 +3254,18 @@ mod tests {
              comment above is stale, not the behaviour"
         );
         assert!(!composio_catalog_lookup("GITHUB_INVENT_A_NEW_VERB").is_read());
+        // …and issue #1818's fallback did not quietly become that heuristic
+        // either. It asks for a read verb; upstream asks only for the absence
+        // of a write one, and this slug is the case that separates them.
+        assert!(!composio_slug_reads_by_verb("GITHUB_INVENT_A_NEW_VERB"));
+        assert_eq!(
+            consequence_of(
+                COMPOSIO_EXECUTE,
+                &json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" })
+            )
+            .group,
+            EffectGroup::Send
+        );
     }
 
     /// **Issue #754.** The catalogue miss the whole issue is about, pinned from
@@ -2792,10 +3276,11 @@ mod tests {
     /// `operationId`-derived slug and the curated descriptive one. The second is
     /// classified as a read and runs; the first misses the catalogue and parks.
     ///
-    /// The verdict for the drifted slug is deliberately UNCHANGED by this
-    /// commit — it still parks, because a slug nobody has classified should.
-    /// What changes is that the miss is now *distinguishable* from a correct
-    /// refusal, which is the thing that was silent.
+    /// The miss is still a miss after issue #1818 — that is what this test is
+    /// for, and it is why the two layers are separate functions. #1818 changed
+    /// what the classifier *does* with a miss; it must not change what the
+    /// catalogue *reports*, or the drift signal #754 exists for would be
+    /// silently switched off by the fix that made drift survivable.
     #[test]
     #[cfg(feature = "openhuman")]
     fn a_drifted_read_is_a_miss_and_its_curated_twin_is_not() {
@@ -2810,15 +3295,9 @@ mod tests {
                 toolkit: "github".to_string()
             },
             "the live spelling of the same operation is a catalogue MISS, and \
-             naming it as such is the whole of #754"
+             naming it as such is the whole of #754 — the curated name is still \
+             the thing to fix even though #1818 stopped the miss from parking"
         );
-        // …and the verdict is untouched: still a send, still per-call.
-        let verdict = consequence_of(
-            COMPOSIO_EXECUTE,
-            &json!({ "tool": "GITHUB_ISSUES_LIST_FOR_REPO" }),
-        );
-        assert_eq!(verdict.group, EffectGroup::Send);
-        assert_eq!(verdict.standing, Standing::PerCall);
     }
 
     /// A curated **write** is not a miss, and telling them apart is what keeps
@@ -3328,8 +3807,13 @@ mod tests {
     }
 
     /// Nothing the catalogue can place is `None`, and `None` is what a scoped
-    /// grant refuses — so an unplaceable slug parks rather than riding somebody
-    /// else's permission.
+    /// grant refuses — so an unplaceable slug can never ride somebody else's
+    /// permission.
+    ///
+    /// Unchanged by issue #1818, and worth saying why: the verb fallback moved
+    /// `..._LIST_...` off the parking path, but it did not give it a scope. A
+    /// grant is minted against a *toolkit*, and a toolkit the catalogue has
+    /// never heard of is still not one an operator consented to.
     #[test]
     fn an_unplaceable_composio_call_has_no_scope() {
         for args in [
