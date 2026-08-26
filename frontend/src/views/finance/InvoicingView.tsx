@@ -111,20 +111,41 @@ export function InvoicingView({ client, company }: Props) {
     void loadInvoices();
   }, [loadInvoices]);
 
+  /*
+    Hoisted above the state conditionals (codex review, #1785): both early
+    returns ran before the header, so this page had no `h1` while it loaded and
+    none at all once the read failed — a terminal state, since nothing retries.
+    The same defect and the same fix as `SearchView` and `HostingView`, which
+    these two are a copy of.
+  */
+  const header = (
+    <PageHeader
+      title="Invoicing"
+      width="5xl"
+      description="What your customers owe and have paid, through Chargebee."
+    />
+  );
+
   if (statusError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 py-6">
-        <Alert variant="destructive" data-testid="invoicing-status-error">
-          <AlertDescription>Could not load the Chargebee connection: {statusError}</AlertDescription>
-        </Alert>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+          <Alert variant="destructive" data-testid="invoicing-status-error">
+            <AlertDescription>Could not load the Chargebee connection: {statusError}</AlertDescription>
+          </Alert>
+        </div>
       </div>
     );
   }
 
   if (!status) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        <Loader2 className="mr-2 size-4 animate-spin" /> Loading invoicing…
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" /> Loading invoicing…
+        </div>
       </div>
     );
   }
@@ -134,11 +155,7 @@ export function InvoicingView({ client, company }: Props) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="invoicing-view">
-      <PageHeader
-        title="Invoicing"
-        width="5xl"
-        description="What your customers owe and have paid, through Chargebee."
-      />
+      {header}
       <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         <ConnectionPanel

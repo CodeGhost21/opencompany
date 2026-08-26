@@ -163,21 +163,51 @@ export function SearchView({ client, company }: Props) {
     }
   }
 
+  /*
+    Hoisted above the state conditionals (codex review, #1785). Both early
+    returns used to run before the header, so the page had no `h1` while it
+    loaded and — because the read is not retried — none at all once it failed.
+    The error state is the one that matters: it is terminal, so a screen reader
+    got a page with no accessible name and no way out of it.
+
+    Read once into a const rather than duplicated into three returns: three
+    copies of a page's own name is how the console got twelve of them.
+  */
+  const header = (
+    <PageHeader
+      title="Search"
+      width="5xl"
+      description={
+        <>
+          Where your teammates look things up. Every teammate that can search
+          gets one <code>web_search</code> tool — this decides which index
+          answers it, and whose account pays for the call.
+        </>
+      }
+    />
+  );
+
   if (loadError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 py-6">
-        <Alert variant="destructive" data-testid="search-load-error">
-          <TriangleAlert className="size-4" />
-          <AlertDescription>Could not load search settings: {loadError}</AlertDescription>
-        </Alert>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+          <Alert variant="destructive" data-testid="search-load-error">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>Could not load search settings: {loadError}</AlertDescription>
+          </Alert>
+        </div>
       </div>
     );
   }
 
   if (!status) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        <Loader2 className="mr-2 size-4 animate-spin" /> Loading search…
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" /> Loading search…
+        </div>
       </div>
     );
   }
@@ -190,17 +220,7 @@ export function SearchView({ client, company }: Props) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="search-view">
-      <PageHeader
-        title="Search"
-        width="5xl"
-        description={
-          <>
-            Where your teammates look things up. Every teammate that can search
-            gets one <code>web_search</code> tool — this decides which index
-            answers it, and whose account pays for the call.
-          </>
-        }
-      />
+      {header}
       <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {!status.inBuild ? (
