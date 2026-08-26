@@ -97,10 +97,15 @@ const PROVIDERS: Record<
     acceptsKey: true,
     requiresBaseUrl: false,
     keyKind: "an OpenRouter key (`sk-or-…`)",
-    // OpenRouter's recommended DeepSeek pairing, prefilled.
+    // Premium defaults, kept aligned with backend DEFAULT_TIER_MODELS.
     preset: {
       baseUrl: "",
-      models: { "chat-v1": "deepseek/deepseek-chat", "reasoning-v1": "deepseek/deepseek-r1" },
+      models: {
+        "chat-v1": "anthropic/claude-sonnet-5",
+        "reasoning-v1": "openai/gpt-5.6-sol-pro",
+        "agentic-v1": "anthropic/claude-opus-5",
+        "vision-v1": "qwen/qwen3.8-max",
+      },
     },
   },
   ollama: {

@@ -146,10 +146,10 @@ pub const DEFAULT_PROVIDER: &str = "openrouter";
 /// The slugs mirror the platform's own OpenRouter bindings, so proxied and
 /// direct resolve to the same models by default.
 pub const DEFAULT_TIER_MODELS: &[(&str, &str)] = &[
-    ("chat-v1", "deepseek/deepseek-v4-flash"),
-    ("reasoning-v1", "deepseek/deepseek-v4-pro"),
-    ("agentic-v1", "deepseek/deepseek-v4-pro"),
-    ("vision-v1", "qwen/qwen3.7-plus"),
+    ("chat-v1", "anthropic/claude-sonnet-5"),
+    ("reasoning-v1", "openai/gpt-5.6-sol-pro"),
+    ("agentic-v1", "anthropic/claude-opus-5"),
+    ("vision-v1", "qwen/qwen3.8-max"),
 ];
 
 /// The concrete model id to put on the wire for `tier`.
@@ -1513,7 +1513,7 @@ mod tests {
         // An unmapped tier still takes the shipped default on the direct path.
         assert_eq!(
             model_for_tier("reasoning-v1", &overrides, false),
-            "deepseek/deepseek-v4-pro"
+            "openai/gpt-5.6-sol-pro"
         );
         // A caller naming a concrete slug is not treated as an unknown tier.
         assert_eq!(
