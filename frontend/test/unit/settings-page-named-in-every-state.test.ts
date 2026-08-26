@@ -10,6 +10,7 @@ import { HostingView } from "@/views/HostingView";
 import { InvoicingView } from "@/views/finance/InvoicingView";
 import { PeopleView } from "@/views/PeopleView";
 import { SearchView } from "@/views/SearchView";
+import { TaskDetailView } from "@/views/TaskDetailView";
 import { WalletView } from "@/views/finance/WalletView";
 
 /**
@@ -208,5 +209,42 @@ describe("People offers no Invite before it knows the reader is an admin", () =>
       b.textContent?.includes("Invite"),
     );
     expect(invite, "Invite must not be offered before the role is known").toBeUndefined();
+  });
+});
+
+/**
+ * The card detail pane, which is not a settings page but has the same shape
+ * and was the fifth finding of this class (codex review on #1785).
+ *
+ * Its heading is the card's own title, inside `DetailHeader`, which needs a
+ * loaded record. So a cold `#/tasks/<id>` was unnamed while the read was in
+ * flight and stayed unnamed after a non-404 failure — `detail` is left null and
+ * nothing retries. The `notFound` branch had already been given a heading; this
+ * is the branch a per-file check could not see, because the file already
+ * contained one.
+ */
+describe("the task detail pane is named before the card is", () => {
+  async function taskName(answer: unknown): Promise<string | null> {
+    await act(async () => {
+      root.render(
+        createElement(TaskDetailView, {
+          client: clientWith(answer) as never,
+          company: "acme",
+          taskId: "task-1",
+          onBack: () => {},
+        } as never),
+      );
+    });
+    const headings = container.querySelectorAll("h1");
+    expect(headings.length, "a page has exactly one h1").toBeLessThan(2);
+    return headings[0]?.textContent?.trim() ?? null;
+  }
+
+  it("names the pane while the record is still loading", async () => {
+    expect(await taskName("pending")).toBe("Task");
+  });
+
+  it("names the pane after a read that leaves no record", async () => {
+    expect(await taskName(new Error("board unreachable"))).toBe("Task");
   });
 });

@@ -101,16 +101,82 @@ function headerFile(leaf: Leaf): string | null {
 }
 
 /**
- * Every `return` of JSX above the first `<PageHeader` in the component that
- * owns it.
+ * Names of local `const`s in this component that hold a `PageHeader`.
  *
- * The component is found by walking back from the header to the nearest
- * top-level declaration, so returns inside helper components defined *earlier*
+ * The fix for a multi-state page is to read the header into a const once and
+ * render `{header}` in each branch — three copies of a page's own name is how
+ * the console got twelve of them. A check that only recognised the literal tag
+ * would call every one of those branches an offence, so it recognises the
+ * binding too.
+ */
+function headerConsts(body: string): string[] {
+  return [...body.matchAll(/const (\w+) = \(?\s*<PageHeader/g)].map((m) => m[1]);
+}
+
+/**
+ * Whether a returned block is JSX at all.
+ *
+ * Anchored on what follows `return`, not on the block containing a `<`
+ * anywhere: a multi-line `return cond ? "a" : "b";` inside the component picks
+ * up a `<` from the lines the block scan swept past and was reported as an
+ * unnamed render.
+ *
+ * Leading commentary is stripped first. Three of these returns open with a
+ * comment explaining the state — `Overview`, `WorkflowsView`, `MemoryView` —
+ * and a check that looked only at the first character skipped all three
+ * silently, which is a hole shaped exactly like the one this file exists to
+ * close. A bare `{` is still not JSX: `return { millis: … }` is an object.
+ */
+function isJsx(block: string): boolean {
+  const after = block
+    .replace(/^\s*return\s*/, "")
+    .replace(/^\(\s*/, "")
+    // Leading commentary, in any of the three forms these files use.
+    .replace(/^(\s*(\/\/[^\n]*|\/\*[\s\S]*?\*\/|\{\/\*[\s\S]*?\*\/\})\s*)+/, "")
+    .trimStart();
+  return after.startsWith("<");
+}
+
+/**
+ * Whether this state renders a page heading: the component, the const holding
+ * it, or a hand-rolled `<h1>`.
+ *
+ * `<h1>` counts because the question here is whether the state has a name at
+ * all. *Who* may hand-roll one, and how many, is `HAND_ROLLED`'s business in
+ * `page-header-adoption.test.ts` — two rules, one each, rather than both
+ * half-enforced in two places.
+ */
+function hasHeading(block: string, consts: string[]): boolean {
+  return (
+    block.includes("<PageHeader") ||
+    block.includes("<h1") ||
+    consts.some((name) => block.includes(`{${name}}`))
+  );
+}
+
+/**
+ * Every JSX `return` in the component that owns the header, and whether that
+ * return carries a heading.
+ *
+ * **This checks every return, not the ones above the first header.** The
+ * earlier version stopped at the first `<PageHeader` occurrence, which is a
+ * per-*file* question — "does this file contain a header" — while the defect
+ * is per-*state*. Five findings in a row were a state inside a file that
+ * already contained a header somewhere: `SearchView`, then Finances and
+ * People, then Chat, Team and Company, then `TaskDetailView`, whose
+ * `notFound` return got one while its main return — loading, and a non-404
+ * failure that leaves `detail` null — did not. Patching the named file each
+ * time produced the next finding, because the check could not tell the two
+ * questions apart.
+ *
+ * The component is found by walking back from the first header to the nearest
+ * top-level declaration, so returns inside helper components defined elsewhere
  * in the file are not counted — they are not this page's states.
  *
- * `return () =>` is an effect cleanup, not a render.
+ * `return () =>` is an effect cleanup, and a `return` with no `<` is a value,
+ * not a render.
  */
-function returnsAboveHeader(source: string): { line: number; text: string }[] {
+function returnsWithoutHeader(source: string): { line: number; text: string }[] {
   const lines = source.split("\n");
   const header = lines.findIndex((l) => l.includes("<PageHeader"));
   if (header < 0) return [];
@@ -122,10 +188,20 @@ function returnsAboveHeader(source: string): { line: number; text: string }[] {
       break;
     }
   }
+  // The component ends where the next top-level declaration begins.
+  let end = lines.length;
+  for (let i = Math.max(start + 1, header + 1); i < lines.length; i++) {
+    if (/^(export )?(function|const) [A-Z][A-Za-z0-9_]*/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+
+  const consts = headerConsts(lines.slice(start, end).join("\n"));
 
   const found: { line: number; text: string }[] = [];
   let i = start;
-  while (i < header) {
+  while (i < end) {
     const line = lines[i];
     if (!/^\s{2,6}return\b/.test(line) || line.includes("return () =>")) {
       i += 1;
@@ -136,14 +212,14 @@ function returnsAboveHeader(source: string): { line: number; text: string }[] {
     let j = i;
     if (!line.trimEnd().endsWith(";")) {
       j = i + 1;
-      while (j < lines.length) {
+      while (j < end) {
         block.push(lines[j]);
         if (new RegExp(`^\\s{${indent}}\\);\\s*$`).test(lines[j])) break;
         j += 1;
       }
     }
     const text = block.join("\n");
-    if (text.includes("<") && !text.includes("<PageHeader") && !delegatesTo(text)) {
+    if (isJsx(text) && !hasHeading(text, consts) && !delegatesTo(text)) {
       const first = block.slice(1).find((l) => l.trim()) ?? line;
       found.push({ line: i + 1, text: first.trim().slice(0, 80) });
     }
@@ -152,7 +228,7 @@ function returnsAboveHeader(source: string): { line: number; text: string }[] {
   return found;
 }
 
-describe("a routed view's header precedes every return it can make (#1785)", () => {
+describe("every state of a routed view renders a heading (#1785)", () => {
   it("checks one file per routed view, and finds all of them", () => {
     // Without this a typo in a path would silently check nothing, which is the
     // failure mode every guard in this directory is written against.
@@ -165,23 +241,23 @@ describe("a routed view's header precedes every return it can make (#1785)", () 
     }
   });
 
-  it("has no routed view returning JSX before it renders its header", () => {
+  it("has no routed view returning JSX without a heading in it", () => {
     const offenders = VIEWS.flatMap((view) => {
       if (view in EARLY_RETURN_OK) return [];
       return NAMED_BY[view].flatMap((leaf) => {
         const file = headerFile(leaf);
         if (file === null) return [];
         const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
-        return returnsAboveHeader(source).map(
-          (r) => `${view} (${file}:${r.line}) returns before its header: ${r.text}`,
+        return returnsWithoutHeader(source).map(
+          (r) => `${view} (${file}:${r.line}) returns with no heading in it: ${r.text}`,
         );
       });
     });
 
     expect(
       offenders,
-      `A routed view returns something before it renders its page header, so ` +
-        `that state has no h1 and a screen reader cannot announce the page.\n` +
+      `A routed view has a state that renders no page header, so that state ` +
+        `has no h1 and a screen reader cannot announce the page.\n` +
         `Read the header into a const above the conditionals and render it in ` +
         `each branch — see SearchView or FinancesView for the shape. Guard any ` +
         `prop that needs data which has not arrived (WalletView's environment ` +
@@ -189,21 +265,21 @@ describe("a routed view's header precedes every return it can make (#1785)", () 
     ).toEqual([]);
   });
 
-  it("has no settings page returning JSX before it renders its header", () => {
+  it("has no settings page returning JSX without a heading in it", () => {
     // Settings is one routed view over ten bookmarkable addresses, so the
     // routed-view sweep above cannot see any of them — `#/settings/people`
     // was one of the two this review found, and it is not a `View`.
     const offenders = SETTINGS_PAGES.flatMap(({ id }) => {
       const file = SETTINGS_NAMED_BY[id];
       const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
-      return returnsAboveHeader(source).map(
-        (r) => `settings/${id} (${file}:${r.line}) returns before its header: ${r.text}`,
+      return returnsWithoutHeader(source).map(
+        (r) => `settings/${id} (${file}:${r.line}) returns with no heading in it: ${r.text}`,
       );
     });
 
     expect(
       offenders,
-      `A settings page returns something before it renders its page header. ` +
+      `A settings page has a state that renders no page header. ` +
         `Same fix as the routed views above.\n${offenders.join("\n")}`,
     ).toEqual([]);
   });
@@ -215,11 +291,11 @@ describe("a routed view's header precedes every return it can make (#1785)", () 
         const early = NAMED_BY[view as View].flatMap((leaf) => {
           const file = headerFile(leaf);
           if (file === null) return [];
-          return returnsAboveHeader(readFileSync(`${VIEWS_DIR}/${file}`, "utf8"));
+          return returnsWithoutHeader(readFileSync(`${VIEWS_DIR}/${file}`, "utf8"));
         });
         return early.length > 0
           ? null
-          : `${view} is exempt but no longer returns before its header — drop the row`;
+          : `${view} is exempt but every state now renders a heading — drop the row`;
       })
       .filter((line): line is string => line !== null);
 
