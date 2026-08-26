@@ -262,3 +262,38 @@ test("a saved OpenRouter tier override can be cleared back to the tier default (
     page.getByText("Reverted to the committed manifest (or managed) configuration."),
   ).toBeVisible({ timeout: 30_000 });
 });
+
+test("typing an OpenRouter passthrough id one keystroke at a time is not stripped mid-word (issue #1838 follow-up, sixth instance)", async ({
+  page,
+}) => {
+  // Unit coverage for this same regression (inference-model-picker.test.ts)
+  // dispatches synthetic input events; this spec is the proof against a real
+  // browser's actual keystroke-by-keystroke typing, which is what a prior
+  // regression on this same effect (the baseline/models divergence, #1838)
+  // slipped past unit tests and only an E2E run caught.
+  await openConnections(page);
+  await expect(page.locator("#inference-key")).toBeVisible({ timeout: 30_000 });
+
+  // A keyless switch to OpenRouter lands on the proxied, free-text path
+  // (issue #1838 follow-up): the provider's own raw-id presets get stripped
+  // immediately since there is no key to save them under, leaving the tier
+  // fields editable and empty.
+  await pickProvider(page, "OpenRouter");
+  const chatInput = page.locator("#inference-model-chat-v1");
+  await expect(chatInput).toBeVisible();
+  await expect(chatInput).toHaveValue("");
+
+  // Type the proxy's own passthrough id character by character. Every prefix
+  // shorter than the full three-segment id counts as a raw catalog id by
+  // segment count, so this is exactly the sequence a per-render strip used to
+  // clear mid-word.
+  const target = "openrouter/anthropic/claude-sonnet-5";
+  await chatInput.pressSequentially(target, { delay: 20 });
+  await expect(chatInput).toHaveValue(target);
+
+  // Leave the shared E2E company on its committed default for later specs.
+  await page.getByRole("button", { name: "Reset to default" }).click();
+  await expect(
+    page.getByText("Reverted to the committed manifest (or managed) configuration."),
+  ).toBeVisible({ timeout: 30_000 });
+});

@@ -473,3 +473,47 @@ describe("proxy-incompatible overrides survive an unready catalog (issue #1838 f
     expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
   });
 });
+
+describe("typing a passthrough id one keystroke at a time while proxied (issue #1838 follow-up, sixth instance)", () => {
+  it("does not strip an in-progress openrouter/<author>/<model> id before the operator finishes typing it", async () => {
+    // The auto-strip effect exists to catch a *settled* proxy-incompatible
+    // value — a catalog pick, a preset, or Remove Key's carried-over
+    // override — landing in `models` in one shot. It used to run on every
+    // render instead, including the renders a keystroke into the free-text
+    // input this same proxied state puts on screen produces. `openrouter/
+    // <author>/<model>` only reaches three segments once it is complete, so
+    // typing it by hand passes through `openrouter/` and `openrouter/a` —
+    // both counted as raw by segment count — and a per-render strip cleared
+    // the field before those segments could ever be finished.
+    //
+    // Each keystroke below is dispatched with the value a real browser would
+    // report: the field's *current* DOM value plus one more character — not
+    // the target string sliced up front. That is what actually reproduces a
+    // clear-mid-word: if the effect wipes the field between keystrokes, the
+    // DOM the next keystroke appends to is already empty, and the loop ends
+    // holding only the tail of the id instead of the whole thing.
+    const { client } = clientFor(status("openrouter", {}, false), [
+      { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" },
+    ]);
+
+    await mount(client);
+
+    const input = container.querySelector<HTMLInputElement>("input#inference-model-chat-v1");
+    expect(input).not.toBeNull();
+
+    const target = "openrouter/anthropic/claude-sonnet-5";
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    for (const ch of target) {
+      const next = (input as HTMLInputElement).value + ch;
+      await act(async () => {
+        setter?.call(input, next);
+        input?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+
+    expect(input).toHaveProperty("value", target);
+  });
+});

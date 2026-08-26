@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrainCircuit, Check, Loader2, RotateCcw, Save, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 
@@ -447,9 +447,34 @@ export function InferenceSection({
    * difference `hasTypedDraft()` saw. An automatic proxy-safety strip is no
    * more a typed draft than the preset it is correcting; `baseline` has to
    * move with it for the same reason it moves with the preset itself.
+   *
+   * Latched to the *edge* of entering a proxied window, not every render
+   * inside one (issue #1838 follow-up, sixth instance). `models` has to stay
+   * a dependency — it is what changed when a catalog pick or Remove Key's
+   * carry-over needs catching — but that means this effect also re-runs on
+   * every keystroke into the free-text input `wouldSaveProxied` itself put on
+   * screen (`useFreeText` below), because typing calls `setModel` the same as
+   * any other write to `models`. `openrouter/<author>/<model>` only reaches
+   * three segments once the id is complete, so a strip that fires on every
+   * render caught the field mid-word — after `openrouter/`, after
+   * `openrouter/a` — and cleared it before an operator typing one by hand
+   * could ever finish it. `stripProxyIncompatible` normalizes a *settled*
+   * value; applying it while the value is still being composed is the bug,
+   * not a stricter version of the fix. `strippedForWindow` records that the
+   * strip already ran for the current proxied window and skips re-running it
+   * until the window closes (provider leaves `openrouter`, or a key makes
+   * `wouldSaveProxied` false again) and a new one opens — which is exactly
+   * the set of transitions (`pickProvider`, typing then clearing a key) this
+   * effect exists to catch.
    */
+  const strippedForWindow = useRef(false);
   useEffect(() => {
-    if (provider !== "openrouter" || !wouldSaveProxied) return;
+    if (provider !== "openrouter" || !wouldSaveProxied) {
+      strippedForWindow.current = false;
+      return;
+    }
+    if (strippedForWindow.current) return;
+    strippedForWindow.current = true;
     const next = stripProxyIncompatible(models);
     const changed = TIERS.some((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
     if (!changed) return;
