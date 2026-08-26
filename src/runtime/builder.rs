@@ -624,6 +624,22 @@ pub struct RuntimeBuilder {
     /// provision. On a rebuild the record's own provenance is carried forward,
     /// so this only applies when no record exists yet.
     template_provenance: Option<TemplateProvenance>,
+    /// Issue #1844: treat a genuinely first-ever boot as already having
+    /// cleared the account-activation funnel, the same grace the migration a
+    /// few lines below already gives an *existing* `running` company. Off by
+    /// default — a real first boot is exactly the moment the gate exists to
+    /// catch — and never read from the environment inside this module (see
+    /// `src/bin/opencompany.rs`, which is the one place `RuntimeBuilder` is
+    /// handed process configuration); this only exists so a caller who has
+    /// already decided the answer can say so explicitly. Its one caller today
+    /// is the e2e host script (`frontend/test/e2e/host.sh`, via
+    /// `OPENCOMPANY_SKIP_ACTIVATION_GATE`): `companies/e2e_harness` boots from
+    /// a wiped data root on every suite run, so without this every one of the
+    /// suite's ~100 unrelated specs would hit the new blocking gate on their
+    /// very first navigation — a regression this field exists to prevent
+    /// without weakening the gate for an actual first-run tenant, which never
+    /// sets it.
+    skip_activation_gate: bool,
     feedback: Option<Arc<FeedbackStore>>,
     github: Option<Arc<dyn GitHubClient>>,
     tinyhumans_feedback: Option<Arc<dyn TinyHumansClient>>,
@@ -737,6 +753,7 @@ impl RuntimeBuilder {
             seed_tasks: false,
             skills_registry: Arc::from([]),
             template_provenance: None,
+            skip_activation_gate: false,
             feedback: None,
             github: None,
             tinyhumans_feedback: None,
@@ -758,6 +775,14 @@ impl RuntimeBuilder {
     /// Overrides the derived company id.
     pub fn with_id(mut self, id: CompanyId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Issue #1844: skip the account-activation funnel's first-boot gate for
+    /// this company — see the field's own doc comment for who this is for and
+    /// why it defaults to off.
+    pub fn skip_activation_gate(mut self, skip: bool) -> Self {
+        self.skip_activation_gate = skip;
         self
     }
 
@@ -2689,9 +2714,52 @@ impl RuntimeBuilder {
             // field existed cannot retroactively "activate" it via this path —
             // its own next `running` boot does that instead.
             Some(r) => (r.name_confirmed, r.activation_completed_at),
-            // A genuinely new company: the real funnel applies from boot one.
+            // A genuinely new company: the real funnel applies from boot one —
+            // unless the caller explicitly said not to gate it (issue #1844's
+            // `skip_activation_gate`, see its own doc comment).
+            None if self.skip_activation_gate => (true, Some(crate::ports::now_millis())),
             None => (false, None),
         };
+        // Issue #1844: an operator-confirmed display name is the one other
+        // manifest field a rebuild carries forward, alongside
+        // `[workflows].enabled` above. `record.manifest` is otherwise
+        // seed-authoritative — re-parsed from `company.toml` on every rebuild —
+        // and the console's `PATCH {scope}` name-confirm route writes straight
+        // into `manifest.company.name` rather than a separate overlay field
+        // (there is no `CompanyRecord::overlay_company_name`; the name IS the
+        // manifest field, the same way `[workflows].enabled` IS). Without this
+        // carry, a redeploy would silently revert an operator's chosen name
+        // back to whatever `company.toml` still says — the exact "runtime
+        // write wiped by the next rebuild" trap `merge_enabled_workflows`
+        // exists to avoid, just for a different field.
+        //
+        // Gated on the *existing record's own* `name_confirmed` — read before
+        // this build's migration above ever runs — not the freshly-computed
+        // `name_confirmed` a few lines up. Those two differ on exactly one
+        // path: the "running and unlatched" grandfather arm stamps `true` on
+        // *every* rebuild of a running, not-yet-latched company, including one
+        // whose record was created moments ago in this same process and never
+        // went near a name-confirm write. Carrying on that computed value would
+        // let a company adopt a manifest edit make it look console-confirmed
+        // (regression caught by `rebuild_keeps_every_other_manifest_field_seed_authoritative`,
+        // which mutates a record's name directly without ever setting the
+        // flag and expects the seed to keep winning). The record's own stored
+        // flag has no such false positive: it is `true` only where a `PATCH
+        // {scope}` write — or a genuine pre-#1843 grandfather record that
+        // already carried it — actually set it.
+        //
+        // Before confirmation the seed's name is a provisional default and
+        // staying seed-authoritative is correct — an operator editing
+        // `company.toml` pre-launch expects the edit to show up. A blank
+        // carried name is refused rather than trusted, since the validator
+        // that keeps `[company].name` non-empty for a fresh seed
+        // (`CompanyManifest::validate`) never ran against a hand-carried value.
+        if let Some(r) = existing.as_ref()
+            && r.name_confirmed
+            && !r.manifest.company.name.trim().is_empty()
+        {
+            self.manifest.company.name = r.manifest.company.name.clone();
+        }
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
         let brain: Arc<dyn Brain> = match self.brain {
@@ -7298,6 +7366,7 @@ needs_reason = true
         assert_eq!(rebuilt.manifest.company.name, "Acme");
     }
 
+
     /// Issue #1796: a grant written through the **overlay** survives a rebuild,
     /// where the raw manifest write above does not.
     ///
@@ -7443,6 +7512,129 @@ needs_reason = true
             "the provider's grant list must carry the console grant: {:?}",
             effective_grants(&rebuilt.manifest)
         );
+    }
+
+    /// Issue #1844: once `name_confirmed` is set, the *record's* name — not
+    /// the seed's — survives a rebuild. The mirror image of the test just
+    /// above: before confirmation the seed wins (asserted there), and after
+    /// confirmation the record does, which is the whole point of gating the
+    /// carry on the flag rather than always preferring one side.
+    #[tokio::test]
+    async fn rebuild_carries_forward_a_confirmed_company_name() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-namecarry-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.manifest.company.name = "Operator Chosen Name".to_string();
+        record.name_confirmed = true;
+        store.save(&record).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            rebuilt.manifest.company.name, "Operator Chosen Name",
+            "a confirmed name must survive a redeploy, not revert to company.toml's seed value"
+        );
+        assert!(rebuilt.name_confirmed);
+    }
+
+    /// Issue #1843/#1844: a company that predates activation tracking and was
+    /// already `running` at its next boot is back-filled as activated —
+    /// `name_confirmed` included — rather than gated behind an onboarding
+    /// screen it has no memory of starting. See `RuntimeBuilder::build`'s own
+    /// migration comment for why `running` (not `existing.is_some()` alone) is
+    /// the condition: a paused/archived company is left exactly as recorded.
+    #[tokio::test]
+    async fn rebuild_backfills_activation_for_a_pre_existing_running_company() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-backfill-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // Simulate a record written before activation tracking existed: the
+        // fields default to `false`/`None` (`#[serde(default)]`'s contract),
+        // and the company is already `running`.
+        let store = crate::store::FsCompanyStore::new(home.clone());
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                overlay_retired_agents: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            rebuilt.name_confirmed,
+            "a pre-existing running company must be back-filled as named"
+        );
+        assert!(
+            rebuilt.activation_completed_at.is_some(),
+            "and as activated — it has been operating all along"
+        );
+    }
+
+    /// The other half of the migration: a genuinely new company (no `existing`
+    /// record at all) gets no grace — the real funnel applies from boot one.
+    #[tokio::test]
+    async fn a_brand_new_company_is_not_backfilled_as_activated() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-nobackfill-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let record = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(!record.name_confirmed);
+        assert!(record.activation_completed_at.is_none());
     }
 
     /// Issue #208: an enabled id with no surviving graph body — a seed entry
