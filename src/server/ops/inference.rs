@@ -75,8 +75,24 @@ pub fn router() -> Router<AppState> {
         "/inference",
         get(get_status).put(set_config).delete(revert_config),
     )
+    .merge(scoped("/inference/models", get(list_models)))
     .merge(scoped("/inference/test", post(test_config)))
     .merge(scoped("/inference/restart", post(restart_runtime)))
+}
+
+/// `GET …/inference/models` — the cached public OpenRouter model registry.
+async fn list_models(
+    company: ScopedCompany,
+) -> Result<Json<Vec<crate::server::inference_models::InferenceModel>>, ApiError> {
+    let _ = company;
+    crate::server::inference_models::openrouter_models()
+        .await
+        .map(Json)
+        .map_err(|error| {
+            ApiError(OpenCompanyError::Store(format!(
+                "OpenRouter model registry unavailable: {error}"
+            )))
+        })
 }
 
 /// The company's effective inference status as the console renders it. **Never**
@@ -1183,6 +1199,28 @@ base_url = "https://byo.example/v1"
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value, raw)
+    }
+
+    #[tokio::test]
+    async fn model_catalog_route_returns_cached_openrouter_models() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+        crate::server::inference_models::openrouter_cache().store(
+            vec![crate::server::inference_models::InferenceModel {
+                id: "provider/real-model".to_string(),
+                name: Some("Real Model".to_string()),
+                context_length: Some(128_000),
+            }],
+            std::time::Instant::now(),
+        );
+
+        let (status, body, raw) =
+            send(&state, "GET", "/api/v1/company/inference/models", None).await;
+
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(body[0]["id"], "provider/real-model");
+        assert_eq!(body[0]["name"], "Real Model");
+        assert_eq!(body[0]["contextLength"], 128_000);
     }
 
     // ---------------------------------------------------------------------
