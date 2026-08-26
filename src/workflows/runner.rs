@@ -851,7 +851,8 @@ async fn run_workflow_inner(
                 &run_id,
                 &trigger_input,
                 &blocked,
-            );
+            )
+            .await;
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
@@ -1141,7 +1142,8 @@ async fn run_workflow_inner(
         &run_id,
         &trigger_input,
         &blocked_nodes,
-    );
+    )
+    .await;
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
     // via a `notices` sentence, not only via the node's own status — the
     // per-node chip is easy to miss on a run that otherwise looks fine, and a
@@ -1565,7 +1567,7 @@ struct PausedGates<'a> {
 /// A build with no approvals queue wired stashes nothing and is silent — the
 /// same node already logged its own "could not be parked" line, and there is no
 /// resolve path to release a stash to.
-fn stash_blocked_agent_nodes(
+async fn stash_blocked_agent_nodes(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     workflow_id: &str,
     run_id: &str,
@@ -1581,6 +1583,26 @@ fn stash_blocked_agent_nodes(
         }
         let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
         parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+        // Issue #1816 (Stage 2): mirror the in-memory arm into the durable
+        // journal so an approval landing after a process/host replacement can
+        // still locate this run. Best-effort — a failed write leaves the
+        // in-memory stash serving the no-restart case, and failing the settled
+        // run over an approvals-queue write is the wrong trade (same stance as
+        // the park itself).
+        if let Err(error) = parking
+            .journal
+            .record_blocked_node_stashed(&turn, workflow_id, trigger_input)
+            .await
+        {
+            tracing::warn!(
+                %workflow_id,
+                %run_id,
+                node = %node.node_id,
+                %error,
+                "[approval] a blocked node's continuation facts could not be durably \
+                 stashed; the in-memory stash still covers a resolve without a restart"
+            );
+        }
     }
 }
 
