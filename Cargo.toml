@@ -213,9 +213,20 @@ regex = { version = "1", optional = true }
 # default build links no network crates.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"], optional = true }
 
-# Real HMAC-SHA256 webhook signing. Pure-Rust, no system libs, no network beyond
-# the shared `reqwest` client used by `HttpWebhookSink`.
-hmac = { version = "0.12", optional = true }
+# HMAC-SHA256. Two callers: webhook signing (`HttpWebhookSink`, behind
+# `webhooks`) and the analytics tenant identifier (`analytics::types::OpaqueId`,
+# un-gated).
+#
+# NOT optional, because the second caller is not. `OpaqueId::tenant` derives a
+# hosted tenant's analytics identity from its slug, and an *unkeyed* digest of a
+# slug is not an opaque identity at all: a tenant slug is usually the customer's
+# brand, so a few thousand guesses invert it and the third-party collector
+# learns exactly who it is looking at. Keying it is the fix, and a keyed digest
+# has to work in every build the identity code compiles in — which is all of
+# them, since the decision layer is deliberately un-gated so it can be tested
+# without the network feature. Pure-Rust, no system libs, and already in
+# `Cargo.lock`, so no lane's graph changes.
+hmac = "0.12"
 
 # Hashing (session/login-code digests) and OS randomness (minting them). Both
 # are unconditional: a build that cannot hash or generate a random token cannot
@@ -459,7 +470,7 @@ runner = ["acp"]
 # Real HTTP POST webhook delivery + HMAC-SHA256 signing. The `WebhookSink` trait,
 # the offline `RecordingWebhookSink`, and the deterministic default signer
 # compile without this; only `HttpWebhookSink`/`HmacSha256Signer` are gated here.
-webhooks = ["dep:reqwest", "dep:hmac"]
+webhooks = ["dep:reqwest"]
 # Real signed per-tenant JWT verification. The `PlatformVerifier` trait and the
 # offline `StaticPlatformVerifier` compile without this; only the JWT verifier is
 # gated behind it.

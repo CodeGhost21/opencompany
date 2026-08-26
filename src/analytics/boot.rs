@@ -37,10 +37,7 @@ pub fn install(state: &AppState, handle: &DeferredTracker, env: &dyn EnvSource) 
     // instance id. Never the company name, and never anything derived from the
     // hostname or the bind address — `crate::app::instance` argues that at
     // length for the same id on the same grounds.
-    let id = match state.config().tenant_namespace.as_deref() {
-        Some(tenant) => OpaqueId::tenant(crate::app::canonical_tenant(tenant)),
-        None => OpaqueId::instance(state.instance_id()),
-    };
+    let id = identify(state, env);
 
     // The cognition seam the rest of the tree already uses, rather than a second
     // derivation of "which brain is this host on?" beside the code that picks
@@ -82,6 +79,31 @@ pub fn install(state: &AppState, handle: &DeferredTracker, env: &dyn EnvSource) 
     });
 
     decision
+}
+
+/// Chooses the opaque id this host's events are attributed to.
+///
+/// Split out of [`install`] so the choice can be asserted directly. It was
+/// inline, and the test that covered it recomputed the expected id itself and
+/// compared the two — which passes whatever `install` actually does, and did:
+/// a deliberate mutation making the keyless path fall back to a baked-in salt
+/// went undetected. A decision this consequential has to be observable.
+///
+/// A tenant slug is identified by keyed digest, and **only** when the platform
+/// configured a key. There is deliberately no unkeyed fallback: a plain hash of
+/// a slug is not an opaque id, because the slug is usually the customer's brand
+/// and a few thousand guesses invert it, and a salt compiled into a GPL-3.0
+/// binary is one every reader of the source already has. Without a key the host
+/// identifies *itself*, by the random instance id that names nobody's customer
+/// — see [`OpaqueId`] for the full argument.
+pub(crate) fn identify(state: &AppState, env: &dyn EnvSource) -> OpaqueId {
+    match (
+        state.config().tenant_namespace.as_deref(),
+        crate::analytics::config::tenant_id_key(env),
+    ) {
+        (Some(tenant), Some(key)) => OpaqueId::tenant(crate::app::canonical_tenant(tenant), &key),
+        _ => OpaqueId::instance(state.instance_id()),
+    }
 }
 
 /// The one line a boot log carries about analytics.
@@ -357,6 +379,105 @@ mod test {
         );
         assert_eq!(decision, Decision::Silent(Silence::Unreadable));
         assert!(describe(&decision).contains("not recognised"));
+    }
+
+    /// A tenant state, for the identity tests below.
+    fn tenant_state(tenant: &str) -> (AppState, tempfile::TempDir) {
+        let home = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(AppConfig {
+            tenant_namespace: Some(tenant.into()),
+            ..AppConfig::default()
+        })
+        .with_home(home.path());
+        (state, home)
+    }
+
+    /// **A hosted tenant with no identity key is known by its instance id, not
+    /// by a digest of its slug.**
+    ///
+    /// The dangerous fallback is the other one. An unkeyed `SHA-256(slug)` is
+    /// not an opaque identity: a slug is usually the customer's brand, so
+    /// whoever holds the digests can enumerate candidates and read the customer
+    /// straight back out. When the platform has not supplied a key there is
+    /// nothing private to derive, so the host names *itself* — 128 random bits
+    /// that identify nobody's customer — rather than naming its customer badly.
+    ///
+    /// Asserted on what `identify` actually returns. An earlier version of this
+    /// test recomputed the expected id itself and compared the two, which is a
+    /// tautology: a mutation replacing the keyless path with a baked-in salt
+    /// passed it.
+    #[test]
+    fn a_tenant_without_an_identity_key_falls_back_to_the_instance_id() {
+        let (state, _home) = tenant_state("acmecorp-holdings");
+        let chosen = identify(
+            &state,
+            &MapEnv::new([
+                (DEPLOYMENT_ENV, "hosted-tenant"),
+                (TOKEN_ENV, "not-a-real-token"),
+            ]),
+        );
+
+        assert_eq!(
+            chosen.as_str(),
+            OpaqueId::instance(state.instance_id()).as_str(),
+            "a keyless tenant must be known by its own random instance id"
+        );
+        assert!(
+            chosen.as_str().starts_with("i_"),
+            "and never by anything in the tenant id space: {chosen:?}"
+        );
+    }
+
+    /// And with a key the tenant *is* identified as a tenant — the control,
+    /// without which "it always uses the instance id now" would pass the test
+    /// above just as well.
+    #[test]
+    fn a_tenant_with_an_identity_key_is_identified_as_one() {
+        let (state, _home) = tenant_state("acmecorp-holdings");
+        let chosen = identify(
+            &state,
+            &MapEnv::new([
+                (DEPLOYMENT_ENV, "hosted-tenant"),
+                (TOKEN_ENV, "not-a-real-token"),
+                (crate::analytics::config::ID_KEY_ENV, "not-a-real-id-key"),
+            ]),
+        );
+
+        let key = crate::analytics::types::TenantIdKey::new("not-a-real-id-key")
+            .expect("a non-blank key");
+        assert_eq!(
+            chosen.as_str(),
+            OpaqueId::tenant("acmecorp-holdings", &key).as_str(),
+            "a keyed tenant is identified by its keyed digest"
+        );
+        assert!(chosen.as_str().starts_with("t_"), "{chosen:?}");
+        assert_ne!(
+            chosen.as_str(),
+            OpaqueId::instance(state.instance_id()).as_str(),
+            "the two id spaces must not collide"
+        );
+    }
+
+    /// A blank key is not a key: it must send the tenant to the instance id
+    /// rather than deriving under a key everybody can guess.
+    #[test]
+    fn a_blank_identity_key_does_not_identify_a_tenant() {
+        let (state, _home) = tenant_state("acmecorp-holdings");
+        for blank in ["", "   ", "\n"] {
+            let chosen = identify(
+                &state,
+                &MapEnv::new([
+                    (DEPLOYMENT_ENV, "hosted-tenant"),
+                    (TOKEN_ENV, "not-a-real-token"),
+                    (crate::analytics::config::ID_KEY_ENV, blank),
+                ]),
+            );
+            assert_eq!(
+                chosen.as_str(),
+                OpaqueId::instance(state.instance_id()).as_str(),
+                "a key of {blank:?} must read as absent"
+            );
+        }
     }
 
     /// The instance id is what a host with no tenant namespace is known by, and

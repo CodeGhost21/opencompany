@@ -141,6 +141,7 @@ symptom in analytics is inflated install counts, not lost data.
 | `OPENCOMPANY_ANALYTICS` | `on` forces reporting; `off` forbids it and outranks everything else. |
 | `OPENCOMPANY_ANALYTICS_TOKEN` | the Mixpanel project token. **Configuration, never a compiled-in constant** — a token baked into a public binary is a token everyone has. |
 | `OPENCOMPANY_ANALYTICS_ENDPOINT` | overrides the collector URL. Must be an absolute `http`/`https` URL with a host; anything else is silence with a reason. |
+| `OPENCOMPANY_ANALYTICS_ID_KEY` | the secret a hosted tenant's analytics id is derived under. Injected by the platform, never given to the collector. Absent means the host is known by its random instance id instead. |
 
 Reporting happens only when **all** of these hold:
 
@@ -149,6 +150,16 @@ Reporting happens only when **all** of these hold:
 3. the deployment is `hosted-tenant`, **or** `OPENCOMPANY_ANALYTICS=on`;
 4. a project token is configured;
 5. the collector endpoint is one a client could actually POST to.
+
+The endpoint is validated with `url`, the same parser `reqwest` uses, rather
+than an approximation of the URL grammar. The first attempt hand-rolled the
+check and accepted eight shapes `reqwest` rejects — `http://[::1/track`,
+`:99999`, `:65536`, `:abc`, `host:8080:9090`, `]::1[`, `127.0.0.1.5` and
+`999.999.999.999` — each of which resolved to reporting and then dropped every
+batch, which is the failure the check exists to prevent. Issue #673 had already
+settled this rule for a different call site: it must be *the same* parser
+`reqwest` uses, because a second hand-rolled reader is a bypass waiting to be
+found.
 
 Condition 1 is met in exactly one place in this repository: `TENANT_FEATURES` in
 `.github/workflows/deploy-staging.yml`, the hosted tenant image's feature set.
@@ -236,6 +247,35 @@ transport in it to hand back. Saying "reporting to …" there would be the exact
 opposite of the truth, and the `mixpanel::build` line that explains it is a
 `tracing::info!` the CLI's default `EnvFilter` swallows — which is why every
 boot line here is a `println!` in the first place.
+
+### Tenant identity is keyed, not merely hashed
+
+A hosted tenant's `distinct_id` is an HMAC-SHA256 of its slug under
+`OPENCOMPANY_ANALYTICS_ID_KEY`, truncated to 128 bits and prefixed `t_`.
+
+It used to be a plain `SHA-256(slug)`, and that did not deliver what it
+promised. A hash only hides an input that cannot be guessed, and a tenant slug
+is close to the opposite: it is usually the customer's brand, drawn from a
+small, public, enumerable set. Anyone holding the digests — the collector
+itself, or anyone with access to the analytics project — can hash a few thousand
+candidate brands and read `t_<digest>` straight back to the customer. Truncation
+does not help. Nor would a salt compiled into the binary, since this is a
+GPL-3.0 crate and that salt would ship in every copy of the source.
+
+**There is no unkeyed fallback.** When no key is configured the host is known by
+its own random instance id (`i_…`, 128 random bits from `app::instance`), which
+identifies nobody's customer. That is the safe direction: a host that cannot
+identify its tenant privately identifies *itself* rather than identifying its
+customer publicly. Every question the identity exists to serve — uniques,
+funnels, segmentation, retention — is answered by either id, because the
+instance id is persisted in the data root and is therefore stable across
+restarts.
+
+The consequence for the platform: **until the manager injects
+`OPENCOMPANY_ANALYTICS_ID_KEY`, hosted tenants report under instance ids rather
+than tenant digests.** Grouping several instances of one tenant together needs
+the key; the manager can still correlate a digest back to a tenant itself,
+because it holds both the key and the slug. The collector cannot.
 
 ## Where it hooks in
 

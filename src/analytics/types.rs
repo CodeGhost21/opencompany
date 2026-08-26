@@ -327,12 +327,32 @@ pub fn metering_slug(metering: UsageMetering) -> &'static str {
 ///
 /// * [`Self::instance`] — the random 128-bit id from
 ///   [`crate::app::instance`], already this host's public name on `/spec`.
-/// * [`Self::tenant`] — the SHA-256 of a tenant slug. Hashed rather than
-///   passed through because a tenant slug is usually the customer's own brand,
-///   and a customer's brand does not belong in a third party's systems. Hashing
-///   keeps every question analytics actually asks — uniques, funnels,
-///   segmentation, retention — all of which need only that the same tenant maps
-///   to the same value every time.
+/// * [`Self::tenant`] — an HMAC-SHA256 of a tenant slug under a key the
+///   collector does not have. Derived rather than passed through because a
+///   tenant slug is usually the customer's own brand, and a customer's brand
+///   does not belong in a third party's systems. A derived id keeps every
+///   question analytics actually asks — uniques, funnels, segmentation,
+///   retention — all of which need only that the same tenant maps to the same
+///   value every time.
+///
+/// ## Why the tenant id is keyed, and what happens without a key
+///
+/// This used to be a plain `SHA-256(slug)`, and that did not deliver what the
+/// paragraph above promises. A hash only hides an input that cannot be guessed,
+/// and a tenant slug is close to the opposite: it is usually the customer's
+/// brand, drawn from a small, public, enumerable set. Anyone holding the digests
+/// — the collector itself, or anyone with access to the analytics project — can
+/// hash a list of candidate brands and read `t_<digest>` straight back to the
+/// customer. Truncating to 128 bits does not help; neither does a fixed salt
+/// shipped in the binary, since it would be in every copy of a GPL-3.0 crate.
+///
+/// So the derivation is keyed with [`TenantIdKey`], which the platform injects
+/// and the collector never sees. **When no key is configured there is no
+/// fallback to an unkeyed digest** — the caller uses [`Self::instance`]
+/// instead, whose 128 random bits are not enumerable by construction. That is
+/// the safe direction: a host that cannot identify its tenant privately
+/// identifies itself, rather than identifying its customer publicly. See
+/// `crate::analytics::boot::install`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OpaqueId(String);
 
@@ -351,10 +371,22 @@ impl OpaqueId {
         Self(format!("{INSTANCE_PREFIX}{instance_id}"))
     }
 
-    /// Attributes events to a hosted tenant, by digest of its slug.
-    pub fn tenant(tenant_slug: &str) -> Self {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(tenant_slug.as_bytes());
+    /// Attributes events to a hosted tenant, by keyed digest of its slug.
+    ///
+    /// HMAC rather than `Sha256(key || slug)`: the point of using a reviewed
+    /// construction here is that nobody has to reason about whether a
+    /// hand-assembled one is sound.
+    pub fn tenant(tenant_slug: &str, key: &TenantIdKey) -> Self {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        // `new_from_slice` on HMAC accepts a key of any length, so this cannot
+        // fail; the key is non-empty by `TenantIdKey`'s constructor anyway.
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.0.as_bytes())
+            .expect("HMAC accepts a key of any length");
+        mac.update(tenant_slug.as_bytes());
+        let digest = mac.finalize().into_bytes();
+
         let mut hex = String::with_capacity(TENANT_DIGEST_HEX);
         for byte in digest.iter().take(TENANT_DIGEST_HEX / 2) {
             use fmt::Write as _;
@@ -375,6 +407,39 @@ impl fmt::Debug for OpaqueId {
         // and a redacted id in a log is one nobody can correlate with a support
         // conversation — which is most of what it is for.
         write!(f, "OpaqueId({})", self.0)
+    }
+}
+
+/// The secret that makes a tenant's analytics id unguessable.
+///
+/// Held by the platform that provisions tenants and **never** by the collector,
+/// which is the entire point: it is what stops whoever holds the digests from
+/// enumerating candidate tenant slugs and reading customer identity back out.
+///
+/// A newtype rather than a bare `String`, for the same reason as
+/// [`ProjectToken`](crate::analytics::config::ProjectToken): it derives neither
+/// `Debug` nor `Serialize` — the hand-written `Debug` redacts — because
+/// `serde_json::to_value(&some_config)` is exactly how a secret reaches a
+/// payload. Nothing in this module serializes a config struct, and this value
+/// is read out only inside [`OpaqueId::tenant`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct TenantIdKey(String);
+
+impl TenantIdKey {
+    /// Wraps a key read from configuration. `None` for a blank one: a variable
+    /// set to whitespace is a variable nobody meant to set, and a key that is
+    /// effectively empty must read as *absent* — falling back to the random
+    /// instance id — rather than as a key everyone can guess.
+    pub fn new(raw: impl Into<String>) -> Option<Self> {
+        let raw = raw.into();
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| Self(trimmed.to_string()))
+    }
+}
+
+impl fmt::Debug for TenantIdKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TenantIdKey(<redacted>)")
     }
 }
 

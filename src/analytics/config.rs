@@ -5,6 +5,7 @@
 //! [`Deployment`] in, a [`Decision`] out — so every branch of it is tested in
 //! the default build, with no network and no feature flag.
 
+use crate::analytics::types::TenantIdKey;
 use crate::app::config::EnvSource;
 use crate::app::deployment::Deployment;
 
@@ -16,6 +17,15 @@ pub const TOKEN_ENV: &str = "OPENCOMPANY_ANALYTICS_TOKEN";
 /// Overrides the collector URL. Exists so a test can point at a local server,
 /// and so a deployment can front Mixpanel with its own proxy.
 pub const ENDPOINT_ENV: &str = "OPENCOMPANY_ANALYTICS_ENDPOINT";
+/// The secret that makes a hosted tenant's analytics id unguessable.
+///
+/// **Configuration, never a compiled-in constant**, and for a sharper reason
+/// than the project token: a salt baked into a GPL-3.0 binary is a salt every
+/// reader of the source already has, which is no salt at all. Injected by the
+/// platform that provisions tenants; never given to the collector. Absent means
+/// the host identifies itself by its random instance id instead — see
+/// [`TenantIdKey`](crate::analytics::types::TenantIdKey).
+pub const ID_KEY_ENV: &str = "OPENCOMPANY_ANALYTICS_ID_KEY";
 
 /// Where events go when nothing overrides it.
 pub const DEFAULT_ENDPOINT: &str = "https://api.mixpanel.com/track";
@@ -265,6 +275,19 @@ fn is_usable_endpoint(raw: &str) -> bool {
     };
     matches!(parsed.scheme(), "http" | "https")
         && parsed.host_str().is_some_and(|host| !host.is_empty())
+}
+
+/// The tenant-identity key, if this deployment configured one.
+///
+/// Read through `get`, not `get_os`, and that is deliberate rather than an
+/// oversight of the rule the switch and the endpoint follow: there is no
+/// unsafe direction to fail into here. A key that cannot be read is treated as
+/// absent, and absent means the host falls back to its random instance id —
+/// which is *more* private than any keyed digest, not less. The distinction
+/// `get_os` buys elsewhere ("malformed must not read as unset") only matters
+/// when unset is the dangerous answer, and here it is the safe one.
+pub fn tenant_id_key(env: &dyn EnvSource) -> Option<TenantIdKey> {
+    non_blank(env, ID_KEY_ENV).and_then(TenantIdKey::new)
 }
 
 /// A configured value, trimmed, or `None` when there is nothing left of it.

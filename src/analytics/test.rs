@@ -5,7 +5,7 @@
 //! it would be introduced at a call site, in a payload field, on any build.
 
 use super::*;
-use crate::analytics::types::{OpaqueId, provider_slug, sample_kind_slug};
+use crate::analytics::types::{OpaqueId, TenantIdKey, provider_slug, sample_kind_slug};
 use crate::app::deployment::Deployment;
 use crate::error::OpenCompanyError;
 use crate::metering::ModelSlug;
@@ -261,11 +261,13 @@ fn every_string_in_a_payload_comes_from_the_compiled_vocabulary() {
     }
 }
 
-/// A tenant slug is a customer's brand. It is hashed, and the test is that the
-/// slug cannot be read back out of the id.
+/// A tenant slug is the customer's brand. It is derived under a key before it
+/// leaves, never carried, and the derived value is stable so that uniques and
+/// funnels still mean something.
 #[test]
-fn a_tenant_slug_is_hashed_rather_than_carried() {
-    let id = OpaqueId::tenant("acmecorp-holdings");
+fn a_tenant_slug_is_derived_rather_than_carried() {
+    let key = TenantIdKey::new("not-a-real-id-key").expect("a non-blank key");
+    let id = OpaqueId::tenant("acmecorp-holdings", &key);
     assert!(!id.as_str().contains("acme"), "{id:?}");
     assert!(
         id.as_str().starts_with("t_"),
@@ -273,14 +275,106 @@ fn a_tenant_slug_is_hashed_rather_than_carried() {
     );
     assert_eq!(
         id.as_str(),
-        OpaqueId::tenant("acmecorp-holdings").as_str(),
+        OpaqueId::tenant("acmecorp-holdings", &key).as_str(),
         "the same tenant must map to the same id on every boot, or uniques and \
          funnels mean nothing"
     );
     assert_ne!(
         id.as_str(),
-        OpaqueId::tenant("acmecorp-holdings-2").as_str()
+        OpaqueId::tenant("acmecorp-holdings-2", &key).as_str()
     );
+}
+
+/// **The tenant id must not be invertible by whoever holds it.**
+///
+/// Not carrying the brand as a substring — the only thing the test above
+/// checks — is a much weaker property than it looks. A tenant slug is usually
+/// the customer's brand: a small, public, enumerable set. Under the plain
+/// `SHA-256(slug)` this used to use, the collector (or anyone with access to
+/// the analytics project) could hash a few thousand candidate brands and read
+/// `t_<digest>` straight back to the customer, so "opaque" was not true of it
+/// in any useful sense.
+///
+/// The guard is that the id is not a function of the slug alone. The self-check
+/// underneath is the load-bearing half: it recomputes the **old** unkeyed
+/// digest and proves an enumerating attacker's guess really would have matched,
+/// so this is testing the fix rather than restating the implementation.
+#[test]
+fn a_tenant_id_is_not_enumerable_from_the_slug() {
+    use sha2::{Digest, Sha256};
+
+    let slug = "acmecorp-holdings";
+    let key = TenantIdKey::new("not-a-real-id-key").expect("a non-blank key");
+    let id = OpaqueId::tenant(slug, &key);
+
+    // What an attacker who knows only the slug can compute: the old
+    // construction, exactly as it shipped — SHA-256, first 16 bytes, hex.
+    let guessed: String = Sha256::digest(slug.as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    // The self-check: that guess is well-formed and really is what the old
+    // construction produced, so the assertion below is not vacuous.
+    assert_eq!(guessed.len(), 32, "the guess must be a full 128-bit digest");
+    assert_eq!(
+        format!("t_{guessed}").len(),
+        id.as_str().len(),
+        "the guess must be the same shape as the id, or it could never have \
+         matched for reasons that have nothing to do with the key"
+    );
+
+    assert_ne!(
+        id.as_str(),
+        format!("t_{guessed}"),
+        "the tenant id is derivable from the slug alone, so anyone holding it \
+         can enumerate candidate brands and identify the customer"
+    );
+
+    // And the key is what makes the difference: change only the key and the id
+    // changes, which is the property an enumerating attacker cannot work around
+    // without it.
+    let other = TenantIdKey::new("not-a-real-id-key-either").expect("a non-blank key");
+    assert_ne!(
+        id.as_str(),
+        OpaqueId::tenant(slug, &other).as_str(),
+        "the same slug under a different key must not collide"
+    );
+}
+
+/// A key is a credential: it must not be printable by accident, because the
+/// accident is a `{:?}` in a log line nobody reviewed. Asserted
+/// case-insensitively, with the self-check, for the reason the endpoint guards
+/// carry one.
+#[test]
+fn a_tenant_id_key_is_not_printable() {
+    const SECRET: &str = "NotARealTenantIdKey";
+    let key = TenantIdKey::new(SECRET).expect("a non-blank key");
+    let printed = format!("{key:?}");
+    assert!(
+        !printed
+            .to_ascii_lowercase()
+            .contains(&SECRET.to_ascii_lowercase()),
+        "the Debug impl leaked the key: {printed}"
+    );
+    assert!(
+        SECRET
+            .to_ascii_lowercase()
+            .contains(&SECRET.to_ascii_lowercase()),
+        "the needle must be findable in the unredacted value, or this is vacuous"
+    );
+}
+
+/// A blank key is no key. It must read as *absent* — sending the caller to the
+/// random instance id — rather than as a key, because a key everybody can guess
+/// is the enumerable digest all over again.
+#[test]
+fn a_blank_tenant_id_key_is_no_key() {
+    for blank in ["", "   ", "\n", "\t\n "] {
+        assert_eq!(TenantIdKey::new(blank), None, "{blank:?}");
+    }
+    assert!(TenantIdKey::new("  not-a-real-id-key\n").is_some());
 }
 
 /// `Display` on this crate's error type embeds absolute paths, company ids, tool
