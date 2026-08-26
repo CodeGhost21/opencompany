@@ -133,8 +133,14 @@ pub fn describe(decision: &Decision) -> String {
 /// to answer "where is this going?". When something was removed the line says
 /// so, because a silently shortened URL is its own hour of confusion.
 ///
+/// `pub(crate)` because the transport logs the same destination when a send
+/// fails (`crate::analytics::mixpanel`). One helper, deliberately: a second
+/// redaction of the same string is a second thing to keep correct, and the two
+/// diverge the first time only one of them learns about a new place a URL can
+/// hold a secret.
+///
 /// [`ProjectToken`]: crate::analytics::config::ProjectToken
-fn loggable_endpoint(raw: &str) -> String {
+pub(crate) fn loggable_endpoint(raw: &str) -> String {
     // Query and fragment first: `?key=…` is at least as common as userinfo.
     let trimmed = raw.split(['?', '#']).next().unwrap_or(raw);
 

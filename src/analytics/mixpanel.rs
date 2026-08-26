@@ -169,6 +169,27 @@ mod http {
         }
     }
 
+    /// The one rendering of a transport failure this module is allowed to log.
+    ///
+    /// `reqwest::Error` keeps the request URL and prints it — `… for url (…)` —
+    /// and that URL is `OPENCOMPANY_ANALYTICS_ENDPOINT`. For a deployment
+    /// fronting Mixpanel with an authenticated proxy, that is precisely where
+    /// the proxy's key lives: in userinfo (`https://user:key@host/track`) or in
+    /// the query string (`?key=…`). So a collector that merely goes unreachable
+    /// wrote the operator's credential into container logs, on a path the boot
+    /// line's redaction never touched and the `ProjectToken` redaction guards a
+    /// different string from entirely.
+    ///
+    /// `without_url` **removes** the URL rather than rewriting it, which is why
+    /// this is not a second redaction surface to keep in step with
+    /// `boot::loggable_endpoint`. There is nothing here to diverge: the error
+    /// carries no URL at all, and the destination on the same log line comes
+    /// from that one helper, so the transport learns about a new place a URL can
+    /// hold a secret at the same moment the boot line does.
+    pub(super) fn loggable_send_error(error: reqwest::Error) -> String {
+        error.without_url().to_string()
+    }
+
     impl Inner {
         /// Drains the buffer and posts it. Every failure is swallowed after one
         /// debug line: a dead collector is a no-op, per #1739's constraints.
@@ -214,7 +235,8 @@ mod http {
                     "[analytics] the collector refused a batch; dropping it"
                 ),
                 Err(error) => tracing::debug!(
-                    %error,
+                    endpoint = %crate::analytics::boot::loggable_endpoint(&self.endpoint),
+                    error = %loggable_send_error(error),
                     "[analytics] could not reach the collector; dropping the batch"
                 ),
             }
@@ -463,6 +485,93 @@ mod test {
         }
         // No assertion on an internal count — the observable property is that
         // this returns at all, promptly, with no reachable collector.
+    }
+
+    /// **A transport failure must not carry the collector credential.**
+    ///
+    /// `OPENCOMPANY_ANALYTICS_ENDPOINT` exists so a deployment can front
+    /// Mixpanel with its own authenticated proxy, and such a proxy carries its
+    /// key in one of the two places a URL can hold one. `reqwest::Error`
+    /// retains the request URL and prints it, so an unreachable collector — a
+    /// routine event, not an exotic one — wrote that key into the debug log.
+    ///
+    /// Measured against reqwest 0.12.28 rather than assumed, and the two places
+    /// do **not** behave alike:
+    ///
+    /// | in the endpoint | what `reqwest::Error`'s `Display` printed |
+    /// |---|---|
+    /// | `http://someone:KEY@127.0.0.1:1/track` | `… for url (http://127.0.0.1:1/track)` — userinfo already stripped |
+    /// | `http://127.0.0.1:1/track?key=KEY` | `… for url (http://127.0.0.1:1/track?key=KEY)` — **leaked verbatim** |
+    ///
+    /// So the query string is the live leak; userinfo is not, today. Both are
+    /// covered here anyway, because "the dependency strips it" is not a
+    /// property this crate owns — it is one `cargo update` from being false,
+    /// and nothing here would fail when it changed. `without_url` removes the
+    /// URL outright, so neither shape can reach the line whatever reqwest
+    /// decides to print.
+    ///
+    /// Asserted **case-insensitively**, with the self-check below: this PR
+    /// already shipped a leak guard that passed a deliberate leak because the
+    /// value came back lowercased.
+    #[tokio::test]
+    async fn a_transport_failure_never_carries_the_endpoint_credential() {
+        const SECRET: &str = "NotARealCollectorKey";
+        let needle = SECRET.to_ascii_lowercase();
+
+        // The self-check, on the shape that is measurably still leaking. A
+        // guard that cannot find the needle in the **unstripped** error proves
+        // nothing about the stripped one — the needle may never have been
+        // there at all. If reqwest ever starts redacting query strings too,
+        // this fails loudly and says so, rather than leaving a guard behind
+        // that asserts nothing.
+        let leaky = format!("http://127.0.0.1:1/track?key={SECRET}");
+        let unstripped = send_failing(&leaky).await.to_string();
+        assert!(
+            unstripped.to_ascii_lowercase().contains(&needle),
+            "the needle must be findable before stripping, or this guard is \
+             vacuous: {unstripped}"
+        );
+
+        for endpoint in [
+            // Port 1 refuses, so each of these is a real transport error rather
+            // than a fabricated one.
+            format!("http://someone:{SECRET}@127.0.0.1:1/track"),
+            leaky.clone(),
+            format!("http://someone:{SECRET}@127.0.0.1:1/track?key={SECRET}"),
+        ] {
+            let logged = super::http::loggable_send_error(send_failing(&endpoint).await);
+            assert!(
+                !logged.to_ascii_lowercase().contains(&needle),
+                "the transport error leaked the collector credential from \
+                 {endpoint:?}: {logged}"
+            );
+            assert!(
+                !logged.is_empty(),
+                "stripping the URL must still leave the operator a reason: {logged}"
+            );
+
+            // And the destination is still named on the same line — through the
+            // one redaction helper the boot line uses, not a second one.
+            let named = crate::analytics::boot::loggable_endpoint(&endpoint);
+            assert!(
+                !named.to_ascii_lowercase().contains(&needle),
+                "the endpoint field leaked it instead: {named}"
+            );
+            assert!(
+                named.contains("127.0.0.1"),
+                "the operator still has to be able to tell where it was going: {named}"
+            );
+        }
+    }
+
+    /// One real, refused request. Nothing listens on port 1.
+    async fn send_failing(endpoint: &str) -> reqwest::Error {
+        reqwest::Client::new()
+            .post(endpoint)
+            .json(&serde_json::json!([]))
+            .send()
+            .await
+            .expect_err("nothing listens on port 1")
     }
 
     /// **A shutdown flush waits for a send already in flight.**
