@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiError } from "@/api/types";
-import { buildManifestToml, describeProvisionError } from "@/lib/company-manifest";
+import {
+  buildManifestToml,
+  collidesWithArchived,
+  describeProvisionError,
+} from "@/lib/company-manifest";
 
 /**
  * The pure half of console company creation (issue #1807).
@@ -74,5 +78,37 @@ describe("describeProvisionError (issue #1807)", () => {
 
   it("falls back to a generic line for a non-ApiError", () => {
     expect(describeProvisionError(new Error("boom"))).toContain("Something went wrong");
+  });
+});
+
+/**
+ * Codex review on #1828 (PR comment 3862711330): a shared-single-DB host
+ * namespaces every provisioned id with `<tenant>--`, invisibly to the
+ * console. An archived company's `CompanyStatus.id` is therefore the
+ * namespaced form (e.g. `tenant-a--acme`), and the dialog's earlier
+ * archived-id guard only rejected an exact string match against that full
+ * id — so a bare `acme` typed into Advanced sailed through the check and
+ * was re-namespaced back to `tenant-a--acme` by the host, recreating the
+ * exact collision the guard exists to prevent.
+ */
+describe("collidesWithArchived (issue #1807)", () => {
+  it("catches an exact match against the archived id", () => {
+    expect(collidesWithArchived("acme", "acme")).toBe(true);
+  });
+
+  it("catches the bare id under a tenant-namespaced archived id", () => {
+    expect(collidesWithArchived("acme", "tenant-a--acme")).toBe(true);
+  });
+
+  it("does not flag a genuinely distinct id", () => {
+    expect(collidesWithArchived("acme-mk2", "acme")).toBe(false);
+    expect(collidesWithArchived("acme", "tenant-a--other")).toBe(false);
+  });
+
+  it("does not flag the tenant-namespaced form itself as if it were bare", () => {
+    // Only the bare tail collides; the full namespaced string typed back in
+    // is already caught by the exact-match branch above, not this one.
+    expect(collidesWithArchived("tenant-a--acme", "tenant-a--acme")).toBe(true);
+    expect(collidesWithArchived("tenant-b--acme", "tenant-a--acme")).toBe(false);
   });
 });

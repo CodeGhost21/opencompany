@@ -51,12 +51,12 @@ function submitButton(): HTMLButtonElement {
   return match as HTMLButtonElement;
 }
 
-async function open(client: OpenCompanyClient) {
+async function open(client: OpenCompanyClient, company = "acme") {
   await act(async () => {
     root.render(
       createElement(CreateCompanyDialog, {
         client,
-        request: { kind: "reset", company: "acme", name: "Acme Robotics" },
+        request: { kind: "reset", company, name: "Acme Robotics" },
         onClose,
         onCreated,
       }),
@@ -129,5 +129,34 @@ describe("resetting a company with the replacement id edited back to the archive
     const error = document.querySelector('[data-testid="create-company-error"]');
     expect(error, "no error shown").toBeTruthy();
     expect(error!.textContent).toContain("acme");
+  });
+});
+
+/**
+ * Codex review on #1828 (PR comment 3862711330): the same guard, but under
+ * shared-single-DB tenant namespacing, where `request.company` (the
+ * archived company's `CompanyStatus.id`) is the namespaced form
+ * (`tenant-a--acme`) and an operator types the *bare* id back in — a
+ * plausible move, since that bare form is what they likely named the
+ * company when it was first provisioned, before any tenant prefix was
+ * attached.
+ */
+describe("resetting a tenant-namespaced company with the bare archived id typed back in", () => {
+  it("refuses to archive or provision, even though the strings don't match exactly", async () => {
+    const lifecycle = vi.fn(() => Promise.resolve());
+    const provisionCompany = vi.fn((_body: ProvisionBody) =>
+      Promise.resolve({ id: "whatever" } as unknown as CompanyStatus),
+    );
+    await open(stubClient({ lifecycle, provisionCompany }), "tenant-a--acme");
+
+    // The bare id, not the full namespaced one the archived company actually
+    // carries — this is exactly the form an exact-string check misses.
+    await setExplicitId("acme");
+    await submit();
+
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(provisionCompany).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="create-company-error"]')).toBeTruthy();
   });
 });

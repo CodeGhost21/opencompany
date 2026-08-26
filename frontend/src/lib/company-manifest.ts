@@ -175,3 +175,27 @@ export function resetReplacementId(oldId: string): string {
 export function wasAlreadyArchived(err: unknown): boolean {
   return err instanceof ApiError && err.code === "company_not_found";
 }
+
+/**
+ * Whether `candidateId`, typed as a reset's replacement id, would collide
+ * with `archivedId` once the host's shared-single-DB tenant namespacing
+ * (`AppConfig::namespaced_company_id`, `runtime/types.rs`) is applied.
+ *
+ * The console never learns the workload's tenant namespace — it isn't part
+ * of `CompanyStatus` — but the encoding is self-describing: a tenant name may
+ * never contain the `--` id delimiter (`validate_tenant_namespace`), so the
+ * *first* `--` in an already-namespaced id unambiguously marks the tenant
+ * boundary, and everything after it is the bare id the host derived from
+ * before namespacing. A bare candidate equal to that tail would be
+ * re-namespaced back to the exact archived id — `namespace_company_id`
+ * re-derives the same `<tenant>--` prefix for a bare id, and is a no-op only
+ * for one *already* carrying it — recreating the collision this whole guard
+ * exists to prevent, just spelled without the prefix the operator may not
+ * know their own company id carries (codex review on #1828, PR comment
+ * 3862711330).
+ */
+export function collidesWithArchived(candidateId: string, archivedId: string): boolean {
+  if (candidateId === archivedId) return true;
+  const delimiter = archivedId.indexOf("--");
+  return delimiter !== -1 && candidateId === archivedId.slice(delimiter + 2);
+}
