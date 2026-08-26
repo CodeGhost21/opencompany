@@ -225,6 +225,24 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).toContain("nothing there to decide");
   });
 
+  // Codex review on #1821 (third pass, same site): `unparkable` is set both
+  // when the workflow never wired an approvals queue AND when the store
+  // itself refused the write (`docs/modules/server/workflow-routes.md`'s
+  // `parkFailed`: "the store refused the write, or no approvals queue is
+  // wired"). The frontend has no field naming which one happened, so telling
+  // the operator this "needs a workflow or policy change" is only true for
+  // one of the two causes and misdirects them for the other.
+  it("does not unconditionally prescribe a workflow change for a call that could not be queued", async () => {
+    await renderHistory(blockedUnparkableRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).not.toContain("that case needs a workflow or policy change");
+    // The hedge names the infra cause a workflow edit can't fix.
+    expect(title).toContain("approvals queue itself can refuse the write");
+  });
+
   // Codex review on #1821: `isUndelivered` (`run-health.ts`) exempts a
   // `skipped` row whose reason is `dry-run` — a test run attempted nothing,
   // on purpose — so `verdictOf` reads it as `ok` the same as a run that
