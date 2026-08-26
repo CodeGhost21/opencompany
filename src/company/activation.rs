@@ -124,6 +124,19 @@ pub(crate) fn derive_steps(
     has_composio_connection: Option<bool>,
     workflow_run_succeeded: bool,
 ) -> ActivationStatus {
+    ActivationStatus {
+        name_confirmed: record.name_confirmed,
+        integration_connected: integration_connected(record, has_composio_connection),
+        workflow_run_succeeded,
+        activation_completed_at: record.activation_completed_at,
+    }
+}
+
+/// The `IntegrationConnected` step alone — split out of [`derive_steps`] so
+/// [`compute_and_latch`] can read it BEFORE deciding whether the journal scan
+/// for `workflow_run_succeeded` is even worth running (issue #1850 review,
+/// finding 2). Same inputs, same rule, no duplicated logic.
+fn integration_connected(record: &CompanyRecord, has_composio_connection: Option<bool>) -> bool {
     // A company whose manifest never grants `composio` has no lever to ever
     // make this step true (issue #1850 review, finding 1) — waive it rather
     // than permanently blocking activation for every bundled company that
@@ -140,15 +153,9 @@ pub(crate) fn derive_steps(
     // company that DOES grant `composio` in the one build most operators
     // actually run. Waive unconditionally when the build has no lever either,
     // the same way the grant waiver above does when the manifest has none.
-    let integration_connected = match has_composio_connection {
+    match has_composio_connection {
         None => true,
         Some(connected) => !composio_grantable || connected,
-    };
-    ActivationStatus {
-        name_confirmed: record.name_confirmed,
-        integration_connected,
-        workflow_run_succeeded,
-        activation_completed_at: record.activation_completed_at,
     }
 }
 
@@ -180,10 +187,15 @@ pub(crate) fn derive_steps(
 ///
 /// Reads the whole journal (`EventSeq::new(0)..`, matching the fallback
 /// [`EventLog::read_before`] itself uses) rather than an indexed query,
-/// because none exists — acceptable because [`compute_and_latch`] only ever
-/// calls this while [`CompanyRecord::activation_completed_at`] is still
-/// `None`, i.e. at most once per company between "created" and "activated",
-/// never again after.
+/// because none exists. [`compute_and_latch`] only ever calls this while
+/// [`CompanyRecord::activation_completed_at`] is still `None`, and — as of
+/// issue #1850 review, finding 2 — only once `name_confirmed` and
+/// `integration_connected` are ALSO both true: a prior version of this
+/// comment claimed that bound already held on its own, which was wrong — the
+/// scan ran on every single poll of an unlatched company regardless of the
+/// other two steps, unbounded by event history each time. It is now bounded
+/// to the polls that can actually complete activation, not merely the ones
+/// before it has.
 pub(crate) async fn any_workflow_run_succeeded(
     company: &CompanyId,
     events: &Arc<dyn EventLog>,
@@ -257,8 +269,32 @@ pub(crate) async fn compute_and_latch(
     }
 
     let has_composio_connection = has_composio_connection().await;
-    let workflow_run_succeeded = any_workflow_run_succeeded(company, events).await?;
-    let status = derive_steps(&record, has_composio_connection, workflow_run_succeeded);
+    let integration_connected = integration_connected(&record, has_composio_connection);
+
+    // The journal scan below is unbounded and grows with the company's whole
+    // event history (see `any_workflow_run_succeeded`'s own docs) — skip it
+    // whenever the other two steps can't ALREADY both be true, since all
+    // three must hold simultaneously for this poll to complete activation
+    // (issue #1850 review, finding 2). The finding corrected a claim in this
+    // function's own prior comment: EVERY poll of a company whose latch is
+    // unset reached this scan, not merely one call, because it ran
+    // unconditionally regardless of whether name_confirmed or
+    // integration_connected were even true yet — the common case for an
+    // operator still early in onboarding. `workflow_run_succeeded` reads
+    // `false` (never scanned, same shape the latched short-circuit above
+    // already uses for a value it isn't deriving live) whenever either
+    // cheaper step is still missing.
+    let workflow_run_succeeded = if record.name_confirmed && integration_connected {
+        any_workflow_run_succeeded(company, events).await?
+    } else {
+        false
+    };
+    let status = ActivationStatus {
+        name_confirmed: record.name_confirmed,
+        integration_connected,
+        workflow_run_succeeded,
+        activation_completed_at: record.activation_completed_at,
+    };
 
     if !status.all_steps_complete() {
         return Ok(status);
@@ -315,7 +351,50 @@ pub(crate) async fn compute_and_latch(
 mod test {
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::events::EventStreamItem;
+    use crate::ports::types::StoredEvent;
     use crate::store::fs::{FsCompanyStore, FsEventLog};
+
+    /// An [`EventLog`] decorator that counts `read_from` calls — the seam
+    /// [`compute_and_latch`]'s journal scan goes through — so a test can
+    /// assert the scan was SKIPPED, not merely that its result didn't matter.
+    /// Delegates every method to a real backend so `append`/`read_from`
+    /// behave exactly as production does; only the count is synthetic.
+    struct CountingEventLog {
+        inner: Arc<dyn EventLog>,
+        read_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingEventLog {
+        fn new(inner: Arc<dyn EventLog>) -> Self {
+            Self {
+                inner,
+                read_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventLog for CountingEventLog {
+        async fn append(&self, id: &CompanyId, event: CompanyEvent) -> Result<EventSeq> {
+            self.inner.append(id, event).await
+        }
+
+        async fn read_from(
+            &self,
+            id: &CompanyId,
+            seq: EventSeq,
+            limit: usize,
+        ) -> Result<Vec<StoredEvent>> {
+            self.read_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.read_from(id, seq, limit).await
+        }
+
+        fn subscribe(&self, id: &CompanyId) -> futures::stream::BoxStream<'static, EventStreamItem> {
+            self.inner.subscribe(id)
+        }
+    }
 
     /// A fresh filesystem-backed store + journal pair, rooted at a throwaway
     /// tempdir — the same real [`CompanyStore`]/[`EventLog`] implementations
@@ -739,6 +818,103 @@ mod test {
 
         let reloaded = store.load(&id).await.unwrap().unwrap();
         assert!(reloaded.activation_completed_at.is_none());
+    }
+
+    /// Issue #1850 review, finding 2: the journal scan behind
+    /// `workflow_run_succeeded` is unbounded and grows with a company's whole
+    /// event history — it must not run on a poll that cannot possibly
+    /// complete activation this round because `name_confirmed` is still
+    /// false, the cheapest of the three steps to know without any IO at all.
+    #[tokio::test]
+    async fn compute_and_latch_skips_the_journal_scan_when_name_is_not_confirmed() {
+        let id = CompanyId::new("acme");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(dir.path()));
+        let counting = Arc::new(CountingEventLog::new(Arc::new(FsEventLog::new(dir.path()))));
+        let events: Arc<dyn EventLog> = counting.clone();
+
+        // `composio` granted and a live connection answered below, so
+        // `integration_connected` reads true — `name_confirmed` (defaulted
+        // false by the `record()` fixture) is the ONLY step still missing,
+        // and that alone must be enough to skip the scan.
+        store.save(&record(&id, &["composio"])).await.unwrap();
+
+        let status = compute_and_latch(&id, &store, &events, async || Some(true))
+            .await
+            .unwrap();
+        assert!(!status.is_activated());
+        assert!(
+            !status.workflow_run_succeeded,
+            "unscanned reads as false, the same shape the latched short-circuit already uses"
+        );
+        assert_eq!(
+            counting
+                .read_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "name_confirmed alone being false must skip the journal read entirely"
+        );
+    }
+
+    /// The companion case: `name_confirmed` true but `integration_connected`
+    /// still false must ALSO skip the scan — the finding was that repeated
+    /// polling scanned "if the operator hasn't confirmed the name OR
+    /// connected an integration", not only the first of those.
+    #[tokio::test]
+    async fn compute_and_latch_skips_the_journal_scan_when_integration_is_not_connected() {
+        let id = CompanyId::new("acme");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(dir.path()));
+        let counting = Arc::new(CountingEventLog::new(Arc::new(FsEventLog::new(dir.path()))));
+        let events: Arc<dyn EventLog> = counting.clone();
+
+        let mut r = record(&id, &["composio"]);
+        r.name_confirmed = true;
+        store.save(&r).await.unwrap();
+
+        // No live connection — `integration_connected` reads false.
+        let status = compute_and_latch(&id, &store, &events, async || Some(false))
+            .await
+            .unwrap();
+        assert!(!status.is_activated());
+        assert!(!status.workflow_run_succeeded);
+        assert_eq!(
+            counting
+                .read_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "integration_connected alone being false must skip the journal read entirely"
+        );
+    }
+
+    /// Once both cheaper steps ARE true, the scan must still run — this is
+    /// the case the skip above must not swallow.
+    #[tokio::test]
+    async fn compute_and_latch_still_scans_once_name_and_integration_are_both_true() {
+        let id = CompanyId::new("acme");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(dir.path()));
+        let counting = Arc::new(CountingEventLog::new(Arc::new(FsEventLog::new(dir.path()))));
+        let events: Arc<dyn EventLog> = counting.clone();
+
+        let mut r = record(&id, &["composio"]);
+        r.name_confirmed = true;
+        store.save(&r).await.unwrap();
+
+        let status = compute_and_latch(&id, &store, &events, async || Some(true))
+            .await
+            .unwrap();
+        assert!(
+            !status.is_activated(),
+            "no workflow run journaled yet — the third step is genuinely missing"
+        );
+        assert_eq!(
+            counting
+                .read_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "once the two cheaper steps are true, the scan must run to answer the third honestly"
+        );
     }
 
     #[tokio::test]
