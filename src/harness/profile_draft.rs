@@ -277,6 +277,11 @@ fn system_prompt(field: ProfileField) -> String {
          when only one word moved.\n\
          - When they ask for a change, change THAT and leave the rest alone. \"Shorter\" means \
          shorter than your last version, not a fresh attempt at the whole thing.\n\
+         - KEEP WHAT YOU ALREADY WROTE. Every section, every line, every example you had stays \
+         unless they asked you to drop it. Adding one thing is not licence to rewrite the rest \
+         more briefly — before you answer, compare your new version against your last one and \
+         put back anything that went missing. If it came out shorter and they did not ask for \
+         shorter, you have lost work they had already accepted.\n\
          - Omit the fence in exactly ONE case: you are asking a question instead of drafting, \
          because what they want is genuinely unclear. Then your prose is that question — one \
          question, the most useful one. Do not ask when you can reasonably guess: a draft they \
@@ -890,6 +895,11 @@ mod test {
             // change only what was asked about.
             assert!(prompt.contains("WHOLE field"), "{prompt}");
             assert!(prompt.contains("leave the rest alone"), "{prompt}");
+            // Adding a section is not licence to rewrite the rest more briefly.
+            // Asked to "add a section and keep everything else", it added the
+            // section and cut the document in half — the same class of silent
+            // loss as a dropped draft, and just as invisible.
+            assert!(prompt.contains("KEEP WHAT YOU ALREADY WROTE"), "{prompt}");
             // And the one that made refinement usable at all. Four turns in
             // five came back describing an edit and carrying no `text`, which
             // reads to the operator as a copilot that did the work and then

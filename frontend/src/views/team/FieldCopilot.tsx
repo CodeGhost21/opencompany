@@ -50,6 +50,19 @@ const FIELD_NOUN: Record<DraftableField, string> = {
 };
 
 /**
+ * How much shorter a new draft may be before the panel says so.
+ *
+ * The prompt tells the copilot to keep what it already wrote, and mostly it
+ * does — but "mostly" is the problem with silent loss. Asked to add a section
+ * and keep the rest, it once added the section and cut the document in half,
+ * and nothing on screen said so: the new card simply looked like a new draft.
+ *
+ * 0.75 is deliberately loose. A rewrite that genuinely tightens wording is not
+ * a defect, and a note that fires on every refinement is one nobody reads.
+ */
+const SHRINK_NOTICE_RATIO = 0.75;
+
+/**
  * The composer's placeholder.
  *
  * Two per field, because the first message and the ones after it are different
@@ -228,8 +241,20 @@ export function FieldCopilot({
             Say what this teammate should own, and it will draft it. Then tell it what to change.
           </p>
         )}
-        {turns.map((turn, i) =>
-          turn.role === "operator" ? (
+        {turns.map((turn, i) => {
+          // The draft this one replaced, for the shrink notice below.
+          const previous = turns
+            .slice(0, i)
+            .filter((t) => t.role === "copilot" && t.draft)
+            .pop()?.draft;
+          const shrank = Boolean(
+            turn.draft && previous && turn.draft.length < previous.length * SHRINK_NOTICE_RATIO,
+          );
+          const lost =
+            shrank && previous && turn.draft
+              ? Math.round((1 - turn.draft.length / previous.length) * 100)
+              : 0;
+          return turn.role === "operator" ? (
             <p
               key={i}
               className="ml-6 rounded-md bg-background px-2.5 py-1.5 text-sm"
@@ -256,6 +281,15 @@ export function FieldCopilot({
                       suggestion invites polishing it in place and then losing
                       the work — the field itself is where editing belongs,
                       which is what Use it puts it in. */}
+                  {shrank && (
+                    <p
+                      className="text-2xs text-muted-foreground"
+                      data-testid={`agent-copilot-shrank-${field}`}
+                    >
+                      {lost}% shorter than the version above — check nothing you wanted was
+                      dropped. That one is still there to use.
+                    </p>
+                  )}
                   <p className="whitespace-pre-wrap text-sm">{turn.draft}</p>
                   <div className="flex items-center gap-2">
                     <Button
@@ -280,8 +314,8 @@ export function FieldCopilot({
                 </div>
               )}
             </div>
-          ),
-        )}
+          );
+        })}
         {busy && (
           <p
             className="flex items-center gap-1.5 text-2xs text-muted-foreground"

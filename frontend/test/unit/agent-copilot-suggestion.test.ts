@@ -174,6 +174,80 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     expect(cards[1].textContent).toContain(SECOND);
   });
 
+  /// A refinement that quietly halves the draft is the same class of failure as
+  /// one that drops it: work the operator had already accepted, gone, with
+  /// nothing on screen saying so. The prompt tells the copilot to keep what it
+  /// wrote; this is what catches the times it does not.
+  it("says so when a new draft is much shorter than the one before it", async () => {
+    const LONG = "A".repeat(2000);
+    const SHORT = "B".repeat(400);
+    let call = 0;
+    render(
+      createElement(FieldCopilot, {
+        field: "instructions",
+        onTurn: async () => {
+          call += 1;
+          return {
+            field: "instructions" as const,
+            reply: call === 1 ? "Here you go." : "Added the escalation section.",
+            text: call === 1 ? LONG : SHORT,
+            source: "model" as const,
+          };
+        },
+        onAccept: () => {},
+      }),
+    );
+
+    click("agent-copilot-open-instructions");
+    say("instructions", "a thorough operating manual");
+    click("agent-copilot-send-instructions");
+    await settle();
+    expect(testid("agent-copilot-shrank-instructions")).toBeNull();
+
+    say("instructions", "add a section on escalation and keep everything else");
+    click("agent-copilot-send-instructions");
+    await settle();
+
+    const notice = testid("agent-copilot-shrank-instructions");
+    expect(notice?.textContent).toContain("80% shorter");
+    // The version it replaced is still on screen with its own Use it, which is
+    // what makes the notice actionable rather than merely alarming.
+    expect(
+      container.querySelectorAll('[data-testid="agent-copilot-accept-instructions"]'),
+    ).toHaveLength(2);
+  });
+
+  /// A refinement that tightens wording is not a defect, and a notice that
+  /// fires on every turn is one nobody reads.
+  it("stays quiet when a redraft is a normal length", async () => {
+    let call = 0;
+    render(
+      createElement(FieldCopilot, {
+        field: "instructions",
+        onTurn: async () => {
+          call += 1;
+          return {
+            field: "instructions" as const,
+            reply: "Done.",
+            text: call === 1 ? "A".repeat(1000) : "B".repeat(900),
+            source: "model" as const,
+          };
+        },
+        onAccept: () => {},
+      }),
+    );
+
+    click("agent-copilot-open-instructions");
+    say("instructions", "an operating manual");
+    click("agent-copilot-send-instructions");
+    await settle();
+    say("instructions", "tighten the wording");
+    click("agent-copilot-send-instructions");
+    await settle();
+
+    expect(testid("agent-copilot-shrank-instructions")).toBeNull();
+  });
+
   it("fills the field only on Use it, and saves nothing", async () => {
     const accepted: string[] = [];
     render(
