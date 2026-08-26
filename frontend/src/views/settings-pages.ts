@@ -100,3 +100,17 @@ export function resolveSettingsPage(sub: string | null): SettingsPage {
 export function settingsPageLabel(page: SettingsPage): string {
   return SETTINGS_PAGES.find((p) => p.id === page)!.label;
 }
+
+/**
+ * The console hash a link to one Settings sub-page needs.
+ *
+ * Typed for the same reason `settingsPageLabel` is: a link written against this
+ * cannot outlive the page it points at. `#/settings/connections` is still
+ * hard-coded in three places in `SetupDialog`, pointing at a page that stopped
+ * existing when Connections was split into OAuth / MCP / Inference — which is
+ * the failure issue #1476 was filed for, one release earlier, over a different
+ * dead link.
+ */
+export function settingsHref(page: SettingsPage): string {
+  return `#/settings/${page}`;
+}
