@@ -61,6 +61,7 @@ mod upstream;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tinyflows::caps::{
     AgentRunOutcome, AgentRunRequest, AgentRunner, Capabilities, CodeLanguage, CodeRunner,
@@ -130,6 +131,8 @@ pub struct RunContext<'a> {
     pub blocks: RunBlocks,
     /// Where an agent node records the approvals its turn parked (issue #880).
     pub approvals: RunApprovals,
+    /// Files agent nodes wrote during this run, keyed by node for durable output.
+    pub artifacts: RunArtifacts,
     /// Where each `agent` node's turn is recorded as an attempt. `None` on a
     /// dry run and in tests, which then behave exactly as they did before
     /// attempts existed.
@@ -198,6 +201,7 @@ pub async fn build_capabilities(
         board,
         blocks,
         approvals,
+        artifacts,
         runs,
         deep,
         attempts,
@@ -387,6 +391,7 @@ pub async fn build_capabilities(
                 board,
                 blocks,
                 approvals,
+                artifacts,
                 board_claim,
                 publish_refusal_claim,
             )
@@ -564,6 +569,8 @@ pub struct HarnessAgentRunner {
     blocks: RunBlocks,
     /// Where this node records the approvals its turn parked (issue #880).
     approvals: RunApprovals,
+    /// Run-scoped files captured after each node turn, including failed turns.
+    artifacts: RunArtifacts,
     /// The run's [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim)
     /// claim, taken once by [`build_capabilities`] and held for the whole run.
     ///
@@ -592,6 +599,53 @@ pub struct HarnessAgentRunner {
 #[derive(Clone, Default)]
 pub struct RunNotices {
     inner: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// One file a workflow agent node wrote during its turn.
+///
+/// A workflow run has no card, so this metadata rides beside the engine result
+/// and is folded into the durable per-node output snapshot by the runner. The
+/// body itself lives in the shared workspace node named here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunArtifact {
+    source: String,
+    title: String,
+    kind: crate::ports::ArtifactKind,
+    workspace_node_id: String,
+    captured_at_millis: u64,
+}
+
+/// Run-scoped collector for node-written files.
+///
+/// Owned by the runner rather than the capability bundle so entries survive an
+/// engine failure or block, both of which drop the bundle before persistence.
+#[derive(Clone, Default)]
+pub struct RunArtifacts {
+    inner: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<RunArtifact>>>>,
+}
+
+impl RunArtifacts {
+    fn push(&self, node_id: &str, artifact: RunArtifact) {
+        let mut guard = self.inner.lock().expect("run artifacts poisoned");
+        let rows = guard.entry(node_id.to_string()).or_default();
+        if let Some(existing) = rows.iter_mut().find(|row| row.source == artifact.source) {
+            *existing = artifact;
+        } else {
+            rows.push(artifact);
+        }
+    }
+
+    /// Takes every captured row as JSON, keyed by graph node id.
+    pub fn take(&self) -> serde_json::Map<String, Value> {
+        std::mem::take(&mut *self.inner.lock().expect("run artifacts poisoned"))
+            .into_iter()
+            .map(|(node, rows)| {
+                let value = serde_json::to_value(rows).unwrap_or_else(|_| Value::Array(Vec::new()));
+                (node, value)
+            })
+            .collect()
+    }
 }
 
 impl RunNotices {
@@ -799,6 +853,7 @@ impl HarnessAgentRunner {
         board: RunBoard,
         blocks: RunBlocks,
         approvals: RunApprovals,
+        artifacts: RunArtifacts,
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
         publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
     ) -> Self {
@@ -817,6 +872,7 @@ impl HarnessAgentRunner {
             board,
             blocks,
             approvals,
+            artifacts,
             board_claim,
             publish_refusal_claim,
         }
@@ -1001,11 +1057,38 @@ impl HarnessAgentRunner {
     /// `push_refusal` reads that scope at call time. Concurrent runs write to
     /// and drain distinct buckets while chat and task turns retain the default
     /// bucket and their existing behavior.
-    fn drain_publish_refusals(&self) {
+    fn drain_publish_refusals(&self, captured: &[String]) {
         let refusals = self.deps.pending_publishes.drain_refusals();
         let mut seen: Vec<String> = Vec::new();
         for source in refusals {
             if seen.iter().any(|s| s == &source) {
+                continue;
+            }
+            // The tool was built before runs had a card-less artifact target,
+            // so it may still have returned its historical refusal — telling
+            // the model mid-turn that the file was not published. The
+            // post-turn workspace capture below can catch that same file
+            // anyway, which would otherwise leave the node's own turn reply
+            // ("I could not publish this") unreconciled against a run
+            // inspector that shows the file delivered. Say both are true
+            // rather than silently dropping one: the tool's refusal was real
+            // at call time, and the capture is what actually landed it.
+            if captured.iter().any(|path| path == &source) {
+                tracing::info!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    path = %source,
+                    "workflow agent node: a publish the tool refused was captured anyway by \
+                     the post-turn workspace scan; reconciling the notice"
+                );
+                self.notices.push(format!(
+                    "A step in this workflow was told \"{source}\" could not be published — a \
+                     workflow run had no destination for that tool call — but the file was \
+                     captured from that teammate's sandbox after the turn and is available as a \
+                     run artifact."
+                ));
+                seen.push(source);
                 continue;
             }
             tracing::warn!(
@@ -1023,6 +1106,144 @@ impl HarnessAgentRunner {
             ));
             seen.push(source);
         }
+    }
+
+    /// Captures every file this node wrote and mirrors it into the run tree.
+    ///
+    /// The snapshot/diff is the same bounded mechanism task dispatch uses. Any
+    /// explicitly staged publish is drained first and its already-captured body
+    /// wins; the remaining changed paths are the unpublished files and are read
+    /// directly from the node's sandbox. Nothing here can change the node's
+    /// success/failure result: a mirror error is logged and the remaining files
+    /// continue, because the turn has already happened.
+    async fn capture_run_artifacts(
+        &self,
+        agent_ref: &str,
+        node_id: &str,
+        workspace: &std::path::Path,
+        before: &crate::harness::publish::WorkspaceSnapshot,
+    ) -> Vec<String> {
+        use crate::harness::publish;
+
+        let changed = before.changed_since(workspace);
+        let staged = self.deps.pending_publishes.drain();
+        let staged_sources: Vec<String> = staged.iter().map(|row| row.source.clone()).collect();
+        let unpublished = publish::unpublished(&changed.files, &staged_sources);
+
+        let mut candidates: std::collections::BTreeMap<String, publish::PendingPublish> = staged
+            .into_iter()
+            .map(|pending| (pending.source.clone(), pending))
+            .collect();
+        for source in unpublished {
+            let file = workspace.join(&source);
+            let inferred = publish::kind_for_extension(&file);
+            let payload = match publish::capture_body(&file, &source, inferred) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        workflow = %self.workflow_id,
+                        run_id = %self.run_id,
+                        node = node_id,
+                        path = %source,
+                        %err,
+                        "workflow agent node: could not read a changed file for run capture"
+                    );
+                    continue;
+                }
+            };
+            let kind = payload.forced_kind(inferred);
+            let title = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| source.clone());
+            candidates.insert(
+                source.clone(),
+                publish::PendingPublish {
+                    agent: agent_ref.to_string(),
+                    source,
+                    title,
+                    kind,
+                    note: None,
+                    payload,
+                },
+            );
+        }
+
+        if changed.partial {
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                node = node_id,
+                "workflow agent node: the workspace scan was partial; run artifact capture may \
+                 be incomplete"
+            );
+        }
+
+        let Some(store) = self.deps.workspace.as_ref() else {
+            if !candidates.is_empty() {
+                tracing::warn!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    node = node_id,
+                    files = candidates.len(),
+                    "workflow agent node: files changed but no shared workspace store is wired"
+                );
+            }
+            return Vec::new();
+        };
+
+        let mut captured = Vec::new();
+        for pending in candidates.into_values() {
+            let payload = match &pending.payload {
+                publish::PublishPayload::Text(text) => {
+                    crate::company::artifact_mirror::MirrorPayload::Text(text)
+                }
+                publish::PublishPayload::Bytes { bytes, mime } => {
+                    crate::company::artifact_mirror::MirrorPayload::Bytes { bytes, mime }
+                }
+            };
+            let target = crate::company::artifact_mirror::RunTarget {
+                agent_id: agent_ref,
+                run_id: &self.run_id,
+                node_id,
+                source: &pending.source,
+                payload,
+            };
+            match crate::company::artifact_mirror::materialize_run(
+                store.as_ref(),
+                &self.company,
+                target,
+            )
+            .await
+            {
+                Ok(mirrored) => {
+                    captured.push(pending.source.clone());
+                    self.artifacts.push(
+                        node_id,
+                        RunArtifact {
+                            source: pending.source,
+                            title: pending.title,
+                            kind: pending.kind,
+                            workspace_node_id: mirrored.node_id,
+                            captured_at_millis: crate::ports::now_millis(),
+                        },
+                    );
+                }
+                Err(err) => tracing::error!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    node = node_id,
+                    path = %pending.source,
+                    %err,
+                    "workflow agent node: could not materialize a changed file as a run artifact"
+                ),
+            }
+        }
+        captured
     }
 
     /// Parks every approval-gated tool call this node's turn just recorded
@@ -1370,6 +1591,15 @@ impl HarnessAgentRunner {
         let lineage_node = node_id.clone().unwrap_or_else(|| agent_ref.to_string());
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
+        // The node runs in its roster agent's sandbox, not the workflow tool
+        // workspace. Snapshot it immediately before inference so the post-turn
+        // drain can distinguish this node's writes from files already there.
+        let workspace = crate::harness::build::agent_workspace(
+            &self.deps.workspace_root,
+            &self.company,
+            agent_ref,
+        );
+        let workspace_before = crate::harness::publish::WorkspaceSnapshot::take(&workspace);
 
         // The attempt row. This is the thing that did not exist: a workflow
         // node's turn had no card and no conversation, so `RunStore` — keyed on
@@ -1493,11 +1723,16 @@ impl HarnessAgentRunner {
             // card would be opened; refusing to drain would make that receipt false
             // and destroy the write when the scope ends.
             Box::pin(self.drain_board_writes()).await;
-            // Issue #1192: likewise on both arms. A turn that failed after being
-            // refused a publish was still refused one, and the file it wrote is
-            // still stranded — dropping the fact because the turn ended badly is
-            // how the refusal became invisible in the first place.
-            self.drain_publish_refusals();
+            // Run artifacts are drained on BOTH arms. A provider/tool failure or
+            // a later approval block does not undo files the turn already wrote,
+            // so capture happens before either return below can discard them.
+            let captured = self
+                .capture_run_artifacts(agent_ref, &lineage_node, &workspace, &workspace_before)
+                .await;
+            // Issue #1192: likewise on both arms. A refusal is still surfaced
+            // when capture failed, but a file successfully mirrored above is no
+            // longer described as stranded.
+            self.drain_publish_refusals(&captured);
             (outcome, parked)
         });
         let turn = Box::pin(self.board_claim.scoped(turn));
@@ -2182,6 +2417,7 @@ mod tests {
             RunBoard::default(),
             RunBlocks::default(),
             RunApprovals::default(),
+            RunArtifacts::default(),
             board_claim,
             publish_refusal_claim,
         );
@@ -2322,6 +2558,7 @@ mod tests {
             RunBoard::default(),
             RunBlocks::default(),
             RunApprovals::default(),
+            RunArtifacts::default(),
             board_claim,
             publish_refusal_claim,
         );
@@ -2354,6 +2591,73 @@ mod tests {
             .scoped(runner.park_gated_calls(Some("work"), &node_turn))
             .await;
         (notices.take(), queue)
+    }
+
+    /// PR #1775 review: a publish the tool refused mid-turn, but which the
+    /// post-turn workspace capture materialized anyway, must not be silently
+    /// dropped from the run's notices. The node's own turn reply already told
+    /// the operator delivery failed (the tool's response, at call time); going
+    /// silent here would leave that unreconciled against a run inspector that
+    /// shows the file delivered.
+    #[tokio::test]
+    async fn a_captured_publish_reconciles_its_earlier_refusal_notice() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1775-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let pending_publishes = deps.pending_publishes.clone();
+        let notices = RunNotices::default();
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1775"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1775"));
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1775".to_string(),
+            None,
+            notices.clone(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim.clone(),
+        );
+
+        // The tool's refusal, staged inside this run's scope exactly as the
+        // live `publish_artifact` call would have.
+        publish_refusal_claim
+            .scoped(async { pending_publishes.push_refusal("specs/plan.md".to_string()) })
+            .await;
+
+        // The post-turn drain, told that the workspace scan captured that
+        // same file anyway.
+        publish_refusal_claim
+            .scoped(async {
+                runner.drain_publish_refusals(&["specs/plan.md".to_string()]);
+            })
+            .await;
+
+        let recorded = notices.take();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "the refusal must be reconciled with a notice, not silenced: {recorded:?}"
+        );
+        assert!(
+            recorded[0].contains("specs/plan.md"),
+            "the notice must name the file: {recorded:?}"
+        );
+        assert!(
+            recorded[0].contains("captured"),
+            "the notice must say the file landed anyway, not just that it was refused: \
+             {recorded:?}"
+        );
     }
 
     #[test]
@@ -2871,6 +3175,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
@@ -2921,6 +3226,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
@@ -3088,6 +3394,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
@@ -3145,6 +3452,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
                 runs: None,
                 deep: None,
                 attempts: Default::default(),
