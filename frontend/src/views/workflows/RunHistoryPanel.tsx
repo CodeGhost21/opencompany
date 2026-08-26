@@ -85,7 +85,7 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
   stopped:
     "An operator stopped this run before it finished; the step that was mid-flight normally ran to completion and was recorded — only a step stuck waiting on an outside call is cut off where it was.",
   blocked:
-    "A step is waiting on your approval before the run can go on — decide it in Approvals.",
+    "A step is waiting on you before the run can go on — usually a card sitting in Approvals, but a call that could not be queued for approval at all leaves nothing there to decide; that case needs a workflow or policy change instead.",
   stranded:
     "The run paused for an approval, but nothing is waiting on you any more and no decision left can move it. Run it again if you still need it.",
   "not delivered":
