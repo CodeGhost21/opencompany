@@ -993,3 +993,86 @@ async fn the_durable_stash_survives_until_the_spawn_is_admitted() {
         "once the spawn is admitted, the stash is retired same as before"
     );
 }
+
+/// Issue #1825: a restart landing between `settle_approval` durably resolving
+/// the verdict and the detached follow-up task (`spawn_follow_up` →
+/// `continue_turn`) ever being polled must not lose the blocked-node bank.
+///
+/// Before this fix, `blocked_nodes.mark_approved` and
+/// `journal.record_blocked_node_approved` were only ever called from inside
+/// `continue_turn`, on the detached task `resolve_approval_spawned` hands off
+/// to *after* the settle has already returned durably. Aborting that task
+/// before it is polled — precisely what a process restart in that window
+/// does — used to leave the approval durably resolved (`ApprovalResolved` is
+/// in the journal) but the blocked-node bank never written, so a boot could
+/// not tell this stash was ever approved and `reconcile_stranded_blocked_nodes`
+/// would never revisit it. The fix moved the bank inline into
+/// `settle_approval` itself, so it lands before the receipt is even returned
+/// and before the follow-up task exists to be aborted.
+///
+/// Unlike the sibling regression test above
+/// (`a_restart_after_the_last_approval_banks_but_before_release_still_continues_the_run`),
+/// this test performs **no manual bank** — it aborts the follow-up and checks
+/// the bank landed anyway, so it actually exercises the inline path rather
+/// than asserting a hand-simulated substitute for it.
+#[tokio::test]
+async fn the_blocked_node_bank_survives_a_restart_before_the_detached_follow_up_runs() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1, "the cold run parks exactly one card");
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // Durably settle the approval, then abort the detached follow-up before
+    // it can be polled at all — simulating a restart in exactly the window
+    // between the settle returning and that task's first poll. No manual
+    // bank follows: everything asserted below must already be true.
+    let (_, follow_up) = rt
+        .resolve_approval_spawned(&cards[0], Verdict::Approve, operator(), GrantScope::Once)
+        .await
+        .expect("the verdict settles durably");
+    follow_up.abort();
+    let _ = follow_up.await;
+
+    assert!(
+        rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "the in-memory bank must be set by the inline settle, with no \
+         follow-up task ever having run"
+    );
+    assert!(
+        rt.journal()
+            .blocked_node_approvals()
+            .iter()
+            .any(|t| t == &turn),
+        "and the durable journal record must exist too — this is the fact a \
+         boot rearm reads, not the in-memory flag"
+    );
+
+    // Confirm the bank is load-bearing exactly the same way the sibling test
+    // proves it: with nothing left parked for this turn, reconciliation is
+    // the only thing that can still redeem it, and it must be able to.
+    rt.reconcile_stranded_blocked_nodes().await;
+    assert_eq!(
+        runner.started(),
+        2,
+        "reconciliation redeems the bank the inline settle wrote, exactly as \
+         it does the hand-simulated one in the sibling test"
+    );
+}
