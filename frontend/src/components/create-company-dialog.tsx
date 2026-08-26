@@ -23,7 +23,11 @@ import { Loader2, TriangleAlert } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyStatus } from "@/api/types";
-import { buildManifestToml, describeProvisionError } from "@/lib/company-manifest";
+import {
+  buildManifestToml,
+  describeProvisionError,
+  resetReplacementId,
+} from "@/lib/company-manifest";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -109,7 +113,15 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     setName(request.kind === "reset" ? request.name : "");
     setAdminEmail("");
     setPolicyMode(DEFAULT_POLICY_MODE);
-    setExplicitId("");
+    // Reset pre-seeds a fresh id rather than leaving this blank: the name
+    // field above is pre-filled with the archived company's own name, and an
+    // unset id here would have the host derive that same name back into the
+    // same id (`company_id_from_name`) — reprovisioning over the archived
+    // company's own durable record instead of a clean one. See
+    // `resetReplacementId`. The operator can still overwrite it from
+    // Advanced; `create` leaves this blank as before, since there is no prior
+    // company for a fresh name to collide with.
+    setExplicitId(request.kind === "reset" ? resetReplacementId(request.company) : "");
     setAdvanced(false);
     setBusy(false);
     setError(null);
@@ -154,7 +166,13 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
         policyMode: policyMode !== DEFAULT_POLICY_MODE ? policyMode : undefined,
       });
       const body: { manifest_toml: string; id?: string } = { manifest_toml };
-      const id = explicitId.trim();
+      // A reset always sends an explicit id, even if the operator cleared the
+      // Advanced field back to empty: falling through to the unset-id default
+      // would have the host re-derive the archived company's own id from the
+      // (possibly untouched) name field above. See `resetReplacementId`.
+      const id =
+        explicitId.trim() ||
+        (request.kind === "reset" ? resetReplacementId(request.company) : "");
       if (id) body.id = id;
       const status = await client.provisionCompany(body);
       onCreated(status);
@@ -262,7 +280,11 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
                   id="create-company-id"
                   value={explicitId}
                   onChange={(e) => setExplicitId(e.target.value)}
-                  placeholder="derived from the name when left blank"
+                  placeholder={
+                    isReset
+                      ? "auto-generated, distinct from the archived id"
+                      : "derived from the name when left blank"
+                  }
                   disabled={busy}
                   className="font-mono text-xs"
                 />

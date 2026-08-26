@@ -128,3 +128,29 @@ export function describeProvisionError(err: unknown): string {
       return err.message;
   }
 }
+
+/**
+ * A fresh id for the company a reset provisions, guaranteed distinct from the
+ * one just archived.
+ *
+ * The provisioning route derives an id from `[company].name` whenever the
+ * request omits one (`company_id_from_name`, `runtime/builder.rs`), and the
+ * reset dialog prefills its name field with the archived company's own name.
+ * Left unset, the default Reset path would therefore hand the host the exact
+ * id the archive just freed — and `RuntimeBuilder::build` loads any existing
+ * durable `CompanyRecord` for an id before building over it, carrying its
+ * `lifecycle`, ledger and overlays forward. The "clean" company would come
+ * back archived, with the old company's history attached, instead of empty.
+ *
+ * Derived from the OLD id rather than the (editable) name field, so it stays
+ * distinct from the archived company regardless of whether the operator
+ * changes the name before submitting — the collision this guards against is
+ * about the id, not the display name.
+ */
+export function resetReplacementId(oldId: string): string {
+  const suffix =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  return `${oldId}-${suffix}`;
+}
