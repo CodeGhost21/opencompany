@@ -439,7 +439,11 @@ is put on the wire (`HarnessModel::telemetry_model`), and never leaves it; the
 vocabulary and the rule for extending it are documented in
 `src/metering/model.rs`; `ModelSlug::as_str` returns a `&'static str`, so a
 telemetry payload can carry it directly without a second classifier. `ModelSlug`'s `Deserialize` re-classifies, so a stored
-row cannot smuggle raw text back into the process either. `None` means no model
+row cannot smuggle raw text back into the process either. A provider publishes
+that value only **after its own call has succeeded**: one provider is shared by
+every agent on a company and the cache is read after a turn finishes, so a turn
+that was rejected — and therefore metered nothing — must not name the model for
+a concurrent turn that did run. `None` means no model
 to name — an `OauthCall`/`SearchCall`, a path that cannot identify one, or a
 sample written before the field existed; the field is `#[serde(default,
 skip_serializing_if)]`, so pre-existing rows on all three backends load
