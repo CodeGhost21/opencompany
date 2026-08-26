@@ -211,6 +211,38 @@ async fn provision(
              Choose `email` or `wallet`, or bind loopback.",
         );
     }
+    // A `wallet`-mode host has no environment counterpart to
+    // `OPENCOMPANY_ADMIN_EMAIL`: `manifest_wallets` (`server/users/wallet.rs`)
+    // reads `[users].wallets` alone, with no deployment-wide bootstrap grant,
+    // because that variable exists for a *platform-provisioned* company whose
+    // creator the control plane knows only as an email address, never a
+    // wallet. The console's create/reset dialog always emits `[users].admins`
+    // — the only field it knows how to fill (`buildManifestToml`,
+    // `company-manifest.ts`) — which `email` mode reads and `wallet` mode
+    // never does. `manifest.validate()` above cannot catch this: it checks the
+    // manifest's own declared `[users].mode` (defaulted to `email`) against
+    // its own admin/wallet lists for self-consistency, and finds none here,
+    // because the mismatch only exists between the manifest and the host's
+    // override — which is exactly what `effective_auth_mode` (just resolved
+    // above, the same way `RuntimeBuilder::build` will) makes visible.
+    // Checked here, before `id` is resolved, for the same reason as the
+    // `none`-mode refusal immediately above: a request refused after
+    // `builder.build()` still leaves its `CompanyRecord` durably saved, so a
+    // caller who fixed the manifest and retried would find the id
+    // permanently reserved by a company that never actually provisioned —
+    // and on a reset, the old company is archived before this point is ever
+    // reached (issue #1828 comment 3866132491).
+    if effective_auth_mode == AuthMode::Wallet && manifest.users.wallets.is_empty() {
+        return envelope(
+            StatusCode::BAD_REQUEST,
+            "auth_mode_wallet_no_wallets",
+            "this host signs users in with wallets, but this manifest lists no \
+             `[users].wallets` — only `[users].admins`, which `wallet` mode never reads, and \
+             there is no deployment-wide wallet bootstrap the way `OPENCOMPANY_ADMIN_EMAIL` \
+             provides for `email` mode. Add at least one base58 wallet address to \
+             `[users].wallets`, or ask the host to switch modes.",
+        );
+    }
 
     let id = match explicit_id {
         Some(raw) => CompanyId::new(raw),

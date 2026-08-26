@@ -251,6 +251,103 @@ async fn retrying_after_a_none_mode_refusal_with_a_valid_mode_succeeds() {
     assert_eq!(body["id"], "acme");
 }
 
+/// A manifest built the way the console's create/reset dialog always builds
+/// one — `[users].admins` only, never `[users].mode` or `[users].wallets`
+/// (`buildManifestToml`, `frontend/src/lib/company-manifest.ts`) — must be
+/// refused on a host whose auth override forces `wallet`: the manifest's own
+/// admin bootstrap is read in `email` mode only, and unlike `email` there is
+/// no deployment-wide `OPENCOMPANY_ADMIN_EMAIL`-style fallback for `wallet`
+/// (`manifest_wallets`, `server/users/wallet.rs` — "there is deliberately no
+/// environment counterpart"). Provisioning this manifest as-is would create a
+/// company nobody, ever, can sign in to.
+///
+/// `manifest.validate()` alone cannot catch this: the manifest's own
+/// `[users].mode` defaults to `email`, which is perfectly self-consistent
+/// with a non-empty `admins` list. The mismatch only exists against the
+/// host's override, which is why this is checked against
+/// `effective_auth_mode` in the handler rather than in `CompanyManifest`
+/// itself (issue #1828 comment 3866132491).
+#[tokio::test]
+async fn provisioning_admins_only_manifest_on_a_wallet_mode_host_is_refused() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    state.set_auth_mode_override(Some(AuthMode::Wallet));
+    let app = router(state.clone());
+
+    // Exactly the shape `buildManifestToml` emits: a name and an admin email,
+    // no `[users].mode`, no `[users].wallets`.
+    let toml = "[company]\nname = \"Acme\"\n[users]\nadmins = [\"ada@example.com\"]\n";
+    let response = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), toml))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["code"], "auth_mode_wallet_no_wallets");
+
+    // Refused, so nothing was registered and the id was not reserved.
+    let response = app
+        .clone()
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// The refusal above must not permanently burn the id the way a post-build
+/// refusal would (see `retrying_after_a_none_mode_refusal_with_a_valid_mode_
+/// succeeds` for the same property on the `none`-mode check): it runs before
+/// `id` is resolved, so a caller who adds a wallet address and retries with
+/// the exact same company name must provision cleanly.
+#[tokio::test]
+async fn retrying_after_a_wallet_mode_refusal_with_a_wallet_listed_succeeds() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    state.set_auth_mode_override(Some(AuthMode::Wallet));
+    let app = router(state.clone());
+
+    let rejected = "[company]\nname = \"Acme\"\n[users]\nadmins = [\"ada@example.com\"]\n";
+    let response = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), rejected))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["code"], "auth_mode_wallet_no_wallets");
+
+    // Same company name, so the same id — corrected to carry a wallet AND
+    // declare `mode = "wallet"`: `manifest.validate()`'s own self-consistency
+    // check (`validate_users`) reads `[users].wallets` only when the manifest
+    // itself says `mode = "wallet"` — its default is `email` — and refuses a
+    // wallets-with-no-mode manifest on that unrelated ground before this
+    // request would ever reach the effective-mode check under test. The wallet
+    // address itself is built rather than pasted, like `CompanyManifest`'s own
+    // `wallet_address()` test helper, so it cannot drift from what the decoder
+    // accepts (a base58 32-byte Ed25519 public key).
+    let wallet_address = bs58::encode([9u8; 32]).into_string();
+    let corrected = format!(
+        "[company]\nname = \"Acme\"\n[users]\nmode = \"wallet\"\nwallets = [\"{wallet_address}\"]\n"
+    );
+    let response = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), &corrected))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "retry with a wallet listed must provision the id the rejected \
+         request never should have reserved, got: {body:?}"
+    );
+    assert_eq!(body["id"], "acme");
+}
+
 /// Builds a JSON-envelope provision request naming an explicit id.
 fn provision_req_json(token: Option<&str>, toml: &str, id: &str) -> Request<Body> {
     let body = serde_json::json!({ "manifest_toml": toml, "id": id }).to_string();
