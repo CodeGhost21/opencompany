@@ -123,4 +123,70 @@ describe("retargetCompanyUrlParam", () => {
     expect(window.location.search).toContain("hub=1");
     expect(window.location.hash).toBe("#/overview");
   });
+
+  /**
+   * Codex review on #1828 (PR comment 3864885209): a connection's explicit
+   * company can come from `window.OPENCOMPANY_CONFIG` or `VITE_OC_COMPANY`,
+   * not just a `?company=` link — `resolveConfig()` merges all three, with
+   * the query layer outranking both. The original guard
+   * (`url.searchParams.get("company") !== archivedId`) bailed whenever the
+   * URL didn't already name `archivedId`, which is exactly what happens when
+   * the id came from one of the other two sources: the URL never carried it
+   * in the first place. `window.OPENCOMPANY_CONFIG` stands in for both here
+   * — the fix never inspects which lower layer supplied the id, only
+   * whether the URL currently conflicts with it, so this exercises the same
+   * branch `VITE_OC_COMPANY` would.
+   */
+  it("writes an override even when the URL never carried a ?company= param — a window.OPENCOMPANY_CONFIG-sourced explicit company", () => {
+    land("");
+    window.OPENCOMPANY_CONFIG = { company: "acme" };
+    const bootConfig = resolveConfig();
+    expect(bootConfig.company).toBe("acme");
+    expect(window.location.search).toBe("");
+
+    retargetCompanyUrlParam("acme", "acme-x7f2a91c");
+
+    // The bug this guards: the old code saw no `?company=` param to correct
+    // and did nothing, so a reload's `resolveConfig()` would still resolve
+    // "acme" from `window.OPENCOMPANY_CONFIG` — this override is the only
+    // way to outrank that on the next load.
+    expect(window.location.search).toBe("?company=acme-x7f2a91c");
+    const reloadedConfig = resolveConfig();
+    expect(reloadedConfig.company).toBe("acme-x7f2a91c");
+
+    delete window.OPENCOMPANY_CONFIG;
+  });
+
+  /**
+   * Codex review on #1828 (PR comment 3864885215): cancelling a reset after
+   * the archive already landed has no replacement id to retarget to. Passing
+   * `null` must still neutralize a config/env-sourced explicit company on
+   * the next reload, not merely no-op — an empty `?company=` still outranks
+   * `window.OPENCOMPANY_CONFIG`/`VITE_OC_COMPANY` in `resolveConfig`'s
+   * merge, and resolves to `""`, which the boot effect's `if (defaultCompany)`
+   * treats as "no explicit company" the same as `null`.
+   */
+  it("clears to an empty override when newId is null, neutralizing a config-sourced company on reload", () => {
+    land("");
+    window.OPENCOMPANY_CONFIG = { company: "acme" };
+    expect(resolveConfig().company).toBe("acme");
+
+    retargetCompanyUrlParam("acme", null);
+
+    expect(window.location.search).toBe("?company=");
+    const reloadedConfig = resolveConfig();
+    // Falsy — not "acme" — is what matters: the boot effect's
+    // `if (defaultCompany)` check treats both `null` and `""` the same way.
+    expect(reloadedConfig.company).toBeFalsy();
+
+    delete window.OPENCOMPANY_CONFIG;
+  });
+
+  it("still no-ops when the URL already names some other company", () => {
+    land("?company=beta");
+
+    retargetCompanyUrlParam("acme", null);
+
+    expect(window.location.search).toBe("?company=beta");
+  });
 });

@@ -726,31 +726,68 @@ export function retargetDefaultCompany(id: ConnectionId, company: string): void 
 }
 
 /**
- * Rewrites a `?company=<archivedId>` URL param to `newId` in place (issue
- * #1807).
+ * Clears an explicit-company connection's persisted default (issue #1807).
+ *
+ * For the abandon path: a reset's archive leg landed, but nothing replaced
+ * it — the operator cancelled, or gave up retrying a failed create. There is
+ * no replacement id to retarget to, so unlike {@link retargetDefaultCompany}
+ * this drops the scoping entirely rather than moving it, sending the next
+ * boot down the multi-company/picker path instead of retrying an id that no
+ * longer exists.
+ *
+ * A no-op for a connection that was never company-scoped, same as
+ * {@link retargetDefaultCompany}.
+ */
+export function clearDefaultCompany(id: ConnectionId): void {
+  const existing = getConnection(id);
+  if (!existing || existing.defaultCompany === null) return;
+  reseat(id, { ...existing, defaultCompany: null });
+}
+
+/**
+ * Rewrites the `?company=` URL param to `newId` in place, or clears it, to
+ * keep the next reload from re-booting a connection into `archivedId`
+ * (issue #1807).
  *
  * {@link retargetDefaultCompany} fixes the persisted profile, but
- * `resolveConfig()` re-derives its `company` fresh from
- * `window.location.search` on every load — the URL itself is not part of the
- * registry and a reset never touches it. Left stale, the *next* reload's
- * bootstrap `addConnection` call looks up `findProfile(baseUrl, archivedId)`,
- * which no longer matches the retargeted profile (its `defaultCompany` is now
- * `newId`), mints a fresh, duplicate connection scoped to the archived id
- * instead of reusing it, and that connection's boot effect asks the host for
- * an id that no longer exists. Rewriting the param here keeps the URL naming
- * the same company the retargeted profile does, so the next reload's lookup
- * matches instead of orphaning it (codex review on #1828, PR comment
- * 3863028385).
+ * `resolveConfig()` re-derives its `company` fresh on every load from THREE
+ * sources, in ascending priority — `VITE_OC_COMPANY`, `window.OPENCOMPANY
+ * _CONFIG`, then `?company=` (see `config.ts`) — and a reset never touches
+ * any of them. Left stale, the *next* reload's bootstrap `addConnection`
+ * call looks up `findProfile(baseUrl, archivedId)`, which no longer matches
+ * the retargeted profile (its `defaultCompany` has moved), mints a fresh,
+ * duplicate connection scoped to the archived id instead of reusing it, and
+ * that connection's boot effect asks the host for an id that no longer
+ * exists.
  *
- * A no-op when the URL never named `archivedId` in the first place — a
- * connection opened by picking a company from the switcher, rather than by a
- * shared link, has no query param to correct.
+ * Only the query layer can be rewritten at runtime — `VITE_OC_COMPANY` is
+ * baked in at build time and `window.OPENCOMPANY_CONFIG` is injected once in
+ * `index.html`, so neither this function nor anything else client-side can
+ * touch them directly. But the query layer outranks both in `resolveConfig`'s
+ * merge, so writing an override there works regardless of which of the three
+ * the connection's explicit company actually came from — including the
+ * config/env case the original fix (query-only) missed (codex review on
+ * #1828, PR comment 3864885209).
+ *
+ * `newId: null` clears the override instead of retargeting to a replacement
+ * — the abandon path (a reset that archived but never created), where there
+ * is no replacement id to name. An empty `?company=` still outranks the
+ * env/window layers on the next `resolveConfig()`, and resolves to `""`,
+ * which the boot effect's `if (defaultCompany)` treats as "no explicit
+ * company" (falsy), same as `null` (codex review on #1828, PR comment
+ * 3864885215).
+ *
+ * A no-op when the URL already names some OTHER company — that param was
+ * never going to resolve to `archivedId` on reload regardless of anything
+ * this function does (the query layer already outranks env/window), so
+ * overwriting it would clobber an unrelated link rather than fix this one.
  */
-export function retargetCompanyUrlParam(archivedId: string, newId: string): void {
+export function retargetCompanyUrlParam(archivedId: string, newId: string | null): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
-  if (url.searchParams.get("company") !== archivedId) return;
-  url.searchParams.set("company", newId);
+  const current = url.searchParams.get("company");
+  if (current !== null && current !== archivedId) return;
+  url.searchParams.set("company", newId ?? "");
   window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
