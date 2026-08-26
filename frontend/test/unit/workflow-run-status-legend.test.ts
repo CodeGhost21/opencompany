@@ -556,7 +556,7 @@ function cancelledAtBoundaryRun(): WorkflowRunOutcome {
 
 /** A run cancelled while a node was genuinely mid-flight: `n_3` started but
  * never finished, so it IS the node the stop cut off — the positive control
- * for the "stopped where it was" sentence. */
+ * for the mid-flight branch (hedged, tenth pass — see below). */
 function cancelledMidFlightRun(): WorkflowRunOutcome {
   return baseRun({
     seq: 10,
@@ -567,12 +567,19 @@ function cancelledMidFlightRun(): WorkflowRunOutcome {
 }
 
 describe("the cancelled-run sentence matches whether a step was actually cut off", () => {
-  it("still says a step was stopped where it was when one genuinely was mid-flight", async () => {
+  it("names the mid-flight step as a possible cut-off when one genuinely was mid-flight", async () => {
     await renderHistory(cancelledMidFlightRun());
     const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
+    expect(row?.textContent).toContain("stopped where it was");
+    // Codex review on #1821 (tenth pass): `WorkflowNodeFinished` is appended
+    // best-effort, so an unmatched `startedNodes` entry is equally
+    // consistent with a node that finished normally but whose own record
+    // silently failed to journal — a definitive "was stopped where it was"
+    // overclaims what a missing row alone can prove.
     expect(row?.textContent).toContain(
-      "the one still running was stopped where it was",
+      "finished without its own record being saved",
     );
+    expect(row?.textContent).toContain("isn't confirmed here");
   });
 
   // Codex review on #1821 (eighth pass): the legend definition (fixed earlier
