@@ -4732,7 +4732,7 @@ to = "gate"
                     port: 587,
                     security: crate::server::ops::smtp::SmtpSecurity::Starttls,
                     username: "acme".into(),
-                    password: "hunter2".into(),
+                    password: crate::ports::types::SecretValue("hunter2".into()),
                     from_name: "Acme".into(),
                     from_email: "acme@opencompany.test".into(),
                 },

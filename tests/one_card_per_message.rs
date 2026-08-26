@@ -955,6 +955,16 @@ async fn a_publish_with_no_card_in_scope_mints_one() {
     // neither a `SMALLTALK_OPENERS` greeting nor a work verb nor a `?`), which
     // keeps the turn's tools available exactly like every non-greeting
     // message did before #1725.
+    //
+    // And NOT "ok" either, which is what this branch reached for before the
+    // merge: #1725 landed twice, by two mechanisms that stack. This branch adds
+    // `small_talk`, which answers a bare hello or thanks from the cycle with no
+    // turn at all; `main` already carried `is_matched_chatter` → the chat-only
+    // turn hint, which fires on every *matched* `Chatter` — and `GREETINGS`
+    // holds "ok". So "ok" reaches a turn, but a turn with no tools, and the
+    // publish this test exists to exercise would never fire. Abstained
+    // `Chatter` is the only class left that still gets tools, which is why the
+    // fixture below is the one that survives both.
     let neutral = "the deck looks good to me";
     assert!(
         detect_task_intent(neutral).is_none(),
@@ -982,8 +992,8 @@ async fn a_trivial_question_opens_no_card() {
     }
 }
 
-/// A bare pleasantry in a desk thread that already has open work. The open-work
-/// briefing the cycle appends made "thanks!" long enough to score as
+/// A bare acknowledgement in a desk thread that already has open work. The
+/// open-work briefing the cycle appends made it long enough to score as
 /// substantial, so the card-opening decision has to read the operator's own
 /// words rather than the annotated message.
 ///
@@ -992,8 +1002,15 @@ async fn a_trivial_question_opens_no_card() {
 /// briefing on the next message. A seed the handler cards instead leaves an
 /// unassigned To-do card, no briefing, and a regression check that passes
 /// without exercising anything.
+///
+/// It was "thanks!" until issue #1725, which answers a bare greeting or thanks
+/// from the runtime without a turn — so the briefing is never appended to one
+/// and the vacuity guard below could no longer be satisfied. An acknowledgement
+/// is deliberately outside that fast path ("yes" answering a teammate's
+/// question is an instruction), so it still takes the annotated path this is
+/// about, and the bug shape is unchanged.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_pleasantry_in_a_desk_thread_with_open_work_opens_no_card() {
+async fn an_acknowledgement_in_a_desk_thread_with_open_work_opens_no_card() {
     let seed = "the nightly job keeps timing out — work out why and write up what you find";
     assert!(
         detect_task_intent(seed).is_none(),
@@ -1010,7 +1027,7 @@ async fn a_pleasantry_in_a_desk_thread_with_open_work_opens_no_card() {
         ),
         rule(|c| c.is("Engineer"), say("Looking into it.")),
         rule(|c| c.is("Chief Executive"), say("Engineering is on it.")),
-        rule(|c| c.is("Engineer"), say("You're welcome!")),
+        rule(|c| c.is("Engineer"), say("Noted.")),
     ])
     .await;
     let host = spawn_host(model).await;
@@ -1023,12 +1040,12 @@ async fn a_pleasantry_in_a_desk_thread_with_open_work_opens_no_card() {
         "the open work must belong to the engineer for the briefing to mention it"
     );
 
-    let reply = host.chat("thanks!", Some("engineering")).await;
+    let reply = host.chat("ok", Some("engineering")).await;
     let after = host.board(&reply).await;
     assert_eq!(
         after.cards.len(),
         before.cards.len(),
-        "'thanks!' opened a card:{}",
+        "'ok' opened a card:{}",
         after.describe()
     );
 

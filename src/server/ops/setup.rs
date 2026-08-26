@@ -213,12 +213,15 @@ async fn build_proposal(company: &ScopedCompany, answers: &SetupAnswers) -> Rost
     };
     let provider = builder.provider_slug();
     let (proposal, usage) = builder.propose(answers).await;
+    // Read *after* the pass, so it names the model the pass actually ran on.
+    let model = builder.model_slug();
     // Metered after the fact and never in the way: the pass has already produced
     // the roster the operator is about to see, and a meter write must not be
     // able to fail it.
     crate::metering::roster_build::record_roster_build_usage(
         &usage,
         &provider,
+        model,
         company.id(),
         company.runtime.store().as_ref(),
         company.runtime.usage().as_ref(),
