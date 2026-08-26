@@ -62,6 +62,25 @@ fi
 expected="$(normalise "$expected_raw")"
 echo "$RELEASE_WORKFLOW ships: $expected"
 
+# ...and the release build must actually PASS it. Everything below compares
+# against this value on the strength of it being what reaches a user, so a
+# `tauri build` that stopped consuming the variable would turn the source of
+# truth into a lie: the DMG would revert to the default set while CI and the dev
+# script kept `acp` and `composio`, and this script would report success. That is
+# #1738 again with the roles reversed, and it is the one drift no comparison here
+# could see. Symmetric with the `tauri dev` check further down.
+release_invocations="$(
+  grep -vE '^[[:space:]]*#' "$RELEASE_WORKFLOW" \
+    | grep -nE 'tauri build|--features' | grep -E 'tauri build|--features' || true
+)"
+if ! printf '%s' "$release_invocations" | grep -q 'DESKTOP_RELEASE_FEATURES'; then
+  echo "assert-desktop-features: $RELEASE_WORKFLOW declares DESKTOP_RELEASE_FEATURES" >&2
+  echo "  but its 'tauri build' never passes it, so the shipped DMG would carry" >&2
+  echo "  the default feature set while every other call site carries the release" >&2
+  echo "  one. Restore '--features \"\$DESKTOP_RELEASE_FEATURES\"' on the build." >&2
+  exit 1
+fi
+
 status=0
 found=0
 
