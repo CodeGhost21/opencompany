@@ -23,6 +23,7 @@ import { Loader2, TriangleAlert } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyStatus } from "@/api/types";
+import { adminEmailProblem } from "@/lib/company-setup";
 import {
   buildManifestToml,
   collidesWithArchived,
@@ -136,6 +137,21 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     if (!request) return;
     const trimmedName = name.trim();
     if (!trimmedName || busy) return;
+
+    // Validate every replacement field before the destructive archive leg
+    // runs, not just before provisioning. A malformed admin email used to
+    // reach the host only after the old company was already gone: the
+    // manifest validator has no way to see it until `provisionCompany` is
+    // called, which — on a reset — is the second half of the request, after
+    // `client.lifecycle("archive", …)` already ran. The operator would see
+    // "Archived X, but couldn't create the new company" for a typo that a
+    // pure check catches for free. Same rule `company-setup.ts` uses for the
+    // same reason (codex review on #1828, PR comment 3862711345).
+    const emailProblem = adminEmailProblem(adminEmail, false);
+    if (emailProblem) {
+      setError(emailProblem);
+      return;
+    }
 
     // Reject a replacement id that is the same one about to be archived —
     // full id or, under shared-single-DB tenant namespacing, its bare form.
