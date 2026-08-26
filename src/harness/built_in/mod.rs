@@ -45,6 +45,7 @@ pub mod build;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
+pub mod chat_seed;
 mod checkpoint;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
@@ -774,7 +775,8 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None, None).await
+        self.run_with_steer(message, None, None, None, Vec::new())
+            .await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -806,6 +808,7 @@ impl CompanyAgent {
         steer: Option<&SteerControl>,
         stream: Option<crate::turn_stream::TurnStreamCtx>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
+        seed: Vec<(String, String)>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
@@ -898,12 +901,40 @@ impl CompanyAgent {
                     "[harness] chat switched — resetting agent history and re-binding to the incoming thread"
                 );
                 agent.clear_history();
-                let seeded = agent.seed_resume_from_thread_transcript(incoming);
+                // Prefer OpenCompany's own EventLog-derived seed (issue #1840).
+                // OpenHuman never writes a file transcript for an OC `chat_id`, so
+                // `seed_resume_from_thread_transcript` always misses and the reply
+                // starts blind (the #1725/#1730 regression). When the caller
+                // projected this desk's recent owning turns from the company log,
+                // seed those directly; fall back to the transcript lookup only
+                // when the seed is empty (a background/workflow turn, or a desk
+                // with no recent history).
+                let seeded = if seed.is_empty() {
+                    agent.seed_resume_from_thread_transcript(incoming)
+                } else {
+                    // `message` is the augmented turn text; `seed_resume_from_messages`
+                    // drops a trailing user line matching it. The raw operator
+                    // message was already stripped caller-side (see
+                    // `chat_seed::strip_current_message`), so this is a defensive
+                    // no-op on the happy path and correct if augmentation was off.
+                    match agent.seed_resume_from_messages(seed, message) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                chat = incoming,
+                                %error,
+                                "[harness] chat-seed resume failed; turn starts without recent history"
+                            );
+                            false
+                        }
+                    }
+                };
                 // On a switch the agent-latest transcript is the WRONG thread, so
-                // never let the turn's fallback auto-resume run: a seed hit sets
-                // `cached_transcript_messages` (the fallback is skipped anyway); a
-                // miss must start fresh, NOT reload the previous chat's
-                // transcript and re-leak it (the exact screenshot bug).
+                // never let the turn's fallback auto-resume run: our explicit
+                // correct-thread seed (or a transcript hit) has already set
+                // `cached_transcript_messages`; a miss must start fresh, NOT reload
+                // the previous chat's transcript and re-leak it (the exact
+                // screenshot bug). Keep this true regardless of which seed path ran.
                 overrides.suppress_transcript_autoload = true;
                 tracing::debug!(
                     chat = incoming,
@@ -2929,9 +2960,11 @@ impl HarnessPool {
 
         // The message goes to the model AS SENT. This is the retrieve→inject
         // step's absence, and it is the difference between "grounded in one
-        // workflow" and "confined to one workflow".
+        // workflow" and "confined to one workflow". Empty seed for the same
+        // reason (issue #1840): a confined turn is intentionally context-free, so
+        // it carries none of the desk's recent history.
         let (outcome, turn_costs) = agent
-            .run_with_steer(message, None, stream_ctx, None)
+            .run_with_steer(message, None, stream_ctx, None, Vec::new())
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
@@ -3155,6 +3188,14 @@ impl HarnessPool {
         // their frames would otherwise misattribute to the active chat (#125
         // review). Either way the durable `TurnStep`s still fold from the same
         // buffered events at turn end.
+        // The chat thread this turn answers, if any — captured before `live` is
+        // consumed by the `stream_ctx` match below. Only a chat turn (`On`) seeds
+        // recent history; a background task or workflow node carries no chat
+        // thread to bind history to (issue #1840).
+        let seed_chat: Option<Option<&str>> = match &live {
+            LiveStream::On { chat_id } => Some(*chat_id),
+            _ => None,
+        };
         let stream_ctx = match live {
             LiveStream::On { chat_id } => Some(crate::turn_stream::TurnStreamCtx {
                 company: company.clone(),
@@ -3184,8 +3225,39 @@ impl HarnessPool {
             }),
             LiveStream::Off => None,
         };
+        // Recent-chat history seed (issue #1840): give a chat reply this desk's
+        // own recent turns so it isn't assembled blind on every switch. Built only
+        // for a chat turn and only when the company journal is wired. The current
+        // operator message is ALREADY journaled at this point (the server appends
+        // it before dispatch), so it is the newest owning event the projector
+        // sees; strip it — `run_single` re-appends the current message itself, so
+        // seeding it too would duplicate it on the wire.
+        let seed = match (seed_chat, deps.events.as_ref()) {
+            (Some(chat_id), Some(events)) => {
+                let (desk_id, desk_name) =
+                    chat_seed::resolve_seed_desk(&deps.store, company, chat_id).await;
+                let mut seed = chat_seed::build_chat_seed(
+                    events,
+                    company,
+                    &desk_id,
+                    &desk_name,
+                    chat_seed::CHAT_SEED_WINDOW,
+                )
+                .await;
+                chat_seed::strip_current_message(&mut seed, message);
+                tracing::debug!(
+                    company = %company,
+                    agent = agent_id,
+                    desk = %desk_id,
+                    seeded = seed.len(),
+                    "[harness] built recent-chat seed for the incoming desk"
+                );
+                seed
+            }
+            _ => Vec::new(),
+        };
         let (outcome, turn_costs) = agent
-            .run_with_steer(&augmented, steer, stream_ctx, run_sink.clone())
+            .run_with_steer(&augmented, steer, stream_ctx, run_sink.clone(), seed)
             .await?;
         // Issue #242: fold this turn's spend into the attempt it belongs to.
         // Per turn, not once at the end, so a redirect re-run and a delegate's
@@ -6104,7 +6176,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None, None)
+            .run_with_steer("hi", Some(&control), None, None, Vec::new())
             .await
             .expect("runs");
         assert_eq!(
@@ -8944,5 +9016,271 @@ budget_usd_daily = 0.0
                 .await
                 .is_none()
         );
+    }
+
+    /// End-to-end proof that a chat reply is assembled WITH this desk's recent
+    /// journaled history in front of the model (issue #1840), driven through the
+    /// real `HarnessPool::run` path with only the model captured.
+    ///
+    /// Each test is RED on the pre-fix code: the old switch branch re-seeded via
+    /// OpenHuman's `seed_resume_from_thread_transcript`, which reads a file
+    /// OpenCompany never writes for a `chat_id`, so the model saw `history_len =
+    /// 0` and none of these markers reached it.
+    mod chat_seed_regression {
+        use super::*;
+
+        use std::sync::Mutex as StdMutex;
+
+        use futures::stream::{self, BoxStream};
+        use tinyagents::harness::model::{ModelRequest, ModelResponse};
+
+        use crate::ports::events::EventStreamItem;
+        use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
+
+        /// An appendable in-memory journal. `read_from` returns ascending order,
+        /// so the trait's default `read_before` yields the newest-first paging the
+        /// seed projector walks.
+        #[derive(Default)]
+        struct InMemoryLog(StdMutex<Vec<StoredEvent>>);
+
+        impl InMemoryLog {
+            fn operator(&self, chat: &str, text: &str) {
+                self.push(CompanyEvent::OperatorMessage {
+                    text: text.to_string(),
+                    by: None,
+                    chat: Some(chat.to_string()),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                });
+            }
+            fn reply(&self, chat_id: &str, text: &str) {
+                self.push(CompanyEvent::AgentReply {
+                    chat_id: chat_id.to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: text.to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                });
+            }
+            fn push(&self, event: CompanyEvent) {
+                let mut log = self.0.lock().unwrap();
+                let seq = EventSeq::new(log.len() as u64);
+                log.push(StoredEvent {
+                    seq,
+                    company: CompanyId::new("acme"),
+                    event,
+                    at_millis: seq.value(),
+                });
+            }
+        }
+
+        #[async_trait]
+        impl EventLog for InMemoryLog {
+            async fn append(
+                &self,
+                _id: &CompanyId,
+                event: CompanyEvent,
+            ) -> crate::Result<EventSeq> {
+                let mut log = self.0.lock().unwrap();
+                let seq = EventSeq::new(log.len() as u64);
+                log.push(StoredEvent {
+                    seq,
+                    company: CompanyId::new("acme"),
+                    event,
+                    at_millis: seq.value(),
+                });
+                Ok(seq)
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.seq.value() >= seq.value())
+                    .take(limit)
+                    .cloned()
+                    .collect())
+            }
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        /// A model that records the full text of every request it is handed, so a
+        /// test can assert which prior turns reached the model's context.
+        #[derive(Default)]
+        struct RecordingProvider {
+            seen: Arc<StdMutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl ChatModel<()> for RecordingProvider {
+            async fn invoke(
+                &self,
+                _state: &(),
+                request: ModelRequest,
+            ) -> tinyagents::Result<ModelResponse> {
+                let joined = request
+                    .messages
+                    .iter()
+                    .map(|m| m.text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.seen.lock().unwrap().push(joined);
+                // A fixed non-empty reply: empty would trip the empty-response
+                // retry wrapper into a second invoke.
+                Ok(ModelResponse::assistant("ok"))
+            }
+        }
+
+        impl HarnessModel for RecordingProvider {
+            fn telemetry_provider_id(&self) -> String {
+                "recording".to_string()
+            }
+        }
+
+        /// A fixture whose journal and model are observable: the returned `log` is
+        /// pre-populated by the test, and `seen` collects every model request.
+        fn recording_fixture() -> (Fixture, Arc<InMemoryLog>, Arc<StdMutex<Vec<String>>>) {
+            let mut fx = fixture();
+            let log = Arc::new(InMemoryLog::default());
+            let provider = Arc::new(RecordingProvider::default());
+            let seen = provider.seen.clone();
+            fx.deps.events = Some(log.clone());
+            fx.deps.provider = provider;
+            (fx, log, seen)
+        }
+
+        /// A — fresh process, first chat turn on `general` (bound = None): the
+        /// prior journaled exchange is seeded into the model, and the current
+        /// message (already journaled) is not duplicated.
+        #[tokio::test]
+        async fn first_chat_turn_seeds_prior_journaled_exchange() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "PRIOR_USER_MARKER");
+            log.reply("general", "PRIOR_AGENT_MARKER");
+            // The current operator message is journaled BEFORE the turn runs, just
+            // as the server does — so the projector sees it as the newest event.
+            log.operator("general", "CURRENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(&rec.id, "ceo", "CURRENT_MARKER", &fx.deps, Some("general"))
+                .await
+                .expect("chat turn runs");
+
+            let all = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                all.contains("PRIOR_USER_MARKER") && all.contains("PRIOR_AGENT_MARKER"),
+                "the prior journaled exchange must reach the model: {all:?}"
+            );
+            assert_eq!(
+                all.matches("CURRENT_MARKER").count(),
+                1,
+                "the current message is stripped from the seed, so it appears once \
+                 (as this turn's user message), not duplicated: {all:?}"
+            );
+        }
+
+        /// B — an unthreaded (background) turn between two chat turns resets
+        /// `bound_chat` to None, making the next chat turn a switch. It must STILL
+        /// re-seed the desk's history — the exact "every background turn blinds the
+        /// next chat reply" failure the fix removes.
+        #[tokio::test]
+        async fn chat_turn_after_a_background_turn_still_seeds_history() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "HISTORY_USER_MARKER");
+            log.reply("general", "HISTORY_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            // First chat turn binds to general.
+            pool.run(&rec.id, "ceo", "first", &fx.deps, Some("general"))
+                .await
+                .expect("first chat turn");
+            // A background/unthreaded turn: resets bound_chat to None.
+            pool.run_background(&rec.id, "ceo", "background", &fx.deps, None)
+                .await
+                .expect("background turn");
+
+            let before = seen.lock().unwrap().len();
+            // Second chat turn on general — a switch again, because the background
+            // turn invalidated the binding.
+            pool.run(&rec.id, "ceo", "second", &fx.deps, Some("general"))
+                .await
+                .expect("second chat turn");
+
+            let after: Vec<String> = seen.lock().unwrap()[before..].to_vec();
+            let last = after
+                .last()
+                .expect("the second chat turn made a model call");
+            assert!(
+                last.contains("HISTORY_USER_MARKER") && last.contains("HISTORY_AGENT_MARKER"),
+                "a chat turn after a background turn must still see the desk's \
+                 recent history: {last:?}"
+            );
+        }
+
+        /// C — isolation: history on desk A must never leak into a turn on desk B.
+        #[tokio::test]
+        async fn a_switch_seeds_only_the_incoming_desks_history() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("alpha", "ALPHA_USER_MARKER");
+            log.reply("alpha", "ALPHA_AGENT_MARKER");
+            log.operator("beta", "BETA_USER_MARKER");
+            log.reply("beta", "BETA_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(&rec.id, "ceo", "hello beta", &fx.deps, Some("beta"))
+                .await
+                .expect("beta chat turn");
+
+            let all = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                all.contains("BETA_USER_MARKER") && all.contains("BETA_AGENT_MARKER"),
+                "beta's own history must be seeded: {all:?}"
+            );
+            assert!(
+                !all.contains("ALPHA_USER_MARKER") && !all.contains("ALPHA_AGENT_MARKER"),
+                "alpha's history must NEVER leak into a beta turn: {all:?}"
+            );
+        }
+
+        /// D — DM parity: a `dm:<id>` thread seeds exactly like a named desk.
+        #[tokio::test]
+        async fn a_dm_thread_seeds_its_own_history() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("dm:teammate", "DM_USER_MARKER");
+            log.reply("dm:teammate", "DM_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(&rec.id, "ceo", "hey there", &fx.deps, Some("dm:teammate"))
+                .await
+                .expect("dm chat turn");
+
+            let all = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                all.contains("DM_USER_MARKER") && all.contains("DM_AGENT_MARKER"),
+                "a DM thread's own history must be seeded (parity with named desks): {all:?}"
+            );
+        }
     }
 }

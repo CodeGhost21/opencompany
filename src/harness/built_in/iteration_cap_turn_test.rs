@@ -623,6 +623,7 @@ async fn a_greeting_after_a_task_runs_no_tools_and_leaks_no_prior_context() {
             None,
             Some(stream_for("sports")),
             None,
+            Vec::new(),
         )
         .await
         .expect("task A runs");
@@ -653,7 +654,7 @@ async fn a_greeting_after_a_task_runs_no_tools_and_leaks_no_prior_context() {
     // ── A bare "hi" on a DIFFERENT chat — the greeting fast path. ──
     let (outcome_b, _usage_b) = with_chat_only_hint(
         true,
-        agent.run_with_steer("hi", None, Some(stream_for("smalltalk")), None),
+        agent.run_with_steer("hi", None, Some(stream_for("smalltalk")), None, Vec::new()),
     )
     .await
     .expect("the greeting runs");
@@ -751,13 +752,19 @@ async fn a_background_turn_does_not_leak_into_the_next_turn_on_its_bound_chat() 
 
     // ── Chat "sports", turn 1: binds bound_chat to "sports". ──
     agent
-        .run_with_steer("hello from sports", None, Some(stream_for("sports")), None)
+        .run_with_steer(
+            "hello from sports",
+            None,
+            Some(stream_for("sports")),
+            None,
+            Vec::new(),
+        )
         .await
         .expect("chat turn 1 runs");
 
     // ── The background task: unthreaded — `stream: None`, same shared Agent. ──
     let (outcome_bg, _usage_bg) = agent
-        .run_with_steer("run the background task", None, None, None)
+        .run_with_steer("run the background task", None, None, None, Vec::new())
         .await
         .expect("background task runs");
     assert!(
@@ -779,7 +786,13 @@ async fn a_background_turn_does_not_leak_into_the_next_turn_on_its_bound_chat() 
     // ── Chat "sports", turn 2 — same chat id the background task ran under
     //    no binding for, so this must be treated as a switch and re-seed. ──
     agent
-        .run_with_steer("still there?", None, Some(stream_for("sports")), None)
+        .run_with_steer(
+            "still there?",
+            None,
+            Some(stream_for("sports")),
+            None,
+            Vec::new(),
+        )
         .await
         .expect("chat turn 2 runs");
 
