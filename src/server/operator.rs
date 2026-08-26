@@ -2722,6 +2722,16 @@ struct ChatHistoryMessageDto {
     at_millis: f64,
     /// Whether it is the operator's own message.
     mine: bool,
+    /// Whether a **person** wrote this line rather than the runtime (issue
+    /// #1734). See [`MessageView::by_person`] for why nothing downstream can
+    /// derive it — in particular why `channel == "operator"` cannot, the echo
+    /// brain naming its own outbound channel that too.
+    ///
+    /// Omitted when `false`, which is every agent reply and every message
+    /// journaled before the field existed, so the legacy shape is unchanged and
+    /// a console reading `undefined` gets today's behaviour.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    by_person: bool,
     /// The scrubbed processing steps behind a company reply, so a rehydrated
     /// transcript renders the same timeline the live turn showed. Omitted when
     /// empty (operator messages, tool-less replies) — keeps the legacy shape.
@@ -2852,6 +2862,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
             text: view.text,
             at_millis: view.at_millis,
             mine: view.mine,
+            by_person: view.by_person,
             steps: view.steps,
             task_id: view.task_id,
             parent_id: view.parent_id,
