@@ -1933,11 +1933,16 @@ export function ChatView({
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
+              readOnly={readOnly}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
-              onSend={(text, _intent, _attachments, mentions) =>
-                void send(text, undefined, parent.id, undefined, mentions)
-              }
+              onSend={(text, _intent, _attachments, mentions) => {
+                // Belt to `ThreadPanel`'s own `readOnly` brace: never mutate
+                // state or call `client.chat` for a channel the server's
+                // read-only guard will refuse anyway (issue #1757).
+                if (readOnly) return;
+                void send(text, undefined, parent.id, undefined, mentions);
+              }}
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
               onTyping={() => onTyping?.(active.id, parent.id)}
