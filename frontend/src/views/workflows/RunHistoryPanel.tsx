@@ -530,6 +530,16 @@ export function RunHistoryRow({
   // worse than a parked one — there is no card to click.
   const unparkable = blocked.reduce((n, b) => n + (b.unparkable ?? 0), 0);
   const failedNode = failedNodeOf(run);
+  // Codex review on #1821 (eighth pass): `RunCancel` stops a run at the next
+  // node boundary — the node already executing normally finishes and is
+  // journaled, per the legend definition's own hedge ("only a step stuck
+  // waiting on an outside call is cut off where it was"). `startedNodes`
+  // names what the run was standing on; a settled run pairs every entry with
+  // a `nodes` finish row UNLESS that node is the one the stop actually cut
+  // off mid-flight (see `startedNodes`'s own doc comment in `api/workflows.ts`).
+  const midFlightNode = (run.startedNodes ?? []).find(
+    (nodeId) => !nodes.some((n) => n.nodeId === nodeId),
+  );
   const errorMessage = run.error ? stripEnginePrefixes(run.error) : null;
   const duration = runDuration(run, now);
   // Completed, quiet runs are the common case. They need enough separation to
@@ -762,9 +772,11 @@ export function RunHistoryRow({
       ) : run.cancelled ? (
         // Issue #383, the third terminal reading. Deliberately not a
         // destructive Alert: nothing went wrong, somebody decided they had seen
-        // enough. It says "stopped", not "finished", because the node that was
-        // executing was dropped where it was rather than allowed to complete —
-        // so a side effect it had started may be half-done.
+        // enough. It says "stopped", not "finished", because a node still
+        // mid-flight when the stop lands — named by `midFlightNode` — is cut
+        // off rather than allowed to complete, and a side effect it had
+        // started may be half-done. `RunCancel` stops at the next node
+        // boundary otherwise, so that is the exception, not the rule.
         <p
           className="text-2xs text-muted-foreground"
           data-testid="workflow-run-cancelled"
@@ -773,8 +785,17 @@ export function RunHistoryRow({
           {nodes.length > 0
             ? ` after ${nodes.length} step${nodes.length === 1 ? "" : "s"}`
             : " before any step finished"}
-          . The steps above completed; the one still running was stopped where
-          it was. Any approvals it had already raised are still waiting for you.
+          .{" "}
+          {midFlightNode
+            ? "The steps above completed; the one still running was stopped where it was."
+            : // Codex review on #1821 (eighth pass): the legend definition
+              // above was fixed to say the mid-flight step "normally ran to
+              // completion and was recorded" — but this sentence still
+              // claimed unconditionally that a step was cut off, which is
+              // only true when `midFlightNode` names one. Most cancels land
+              // cleanly at a boundary with nothing interrupted at all.
+              "Every step that had started completed and was recorded before the stop took effect."}{" "}
+          Any approvals it had already raised are still waiting for you.
         </p>
       ) : isBlocked(run) ? (
         // Issue #881, the fourth terminal reading — and the one that had NO
