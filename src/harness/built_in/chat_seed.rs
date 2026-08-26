@@ -34,6 +34,57 @@ use crate::ports::{CompanyStore, EventLog};
 use crate::server::chat_history;
 use crate::server::ops::language::DEFAULT_DESK;
 
+/// What a chat turn needs to build its recent-history seed, carried into
+/// [`super::CompanyAgent::run_with_steer`] rather than an already-projected
+/// `Vec`.
+///
+/// The projection itself ([`build_chat_seed`]) is only done inside
+/// `run_with_steer`, after the chat-switch decision (under the same
+/// `bound_chat` lock) confirms a re-seed is actually needed — never for a
+/// turn that keeps the same bound chat as the one before it. Handing the
+/// caller-built `Vec` in unconditionally meant the (filesystem-backend-costly
+/// — see [`build_chat_seed`]'s docs) journal walk ran on *every* chat turn,
+/// switch or not, since the caller has no way to see the switch decision
+/// before it (codex review finding).
+///
+/// `None` for every non-chat turn — background, workflow, or [confined]
+/// (`confine::run_confined`) — which want no seed regardless of switch
+/// status, exactly like passing an empty seed did before this type existed.
+///
+/// [confined]: super::confine
+pub struct ChatSeedRequest {
+    /// The turn's raw, pre-memory-injection text — what
+    /// [`strip_current_message`] matches against. Deliberately NOT
+    /// `run_with_steer`'s own `message` argument: that one is the
+    /// memory-augmented turn text, which the journal never recorded (see
+    /// `strip_current_message`'s docs).
+    pub raw_message: String,
+    /// The company journal [`build_chat_seed`] projects the seed from.
+    pub events: Arc<dyn EventLog>,
+    /// Resolves the incoming chat id to its desk id/name pair (see
+    /// [`resolve_seed_desk`]).
+    pub store: Arc<dyn CompanyStore>,
+}
+
+impl ChatSeedRequest {
+    /// Projects this desk's recent history and strips the current message's
+    /// own duplicate, in one call — the two steps [`super::CompanyAgent::run_with_steer`]'s
+    /// switch branch needs, together.
+    pub async fn build(&self, company: &CompanyId, chat_id: &str) -> Vec<(String, String)> {
+        let (desk_id, desk_name) = resolve_seed_desk(&self.store, company, Some(chat_id)).await;
+        let mut seed = build_chat_seed(
+            &self.events,
+            company,
+            &desk_id,
+            &desk_name,
+            CHAT_SEED_WINDOW,
+        )
+        .await;
+        strip_current_message(&mut seed, &self.raw_message);
+        seed
+    }
+}
+
 /// How many of the most-recent owning messages a chat seed carries.
 ///
 /// A conversational window, not the whole transcript: enough that a reply lands

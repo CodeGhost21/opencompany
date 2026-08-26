@@ -775,8 +775,7 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None, None, Vec::new())
-            .await
+        self.run_with_steer(message, None, None, None, None).await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -808,7 +807,7 @@ impl CompanyAgent {
         steer: Option<&SteerControl>,
         stream: Option<crate::turn_stream::TurnStreamCtx>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
-        seed: Vec<(String, String)>,
+        chat_seed: Option<chat_seed::ChatSeedRequest>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
@@ -831,6 +830,11 @@ impl CompanyAgent {
             crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
             crate::turn_stream::LiveRoute::Workflow { .. } => None,
         });
+        // The company this turn's chat seed (if any) projects from — same
+        // "captured before `stream` moves" reasoning as `turn_chat_id` above.
+        // Only meaningful alongside `turn_chat_id`, so `None` for exactly the
+        // same turns.
+        let turn_company: Option<CompanyId> = stream.as_ref().map(|ctx| ctx.company.clone());
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
@@ -904,19 +908,38 @@ impl CompanyAgent {
                 // Prefer OpenCompany's own EventLog-derived seed (issue #1840).
                 // OpenHuman never writes a file transcript for an OC `chat_id`, so
                 // `seed_resume_from_thread_transcript` always misses and the reply
-                // starts blind (the #1725/#1730 regression). When the caller
-                // projected this desk's recent owning turns from the company log,
-                // seed those directly; fall back to the transcript lookup only
-                // when the seed is empty (a background/workflow turn, or a desk
+                // starts blind (the #1725/#1730 regression). Project it HERE, now
+                // that `switched` is confirmed true — not by the caller for every
+                // turn — because the projection walks the company journal and is
+                // costly on the filesystem backend (`chat_seed::build_chat_seed`'s
+                // docs); building it unconditionally meant every ordinary
+                // same-desk reply paid for a journal scan its `switched == false`
+                // branch below would just throw away (codex review finding). This
+                // still runs inside the same `bound_chat`-locked section as the
+                // switch decision, so it is exactly as atomic as the eager build
+                // was — no turn can observe a `switched` verdict this projection
+                // doesn't match.
+                let seed = match (&chat_seed, turn_company.as_ref()) {
+                    (Some(request), Some(company)) => request.build(company, incoming).await,
+                    _ => Vec::new(),
+                };
+                tracing::debug!(
+                    chat = incoming,
+                    seeded = seed.len(),
+                    "[harness] built recent-chat seed for the incoming desk"
+                );
+                // Fall back to the transcript lookup only when the seed is empty
+                // (a background/workflow turn, no `chat_seed` request, or a desk
                 // with no recent history).
                 let seeded = if seed.is_empty() {
                     agent.seed_resume_from_thread_transcript(incoming)
                 } else {
                     // `message` is the augmented turn text; `seed_resume_from_messages`
-                    // drops a trailing user line matching it. The raw operator
-                    // message was already stripped caller-side (see
-                    // `chat_seed::strip_current_message`), so this is a defensive
-                    // no-op on the happy path and correct if augmentation was off.
+                    // drops a trailing user line matching it. `ChatSeedRequest::build`
+                    // (above) already stripped the raw duplicate against
+                    // `raw_message` (see `chat_seed::strip_current_message`), so
+                    // this is a defensive no-op on the happy path and correct if
+                    // augmentation was off.
                     match agent.seed_resume_from_messages(seed, message) {
                         Ok(()) => true,
                         Err(error) => {
@@ -2964,7 +2987,7 @@ impl HarnessPool {
         // reason (issue #1840): a confined turn is intentionally context-free, so
         // it carries none of the desk's recent history.
         let (outcome, turn_costs) = agent
-            .run_with_steer(message, None, stream_ctx, None, Vec::new())
+            .run_with_steer(message, None, stream_ctx, None, None)
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
@@ -3226,38 +3249,37 @@ impl HarnessPool {
             LiveStream::Off => None,
         };
         // Recent-chat history seed (issue #1840): give a chat reply this desk's
-        // own recent turns so it isn't assembled blind on every switch. Built only
-        // for a chat turn and only when the company journal is wired. The current
-        // operator message is ALREADY journaled at this point (the server appends
-        // it before dispatch), so it is the newest owning event the projector
-        // sees; strip it — `run_single` re-appends the current message itself, so
-        // seeding it too would duplicate it on the wire.
-        let seed = match (seed_chat, deps.events.as_ref()) {
-            (Some(chat_id), Some(events)) => {
-                let (desk_id, desk_name) =
-                    chat_seed::resolve_seed_desk(&deps.store, company, chat_id).await;
-                let mut seed = chat_seed::build_chat_seed(
-                    events,
-                    company,
-                    &desk_id,
-                    &desk_name,
-                    chat_seed::CHAT_SEED_WINDOW,
-                )
-                .await;
-                chat_seed::strip_current_message(&mut seed, message);
-                tracing::debug!(
-                    company = %company,
-                    agent = agent_id,
-                    desk = %desk_id,
-                    seeded = seed.len(),
-                    "[harness] built recent-chat seed for the incoming desk"
-                );
-                seed
-            }
-            _ => Vec::new(),
+        // own recent turns so it isn't assembled blind on every switch. Only
+        // ever wanted for a chat turn with the company journal wired — never
+        // built here, though: `run_with_steer` projects it itself, and only
+        // once its `bound_chat`-locked switch check confirms this turn is
+        // actually a switch (a same-desk reply right after another one is not,
+        // and building it unconditionally on every chat turn made every
+        // ordinary reply pay for a journal scan whose result would just be
+        // thrown away — codex review finding). This is just the (cheap — two
+        // `Arc` clones, no I/O) request the projection needs when the switch
+        // check does land on `true`. The current operator message is ALREADY
+        // journaled at this point (the server appends it before dispatch), so
+        // it is the newest owning event the projector sees; `raw_message` is
+        // what `chat_seed::strip_current_message` matches to strip it —
+        // `run_single` re-appends the current message itself, so seeding it
+        // too would duplicate it on the wire.
+        let chat_seed_request = match (seed_chat, deps.events.as_ref()) {
+            (Some(_), Some(events)) => Some(chat_seed::ChatSeedRequest {
+                raw_message: message.to_string(),
+                events: events.clone(),
+                store: deps.store.clone(),
+            }),
+            _ => None,
         };
         let (outcome, turn_costs) = agent
-            .run_with_steer(&augmented, steer, stream_ctx, run_sink.clone(), seed)
+            .run_with_steer(
+                &augmented,
+                steer,
+                stream_ctx,
+                run_sink.clone(),
+                chat_seed_request,
+            )
             .await?;
         // Issue #242: fold this turn's spend into the attempt it belongs to.
         // Per turn, not once at the end, so a redirect re-run and a delegate's
@@ -6176,7 +6198,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None, None, Vec::new())
+            .run_with_steer("hi", Some(&control), None, None, None)
             .await
             .expect("runs");
         assert_eq!(
@@ -9040,10 +9062,24 @@ budget_usd_daily = 0.0
         /// An appendable in-memory journal. `read_from` returns ascending order,
         /// so the trait's default `read_before` yields the newest-first paging the
         /// seed projector walks.
+        ///
+        /// `reads` counts every `read_from` call (the default `read_before`'s
+        /// only path into a backend) — a stand-in for the filesystem backend's
+        /// whole-file JSONL scan (`store::fs::read_before`'s docs), so a test
+        /// can assert the seed projector only walks the journal when a chat
+        /// switch actually needs it, not on every chat turn (codex review
+        /// finding).
         #[derive(Default)]
-        struct InMemoryLog(StdMutex<Vec<StoredEvent>>);
+        struct InMemoryLog {
+            events: StdMutex<Vec<StoredEvent>>,
+            reads: std::sync::atomic::AtomicUsize,
+        }
 
         impl InMemoryLog {
+            fn reads(&self) -> usize {
+                self.reads.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
             fn operator(&self, chat: &str, text: &str) {
                 self.push(CompanyEvent::OperatorMessage {
                     text: text.to_string(),
@@ -9068,7 +9104,7 @@ budget_usd_daily = 0.0
                 });
             }
             fn push(&self, event: CompanyEvent) {
-                let mut log = self.0.lock().unwrap();
+                let mut log = self.events.lock().unwrap();
                 let seq = EventSeq::new(log.len() as u64);
                 log.push(StoredEvent {
                     seq,
@@ -9086,7 +9122,7 @@ budget_usd_daily = 0.0
                 _id: &CompanyId,
                 event: CompanyEvent,
             ) -> crate::Result<EventSeq> {
-                let mut log = self.0.lock().unwrap();
+                let mut log = self.events.lock().unwrap();
                 let seq = EventSeq::new(log.len() as u64);
                 log.push(StoredEvent {
                     seq,
@@ -9102,8 +9138,9 @@ budget_usd_daily = 0.0
                 seq: EventSeq,
                 limit: usize,
             ) -> crate::Result<Vec<StoredEvent>> {
+                self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(self
-                    .0
+                    .events
                     .lock()
                     .unwrap()
                     .iter()
@@ -9280,6 +9317,54 @@ budget_usd_daily = 0.0
             assert!(
                 all.contains("DM_USER_MARKER") && all.contains("DM_AGENT_MARKER"),
                 "a DM thread's own history must be seeded (parity with named desks): {all:?}"
+            );
+        }
+
+        /// E — a second chat turn on the SAME desk, back to back, is not a
+        /// switch: `bound_chat` already points at it, so `run_with_steer`'s
+        /// switch check must skip both the re-seed AND the journal read that
+        /// builds it. RED on the pre-fix code, which built the (costly on the
+        /// filesystem backend — `chat_seed::build_chat_seed`'s docs) seed in
+        /// the caller for every chat turn, switch or not, and simply discarded
+        /// it on a non-switch turn; GREEN once the projection only runs inside
+        /// the confirmed-switch branch (codex review finding).
+        #[tokio::test]
+        async fn a_non_switch_chat_turn_does_not_re_read_the_journal() {
+            let (fx, log, _seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "PRIOR_USER_MARKER");
+            log.reply("general", "PRIOR_AGENT_MARKER");
+            // The current operator message for turn 1, journaled before it runs.
+            log.operator("general", "first");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            // Turn 1 on "general": a switch (bound_chat starts None) — must
+            // read the journal to build the seed.
+            pool.run(&rec.id, "ceo", "first", &fx.deps, Some("general"))
+                .await
+                .expect("first chat turn");
+            let reads_after_first = log.reads();
+            assert!(
+                reads_after_first > 0,
+                "the first (switching) turn must read the journal to build its seed"
+            );
+
+            // The current operator message for turn 2, journaled before it runs
+            // — same desk as turn 1, so `bound_chat` already matches it.
+            log.operator("general", "second");
+
+            // Turn 2 on "general" — NOT a switch. Must not touch the journal
+            // again to build a seed nothing downstream will use.
+            pool.run(&rec.id, "ceo", "second", &fx.deps, Some("general"))
+                .await
+                .expect("second chat turn");
+            assert_eq!(
+                log.reads(),
+                reads_after_first,
+                "a same-desk, non-switch chat turn must not re-read the \
+                 journal to build a seed the switch check will discard"
             );
         }
     }
