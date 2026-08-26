@@ -144,11 +144,33 @@ function makeClient(script: {
   graphFails?: string[];
   /** Rejection for `DELETE …/workflows/{id}`, if the test drives one. */
   del?: () => Promise<never>;
+  /**
+   * Reject the workflow-LIST read from this call onwards (1-based), so the
+   * first read can land the detail view and a later REFRESH can fail under it —
+   * which is the shape the finding is about: a company-wide failure arriving
+   * while one workflow is open.
+   */
+  listFailsAfter?: number;
+  /** Narrow that failure to these companies, so another company's list is fine. */
+  listFailsFor?: string[];
+  /** Hold one company's list read open, so a test can look at the gap it leaves. */
+  holdList?: { company: string; gate: Promise<null> };
 }): OpenCompanyClient {
+  let listReads = 0;
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
       if (path.endsWith("/workflows")) {
+        listReads += 1;
+        const forCompany = path.split("/")[3] ?? "";
+        if (script.holdList && forCompany === script.holdList.company) {
+          await script.holdList.gate;
+        }
+        const late = script.listFailsAfter === undefined || listReads > script.listFailsAfter;
+        const named = script.listFailsFor === undefined || script.listFailsFor.includes(forCompany);
+        if (script.listFailsAfter !== undefined && late && named) {
+          throw new Error("could not load workflows");
+        }
         return [
           { id: WF_A, name: GRAPHS[WF_A].name },
           { id: WF_B, name: GRAPHS[WF_B].name },
@@ -215,9 +237,14 @@ function inView<T extends Element>(testId: string): T | null {
   return container.querySelector<T>(`[data-testid="${testId}"]`);
 }
 
-async function show(client: OpenCompanyClient, company: string, sub: string | null) {
+async function show(
+  client: OpenCompanyClient,
+  company: string,
+  sub: string | null,
+  listEventTick = 0,
+) {
   await act(async () => {
-    root.render(createElement(WorkflowsView, { client, company, sub }));
+    root.render(createElement(WorkflowsView, { client, company, sub, listEventTick }));
   });
 }
 
@@ -382,12 +409,75 @@ describe("WorkflowsView leaves per-workflow state behind on a switch", () => {
     const client = makeClient({ graphFails: [WF_A] });
 
     await show(client, "acme", WF_A);
-    expect(inView("workflow-load-error")).not.toBeNull();
+    expect(inView("workflow-graph-error")).not.toBeNull();
 
     await click(inView("workflow-back-to-index"));
 
     // Pre-fix: "could not load the workflow graph" sits over an index that
     // loaded perfectly, about a workflow nobody is looking at.
-    expect(inView("workflow-load-error")).toBeNull();
+    expect(inView("workflow-graph-error")).toBeNull();
+  });
+
+  it("keeps a workflow-LIST failure visible when the operator returns to the index", async () => {
+    // Review of PR #1744. `error` was one slot for two unrelated failures, and
+    // clearing it on every selection change threw the company-wide one away at
+    // the exact moment the operator went back to the list it is about: a stale
+    // list with nothing on screen saying so.
+    const client = makeClient({ listFailsAfter: 1 });
+
+    // The first list read lands the detail view; the host then says the list
+    // changed (issue #384's `listEventTick`) and the refresh fails under it.
+    await show(client, "acme", WF_A);
+    await show(client, "acme", WF_A, 1);
+    expect(inView("workflow-list-error")?.textContent).toContain("could not load workflows");
+
+    await click(inView("workflow-back-to-index"));
+
+    // Pre-fix: the selection change cleared the single shared `error` slot, so
+    // the index rendered a stale list with nothing saying the refresh failed.
+    expect(inView("workflow-list-error")?.textContent).toContain("could not load workflows");
+  });
+
+  it("does not carry a workflow-LIST failure onto the next company", async () => {
+    // The other half of the same rule: the list read is keyed on the company,
+    // so its failure has to end at a company change. Splitting the two slots
+    // must not lose the axis the shared slot got right.
+    const client = makeClient({ listFailsAfter: 1, listFailsFor: ["acme"] });
+
+    await show(client, "acme", WF_A);
+    await show(client, "acme", WF_A, 1);
+    expect(inView("workflow-list-error")).not.toBeNull();
+
+    // Beta's own list loads perfectly, and must not inherit Acme's warning.
+    await show(client, "beta", WF_A, 1);
+
+    expect(inView("workflow-list-error")).toBeNull();
+  });
+
+  it("drops the list failure the moment the company changes, not when the next list answers", async () => {
+    // The company axis is the one the shared `error` slot got RIGHT, and
+    // splitting it must not lose it. A successful read for the next company
+    // would clear this eventually — but "eventually" is a whole round trip
+    // during which Acme's "could not load workflows" sits over Beta's loading
+    // list, which is the same false claim this PR is about everywhere else.
+    const gate = deferred<null>();
+    const client = makeClient({
+      listFailsAfter: 1,
+      listFailsFor: ["acme"],
+      holdList: { company: "beta", gate: gate.promise },
+    });
+
+    await show(client, "acme", WF_A);
+    await show(client, "acme", WF_A, 1);
+    expect(inView("workflow-list-error")).not.toBeNull();
+
+    // Beta's list read is still in flight.
+    await show(client, "beta", WF_A, 1);
+    expect(inView("workflow-list-error")).toBeNull();
+
+    await act(async () => {
+      gate.resolve(null);
+    });
+    expect(inView("workflow-list-error")).toBeNull();
   });
 });

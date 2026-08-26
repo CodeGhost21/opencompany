@@ -411,7 +411,21 @@ export function WorkflowsView({
     [approvals, result?.runId],
   );
   const askerNames = useAskerNames(client, company, runApprovalCards);
-  const [error, setError] = useState<string | null>(null);
+  // Issue #1704 (review): two load failures, two slots — they were one, and one
+  // was not enough to describe either honestly.
+  //
+  // `listError` is a COMPANY-wide condition: the workflow list would not load.
+  // `graphError` is about ONE workflow: its graph would not load. Sharing a slot
+  // meant a successful list read cleared a graph failure and vice versa, and it
+  // meant a selection change had to choose between two wrong answers — leave a
+  // graph failure up on the index it does not describe, or wipe a list failure
+  // exactly as the operator returns to the stale list it is about.
+  //
+  // So the lifetimes differ, and now they can: `graphError` is cleared by every
+  // selection change, `listError` only by a COMPANY change (the axis its own
+  // fetch is keyed on) or by a list read that succeeds.
+  const [listError, setListError] = useState<string | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   // Issue #259: the same dialog, hydrated from the selected graph. Separate
   // state from `createOpen` rather than a mode flag, so the create path keeps
@@ -791,10 +805,10 @@ export function WorkflowsView({
           if (prev !== null) reconciledSelectionRef.current = { id: null };
           return null;
         });
-        setError(null);
+        setListError(null);
       } catch (e) {
         if (!live) return;
-        setError(e instanceof Error ? e.message : "could not load workflows");
+        setListError(e instanceof Error ? e.message : "could not load workflows");
       } finally {
         if (live) setLoadingList(false);
       }
@@ -994,6 +1008,12 @@ export function WorkflowsView({
   }, [selectedId]);
   useEffect(() => {
     setMissingWorkflowId(null);
+    // Issue #1704 (review): the list failure is scoped to the company whose list
+    // failed. It must NOT be cleared by a workflow change — that is the axis the
+    // operator crosses to go and look at the stale list — but it must be cleared
+    // here, or "could not load workflows" from the company just left would sit
+    // over the next company's list while that list loads perfectly.
+    setListError(null);
   }, [company]);
 
   // Fetch the selected workflow's full graph.
@@ -1012,14 +1032,14 @@ export function WorkflowsView({
         const g = await getWorkflow(client, company, selectedId);
         if (!live) return;
         setGraph(g);
-        setError(null);
+        setGraphError(null);
         // A successful re-read is exactly what clears a stale-graph warning:
         // whatever `version` we now hold is current.
         setConflict(null);
       } catch (e) {
         if (!live) return;
         setGraph(null);
-        setError(e instanceof Error ? e.message : "could not load the workflow graph");
+        setGraphError(e instanceof Error ? e.message : "could not load the workflow graph");
       } finally {
         if (live) setLoadingGraph(false);
       }
@@ -2067,11 +2087,18 @@ export function WorkflowsView({
     // clears it — but a graph read that FAILS does not, which is precisely the
     // case where the operator is left staring at it.
     setConflict(null);
-    // Issue #1704: and the load error, whose reach is wider still. It renders
-    // outside the `detailOpen` gate, so "could not load the workflow graph"
-    // about the workflow just left follows the operator all the way back to the
-    // index and sits over a list that loaded perfectly.
-    setError(null);
+    // Issue #1704: and the graph-load error, whose reach is wider still. It
+    // renders outside the `detailOpen` gate, so "could not load the workflow
+    // graph" about the workflow just left follows the operator all the way back
+    // to the index and sits over a list that loaded perfectly.
+    //
+    // Issue #1704 (review): `graphError` ONLY. This used to be one `error` slot
+    // shared with the workflow-list read, and clearing that here threw away a
+    // company-wide "could not load workflows" at the exact moment the operator
+    // returned to the list it describes — a stale list with nothing saying so.
+    // The list read is keyed on the company, so its failure is cleared on the
+    // company axis instead (see the `[company]` effect above).
+    setGraphError(null);
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.
@@ -2879,10 +2906,23 @@ export function WorkflowsView({
         </div>
       )}
 
-      {error && (
+      {/* Issue #1704 (review): the company-wide list failure, on the index and
+          on a detail view alike — a workflow open on screen does not make the
+          list behind it any less stale. First, because it is the wider claim. */}
+      {listError && (
         <div className="px-4 pt-3">
-          <Alert variant="destructive" data-testid="workflow-load-error">
-            <AlertDescription>{error}</AlertDescription>
+          <Alert variant="destructive" data-testid="workflow-list-error">
+            <AlertDescription>{listError}</AlertDescription>
+          </Alert>
+        </div>
+      )}
+
+      {/* And the one about the workflow on screen. The selection-change effect
+          clears it, so it cannot outlive the workflow it names. */}
+      {graphError && (
+        <div className="px-4 pt-3">
+          <Alert variant="destructive" data-testid="workflow-graph-error">
+            <AlertDescription>{graphError}</AlertDescription>
           </Alert>
         </div>
       )}
