@@ -1219,6 +1219,28 @@ export class OpenCompanyClient {
   // open (issue #414). Add MCP calls to `api/mcp.ts`, next to the ones the host
   // answers.
 
+  /**
+   * Provision a company from a manifest (issue #1807).
+   *
+   * Platform-scoped on the host (`PlatformScope`): only a client that carries a
+   * platform bearer ({@link carriesPlatformBearer}) can reach it — a person
+   * signed in with a session cookie is refused by construction, the same wall
+   * `suspend`/`archive` sit behind. The console gates the New-company control on
+   * that flag rather than letting the call 401 after the operator has typed a
+   * name (the #1401 dishonest-button lesson).
+   *
+   * `manifest_toml` is the company manifest as TOML; the host fills in
+   * `[policy].mode = "auto"` and `[users].mode = "email"` when the text omits
+   * them, so `[company].name` alone is a valid body. `id` overrides the id the
+   * host would otherwise derive from the company name.
+   *
+   * Returns the fresh company's status (the host answers `201`), which the
+   * caller switches the console into.
+   */
+  provisionCompany(body: { manifest_toml: string; id?: string }): Promise<CompanyStatus> {
+    return this.request<CompanyStatus>("POST", "/api/v1/companies", body);
+  }
+
   /** Platform lifecycle control (requires a scoped company id). */
   lifecycle(action: LifecycleAction, company?: string | null): Promise<CompanyStatus> {
     const id = company ?? this.defaultCompany;
