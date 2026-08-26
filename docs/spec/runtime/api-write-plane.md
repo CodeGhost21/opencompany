@@ -383,9 +383,12 @@ forever after even if a live signal later regresses (a connection gets
 disconnected), because the question is "did this operator ever clear
 onboarding", not "is onboarding state currently intact". This GET is not a
 pure read — the first call where every step is true durably **persists** the
-latch (and journals the terminal `OnboardingCompleted` event) before
-answering, which is why it is a console read exception here rather than a
-GraphQL resolver. Every call after the latch is set short-circuits before any
+latch before answering, which is why it is a console read exception here
+rather than a GraphQL resolver. It then appends the terminal
+`OnboardingCompleted` event on a **best-effort** basis: the latch has already
+landed by that point, so a journal failure is logged and ignored rather than
+un-activating the company, and the response can report activation with the
+audit entry missing. Every call after the latch is set short-circuits before any
 Composio round trip or journal scan, so polling an already-activated company
 stays cheap. Any member may call it — it decides nothing on the company's
 behalf, only answers a question.
