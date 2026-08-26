@@ -1732,6 +1732,26 @@ impl CompanyRuntime {
         // that is not a workflow run.
         if let Some(turn) = turn.as_deref() {
             self.workflow_gates.decide(turn, &approval_id, verdict);
+            // Issue #1816: bank a blocked-node approval durably the moment it
+            // lands, for the same "before the queue is told" reason as the gate
+            // batch above — except here the loss this guards against is not a
+            // re-ask, it is total. `resume_blocked_agent_node` either spawns the
+            // continuation once or never; if the batch `continuations.decide`
+            // returns below has forgotten this decision to a restart, this is
+            // the only place that fact survives. A no-op for every turn that is
+            // not a blocked agent node's.
+            if verdict == Verdict::Approve && crate::runtime::workflow_resume::is_node_turn(turn) {
+                self.blocked_nodes.mark_approved(turn);
+                if let Err(error) = self.journal.record_blocked_node_approved(turn).await {
+                    tracing::warn!(
+                        company = %self.id,
+                        %turn,
+                        %error,
+                        "[approval] a blocked node's approval could not be durably banked; a \
+                         restart before this node's last decision may now strand this grant"
+                    );
+                }
+            }
         }
         let batch = match &turn {
             Some(turn) => match self.continuations.decide(turn, Some(event)) {
@@ -1870,7 +1890,12 @@ impl CompanyRuntime {
         turn: &str,
         batch: Vec<CompanyEvent>,
     ) -> Result<CycleReport> {
-        let approved = batch.iter().any(|event| {
+        // Issue #1816: the released batch only names the verdicts this process
+        // held in memory, which a restart between two decisions on the same
+        // node can leave short of an earlier approve. `stashed.approved` (below)
+        // is the durable backstop for exactly that gap — read alongside this,
+        // not instead of it, since the common in-process case never needs it.
+        let batch_approved = batch.iter().any(|event| {
             matches!(
                 event,
                 CompanyEvent::ApprovalResolved {
@@ -1908,6 +1933,12 @@ impl CompanyRuntime {
                  rehydrate an already-resolved block, which no resolve will re-release"
             );
         }
+        // The stash's own flag (banked at decide time, and rehydrated across a
+        // restart alongside the stash itself) carries an earlier approve the
+        // batch above may have lost. Either source is enough — the point is
+        // that a genuine approve on this node is never overruled by what this
+        // particular process happened to still be holding.
+        let approved = batch_approved || stashed.as_ref().is_some_and(|s| s.approved);
         if !approved {
             tracing::info!(
                 company = %self.id,
