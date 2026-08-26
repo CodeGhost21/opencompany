@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import {
   Popover,
   PopoverContent,
+  PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
 import type { OpenCompanyClient } from "@/api/client";
@@ -135,7 +136,15 @@ function statusDotTitle(label: string): string {
  * one keyboard- and touch-reachable affordance" (see the "make the parked
  * badge discoverable" commit), was itself unreachable by touch. `Popover`
  * opens on press out of the box; `openOnHover` keeps the existing hover
- * discovery for the mouse case. */
+ * discovery for the mouse case.
+ *
+ * Codex review on #1821 (sixth pass): the heading below used to be a plain
+ * `span`. `Popover.Popup` renders `role="dialog"` and only wires its own
+ * `aria-labelledby` when a `Popover.Title` is present to supply the id — a
+ * bare `span` supplies nothing, so a screen-reader user who opened this
+ * dialog heard an unnamed one. `PopoverTitle` is the primitive's own heading
+ * component for exactly this; using it is what makes the popup register the
+ * id in the first place. */
 function RunStatusLegend() {
   return (
     <Popover>
@@ -153,7 +162,7 @@ function RunStatusLegend() {
         <Info className="size-3.5" aria-hidden="true" />
       </PopoverTrigger>
       <PopoverContent className="flex max-h-(--available-height) max-w-xs flex-col items-start gap-1 overflow-y-auto text-left">
-        <span className="font-medium">What these statuses mean</span>
+        <PopoverTitle>What these statuses mean</PopoverTitle>
         {RUN_STATUS_LEGEND.map((term) => (
           <span key={term} className="block">
             <span className="font-medium">{term}</span> —{" "}
