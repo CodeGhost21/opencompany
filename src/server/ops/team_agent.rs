@@ -1537,16 +1537,24 @@ pub(super) async fn draft_new_profile(
         // the field can hold. Each is clamped to the bound it would have to
         // obey to be *saved*, so a grounding loses nothing that could have
         // become the teammate.
-        name: body.name.as_deref().map(clamp_description),
+        //
+        // A field that is blank once trimmed is dropped rather than sent as an
+        // empty string, matching what `InProgress::or_stored` does for the
+        // teammate that already exists: "" is not a mandate, and putting one in
+        // the prompt tells the model this teammate HAS an empty mandate rather
+        // than none yet.
+        name: blank_to_none(body.name.as_deref().map(clamp_description)),
         role: clamp_description(role),
-        description: body
-            .description
-            .as_deref()
-            .map(|text| ProfileField::Description.clamp(text)),
-        instructions: body
-            .instructions
-            .as_deref()
-            .map(|text| ProfileField::Instructions.clamp(text)),
+        description: blank_to_none(
+            body.description
+                .as_deref()
+                .map(|text| ProfileField::Description.clamp(text)),
+        ),
+        instructions: blank_to_none(
+            body.instructions
+                .as_deref()
+                .map(|text| ProfileField::Instructions.clamp(text)),
+        ),
         // Every teammate on the roster is a sibling of one that is not on it
         // yet, so nothing is filtered out — and this is exactly when the list
         // earns its keep: a mandate written for a teammate about to be added is
@@ -1569,6 +1577,17 @@ pub(super) async fn draft_new_profile(
         "[draft] answered a turn for a teammate being added"
     );
     Ok(Json(DraftDto::from_draft(field, draft)))
+}
+
+/// A field that is blank once clamped is no field at all.
+///
+/// The Add form sends every box it has, including the ones the operator has
+/// not filled in, so `Some("")` reaches here routinely. Passed on, it tells
+/// the model this teammate *has* an empty mandate rather than none yet — a
+/// difference the prompt is written around. `InProgress::or_stored` makes the
+/// same call for the teammate that already exists.
+fn blank_to_none(value: Option<String>) -> Option<String> {
+    value.filter(|text| !text.trim().is_empty())
 }
 
 /// The two authored fields as the console currently shows them, when it has
@@ -4387,6 +4406,21 @@ agent = "claude"
         assert!(
             persona.chars().count() < 50_000,
             "a persona is cut to what a prompt can carry, not to what was pasted"
+        );
+    }
+
+    /// The Add form sends every box it has, filled in or not. An empty one is
+    /// not an empty mandate — a teammate being added has none *yet*, and the
+    /// two are different things to tell a model.
+    #[test]
+    fn an_untouched_box_on_the_add_form_is_no_field_at_all() {
+        assert_eq!(super::blank_to_none(Some(String::new())), None);
+        assert_eq!(super::blank_to_none(Some("  \n ".to_string())), None);
+        assert_eq!(super::blank_to_none(None), None);
+        assert_eq!(
+            super::blank_to_none(Some("Paid to delivered.".to_string())).as_deref(),
+            Some("Paid to delivered."),
+            "a field the operator actually wrote survives untouched"
         );
     }
 
