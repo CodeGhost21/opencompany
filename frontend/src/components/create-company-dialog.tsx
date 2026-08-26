@@ -32,6 +32,7 @@ import {
   resetReplacementId,
   wasAlreadyArchived,
   wasAmbiguousProvisionOutcome,
+  wasArchiveNetworkAmbiguous,
 } from "@/lib/company-manifest";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -227,6 +228,40 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
           // failure that didn't happen.
           setArchived(true);
           didArchive = true;
+        } else if (wasArchiveNetworkAmbiguous(err)) {
+          // This attempt's own reply may have been lost after the host
+          // already archived the company — the same ambiguity
+          // `wasAlreadyArchived` covers for a later retry's
+          // `company_not_found`, but on a first attempt the code is still
+          // `network_error`. Reconcile with a status lookup instead of
+          // asserting "Nothing was changed", which may be false (issue
+          // #1828 comment 3865803912).
+          try {
+            await client.status(request.company);
+            // Still addressable and live: the archive genuinely did not
+            // take.
+            setError(
+              `Couldn't archive ${request.name}: ${describeProvisionError(err)} Nothing was changed.`,
+            );
+            setBusy(false);
+            return;
+          } catch (lookupErr) {
+            if (wasAlreadyArchived(lookupErr)) {
+              // Gone: this attempt's own archive landed and only its reply
+              // was lost.
+              setArchived(true);
+              didArchive = true;
+            } else {
+              // The reconciliation lookup is itself ambiguous — don't
+              // assert either outcome. Leave `archived` false so a retry
+              // stays possible, rather than closing over an unknown state.
+              setError(
+                `Couldn't confirm whether ${request.name} was archived: ${describeProvisionError(err)} Check the company roster before retrying.`,
+              );
+              setBusy(false);
+              return;
+            }
+          }
         } else {
           // Nothing was created, and the archive did not take — say so
           // plainly and leave the operator where they are to try again.

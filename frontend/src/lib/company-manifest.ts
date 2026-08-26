@@ -263,6 +263,31 @@ export function wasAlreadyArchived(err: unknown): boolean {
 }
 
 /**
+ * Whether a failed archive attempt is ambiguous rather than a definite
+ * refusal — the FIRST-attempt counterpart to {@link wasAlreadyArchived}.
+ *
+ * `wasAlreadyArchived` recognizes a *retry's* `company_not_found` as proof
+ * the earlier attempt's archive already landed. But the earlier attempt
+ * itself throws `network_error`, the same ambiguous code
+ * {@link wasAmbiguousProvisionOutcome} describes for the provisioning leg:
+ * `ApiClient.request` throws it whether the request never reached the host,
+ * or it reached the host, archived the company, and only the *reply* was
+ * lost in transit. Treated as a definite refusal, that first attempt used to
+ * tell the operator "Nothing was changed" — which may be false — and an
+ * operator who trusted that and closed the dialog left the console showing a
+ * company that was in fact already archived, roster and persisted-default
+ * cleanup never run (issue #1828 comment 3865803912).
+ *
+ * The caller reconciles by looking the company up with `client.status`:
+ * still there means the archive genuinely did not take; `company_not_found`
+ * ({@link wasAlreadyArchived}) means this attempt's own archive landed and
+ * only its reply was lost.
+ */
+export function wasArchiveNetworkAmbiguous(err: unknown): boolean {
+  return err instanceof ApiError && err.code === "network_error";
+}
+
+/**
  * Whether a failed provision is worth reconciling against the host before
  * reporting it as a failure.
  *
