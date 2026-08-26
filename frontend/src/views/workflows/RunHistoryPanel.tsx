@@ -81,7 +81,7 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
   running: "Still working through its steps — nothing here is final yet.",
   ok: "Finished, and every report reached its destination.",
   failed:
-    "The run ended in error — usually a step that failed, but sometimes nothing in the graph got the chance to run. Review the error, correct the workflow, and run it again.",
+    "The run ended in error — usually a step that failed and the workflow needs a fix, but sometimes nothing in the graph got the chance to run at all, and the error can be a host restart or a capability that failed to build rather than anything wrong with the workflow. Read the error before assuming the workflow needs correcting.",
   stopped:
     "An operator stopped this run before it finished; the step that was mid-flight normally ran to completion and was recorded — only a step stuck waiting on an outside call is cut off where it was.",
   blocked:
