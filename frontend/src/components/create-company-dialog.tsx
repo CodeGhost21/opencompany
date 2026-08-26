@@ -199,7 +199,17 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
   const submitLabel = isReset ? "Archive & start clean" : "Create company";
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    // Ignore a dismiss request while busy — Escape and the built-in ✕ close
+    // button both fire the same `onOpenChange(false)` as Cancel (already
+    // `disabled={busy}` below), and without this gate they would bypass that
+    // guard: `onClose` clears `request`, this component then renders `null`,
+    // but the in-flight `submit()` keeps running against a dialog the
+    // operator believes they dismissed. On a reset that is the dangerous
+    // half-state made invisible — a late archive-succeeded/create-failed
+    // writes its warning into a hidden dialog, and a late success still calls
+    // `onCreated`, navigating the operator into a company they thought they
+    // had cancelled out of.
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
