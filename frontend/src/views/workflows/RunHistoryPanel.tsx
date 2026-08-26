@@ -140,7 +140,7 @@ function RunStatusLegend() {
       >
         <Info className="size-3.5" aria-hidden="true" />
       </TooltipTrigger>
-      <TooltipContent className="flex max-w-xs flex-col items-start gap-1 text-left">
+      <TooltipContent className="flex max-h-(--available-height) max-w-xs flex-col items-start gap-1 overflow-y-auto text-left">
         <span className="font-medium">What these statuses mean</span>
         {RUN_STATUS_LEGEND.map((term) => (
           <span key={term} className="block">
