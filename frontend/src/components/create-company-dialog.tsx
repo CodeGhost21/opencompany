@@ -134,6 +134,25 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     if (!request) return;
     const trimmedName = name.trim();
     if (!trimmedName || busy) return;
+
+    // Reject a replacement id that is the same one about to be archived.
+    // `resetReplacementId` seeds a fresh default, but the field stays
+    // editable from Advanced, and typing the archived company's own id back
+    // in — a likely move for an operator trying to keep the slug — recreates
+    // the exact collision that default exists to avoid: `RuntimeBuilder::build`
+    // reloads any existing durable record for an id before building over it,
+    // so the "clean" replacement would come back carrying the archived
+    // company's lifecycle, ledger and overlays. Caught before archiving, not
+    // just before provisioning, so a bad id never leaves the operator with
+    // the old company already gone and no way to retry cleanly (codex review
+    // on #1828, PR comment 3861770475).
+    if (request.kind === "reset" && explicitId.trim() === request.company) {
+      setError(
+        `The replacement id can't be ${request.company} — that's the company being archived. Leave the field blank for an auto-generated id, or choose a different one.`,
+      );
+      return;
+    }
+
     setBusy(true);
     setError(null);
 
