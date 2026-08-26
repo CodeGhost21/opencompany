@@ -44,9 +44,25 @@ pub fn install(state: &AppState, handle: &DeferredTracker, env: &dyn EnvSource) 
 
     // The cognition seam the rest of the tree already uses, rather than a second
     // derivation of "which brain is this host on?" beside the code that picks
-    // one. Every company on a host shares its brain mode, so the first
-    // registered runtime answers for all of them; a host with no companies yet
-    // reports the default descriptor, which honestly says `custom`/`unknown`.
+    // one.
+    //
+    // **This is a host-level label, not a per-company one, and the difference is
+    // real.** Inference is configured per company, so `serve --company a
+    // --company b` with one configured and one on the echo fallback gives two
+    // cognition paths and one envelope — the first registered runtime answers
+    // for both. `Envelope::set_cognition` then makes the label the *most
+    // recently observed* rather than the first, which is right for the case it
+    // exists for (a host whose one company is provisioned or rebuilt after
+    // boot) and no more correct than the first for a genuinely mixed host.
+    //
+    // Making it per-company means moving cognition off the envelope's
+    // super-properties and onto `turn_finished` and `turn_metered` themselves,
+    // which changes the payload shape #1739 shipped — an analytics-contract
+    // decision rather than a defect fix, and one `instance_started` (which has
+    // no company) does not fit. Raised on PR #1751 and left for its own change.
+    //
+    // A host with no companies yet reports the default descriptor, which
+    // honestly says `custom`/`unknown` until `observe_cognition` corrects it.
     let cognition = state
         .registry()
         .list()

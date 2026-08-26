@@ -197,7 +197,17 @@ boot line here is a `println!` in the first place.
 | `turn_finished` | `runtime::cycle::CycleRunner::run_bracketed` | The cycle's whole span, including the wait on the per-company serial lock — which is the part an operator experiences as "nothing is happening". |
 | `turn_metered` | `analytics::meter::TrackingUsageMeter`, a decorator over the `UsageMeter` port | Every `metering::record_*` path ends there, on every build. The harness cost hook is richer but `openhuman`-gated, and the cycle-level path deliberately reports zero tokens on that build so spend is not double-counted — so an event at either one is blind on the other half of the fleet. |
 | `instance_started` | `analytics::boot::install` | After companies register **and after the port is bound**: the company count and the cognition path are not known before the first, and a host that never took its address never started in any sense worth counting. |
-| cognition relabel | `Tracker::observe_cognition`, from `server::provision` and `runtime::rebuild` | Boot's answer stops being true in two ways. A hosted host provisioned into an empty registry had no runtime to read and recorded `custom`/`unknown`; and a company that configures inference for the first time is rebuilt in place (issue #290), which moves it from `echo` to `harness`. Most recent observation wins — every company on a host shares its brain mode, so this is one process-wide fact. Events already sent are not revised. |
+| cognition relabel | `Tracker::observe_cognition`, from `server::provision` and `runtime::rebuild` | Boot's answer stops being true in two ways. A hosted host provisioned into an empty registry had no runtime to read and recorded `custom`/`unknown`; and a company that configures inference for the first time is rebuilt in place (issue #290), which moves it from `echo` to `harness`. Most recent observation wins. Events already sent are not revised. |
+
+**Cognition is a host-level label, and on a multi-company host it is
+approximate.** Inference is configured per company, so a host serving two
+companies — one configured, one on the echo fallback — has two cognition paths
+and one envelope, and whichever was observed last answers for both. Making it
+exact means moving cognition off the envelope's super-properties and onto
+`turn_finished` and `turn_metered` themselves, which changes the payload shape
+this document describes and does not fit `instance_started`, which has no
+company. That is an analytics-contract decision rather than a defect, raised in
+review on PR #1751 and left for its own change.
 | flush | `src/bin/opencompany.rs`, after the bound host stops serving | The server has already drained, so a last-moment turn's event still leaves. |
 
 Failure is silent by construction: `Tracker::track` is synchronous and
