@@ -215,14 +215,24 @@ async fn add_grant(
         return Ok(Json(ToolGrantsDto::build(&record)));
     }
 
+    // Already granted from the console: return what stands, and store nothing.
+    //
+    // Re-storing would leave the list identical and stamp a NEW `set_by` and
+    // `at_millis` over it, so a retried `PUT` — a client whose response was lost,
+    // a second admin making sure — would re-attribute the original operator's
+    // grant to whoever asked last. Attribution is the whole reason this override
+    // carries an actor: a capability widening that records the wrong person is
+    // barely better than one that records nobody. The grant happened once, and
+    // the record should say when and by whom.
     let mut added = record
         .overlay_tool_grants
         .as_ref()
         .map(|held| held.added.clone())
         .unwrap_or_default();
-    if !added.contains(&namespace) {
-        added.push(namespace);
+    if added.contains(&namespace) {
+        return Ok(Json(ToolGrantsDto::build(&record)));
     }
+    added.push(namespace);
 
     record.overlay_tool_grants = Some(ToolGrantsOverride {
         added,
@@ -573,15 +583,49 @@ mod tests {
         assert_eq!(body["allow"], json!(["*", "search", "chargebee", "paypal"]));
     }
 
-    /// Granting the same namespace twice is idempotent, not a duplicate entry.
+    /// Granting the same namespace twice is idempotent, not a duplicate entry —
+    /// and the second call does not re-attribute the first.
+    ///
+    /// A retried `PUT` (a lost response, a second admin making sure) must not
+    /// move `setBy`/`setAtMillis` onto whoever asked last. A capability widening
+    /// that records the wrong person is barely better than one that records
+    /// nobody, and the grant happened once.
     #[tokio::test]
-    async fn granting_twice_is_idempotent() {
+    async fn granting_twice_is_idempotent_and_keeps_the_original_attribution() {
         let dir = home();
         let state = state(dir.path()).await;
-        call(&state, "PUT", URI, Some(json!({"namespace": "hosting"}))).await;
-        let (_, body) = call(&state, "PUT", URI, Some(json!({"namespace": "hosting"}))).await;
-        assert_eq!(body["added"], json!(["hosting"]));
+
+        // Seeded rather than granted twice in a row on purpose. Two live calls
+        // share one `now_millis()` at this speed and one signed-in admin, so
+        // comparing their responses would pass whether or not the second call
+        // re-stamped anything — a test that cannot fail. A distinct actor and an
+        // obviously-old timestamp make the re-attribution visible.
+        let store = FsCompanyStore::new(dir.path().to_path_buf());
+        let id = CompanyId::new("acme");
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_tool_grants = Some(ToolGrantsOverride {
+            added: vec!["hosting".to_string()],
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "the-operator-who-actually-granted-it".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        });
+        record.manifest.tools.allow = record.effective_tool_allow();
+        store.save(&record).await.unwrap();
+
+        let (status, body) = call(&state, "PUT", URI, Some(json!({"namespace": "hosting"}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["added"], json!(["hosting"]), "duplicated the entry");
         assert_eq!(body["allow"], json!(["*", "search", "hosting"]));
+        assert_eq!(body["setBy"], "the-operator-who-actually-granted-it");
+        assert_eq!(body["setAtMillis"], 1_700_000_000_000u64);
+
+        // And nothing was written, so the stored record says the same.
+        let after = store.load(&id).await.unwrap().unwrap();
+        let held = after.overlay_tool_grants.expect("still granted");
+        assert_eq!(held.set_by.id, "the-operator-who-actually-granted-it");
+        assert_eq!(held.at_millis, 1_700_000_000_000);
     }
 
     /// A single withdrawal leaves the other console grants alone, and actually

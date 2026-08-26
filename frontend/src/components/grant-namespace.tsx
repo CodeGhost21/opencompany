@@ -76,7 +76,7 @@ export function GrantNamespace({
   company,
   namespace,
   explanation,
-  canManage = true,
+  canManage,
   onGranted,
   testId,
 }: {
@@ -90,8 +90,15 @@ export function GrantNamespace({
    * Whether this operator may widen the company's grants. `false` renders the
    * explanation with no control — telling someone to click a button that will
    * 403 is the same dead end in a new costume.
+   *
+   * **Required, and deliberately not defaulted.** It was `= true` for one
+   * revision, which is the wrong direction for a permission: a caller that had
+   * not yet worked out the viewer's role got an enabled button by omission, and
+   * every write behind it is admin-only (`AdminScopedCompany`). Required means a
+   * new connect surface cannot acquire this control without first answering the
+   * question — the compiler asks on the component's behalf.
    */
-  canManage?: boolean;
+  canManage: boolean;
   /** Re-read the surface's own status, so its badge stops saying "not granted". */
   onGranted: () => void | Promise<void>;
   testId?: string;

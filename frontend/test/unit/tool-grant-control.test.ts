@@ -34,6 +34,11 @@ const HOSTING_UNGRANTED = {
   supportedProviders: ["vercel"],
 };
 
+/** The `/auth/me` answer for a viewer with `role`. */
+function whoami(role: "admin" | "member") {
+  return { id: "u1", email: "a@b.c", role, company: "acme", hasPassword: true };
+}
+
 const GRANTS = {
   allow: ["*", "hosting"],
   manifestAllow: ["*"],
@@ -73,10 +78,14 @@ describe("the connect page's grant control", () => {
     // The status flips on the second read, exactly as the host's would once the
     // grant is stored — so the assertion below is about the view believing the
     // host, not about it optimistically hiding its own warning.
-    const get = vi
-      .fn()
-      .mockResolvedValueOnce(HOSTING_UNGRANTED)
-      .mockResolvedValue({ ...HOSTING_UNGRANTED, granted: true });
+    let statusReads = 0;
+    const get = vi.fn((path: string) => {
+      if (path.endsWith("/auth/me")) return Promise.resolve(whoami("admin"));
+      statusReads += 1;
+      return Promise.resolve(
+        statusReads === 1 ? HOSTING_UNGRANTED : { ...HOSTING_UNGRANTED, granted: true },
+      );
+    });
     const put = vi.fn().mockResolvedValue(GRANTS);
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
@@ -99,7 +108,7 @@ describe("the connect page's grant control", () => {
       namespace: "hosting",
     });
     // And the page re-read its own status rather than assuming.
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(statusReads).toBe(2);
     expect(at("hosting-not-granted")).toBeNull();
     expect(at("hosting-connected")).not.toBeNull();
   });
@@ -108,8 +117,13 @@ describe("the connect page's grant control", () => {
     // A non-admin, or a host that does not offer this namespace. The one thing
     // that must not happen is the warning disappearing: an operator who is told
     // nothing and sees the alert vanish has been told the integration works.
-    const get = vi.fn().mockResolvedValue(HOSTING_UNGRANTED);
-    const put = vi.fn().mockRejectedValue(new Error("admins only"));
+    let statusReads = 0;
+    const get = vi.fn((path: string) => {
+      if (path.endsWith("/auth/me")) return Promise.resolve(whoami("admin"));
+      statusReads += 1;
+      return Promise.resolve(HOSTING_UNGRANTED);
+    });
+    const put = vi.fn().mockRejectedValue(new Error("host said no"));
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       get,
@@ -124,8 +138,58 @@ describe("the connect page's grant control", () => {
     expect(put).toHaveBeenCalledTimes(1);
     // No re-read: there is nothing new to read, and pretending otherwise would
     // make a refusal look like a slow success.
-    expect(get).toHaveBeenCalledTimes(1);
+    expect(statusReads).toBe(1);
     expect(at("hosting-not-granted")).not.toBeNull();
     expect(at("hosting-not-granted-action")).not.toBeNull();
+  });
+
+  it("does not offer a non-admin a control whose write is admin-only", async () => {
+    // The prop behind this defaults CLOSED and is required, so a connect
+    // surface cannot acquire the control by forgetting to ask who is looking.
+    // The explanation still renders — a member needs to know why the
+    // integration reaches nobody, and who can change it.
+    const get = vi.fn((path: string) =>
+      path.endsWith("/auth/me")
+        ? Promise.resolve(whoami("member"))
+        : Promise.resolve(HOSTING_UNGRANTED),
+    );
+    const put = vi.fn();
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get,
+      put,
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(createElement(HostingView, { client, company: "acme" }));
+    });
+
+    expect(at("hosting-not-granted")).not.toBeNull();
+    expect(at("hosting-not-granted-action")).toBeNull();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("treats a host with no user plane as a non-admin", async () => {
+    // `/auth/me` 404s on a host that ships no user plane, and the resolution
+    // must fail closed rather than throwing or defaulting open — an unresolved
+    // role is not an admin.
+    const get = vi.fn((path: string) =>
+      path.endsWith("/auth/me")
+        ? Promise.reject(new Error("no user plane"))
+        : Promise.resolve(HOSTING_UNGRANTED),
+    );
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get,
+      put: vi.fn(),
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(createElement(HostingView, { client, company: "acme" }));
+    });
+
+    expect(at("hosting-view")).not.toBeNull();
+    expect(at("hosting-not-granted")).not.toBeNull();
+    expect(at("hosting-not-granted-action")).toBeNull();
   });
 });

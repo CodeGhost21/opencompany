@@ -28,12 +28,23 @@ const HOSTING_OK = {
   supportedProviders: ["vercel"],
 };
 
-/** A client answering the hosting read with a value or a rejection. */
-function clientWith(answer: unknown): OpenCompanyClient {
+/**
+ * A client answering the hosting read with a value or a rejection.
+ *
+ * `/auth/me` is answered separately, and as an admin by default: since #1796
+ * this page resolves the viewer's role to decide whether to offer the grant
+ * control, and a client that rejected every `GET` alike would leave every test
+ * here asserting a non-admin's view by accident. `role` makes that explicit.
+ */
+function clientWith(answer: unknown, role: "admin" | "member" = "admin"): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
-    get: () =>
-      answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer ?? HOSTING_OK),
+    get: (path: string) =>
+      path.endsWith("/auth/me")
+        ? Promise.resolve({ id: "u1", email: "a@b.c", role, company: "acme", hasPassword: true })
+        : answer instanceof Error
+          ? Promise.reject(answer)
+          : Promise.resolve(answer ?? HOSTING_OK),
   } as unknown as OpenCompanyClient;
 }
 
@@ -101,6 +112,18 @@ describe("HostingView status surfaces", () => {
     expect(at("hosting-not-granted")?.textContent).not.toContain(
       "cannot be fixed from this page",
     );
+  });
+
+  it("offers a non-admin the explanation and no control", async () => {
+    // Every write behind the control is admin-only, so a member gets told what
+    // is wrong and who can fix it. Offering the button anyway would trade the
+    // old dead end for a button whose only possible outcome is a 403 toast.
+    await show(clientWith({ ...HOSTING_OK, granted: false }, "member"));
+
+    const warning = at("hosting-not-granted");
+    expect(warning).not.toBeNull();
+    expect(warning?.textContent).toContain("An admin has to grant it");
+    expect(at("hosting-not-granted-action")).toBeNull();
   });
 
   it("says the host lacks the tools, and says only that", async () => {

@@ -8,6 +8,7 @@ import {
   saveHosting,
   type HostingStatus,
 } from "@/api/hosting";
+import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { GrantNamespace } from "@/components/grant-namespace";
@@ -73,6 +74,15 @@ export function HostingView({ client, company }: Props) {
   const [status, setStatus] = useState<HostingStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Whether this viewer may widen the company's tool grants (issue #1796).
+  //
+  // Resolved the way `OAuthView` resolves the same question, and defaulted
+  // CLOSED for the same reason: every write behind the control is admin-only,
+  // so an unresolved role must not render an enabled button. Courtesy, not
+  // enforcement — the host refuses a non-admin's `PUT` whatever this says. What
+  // it prevents is offering an operator an action whose only possible outcome
+  // is a 403 toast, which on this page would replace one dead end with another.
+  const [canManage, setCanManage] = useState(false);
 
   const [apiKey, setApiKey] = useState("");
   const [team, setTeam] = useState("");
@@ -93,6 +103,22 @@ export function HostingView({ client, company }: Props) {
     } catch (err) {
       setLoadError(reason(err));
     }
+  }, [client, company]);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
   }, [client, company]);
 
   useEffect(() => {
@@ -192,6 +218,7 @@ export function HostingView({ client, company }: Props) {
             client={client}
             company={company}
             namespace="hosting"
+            canManage={canManage}
             explanation="No teammate will get the deployment tools even once a key is saved."
             onGranted={load}
             testId="hosting-not-granted"
