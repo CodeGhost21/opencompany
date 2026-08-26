@@ -331,6 +331,9 @@ impl Brain for HostedMedullaBrain {
         Cognition {
             path: "hosted",
             provider: MEDULLA_PROVIDER,
+            // The model is chosen upstream and never named on the `orch:usage`
+            // frame, so this process cannot honestly report one (issue #1749).
+            model: None,
             metering: UsageMetering::PerCycle,
         }
     }

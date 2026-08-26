@@ -1244,6 +1244,7 @@ async fn planning_spend_lands_on_the_company_and_never_on_the_assignee() {
             cost_usd: 0.03,
         },
         "managed",
+        None,
         runtime.id(),
         runtime.store().as_ref(),
         runtime.usage().as_ref(),

@@ -834,6 +834,7 @@ impl<'a> CycleRunner<'a> {
             usage,
             crate::metering::UNATTRIBUTED_AGENT,
             cognition.provider,
+            cognition.model,
             company,
             self.rt.store.as_ref(),
             self.rt.usage().as_ref(),
@@ -3107,6 +3108,7 @@ mod test {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::ChannelAdapter;
     use crate::ports::brain::Brain;
+    use crate::ports::types::SecretValue;
     use crate::ports::types::{
         ActorKind, ChunkAddr, ChunkHit, ChunkMeta, CompressedTrace, ContextChunk, CycleResult,
         EffectGroup, EventSeq, EvictionPolicy, ReplyTo, TaskResult, TokenUsage,
@@ -5139,6 +5141,7 @@ mod test {
             crate::ports::Cognition {
                 path: "test",
                 provider: "medulla",
+                model: None,
                 metering: self.metering,
             }
         }
@@ -5510,7 +5513,7 @@ mod test {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "user".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: from_email.into(),
         }

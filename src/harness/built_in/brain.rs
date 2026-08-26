@@ -2732,6 +2732,10 @@ impl Brain for HarnessBrain {
         Cognition {
             path: crate::ports::brain::HARNESS_PATH,
             provider: "per-turn",
+            // Named per turn, beside the provider slug, for the same reason:
+            // this path meters itself and reports zero cycle usage, so a model
+            // named here would never reach a sample (issue #1749).
+            model: None,
             metering: UsageMetering::PerTurn,
         }
     }

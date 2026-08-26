@@ -215,6 +215,14 @@ impl TaskPlanner {
         self.model.telemetry_provider_id()
     }
 
+    /// The model this pass's usage is metered against, read live off the
+    /// provider and already folded onto the closed vocabulary (issue #1749).
+    /// `None` before the provider has issued a turn, or when it cannot name a
+    /// model.
+    pub fn model_slug(&self) -> Option<crate::metering::ModelSlug> {
+        self.model.telemetry_model()
+    }
+
     /// Claims `task_id` for a pass, or returns `None` if one is already in
     /// flight for it.
     ///
@@ -486,6 +494,7 @@ async fn record_usage(
     crate::metering::record_planning_usage(
         usage,
         &planner.provider_slug(),
+        planner.model_slug(),
         runtime.id(),
         runtime.store().as_ref(),
         runtime.usage().as_ref(),
