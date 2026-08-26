@@ -367,11 +367,17 @@ the body entirely (not `null`) until the funnel has latched. `nameConfirmed`
 mirrors the record's own field; `workflowRunSucceeded` is true once the
 journal shows one real (non-dry) run reach the `Ok` verdict, the same ladder
 the console's Steps panel uses; `integrationConnected` requires a live Composio
-connection **and** an explicit `composio` grant in `[tools].allow` — except
-when the manifest can never grant that namespace at all (several bundled
-companies drop `composio` on purpose, e.g. `agentic_math_lab`,
-`agentic_product_team`), in which case the step is waived rather than
-permanently blocking activation for that company. Once every step has read
+connection **and** an explicit `composio` grant in `[tools].allow` — except in
+two cases, where the step is waived rather than permanently blocking
+activation. First, when the manifest can never grant that namespace at all
+(several bundled companies drop `composio` on purpose, e.g. `agentic_math_lab`,
+`agentic_product_team`). Second, when the running binary was built without the
+`composio` feature — including the documented default `cargo run --bin
+opencompany -- serve` — because that build has no client with which to hold a
+connection, so no company running under it could ever satisfy the step. In
+that build the step reads true even for a manifest that does grant `composio`
+and holds no connection; a build that compiles the feature still requires a
+live one. Once every step has read
 true simultaneously, the answer **latches**: `isActivated` stays `true`
 forever after even if a live signal later regresses (a connection gets
 disconnected), because the question is "did this operator ever clear
