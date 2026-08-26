@@ -266,6 +266,116 @@ silent fallback either.
 
 ---
 
+## How long a turn may take
+
+There is exactly **one whole-turn** time bound anywhere on the path from a
+workflow run to a model call, and it does not live in this repo. Individual
+**tool** calls can carry a second, tighter bound of their own — see below.
+
+```
+workflow run ............................. no time bound
+  └─ tinyflows node execution ............ no time bound (duration observed only)
+      └─ agent capability → agent.turn() . no time bound
+          └─ tinyagents run "agent_turn" . the per-turn wall-clock ceiling
+              └─ each model call ......... bounded by (ceiling − run elapsed)
+              └─ each tool call .......... the lesser of that and the tool's own
+                  └─ sub-agent turn ...... inherits the parent's remainder
+```
+
+The ceiling is the vendored harness policy's `max_wall_clock_ms`, set in
+`vendor/openhuman/src/openhuman/agent/tinyagents/mod.rs::run_policy_for`. It
+defaults to ten minutes, is overridden with
+**`OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`** (whole seconds; `0` removes it
+entirely), and is process-global — not per node, not per workflow, and not
+settable from a manifest or from the console.
+
+**It bounds the whole turn, from the moment the harness run starts.** Remaining
+budget is `ceiling − Instant::elapsed()`, so model time, tool time, sub-agent
+time and retry backoff all count against it; each individual call is then given
+whatever is left. It is deliberately generous: a hang backstop, not a UX
+deadline.
+
+### Why the harness's own message misleads, and what this crate says instead
+
+When the ceiling fires, the vendored leaf reads:
+
+```
+model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)
+```
+
+Every word of that is true and it is almost impossible to read correctly. The
+number is the budget that **remained** when that call was issued — not the
+call's duration, and not the ceiling. A turn that ran the full ten minutes
+therefore reports a figure ten times smaller than the limit it hit, and reads
+as though one slow model call were at fault. Issue #1680 was filed on exactly
+that reading: a node that had already spent about nine minutes before its last
+model call started was diagnosed as a 56-second budget being too tight.
+
+`CompanyAgent::classify_turn` (`src/harness/built_in/mod.rs`) therefore times
+each turn attempt and rewrites this one class of error, naming what the turn
+actually spent, saying that the harness's figure is a remainder, and naming the
+environment variable that moves the ceiling. The underlying error is appended
+verbatim — it is the only thing that says which call was in flight.
+
+Two constraints on that message are deliberate:
+
+- **It does not restate the default value.** `DEFAULT_AGENT_TURN_TIMEOUT_SECS`
+  is private to the vendored crate and cannot be read from here; a copy of
+  `600` would go stale on the next vendored bump without anything failing. The
+  elapsed time is measured and the knob's *name* is a fact independent of its
+  value, so both can be stated honestly while the number cannot.
+- **A ceiling hit stays a hard failure.** It is not retried — the one-shot
+  empty-reply retry would turn a ten-minute failure into a twenty-minute one —
+  and it fails the node rather than degrading to a partial result.
+
+### The per-tool bounds this crate *does* set
+
+Several tools bound themselves, more tightly than the ceiling and independently
+of it, so a turn can lose a call without being anywhere near its own limit:
+
+- **The built-in web tools** — `web_fetch`, `http_request` and `curl`, all three
+  wired in `web_tools` (`src/harness/built_in/toolbelt.rs`) from
+  `HttpRequestConfig::default().timeout_secs`, which is **30 seconds**. One
+  source deliberately: `curl` takes it too rather than its own schema default of
+  120, and `web_fetch` is constructed with `None` so it falls back to the same
+  number. This is the bound an operator is most likely to meet and least likely
+  to look for, because nothing in the tool's own output names the ceiling.
+- **BYO web search** — `TIMEOUT_SECS` in `src/harness/built_in/search_byo.rs`,
+  thirty seconds, passed to each provider tool and applied as the HTTP request
+  timeout on its client. Deliberately shorter than a turn: a search that has not
+  answered in half a minute has already cost more than the answer is worth. Only
+  the bring-your-own providers; the managed tool keeps upstream's own policy.
+- **MCP** — each server declaration's `timeout_secs`, forwarded verbatim to the
+  transport by `server_config` in `src/harness/built_in/mcp.rs`. Per server, set
+  in the company's MCP config, and the one bound on this page an operator can
+  actually edit.
+
+None of them ends the turn. A call that trips its own bound comes back as a
+failed tool result, which the agent may retry or route around; only the ceiling
+above fails the node. The ceiling still counts every second they spent — which
+is the reading #1680 turned on, since a turn can burn most of its budget on tool
+calls that each looked fine.
+
+So a timeout an operator sees is one of two different facts, and the message is
+what tells them apart: a per-tool bound names the tool (`tool \`curl\` timed out
+after 30000 ms`), while the ceiling names the run and the *remaining* budget,
+which is what this crate rewrites.
+
+### What this crate does not bound
+
+OpenCompany imposes no run-level or node-level deadline of its own. The two
+`Duration` constants in `src/workflows/runner.rs` are a progress-collector join
+(`PROGRESS_DRAIN_TIMEOUT`) and a grace period that arms only after an explicit
+operator cancel (`CANCEL_HARD_ABORT_GRACE`); neither fires on its own. The
+per-node `elapsed_ms` on `WorkflowRunNodeRow` is recorded **after** the fact and
+compared to nothing.
+
+So a node whose agent turn walks off the ceiling is the only way a workflow run
+stops on time alone, and the honest reading of that failure is "this step asked
+for more than one turn can do", not "the model was slow".
+
+---
+
 ## OpenHuman's own library front door
 
 Upstream now exposes an agent turn as a **library call**. `openhuman_core`
