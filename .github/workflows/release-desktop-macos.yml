@@ -79,6 +79,32 @@ jobs:
           echo "::error::create_release=true requires sign=true — an unsigned DMG must not be attached to a GitHub Release. Re-dispatch with sign=true (and the APPLE_* secrets set)." >&2
           exit 1
 
+      # `softprops/action-gh-release` CREATES a missing Release, and with
+      # `fail-fast: false` both matrix legs can reach that create at once — the
+      # loser gets a 422, so the run fails AFTER two ~60-minute builds and
+      # publishes only one architecture. Requiring the Release to already exist
+      # removes the race outright instead of relying on operators to dispatch
+      # `release.yml` first (raised in review on #1813).
+      #
+      # `max-parallel: 1` would also close it, by serialising two long builds
+      # that have no reason to be sequential. This costs seconds instead.
+      #
+      # `tag` reaches the script through the environment, never interpolated
+      # into the shell: it is operator-supplied `workflow_dispatch` input, and
+      # `${{ }}` splicing it into `run:` would be a command-injection seam in a
+      # job that holds `contents: write`.
+      - name: Require an existing Release to attach to
+        if: inputs.create_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "::error::create_release=true but no GitHub Release exists for tag '$TAG'. Run the \`Release\` workflow (release.yml) for that tag first — it owns \`generate_release_notes\` — then re-dispatch this workflow to attach the DMGs." >&2
+            exit 1
+          fi
+
       - name: Validate signing prerequisites
         if: inputs.sign
         env:
@@ -284,13 +310,11 @@ jobs:
       # so the Release ends up carrying both DMGs. They upload as separate
       # assets and do not overwrite each other.
       #
-      # RUN `release.yml` FOR THE TAG FIRST. This action creates the Release
-      # when one does not exist, and with `fail-fast: false` the two legs can
-      # arrive at that create concurrently — a race whose loser gets a 422. The
-      # intended order makes it moot: `release.yml` cuts the Release (it owns
-      # `generate_release_notes`), and this workflow only ever attaches to one
-      # that is already there. `max-parallel: 1` would also close it, at the
-      # cost of doubling the wall-clock of every release.
+      # This action would CREATE the Release if none existed, which both legs
+      # could race. The `guard` job proves one already exists whenever
+      # `create_release` is true, so by here this step only ever ATTACHES —
+      # and two concurrent attaches of differently-named assets do not race.
+      # `release.yml` is what cuts the Release; it owns `generate_release_notes`.
       - name: Attach signed DMG to release
         if: inputs.create_release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
