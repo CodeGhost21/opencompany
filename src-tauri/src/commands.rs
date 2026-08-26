@@ -931,8 +931,7 @@ mod adopt_session_tests {
     async fn an_insecure_host_is_refused_before_anything_is_stored() {
         let proxy = registry_with("insecure-1", "http://192.168.1.20:8080").await;
 
-        let result =
-            adopt_session(&proxy, "insecure-1".to_string(), "acme.tok".to_string()).await;
+        let result = adopt_session(&proxy, "insecure-1".to_string(), "acme.tok".to_string()).await;
 
         let error = result.expect_err("a credential must not ride plain HTTP off-machine");
         assert!(error.contains("not encrypted"), "{error}");
