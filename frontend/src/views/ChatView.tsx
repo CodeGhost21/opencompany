@@ -303,6 +303,15 @@ interface Props {
    * one is often to open the Approvals page and come back.
    */
   failedApprovals?: Record<string, string>;
+  /**
+   * The coarse "near your credit limit" warning (issue #1846), off the live
+   * `budget_proximity` frame. Owned by the shell — it can fire mid-turn on any
+   * channel, and the shell is what outlives a channel switch. `null`/absent
+   * renders no banner.
+   */
+  budgetProximity?: { message: string; atMillis: number } | null;
+  /** Clears the banner above — the shell's own state, this view only asks. */
+  onDismissBudgetProximity?: () => void;
 }
 
 const FIRST_TEAM_BRIEF =
@@ -355,6 +364,8 @@ export function ChatView({
   decidingApprovals,
   decidedApprovals,
   failedApprovals,
+  budgetProximity,
+  onDismissBudgetProximity,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -411,6 +422,11 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
+  /** Issue #1846: which teammate's budget-pause redeem is in flight, if any —
+   * so only that notice's button shows a busy state. */
+  const [redeemingBudgetPauseAgent, setRedeemingBudgetPauseAgent] = useState<string | null>(
+    null,
+  );
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
@@ -1538,6 +1554,38 @@ export function ChatView({
   }
 
   /**
+   * The Add-Credits CTA (issue #1846): redeems the parked marker and
+   * re-dispatches the original message. The redeemed turn's own reply arrives
+   * over the SSE feed like any other, so there is nothing to inject here on
+   * success — only the busy state and a failure toast.
+   *
+   * A 404 means the marker is already gone: redeemed from another tab,
+   * expired with the process, or already handled. Read as a (delayed) success
+   * rather than an error — the operator's intent ("get this moving again") is
+   * either already satisfied or nothing this click can fix by retrying.
+   */
+  async function redeemBudgetPause(agentId: string) {
+    if (redeemingBudgetPauseAgent) return;
+    setRedeemingBudgetPauseAgent(agentId);
+    try {
+      await client.redeemBudgetPause(agentId, company);
+      toast.success("Resending the stalled message.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        toast("Nothing to resend — that pause was already handled.");
+      } else {
+        toast.error(
+          error instanceof Error && error.message
+            ? error.message
+            : "Couldn't resend — try again in a moment.",
+        );
+      }
+    } finally {
+      setRedeemingBudgetPauseAgent(null);
+    }
+  }
+
+  /**
    * Give a teammate an inbox, or take it away, on the host — keyed by the
    * roster **agent id**, which is the `InboxStore` key the Inbox page reads and
    * the ingest webhook files mail under. Nothing is persisted client-side: if
@@ -1856,7 +1904,27 @@ export function ChatView({
               decidingApprovals={decidingApprovals}
               failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}
+              onRedeemBudgetPause={(agentId) => void redeemBudgetPause(agentId)}
+              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
             />
+            {budgetProximity && (
+              <p
+                role="status"
+                className="flex shrink-0 items-center gap-1.5 border-t border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0 flex-1">{budgetProximity.message}</span>
+                {onDismissBudgetProximity && (
+                  <button
+                    type="button"
+                    onClick={onDismissBudgetProximity}
+                    className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-amber-500/15"
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </p>
+            )}
             {consoleOnlyMember && (
               <p
                 role="status"
