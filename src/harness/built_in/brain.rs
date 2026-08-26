@@ -946,6 +946,35 @@ impl HarnessBrain {
                     // A dispatched task discards its steps — the note is text-only.
                     match outcome {
                         Ok(outcome) => {
+                            // Issue #1846 review (Codex #3864988168): a budget
+                            // pause is a terminal state, exactly like a spend
+                            // halt or an iteration-cap pause — the model call
+                            // itself failed, so `outcome.reply` is not a
+                            // completed answer, it is the placeholder/notice
+                            // text `classify_turn` substitutes (mirrors the
+                            // operator-chat path's own
+                            // `BUDGET_PAUSED_PLACEHOLDER_REPLY` treatment
+                            // below). Settling this as `Completed` let a
+                            // background dispatch's exhausted-budget failure
+                            // read on the board as a finished, reviewable
+                            // result — the same asymmetry this issue's
+                            // headline fix closes for the top-level
+                            // orchestrator's own call, just on the dispatched-
+                            // card path instead.
+                            //
+                            // Checked, and returned on, BEFORE the delegation
+                            // drain: per `classify_turn`, the budget-paused arm
+                            // only fires when the model call itself errored,
+                            // which cannot also have queued a hand-off on the
+                            // same attempt — so there is nothing below worth
+                            // draining, and doing so unconditionally would risk
+                            // running a stale hand-off from an earlier retry
+                            // still sitting in the queue.
+                            if let Some(pause) = &outcome.budget_paused {
+                                let result = budget_pause_notice(pause);
+                                settle(&mut card, TaskRunEnd::Paused, &responder, &result);
+                                break (TaskRunEnd::Paused, result);
+                            }
                             // Issue #204: the turn may have DELEGATED rather
                             // than done the work. The dispatched responder is
                             // the orchestrator, which carries `delegate_to_desk`
@@ -981,6 +1010,14 @@ impl HarnessBrain {
                                 // its steps and its spend belong to the card's
                                 // run, not to nothing (#242).
                                 .for_run(sink.clone())
+                                // Issue #1846 review (Codex #3864988176): the
+                                // card's own (possibly redirect-augmented)
+                                // instruction — the closest thing a dispatched
+                                // task has to "the operator's own words" — so a
+                                // delegate's budget-pause marker re-parks with
+                                // the brief this attempt is actually running,
+                                // not the hand-off instruction the model wrote.
+                                .reissue_message(instruction.clone())
                                 .handle_task_delegations(&mut card, &responder)
                                 .await
                             {
@@ -2979,6 +3016,11 @@ impl HarnessBrain {
                         // Who else this message named (issue: mentions). Context
                         // for the turn, never a second dispatch.
                         .also_mentioned(also_mentioned)
+                        // Issue #1846 review (Codex #3864988176): the operator's
+                        // own words, so a delegate's budget-pause marker re-parks
+                        // with what the operator actually asked for rather than
+                        // the hand-off instruction the model wrote.
+                        .reissue_message(composed.clone())
                         .handle_operator_message(&responder, &composed, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
@@ -3309,7 +3351,7 @@ mod tests {
     use crate::ports::brain::CycleHost;
     // Issue #301: every lifecycle return now lands in To-do (the `backlog` pool
     // is gone), so these assertions read the const rather than a literal.
-    use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_TODO};
+    use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO};
     use crate::ports::types::{
         ApprovalId, CompanyId, ContextOp, ContextOpResult, Effect, EffectDisposition, OverlayAgent,
         ToolCall, ToolResult,
@@ -3667,6 +3709,143 @@ description = "Builds it."
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
             tasks,
         )
+    }
+
+    /// A model whose every call fails with the exact wire shape
+    /// `is_top_level_budget_exhausted` recognises (issue #1846 review, Codex
+    /// #3864988168) — the same body `a_top_level_budget_exhaustion_pauses_
+    /// gracefully_and_parks_a_reissue_marker` in `mod.rs` scripts, reused here
+    /// to prove the DISPATCHED-CARD path settles on the pause rather than
+    /// completing.
+    struct BudgetExhaustedProvider;
+
+    #[async_trait]
+    impl ChatModel<()> for BudgetExhaustedProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
+            Err(tinyagents::TinyAgentsError::Model(
+                "USER_INSUFFICIENT_CREDITS: insufficient budget for this account — add credits \
+                 to continue"
+                    .to_string(),
+            ))
+        }
+    }
+
+    impl HarnessModel for BudgetExhaustedProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "scripted".to_string()
+        }
+    }
+
+    /// As [`brain_with_tasks`], but every model call fails with a
+    /// budget-exhausted body (issue #1846 review, Codex #3864988168) —
+    /// otherwise byte-identical, so the only variable a test built on this
+    /// exercises is how the dispatch path reacts to that one failure shape.
+    fn brain_with_tasks_and_budget_exhausted_provider(
+        dir: &std::path::Path,
+    ) -> (HarnessBrain, Arc<FsOps>) {
+        let tasks = Arc::new(FsOps::new(dir));
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(BudgetExhaustedProvider),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: Some(Arc::new(FsOps::new(dir))),
+            workspace_root: dir.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: Some(tasks.clone()),
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
+        };
+        (
+            HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
+            tasks,
+        )
+    }
+
+    /// **The regression.** Issue #1846 review (Codex #3864988168): `run_task`
+    /// never inspected `outcome.budget_paused` before this fix — a dispatched
+    /// card whose model call ran out of credits fell straight into the
+    /// `None => { ... None => settle(Completed) }` arm, since a budget pause
+    /// carries an `Ok(TurnOutcome)` with no delegation queued, and landed in
+    /// `in_review` looking like a finished, reviewable result instead of the
+    /// graceful pause the operator-chat path already gave the same failure.
+    #[tokio::test]
+    async fn a_dispatched_tasks_budget_exhaustion_pauses_rather_than_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks_and_budget_exhausted_provider(dir.path());
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(&company, &card("t-1", "engineer"))
+            .await
+            .expect("seed");
+        // Driven directly, not through `run_cycle`, so the roster has to be
+        // built explicitly — see
+        // `dispatched_card_with_an_origin_stops_in_review_and_still_posts_back`.
+        brain
+            .pool
+            .ensure(&brain.record(), &brain.deps)
+            .await
+            .expect("roster");
+
+        brain.run_task("t-1", None).await.expect("run");
+
+        let settled = only_card(&tasks).await;
+        assert_eq!(
+            settled.column, COLUMN_PAUSED,
+            "a budget-exhausted model call is a graceful pause, not a completed result — \
+             it must not read on the board as a finished, reviewable card"
+        );
+        let note = settled.note.expect("note");
+        assert!(
+            note.contains("add credits") || note.contains("Add credits"),
+            "the note must carry the actionable ask a genuine budget pause gives, not just \
+             an opaque dispatch failure: {note}"
+        );
     }
 
     /// As [`brain_with_tasks`], but the roster also carries an `eng` desk led by
