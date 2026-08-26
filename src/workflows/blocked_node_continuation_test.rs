@@ -35,18 +35,24 @@
 //! adds none; and a node blocked on two calls adds one, only after the second
 //! decision. Two blocked runs never continue each other.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 use crate::company::{CompanyManifest, parse_workflow};
 use crate::harness::HarnessPool;
 use crate::harness::policy::ApprovalRequestQueue;
-use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyId, CompanyRecord, Verdict};
-use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
+use crate::ports::types::{
+    Actor, ActorKind, ApprovalId, CompanyId, CompanyRecord, CompanySummary, LedgerEntry, Verdict,
+};
+use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::RuntimeBuilder;
+use crate::runtime::grants::GrantScope;
 use crate::runtime::workflow_resume::workflow_node_turn_key;
+use crate::store::FsCompanyStore;
 
 use super::gated_tool_turn_test::{Turn, deps, spawn_script_recording};
 
@@ -218,6 +224,105 @@ async fn runtime(
     });
     rt.set_workflow_runner(runner.clone());
     (Arc::new(rt), runner)
+}
+
+/// A [`CompanyStore`] that suspends its `load` calls on a gate the test
+/// controls, wrapping the real filesystem store so every other call — and
+/// every `load` before the gate is armed — behaves exactly as it always did.
+///
+/// `spawn_blocked_node_continuation` awaits `runtime.store().load(...)`
+/// before its synchronous run-admission step, and that is the one genuine
+/// suspension point between "`resume_blocked_agent_node` has committed to
+/// continuing" and the run actually being registered — everything after it
+/// (the graph run itself) is handed to a task `WorkflowSpawn::spawn` does not
+/// await, so nothing past this point is observably synchronous with the
+/// caller. Holding this one open is therefore the only way to inspect state
+/// from inside that window at all, and `reached` makes stopping there
+/// deterministic rather than a hope that the test task and the load race the
+/// way the test wants.
+struct GatedStore {
+    inner: FsCompanyStore,
+    armed: AtomicBool,
+    reached: Notify,
+    release: Notify,
+}
+
+impl GatedStore {
+    fn new(home: &std::path::Path) -> Self {
+        Self {
+            inner: FsCompanyStore::new(home.to_path_buf()),
+            armed: AtomicBool::new(false),
+            reached: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl CompanyStore for GatedStore {
+    async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+        if self.armed.load(Ordering::SeqCst) {
+            self.reached.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.load(id).await
+    }
+
+    async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+        self.inner.save(record).await
+    }
+
+    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+        self.inner.list().await
+    }
+
+    async fn append_ledger(&self, id: &CompanyId, entry: LedgerEntry) -> crate::Result<()> {
+        self.inner.append_ledger(id, entry).await
+    }
+}
+
+/// [`runtime`]'s twin, wired identically except the store is a [`GatedStore`]
+/// the caller can later arm to freeze a resolve mid-continuation.
+async fn runtime_with_gated_store(
+    home: &std::path::Path,
+    turns: Vec<Turn>,
+) -> (
+    Arc<crate::company::runtime::CompanyRuntime>,
+    Arc<GatedStore>,
+    Arc<RecordingRunner>,
+) {
+    let store = Arc::new(GatedStore::new(home));
+    let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_seed_dir(home.to_path_buf())
+        .with_store(store.clone())
+        .build()
+        .await
+        .expect("runtime builds");
+
+    let (base_url, _script) = spawn_script_recording(turns).await;
+    let (mut deps, _unused) = deps(base_url, home);
+    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
+    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
+    delivery.parking = Some(super::delivery::DeliveryParking {
+        approvals: rt.approvals.clone(),
+        journal: rt.journal().clone(),
+        continuations: rt.continuations.clone(),
+        gates: rt.workflow_gates().clone(),
+        blocked_nodes: rt.blocked_nodes().clone(),
+    });
+
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record(), &deps).await.expect("roster builds");
+    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+        pool,
+        Arc::new(deps.clone()),
+    ));
+    let runner = Arc::new(RecordingRunner {
+        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
+        started: Mutex::new(Vec::new()),
+    });
+    rt.set_workflow_runner(runner.clone());
+    (Arc::new(rt), store, runner)
 }
 
 /// Starts the graph through the runtime's own runner — the console run path — and
@@ -626,5 +731,265 @@ async fn two_blocked_runs_do_not_cross_continue() {
         cards_for(&rt, &run_b).len(),
         1,
         "run B's card is untouched — no cross-continuation"
+    );
+}
+
+/// Issue #1816 (Stage 3): a restart landing between the durable approval bank
+/// (`record_blocked_node_approved`) and the in-memory decision that would
+/// have released the block (`ContinuationQueue::decide`) must not strand the
+/// run.
+///
+/// The approval here is the node's only (and therefore last) decision, so on
+/// `main` a boot rehydrates the stash marked approved but `parked_turns()` no
+/// longer names this turn at all — it already resolved before the crash — so
+/// nothing scans for an approved, no-longer-waited-on stash, and the run sits
+/// stranded forever: not a future decision away, because there is no future
+/// decision coming.
+///
+/// The crash is reproduced by doing exactly what `resolve_approval` does up
+/// to the point this issue is about — durably settling the approval, then
+/// durably banking it — and then aborting before the in-memory decide, rather
+/// than literally racing a process exit. `reconcile_stranded_blocked_nodes`
+/// is called directly (the method the boot builder calls once, at the end of
+/// every cold boot) so the assertion is on its exact logic without depending
+/// on this fixture's own workflow-runner wiring order.
+#[tokio::test]
+async fn a_restart_after_the_last_approval_banks_but_before_release_still_continues_the_run() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1, "the cold run parks exactly one card");
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // Durably settle the approval — removes it from `parked`, appends
+    // `ApprovalResolved` — exactly as `resolve_approval` does, then abort the
+    // detached follow-up before it can run `continue_turn` at all.
+    let (_, follow_up) = rt
+        .resolve_approval_spawned(&cards[0], Verdict::Approve, operator(), GrantScope::Once)
+        .await
+        .expect("the verdict settles durably");
+    follow_up.abort();
+    let _ = follow_up.await;
+
+    // The bank `continue_turn` would have written next — both halves, exactly
+    // as `blocked_nodes.mark_approved` + `journal.record_blocked_node_approved`
+    // are called together there — done by hand, matching precisely what a
+    // crash immediately after that awaited durable append succeeds would
+    // leave behind: the in-memory flag set (nothing rebuilds this from the
+    // durable record until a boot rearms it) and the durable record written.
+    rt.blocked_nodes().mark_approved(&turn);
+    rt.journal()
+        .record_blocked_node_approved(&turn)
+        .await
+        .expect("the durable bank succeeds");
+
+    assert_eq!(
+        runner.started(),
+        1,
+        "precondition: the crash lands before any continuation runs"
+    );
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "precondition: the stash is still live — release never ran"
+    );
+    assert!(
+        rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "precondition: the approval is durably banked"
+    );
+    assert!(
+        rt.journal().parked_turns().iter().all(|t| t != &turn),
+        "precondition: the approval is already durably resolved, so a boot \
+         rearm would find nothing left parked for this turn"
+    );
+
+    // On `main` nothing drives this: the boot builder rearms `blocked_nodes`
+    // (approved) and `continuations` (nothing outstanding for this turn,
+    // since nothing is parked for it), and no future decision is coming to
+    // trigger `resume_blocked_agent_node`. This is the reconciliation this
+    // issue adds, run exactly as the boot builder runs it once per cold boot.
+    rt.reconcile_stranded_blocked_nodes().await;
+
+    assert_eq!(
+        runner.started(),
+        2,
+        "the stranded approval is resumed exactly once, without waiting for a \
+         decision that will never come"
+    );
+    assert_eq!(
+        all_blocked_cards(&rt),
+        0,
+        "the continuation redeemed the grant and did not re-park"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "the stash is retired once the continuation actually runs"
+    );
+}
+
+/// A node still genuinely waiting on a sibling decision must not be resumed
+/// by reconciliation just because one of its two calls is durably approved —
+/// only a turn with nothing left parked is stranded; this one is mid-turn.
+#[tokio::test]
+async fn reconciliation_does_not_fire_early_on_a_node_still_awaiting_a_sibling_decision() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo one" }),
+            },
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo two" }),
+            },
+            Turn::Say("Both were refused, so I stopped."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 2, "the node parked two cards under one batch");
+
+    // Approve the first of two — durably banked, but the second call is still
+    // parked, so this turn is genuinely mid-block, not stranded.
+    resolve_and_settle(&rt, &cards[0], Verdict::Approve).await;
+    assert_eq!(runner.started(), 1, "one of two decisions releases nothing");
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+    assert!(
+        rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "the first approval is durably banked"
+    );
+    assert!(
+        rt.journal().parked_turns().iter().any(|t| t == &turn),
+        "the second call is still parked — this turn is not stranded"
+    );
+
+    rt.reconcile_stranded_blocked_nodes().await;
+
+    assert_eq!(
+        runner.started(),
+        1,
+        "reconciliation must not resume a node still waiting on a sibling \
+         decision — that would run the continuation before the operator has \
+         finished deciding"
+    );
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "the stash is untouched — still correctly waiting on the second call"
+    );
+}
+
+/// Issue #1816 (Stage 4): a restart landing strictly *during* the awaited
+/// `spawn_blocked_node_continuation` call — after `resume_blocked_agent_node`
+/// has committed to continuing, but before the run is actually admitted —
+/// must not lose the stash. On `main` the durable release (and the in-memory
+/// drop beneath it) fires unconditionally before the spawn is even
+/// attempted, so a crash in that window strands the run exactly like a spawn
+/// that never happened: no pending decision (already resolved, per the
+/// approval's own `ApprovalResolved`), no stash (already released), nothing
+/// left to rehydrate.
+///
+/// Proven by freezing the resolve inside `spawn_blocked_node_continuation`'s
+/// own `store().load(...)` await — the one genuine suspension point between
+/// "committed to continuing" and the run being registered, since the actual
+/// graph run is hand off to a task `WorkflowSpawn::spawn` does not await, so
+/// nothing past that point is observably synchronous with the caller. On
+/// `main` the stash is already gone by the time this point is reached —
+/// release fired before `spawn_blocked_node_continuation` was ever called.
+#[tokio::test]
+async fn the_durable_stash_survives_until_the_spawn_is_admitted() {
+    let home = seed_home();
+    let (rt, store, runner) = runtime_with_gated_store(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+    let card = cards[0].clone();
+
+    // Arm the gate only now — the builder's own boot-time `store.load` (and
+    // the cold run's own reads) must pass through untouched.
+    store.armed.store(true, Ordering::SeqCst);
+
+    // The resolve has to run concurrently: `resolve_approval` awaits its own
+    // follow-up cycle to completion, and that cycle is what will be frozen
+    // inside the gate.
+    let rt_task = Arc::clone(&rt);
+    let resolve = tokio::spawn(async move {
+        rt_task
+            .resolve_approval(&card, Verdict::Approve, operator())
+            .await
+    });
+
+    // Deterministic rendezvous: block here until the continuation's own
+    // `store().load(...)` has actually been entered, rather than racing a
+    // fixed sleep against it.
+    store.reached.notified().await;
+
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "the durable stash must still be live the instant the spawn attempt \
+         actually begins — releasing it beforehand is exactly the gap this \
+         fix closes"
+    );
+    assert!(
+        !rt.journal().blocked_stashes().is_empty(),
+        "and the durable record beneath it must still be live too"
+    );
+
+    // Let the frozen resolve finish. `resolve_approval` returns once
+    // `spawn_blocked_node_continuation` is admitted, not once the graph run
+    // it detaches has actually executed — the same settling window
+    // `resolve_and_settle` gives every other test in this module.
+    store.release.notify_one();
+    resolve
+        .await
+        .expect("the spawned resolve task itself does not panic")
+        .expect("the verdict resolves");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert_eq!(
+        runner.started(),
+        2,
+        "the continuation actually ran once the gate released"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "once the spawn is admitted, the stash is retired same as before"
     );
 }
