@@ -605,6 +605,23 @@ impl AppState {
         self.rebuilder.clone()
     }
 
+    /// Whether this host can rebuild a registered company's runtime in place
+    /// (issue #290) — the capability behind every surface that offers to apply
+    /// a configuration change without a process restart.
+    ///
+    /// [`crate::server::setup`] and [`crate::server::ops::memory_engine`]
+    /// establish the same fact by *attempting* a rebuild and reporting the
+    /// failure. That is the right shape for an action already under way, and
+    /// the wrong one for a surface deciding whether to *offer* the action at
+    /// all: a console that cannot ask up front renders a control whose only
+    /// possible outcome is the `Config` error [`rebuild_company`] returns
+    /// (issue #1736). Asking is what lets it say "not on this host" instead.
+    ///
+    /// [`rebuild_company`]: crate::runtime::rebuild_company
+    pub fn can_rebuild_in_place(&self) -> bool {
+        self.rebuilder.is_some()
+    }
+
     /// Records the boot-only builder inputs for `id`, at registration.
     ///
     /// Cloned state shares this map (it is `Arc`-backed), so a company

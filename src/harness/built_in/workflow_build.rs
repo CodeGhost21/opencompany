@@ -274,6 +274,14 @@ impl WorkflowBuilder {
         self.model.telemetry_provider_id()
     }
 
+    /// The model this pass's usage is metered against, read live off the
+    /// provider and already folded onto the closed vocabulary (issue #1749).
+    /// `None` before the provider has issued a turn, or when it cannot name a
+    /// model.
+    pub fn model_slug(&self) -> Option<crate::metering::ModelSlug> {
+        self.model.telemetry_model()
+    }
+
     /// Claims `task_id` for a pass, or returns `None` if one is already in
     /// flight for it — the second concurrency layer, covering the drag-out-and-
     /// back-in that a second genuine transition would otherwise let race.
@@ -593,6 +601,7 @@ async fn record_usage(
         runtime.id(),
         agent,
         run_id,
+        builder.model_slug(),
         runtime.store().as_ref(),
         runtime.usage().as_ref(),
     )
