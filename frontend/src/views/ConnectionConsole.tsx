@@ -70,6 +70,23 @@ interface Props {
   notice?: string;
   /** Forces the sign-in view — a magic link that failed to redeem, say. */
   forceLogin?: boolean;
+  /**
+   * Whether THIS connection is the one `resolveConfig()` produced for the
+   * page currently loaded — `App`'s `bootstrapId === connectionId` (issue
+   * #1828 comment 3865563560).
+   *
+   * The only connection whose `?company=`/`?api=` URL params describe it. A
+   * restored, non-bootstrap profile (added in a previous session, or
+   * selected from the switcher) can carry its own `defaultCompany` just the
+   * same, but that value came from `profileStore`, not from the page's URL —
+   * so a create/reset on it must retarget the *profile* only. Rewriting the
+   * live URL for it clobbers whatever host/company the address bar actually
+   * names (the bootstrap connection's, or none at all), and the very next
+   * reload's `resolveConfig()`/`findProfile` pair mints a duplicate
+   * connection scoped to the wrong host. Defaults to `false` (the safer
+   * read) for callers that have not threaded it through yet.
+   */
+  isBootstrap?: boolean;
 }
 
 export function ConnectionConsole({
@@ -78,6 +95,7 @@ export function ConnectionConsole({
   defaultCompany,
   notice,
   forceLogin,
+  isBootstrap = false,
 }: Props) {
   const [phase, setPhase] = useState<Phase>(
     forceLogin ? { kind: "login", company: defaultCompany, notice } : { kind: "loading" },
@@ -297,14 +315,23 @@ export function ConnectionConsole({
       // The registry fix above does not reach a `?company=` link's own URL —
       // see `retargetCompanyUrlParam` for why a stale param there still
       // orphans the retargeted profile on the next reload. A no-op when the
-      // connection was never company-scoped in the first place.
-      if (priorDefaultCompany) retargetCompanyUrlParam(priorDefaultCompany, status.id);
+      // connection was never company-scoped in the first place — and,
+      // symmetrically, when this connection isn't the one the page's URL
+      // describes. A restored non-bootstrap profile's `?company=` link (if
+      // it even has one live in the address bar right now) names some other
+      // connection entirely; retargeting the persisted profile above is
+      // sufficient for it, and rewriting the URL here would instead point
+      // the address bar at a company the *bootstrap* connection never asked
+      // for (issue #1828 comment 3865563560).
+      if (isBootstrap && priorDefaultCompany) {
+        retargetCompanyUrlParam(priorDefaultCompany, status.id);
+      }
       // Enter the new company with the status this call already has —
       // `switchCompany`'s own `knownStatus` short-circuit skips a redundant
       // second `client.status` fetch (PR comment 3864628314).
       void switchCompany(status.id, next, status);
     },
-    [connection, connectionId, createRequest, knownCompanies, switchCompany],
+    [connection, connectionId, createRequest, isBootstrap, knownCompanies, switchCompany],
   );
 
   const createDialog = (
@@ -337,7 +364,10 @@ export function ConnectionConsole({
           // #1828, PR comment 3864885215).
           if (archivedId && connection?.defaultCompany === archivedId) {
             clearDefaultCompany(connectionId);
-            retargetCompanyUrlParam(archivedId, null);
+            // Same bootstrap-only gate as `onCompanyCreated` above, and for
+            // the same reason: a restored non-bootstrap profile's abandoned
+            // reset has nothing live in the URL to clear.
+            if (isBootstrap) retargetCompanyUrlParam(archivedId, null);
           }
           backToPicker();
         }

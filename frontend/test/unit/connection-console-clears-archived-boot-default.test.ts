@@ -32,6 +32,13 @@ import type { ConnectionId } from "@/connections/types";
  * `onResetCompany` callback — same reasoning as
  * `connection-console-create-retargets-url.test.ts` for staying out of a
  * full mount.
+ *
+ * Follow-up (codex review on #1828, PR comment 3865563560): the URL clear
+ * this pins is now gated on `ConnectionConsole`'s `isBootstrap` prop — see
+ * `connection-console-create-retargets-url.test.ts` for the restored,
+ * non-bootstrap counter-case. `show()` below passes `isBootstrap: true`
+ * because the connection it renders is scoped to the same company the page
+ * lands on (`?company=acme`), i.e. it IS the bootstrap connection.
  */
 
 vi.mock("@/components/app-shell", () => ({
@@ -119,6 +126,12 @@ async function show(connectionId: ConnectionId, client: OpenCompanyClient) {
           connectionId,
           client,
           defaultCompany: "acme",
+          // This connection's `defaultCompany` matches the `?company=acme`
+          // the page lands on in `beforeEach` below — it is the bootstrap
+          // connection, so the abandon-path URL clear this test pins is
+          // expected to fire (issue #1828 comment 3865563560; see
+          // `ConnectionConsole`'s `isBootstrap` prop).
+          isBootstrap: true,
         }),
       }),
     );

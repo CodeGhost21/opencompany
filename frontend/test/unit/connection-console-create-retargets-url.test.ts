@@ -35,6 +35,20 @@ import type { ConnectionId } from "@/connections/types";
  * dedicated coverage in `connection-retarget-company-url-param.test.ts`; this
  * file is the wiring gap that left it — the one that previously only ever
  * called with `archived` — never called for a plain create.
+ *
+ * Follow-up (codex review on #1828, PR comment 3865563560): that fix over-
+ * corrected. `retargetCompanyUrlParam`'s own guard only refuses to write when
+ * the URL already names some OTHER company — an absent `?company=` param
+ * passes it, so the retarget wrote one in even for a restored, non-bootstrap
+ * connection whose `defaultCompany` came from `profileStore`, not from the
+ * page's URL. `App`'s bootstrap connection is the only one the live URL
+ * actually describes; `ConnectionConsole` now takes an `isBootstrap` prop
+ * (`App`'s `active.id === bootstrapId`) and gates both `retargetCompanyUrlParam`
+ * call sites on it. The suite below covers both directions: the "first" test
+ * models the bootstrap connection (`isBootstrap: true`, matching the URL it
+ * lands on) and still expects the retarget; the "second" models a restored
+ * non-bootstrap profile (`isBootstrap: false`) with its own `defaultCompany`
+ * and an empty URL, and expects the retarget to be skipped.
  */
 
 vi.mock("@/components/app-shell", () => ({
@@ -99,7 +113,11 @@ function land(search: string): void {
   window.history.replaceState({}, "", `/${search}`);
 }
 
-async function show(connectionId: ConnectionId, client: OpenCompanyClient) {
+async function show(
+  connectionId: ConnectionId,
+  client: OpenCompanyClient,
+  isBootstrap = true,
+) {
   await act(async () => {
     root.render(
       createElement(HostsProvider, {
@@ -117,6 +135,7 @@ async function show(connectionId: ConnectionId, client: OpenCompanyClient) {
           connectionId,
           client,
           defaultCompany: "acme",
+          isBootstrap,
         }),
       }),
     );
@@ -150,7 +169,7 @@ afterEach(() => {
   land("");
 });
 
-describe("a plain create from an explicit-company console", () => {
+describe("a plain create from the bootstrap connection's explicit-company console", () => {
   it("retargets the ?company= URL param the same way a reset does", async () => {
     const acme = company("acme", "Acme Robotics");
     const beta = company("co-beta1", "Beta Co");
@@ -215,6 +234,80 @@ describe("a plain create from an explicit-company console", () => {
     expect(getConnection(connectionId)?.defaultCompany).toBe("co-beta1");
 
     // The console itself followed the create into the new company too.
+    phase = container.querySelector('[data-testid="console-phase"]');
+    expect(phase!.getAttribute("data-company")).toBe("co-beta1");
+  });
+});
+
+describe("a plain create from a restored, non-bootstrap console", () => {
+  it("does not rewrite the bootstrap connection's URL", async () => {
+    // No `?company=` on the page at all — this models a second, restored
+    // connection sitting beside whatever the bootstrap connection's own URL
+    // describes (or nothing, in the single-connection default). Either way
+    // the live URL does not belong to `connectionId` below.
+    land("");
+
+    const acme = company("acme", "Acme Robotics");
+    const beta = company("co-beta1", "Beta Co");
+    const connectionId = addConnection({ baseUrl: "https://acme.test", defaultCompany: "acme" });
+    const { client, provisionCompany } = stubClient({ initial: acme, provisioned: beta });
+
+    // `isBootstrap: false` is the point of this test — everything else
+    // mirrors the bootstrap case above.
+    await show(connectionId, client, false);
+    await settle();
+
+    let phase = container.querySelector('[data-testid="console-phase"]');
+    expect(phase, "console phase never rendered").toBeTruthy();
+    expect(phase!.getAttribute("data-company")).toBe("acme");
+    // Pre-condition: `retargetCompanyUrlParam`'s own no-op guard only refuses
+    // to write when the URL already names some OTHER company. An absent
+    // `?company=` is not that, so without the `isBootstrap` gate this test
+    // would still see the write happen below.
+    expect(window.location.search).toBe("");
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="app-shell-new-company"]',
+    );
+    expect(trigger, "New company trigger not found").toBeTruthy();
+    await act(async () => {
+      trigger!.click();
+    });
+
+    const nameInput = document.querySelector<HTMLInputElement>("#create-company-name");
+    expect(nameInput, "create-company-name field not found").toBeTruthy();
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => {
+      setValue.call(nameInput, "Beta Co");
+      nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const adminInput = document.querySelector<HTMLInputElement>("#create-company-admin");
+    expect(adminInput, "create-company-admin field not found").toBeTruthy();
+    await act(async () => {
+      setValue.call(adminInput, "ceo@beta.test");
+      adminInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const submit = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('[data-slot="dialog-content"] button'),
+    ).find((b) => b.textContent?.trim() === "Create company");
+    expect(submit, 'no "Create company" button found').toBeTruthy();
+    await act(async () => {
+      submit!.click();
+    });
+    await settle();
+
+    expect(provisionCompany).toHaveBeenCalledTimes(1);
+
+    // The regression this pins (issue #1828 comment 3865563560): a restored,
+    // non-bootstrap profile's create must NOT touch the live URL — only the
+    // bootstrap connection's own `?company=` link is safe to rewrite.
+    expect(window.location.search).toBe("");
+    // The persisted profile still moves — `retargetDefaultCompany` is
+    // ungated, and correctly so; only the URL write is bootstrap-only.
+    expect(getConnection(connectionId)?.defaultCompany).toBe("co-beta1");
+
     phase = container.querySelector('[data-testid="console-phase"]');
     expect(phase!.getAttribute("data-company")).toBe("co-beta1");
   });

@@ -781,6 +781,23 @@ export function clearDefaultCompany(id: ConnectionId): void {
  * never going to resolve to `archivedId` on reload regardless of anything
  * this function does (the query layer already outranks env/window), so
  * overwriting it would clobber an unrelated link rather than fix this one.
+ *
+ * That guard alone does NOT cover an absent `?company=` param — `current ===
+ * null` also passes it, so this still WRITES one in for a connection that
+ * never sourced its default company from the URL at all. Whether that write
+ * is correct depends on identity, not on what the param currently holds: it
+ * is only correct for the one connection `resolveConfig()` produced for the
+ * page currently loaded (`ConnectionConsole`'s `isBootstrap` prop, App's
+ * `bootstrapId === connectionId`). A restored, non-bootstrap profile can
+ * carry its own non-null `defaultCompany` the same way and hit this
+ * function via the same call sites, and an absent param there means the
+ * *bootstrap* connection's own link (or no link at all) — writing into it
+ * anyway points the address bar at a company the connection whose config it
+ * actually describes never asked for, and the next reload's
+ * `resolveConfig()`/`findProfile` pair mints a duplicate scoped to the wrong
+ * host (issue #1828 comment 3865563560). Callers gate on that identity
+ * before calling; this function's own guard only ever protected the
+ * narrower "URL already names something else" case.
  */
 export function retargetCompanyUrlParam(archivedId: string, newId: string | null): void {
   if (typeof window === "undefined") return;
