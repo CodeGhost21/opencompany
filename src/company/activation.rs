@@ -8,20 +8,26 @@
 //! 1. **`NameConfirmed`** — [`CompanyRecord::name_confirmed`], written by a
 //!    future console write path (#1844's confirm-name route). This module only
 //!    reads it.
-//! 2. **`IntegrationConnected`** — waived (vacuously complete) when the
-//!    company's `[tools].allow` never grants the `composio` namespace at all
-//!    (per
-//!    [`grants_composio_explicit`](crate::company::grants_composio_explicit)) —
-//!    several bundled companies drop `composio` on purpose
-//!    (`companies/agentic_math_lab`, `companies/agentic_product_team`,
-//!    `companies/agentic_research_lab`, `companies/openhuman_demo`,
-//!    `companies/signals_opportunity_studio`), and requiring a connection no
-//!    agent in that company could ever make would permanently block
-//!    activation for every one of them (issue #1850 review). When the
-//!    namespace *is* grantable, the step still requires an actual live
-//!    Composio connection — a connection nobody granted the namespace for
-//!    cannot be used by any agent, so it does not complete the step on its
-//!    own either.
+//! 2. **`IntegrationConnected`** — waived (vacuously complete) whenever there
+//!    is no lever available to ever make it true on its own merits, which is
+//!    two independent conditions:
+//!    - the BUILD has no Composio client compiled in at all (`cargo run --bin
+//!      opencompany -- serve`, AGENTS.md's own documented default command,
+//!      enables no `composio` feature) — issue #1850 review, finding 2; or
+//!    - the company's `[tools].allow` never grants the `composio` namespace at
+//!      all (per
+//!      [`grants_composio_explicit`](crate::company::grants_composio_explicit))
+//!      — several bundled companies drop `composio` on purpose
+//!      (`companies/agentic_math_lab`, `companies/agentic_product_team`,
+//!      `companies/agentic_research_lab`, `companies/openhuman_demo`,
+//!      `companies/signals_opportunity_studio`) — issue #1850 review, finding 1.
+//!
+//!    Requiring a connection no build or no agent could ever produce would
+//!    permanently block activation for every company on the wrong side of
+//!    either condition. When BOTH are available (composio compiled in AND
+//!    grantable), the step still requires an actual live Composio connection
+//!    — a connection nobody granted the namespace for cannot be used by any
+//!    agent, so it does not complete the step on its own either.
 //! 3. **`WorkflowRunSucceeded`** — at least one real (non-dry) workflow run
 //!    reached [`RunStatus::Succeeded`](crate::ports::runs::RunStatus::Succeeded).
 //!    Answered by scanning the journal for a
@@ -64,10 +70,11 @@ use crate::ports::workflow_verdict::{RunVerdictFacts, WorkflowRunVerdict};
 pub(crate) struct ActivationStatus {
     /// [`CompanyRecord::name_confirmed`], read verbatim.
     pub name_confirmed: bool,
-    /// `true` when the company's manifest cannot grant the `composio`
-    /// namespace at all (the step is waived — see the module docs), or when
-    /// it can and the company both holds a live Composio connection and has
-    /// explicitly granted that namespace.
+    /// `true` when this build has no Composio client compiled in at all, or
+    /// the company's manifest cannot grant the `composio` namespace at all
+    /// (either way the step is waived — see the module docs), or when both
+    /// are available and the company holds a live Composio connection and
+    /// has explicitly granted that namespace.
     pub integration_connected: bool,
     /// Whether the journal shows a real (non-dry) workflow run that reached
     /// `succeeded`.
@@ -107,21 +114,39 @@ impl ActivationStatus {
 /// hold at least one active Composio connection" (from
 /// `list_connection_states`/`list_connections_detailed` on the live path, or a
 /// fixture in a test) — fetching it is IO this function deliberately does not
-/// perform.
+/// perform. `None` is a distinct answer from `Some(false)`: it means this
+/// BUILD has no Composio client compiled in at all (see
+/// `ops::activation::has_composio_connection`'s `#[cfg(not(feature =
+/// "composio"))]` fallback), not merely that this company isn't connected
+/// right now — see the waiver below.
 pub(crate) fn derive_steps(
     record: &CompanyRecord,
-    has_composio_connection: bool,
+    has_composio_connection: Option<bool>,
     workflow_run_succeeded: bool,
 ) -> ActivationStatus {
     // A company whose manifest never grants `composio` has no lever to ever
-    // make this step true (issue #1850 review) — waive it rather than
-    // permanently blocking activation for every bundled company that
+    // make this step true (issue #1850 review, finding 1) — waive it rather
+    // than permanently blocking activation for every bundled company that
     // deliberately omits the namespace. When it IS grantable, a connection
     // still has to actually exist — see the module docs' second bullet.
     let composio_grantable = grants_composio_explicit(&record.manifest.tools.allow);
+    // A company whose BUILD never compiled the `composio` feature at all has
+    // the same "no lever" shape, one level up (issue #1850 review, finding
+    // 2): `cargo run --bin opencompany -- serve` — AGENTS.md's own documented
+    // default command — enables no `composio` feature, so
+    // `has_composio_connection` is `None` for every company in that build
+    // regardless of what its manifest grants. Reading that as `Some(false)`
+    // ("not yet connected") would permanently block activation for every
+    // company that DOES grant `composio` in the one build most operators
+    // actually run. Waive unconditionally when the build has no lever either,
+    // the same way the grant waiver above does when the manifest has none.
+    let integration_connected = match has_composio_connection {
+        None => true,
+        Some(connected) => !composio_grantable || connected,
+    };
     ActivationStatus {
         name_confirmed: record.name_confirmed,
-        integration_connected: !composio_grantable || has_composio_connection,
+        integration_connected,
         workflow_run_succeeded,
         activation_completed_at: record.activation_completed_at,
     }
@@ -197,16 +222,19 @@ pub(crate) async fn any_workflow_run_succeeded(
 /// (see the module docs): no Composio call, no journal scan, once activated.
 ///
 /// `has_composio_connection` is a **lazy** answer to "does this company hold a
-/// live Composio connection" — a closure rather than a pre-fetched `bool`, so
+/// live Composio connection" — a closure rather than a pre-fetched value, so
 /// an already-activated company's poll never pays for the round trip that
-/// answer costs. Callers without the `composio` feature simply pass a closure
-/// that always resolves to `false`; this function does no Composio IO itself
-/// either way.
+/// answer costs. It resolves to `Option<bool>`, not `bool`: callers without
+/// the `composio` feature pass a closure that always resolves to `None` (no
+/// client to ask, and no lever any company in this build has — see
+/// [`derive_steps`]'s waiver), which `derive_steps` treats differently from a
+/// live `Some(false)` "not connected yet". This function does no Composio IO
+/// itself either way.
 pub(crate) async fn compute_and_latch(
     company: &CompanyId,
     store: &Arc<dyn CompanyStore>,
     events: &Arc<dyn EventLog>,
-    has_composio_connection: impl AsyncFnOnce() -> bool,
+    has_composio_connection: impl AsyncFnOnce() -> Option<bool>,
 ) -> Result<ActivationStatus> {
     let record = store
         .load(company)
@@ -344,7 +372,7 @@ mod test {
         // requirement here rather than a waiver — see
         // `no_composio_grant_at_all_waives_the_integration_step` for that case.
         let r = record(&CompanyId::new("acme"), &["composio"]);
-        let status = derive_steps(&r, false, false);
+        let status = derive_steps(&r, Some(false), false);
         assert!(!status.name_confirmed);
         assert!(!status.integration_connected);
         assert!(!status.workflow_run_succeeded);
@@ -356,7 +384,7 @@ mod test {
     fn name_confirmed_alone_is_not_activation() {
         let mut r = record(&CompanyId::new("acme"), &[]);
         r.name_confirmed = true;
-        let status = derive_steps(&r, false, false);
+        let status = derive_steps(&r, Some(false), false);
         assert!(status.name_confirmed);
         assert!(!status.all_steps_complete());
     }
@@ -372,7 +400,7 @@ mod test {
         // manifest cannot grant the namespace, the step waives (reads
         // vacuously complete) regardless of connection state.
         let r = record(&CompanyId::new("acme"), &["files", "docs", "shell"]);
-        let status = derive_steps(&r, /* has_composio_connection */ false, false);
+        let status = derive_steps(&r, /* has_composio_connection */ Some(false), false);
         assert!(
             status.integration_connected,
             "a company that can never grant composio has no lever to complete this step — it must waive, not permanently block"
@@ -388,28 +416,48 @@ mod test {
         // agent (namespace never granted), so it neither blocks nor is
         // required; the waiver applies the same as with no connection at all.
         let r = record(&CompanyId::new("acme"), &["*"]);
-        let status = derive_steps(&r, /* has_composio_connection */ true, false);
+        let status = derive_steps(&r, /* has_composio_connection */ Some(true), false);
         assert!(status.integration_connected);
+    }
+
+    #[test]
+    fn composio_not_compiled_waives_the_step_even_when_the_manifest_grants_it() {
+        // Issue #1850 review, finding 2: `cargo run --bin opencompany --
+        // serve` — AGENTS.md's own documented default command — compiles no
+        // `composio` feature, so `ops::activation::has_composio_connection`'s
+        // `#[cfg(not(feature = "composio"))]` fallback resolves to `None` for
+        // every company regardless of what its manifest grants. Before this
+        // fix, `None` collapsed to "not connected" and this company — which
+        // DOES grant `composio`, unlike the manifest-waiver tests above —
+        // could never complete this step in that build. `None` must waive
+        // unconditionally, the same as the manifest-level waiver, because the
+        // build has no lever either.
+        let r = record(&CompanyId::new("acme"), &["composio"]);
+        let status = derive_steps(&r, /* has_composio_connection */ None, false);
+        assert!(
+            status.integration_connected,
+            "a build with no Composio client compiled in has no lever to complete this step — it must waive, not permanently block a company that grants composio"
+        );
     }
 
     #[test]
     fn grant_without_a_connection_is_not_integration_connected() {
         let r = record(&CompanyId::new("acme"), &["composio"]);
-        let status = derive_steps(&r, /* has_composio_connection */ false, false);
+        let status = derive_steps(&r, /* has_composio_connection */ Some(false), false);
         assert!(!status.integration_connected);
     }
 
     #[test]
     fn connection_and_explicit_grant_together_complete_the_step() {
         let r = record(&CompanyId::new("acme"), &["composio"]);
-        let status = derive_steps(&r, true, false);
+        let status = derive_steps(&r, Some(true), false);
         assert!(status.integration_connected);
     }
 
     #[test]
     fn dotted_composio_subgrant_also_counts() {
         let r = record(&CompanyId::new("acme"), &["composio.gmail"]);
-        let status = derive_steps(&r, true, false);
+        let status = derive_steps(&r, Some(true), false);
         assert!(status.integration_connected);
     }
 
@@ -417,7 +465,7 @@ mod test {
     fn all_three_steps_true_is_activation() {
         let mut r = record(&CompanyId::new("acme"), &["composio"]);
         r.name_confirmed = true;
-        let status = derive_steps(&r, true, true);
+        let status = derive_steps(&r, Some(true), true);
         assert!(status.all_steps_complete());
         assert!(status.is_activated());
     }
@@ -434,7 +482,7 @@ mod test {
         // for that case.
         let mut r = record(&CompanyId::new("acme"), &["composio"]);
         r.activation_completed_at = Some(1_700_000_000_000);
-        let status = derive_steps(&r, false, false);
+        let status = derive_steps(&r, Some(false), false);
         assert!(
             !status.all_steps_complete(),
             "the live steps really are false"
@@ -478,7 +526,7 @@ mod test {
             .await
             .unwrap();
 
-        let status = compute_and_latch(&id, &store, &events, async || true)
+        let status = compute_and_latch(&id, &store, &events, async || Some(true))
             .await
             .unwrap();
         assert!(status.is_activated());
@@ -526,15 +574,74 @@ mod test {
             .await
             .unwrap();
 
-        // The composio closure always answers `false` (no client, no
-        // connection) — matching the `#[cfg(not(feature = "composio"))]`
-        // fallback and every company that never grants the namespace.
-        let status = compute_and_latch(&id, &store, &events, async || false)
+        // `Some(false)` here, not `None`: this proves the MANIFEST-level
+        // waiver specifically — a build that DOES have a Composio client
+        // compiled in, querying a company that structurally never grants the
+        // namespace. See `compute_and_latch_activates_when_composio_is_not_compiled`
+        // below for the build-level waiver (`None`, the real
+        // `#[cfg(not(feature = "composio"))]` fallback shape).
+        let status = compute_and_latch(&id, &store, &events, async || Some(false))
             .await
             .unwrap();
         assert!(
             status.is_activated(),
             "a company that structurally cannot grant composio must still be able to activate"
+        );
+        assert!(status.activation_completed_at.is_some());
+
+        let reloaded = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            reloaded.activation_completed_at.is_some(),
+            "the latch must be durably persisted, not just returned"
+        );
+    }
+
+    /// The build-level counterpart to the test above (issue #1850 review,
+    /// finding 2): this company DOES grant `composio` — unlike the
+    /// never-grants-it fixture — so under the OLD `Option`-less signature this
+    /// scenario could never activate in a build with no Composio feature
+    /// compiled in. `None` from the closure is the real
+    /// `#[cfg(not(feature = "composio"))]` fallback shape
+    /// (`ops::activation::has_composio_connection`), not a stand-in for
+    /// `Some(false)`.
+    #[tokio::test]
+    async fn compute_and_latch_activates_when_composio_is_not_compiled() {
+        let id = CompanyId::new("acme");
+        let (store, events, _dir) = stores();
+
+        // Grants `composio` explicitly — the case the manifest-level waiver
+        // does NOT cover, so only the build-level (`None`) waiver can let this
+        // company ever complete the step.
+        let mut r = record(&id, &["composio"]);
+        r.name_confirmed = true;
+        store.save(&r).await.unwrap();
+
+        events
+            .append(
+                &id,
+                CompanyEvent::WorkflowRunFinished {
+                    workflow_id: "digest".to_string(),
+                    scheduled: false,
+                    run_id: Some("run-1".to_string()),
+                    deliveries: Vec::new(),
+                    pending_approvals: Vec::new(),
+                    error: None,
+                    cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let status = compute_and_latch(&id, &store, &events, async || None)
+            .await
+            .unwrap();
+        assert!(
+            status.is_activated(),
+            "a company that grants composio must still activate in a build with no composio client compiled in"
         );
         assert!(status.activation_completed_at.is_some());
 
@@ -625,7 +732,7 @@ mod test {
         store.save(&record(&id, &["composio"])).await.unwrap();
 
         // No workflow run journaled at all — the third step is missing.
-        let status = compute_and_latch(&id, &store, &events, async || true)
+        let status = compute_and_latch(&id, &store, &events, async || Some(true))
             .await
             .unwrap();
         assert!(!status.is_activated());
@@ -654,7 +761,7 @@ mod test {
         let composio_calls = std::sync::atomic::AtomicUsize::new(0);
         let status = compute_and_latch(&id, &store, &events, async || {
             composio_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            false
+            Some(false)
         })
         .await
         .unwrap();

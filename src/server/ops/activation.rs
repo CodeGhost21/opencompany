@@ -77,6 +77,9 @@ async fn get_activation(company: ScopedCompany) -> Result<Json<ActivationDto>, A
 /// Whether the company holds at least one **live** Composio connection —
 /// [`crate::company::activation::derive_steps`] separately ANDs this against
 /// the `composio` namespace grant, so this answers only the connection half.
+/// `Some(_)` either way: this build DOES have a client to ask, even when the
+/// answer it gets back is "no". See the `#[cfg(not(feature = "composio"))]`
+/// fallback below for the build that has no client at all.
 ///
 /// A resolve or list failure reads as "no connection" rather than surfacing an
 /// error: this route's job is to say where the operator stands in the funnel,
@@ -84,20 +87,31 @@ async fn get_activation(company: ScopedCompany) -> Result<Json<ActivationDto>, A
 /// the integration step unmet, which is honest (a connection this route can't
 /// currently confirm is not one an agent can currently use either).
 #[cfg(feature = "composio")]
-async fn has_composio_connection(runtime: &CompanyRuntime) -> bool {
+async fn has_composio_connection(runtime: &CompanyRuntime) -> Option<bool> {
     let Ok(config) = super::composio::resolve_tenant(runtime).await else {
-        return false;
+        return Some(false);
     };
-    crate::harness::composio::list_connection_states(&config)
-        .await
-        .map(|states| states.iter().any(|(_, connected)| *connected))
-        .unwrap_or(false)
+    Some(
+        crate::harness::composio::list_connection_states(&config)
+            .await
+            .map(|states| states.iter().any(|(_, connected)| *connected))
+            .unwrap_or(false),
+    )
 }
 
-/// Without the `composio` feature there is no client to ask — the same
-/// no-client fallback shape `composio::fetch_catalog` answers its own callers
-/// with.
+/// Without the `composio` feature there is no client to ask, and — the point
+/// `None` exists to make — no company in THIS BUILD can ever hold a
+/// connection either, `cargo run --bin opencompany -- serve` (AGENTS.md's own
+/// documented default command) included. `None` carries that "no lever"
+/// signal through to
+/// [`derive_steps`](crate::company::activation::derive_steps), which waives
+/// the integration step unconditionally for it — collapsing this to `Some(false)`
+/// (the pre-#1850-review-finding-2 shape) would instead read as "not
+/// connected yet" and permanently block activation for every company that
+/// grants `composio` in the one build most operators actually run. Mirrors
+/// the same no-client fallback shape `composio::fetch_catalog` answers its
+/// own callers with.
 #[cfg(not(feature = "composio"))]
-async fn has_composio_connection(_runtime: &CompanyRuntime) -> bool {
-    false
+async fn has_composio_connection(_runtime: &CompanyRuntime) -> Option<bool> {
+    None
 }
