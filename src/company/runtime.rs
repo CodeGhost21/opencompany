@@ -868,10 +868,24 @@ impl CompanyRuntime {
     /// This was `wired_channel_ids`; the rename survives because every call site
     /// is still worth re-reading against the delivery rule — but the rule no
     /// longer excludes `operator`, whose report now lands durably.
+    ///
+    /// Deduplicated, first-occurrence order preserved (issue #1781 review,
+    /// Codex P2 follow-up). A grandfathered manifest desk at the literal id
+    /// `operator` predates the "operator is reserved" manifest validation
+    /// (`company/manifest.rs`, checked only at upload/create time, never at
+    /// boot) and still wires **both** the built-in `OperatorChannel` and a
+    /// `DeskChannel("operator")` into `self.channels` — the desk-wiring loop in
+    /// `RuntimeBuilder::build` dedupes desk ids against each other but has no
+    /// way to know the built-in channel already claimed the same id. Left
+    /// unfiltered, `operator` would surface twice in `/workflows/wired-channels`
+    /// and `WorkflowCreateDialog` would render two `SelectItem`s with the same
+    /// key and value.
     pub fn deliverable_channel_ids(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
         self.channels
             .iter()
             .map(|channel| channel.channel_id().to_string())
+            .filter(|id| seen.insert(id.clone()))
             .collect()
     }
 

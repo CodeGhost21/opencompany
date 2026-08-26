@@ -7289,6 +7289,60 @@ needs_reason = true
         );
     }
 
+    /// Issue #1781 review (Codex P2): a grandfathered manifest desk at the
+    /// literal id `operator` predates `company/manifest.rs`'s "operator is
+    /// reserved" validation (which only runs at upload/create time, never at
+    /// boot) and still wires **both** the built-in `OperatorChannel` and a
+    /// `DeskChannel("operator")` into `runtime.channels` — `desk_exists`
+    /// resolves the manifest group chat and the desk-wiring loop has no idea
+    /// the built-in channel already claimed the same id. `deliverable_channel_ids`
+    /// must not leak that internal duplication to the console: it feeds
+    /// `/workflows/wired-channels`, and `WorkflowCreateDialog` renders one
+    /// `SelectItem` per id — a repeated `operator` collides as a React key.
+    #[tokio::test]
+    async fn deliverable_channel_ids_dedupes_a_grandfathered_operator_desk() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            [[group_chat]]
+            id = "operator"
+            name = "Operator"
+            members = ["ceo"]
+            "#,
+        );
+        let runtime = RuntimeBuilder::new(dir.path(), manifest)
+            .build()
+            .await
+            .unwrap();
+
+        // Both adapters really are present internally — this asserts the
+        // fixture reaches the collision state the fix has to survive, not just
+        // that the picker happens to look right for some other reason.
+        let operator_channels = runtime
+            .channels
+            .iter()
+            .filter(|c| c.channel_id() == "operator")
+            .count();
+        assert_eq!(
+            operator_channels, 2,
+            "fixture must actually wire both the built-in Operator channel and \
+             the grandfathered desk under the same id"
+        );
+
+        let deliverable = runtime.deliverable_channel_ids();
+        let operator_count = deliverable.iter().filter(|id| *id == "operator").count();
+        assert_eq!(
+            operator_count, 1,
+            "operator must appear exactly once in the picker's set — ordering \
+             preserved, duplicates dropped: {deliverable:?}"
+        );
+    }
+
     /// **The invariant that would have caught #981, restored by #1757.** The
     /// picker's set (`deliverable_channel_ids`) and the delivery layer's set
     /// (`WorkflowDeliveryDeps.channels`) are produced by the same `build()`, and
