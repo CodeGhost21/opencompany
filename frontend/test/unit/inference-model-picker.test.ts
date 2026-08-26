@@ -11,14 +11,18 @@ import { InferenceSection } from "@/views/connections/InferenceSection";
 let container: HTMLDivElement;
 let root: Root;
 
-function status(provider: string, models: Record<string, string>): InferenceStatus {
+function status(
+  provider: string,
+  models: Record<string, string>,
+  keyConfigured = true,
+): InferenceStatus {
   return {
     provider,
     slug: provider === "openai_compatible" ? "byok" : provider,
     baseUrl: provider === "openai_compatible" ? "https://models.example/v1" : "https://openrouter.ai/api/v1",
     models,
     source: "runtime",
-    keyConfigured: true,
+    keyConfigured,
     cognition: "harness",
     usageMetering: "perTurn",
     restartRequired: false,
@@ -105,6 +109,24 @@ describe("OpenRouter tier model pickers", () => {
       "value",
       "operator/custom-chat",
     );
+  });
+
+  it("keeps free-text inputs for a proxied OpenRouter company with no key configured", async () => {
+    // No stored key -> the platform's subscription proxy resolves the tier,
+    // which only accepts an abstract tier name (or its own disabled-by-default
+    // `openrouter/<author>/<model>` passthrough). The registry's raw catalog
+    // ids the select would save are exactly what that proxy rejects, so the
+    // picker must not offer them here even though the catalog loaded fine.
+    const { client } = clientFor(
+      status("openrouter", { "chat-v1": "chat-v1" }, false),
+      [{ id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" }],
+    );
+
+    await mount(client);
+
+    expect(container.querySelector('[data-testid="inference-model-catalog-proxied"]')).not.toBeNull();
+    expect(container.querySelector("input#inference-model-chat-v1")).toHaveProperty("value", "chat-v1");
+    expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).toBeNull();
   });
 
   it("keeps free-text inputs for non-OpenRouter providers without fetching the registry", async () => {

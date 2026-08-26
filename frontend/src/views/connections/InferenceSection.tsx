@@ -532,6 +532,20 @@ export function InferenceSection({
   if (load === "unavailable") return null;
 
   const modelRows = status ? Object.entries(status.models) : [];
+  /**
+   * Whether saving right now would ride the platform's subscription proxy
+   * rather than go straight to OpenRouter with a tenant key.
+   *
+   * The proxy only resolves an abstract tier (or its own `openrouter/…`
+   * passthrough form, off by default) — see `model_for_tier` in
+   * `src/company/inference.rs`. The catalog picker below stores the
+   * registry's raw `<author>/<model>` id verbatim, which is exactly the form
+   * the proxy rejects. `key` is write-only and never comes back from the
+   * host, so "no key typed" only means proxied when the stored config is not
+   * already a direct, keyed OpenRouter connection.
+   */
+  const wouldSaveProxied =
+    key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2">
@@ -767,13 +781,26 @@ export function InferenceSection({
                         OpenRouter returned no models. Enter model ids directly.
                       </p>
                     )}
+                    {provider === "openrouter" &&
+                      modelCatalog.kind === "ready" &&
+                      wouldSaveProxied && (
+                        <p
+                          className="text-xs text-muted-foreground"
+                          data-testid="inference-model-catalog-proxied"
+                        >
+                          Without an OpenRouter key this runs on the shared subscription, which only
+                          resolves a tier name. Add a key above to pick a specific model, or enter a
+                          tier id directly.
+                        </p>
+                      )}
                     <div className="grid gap-2 sm:grid-cols-2">
                       {TIERS.map((tier) => {
                         const value = models[tier] ?? "";
                         const useFreeText =
                           provider !== "openrouter" ||
                           modelCatalog.kind === "error" ||
-                          modelCatalog.kind === "empty";
+                          modelCatalog.kind === "empty" ||
+                          wouldSaveProxied;
                         const options =
                           modelCatalog.kind === "ready"
                             ? optionsForTier(modelCatalog.models, value)
