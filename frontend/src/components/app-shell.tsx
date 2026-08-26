@@ -45,6 +45,7 @@ import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { RouteLoading } from "@/components/route-loading";
 import {
   RESTING_ROW,
   SidebarCollapseButton,
@@ -2715,13 +2716,7 @@ export function AppShell({
             />
           )}
           {view === "workspace" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading workspace…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Workspace" label="Loading workspace…" />}>
               <WorkspaceView
                 client={client}
                 company={company}
@@ -2761,13 +2756,7 @@ export function AppShell({
             />
           )}
           {view === "observatory" && (
-          <Suspense
-            fallback={
-              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
-                Loading observatory…
-              </div>
-            }
-          >
+          <Suspense fallback={<RouteLoading title="Observatory" label="Loading observatory…" />}>
             <ObservatoryView
               client={client}
               company={company}
@@ -2783,13 +2772,7 @@ export function AppShell({
           </Suspense>
         )}
         {view === "workflows" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading canvas…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Workflows" label="Loading canvas…" />}>
               <WorkflowsView
                 client={client}
                 company={company}
@@ -2829,24 +2812,12 @@ export function AppShell({
             </Suspense>
           )}
           {view === "pages" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading pages…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Pages" label="Loading pages…" />}>
               <PagesView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading finances…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Finances" label="Loading finances…" />}>
               <FinanceSection
                 client={client}
                 company={company}
