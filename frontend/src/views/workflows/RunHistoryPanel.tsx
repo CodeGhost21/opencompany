@@ -740,7 +740,20 @@ export function RunHistoryRow({
                     // branches on for this exact case; this sentence collapsed
                     // it into "nothing in the graph got the chance to run",
                     // which is only true when `nodes` is empty too.
-                    `Review the error details — ${nodes.length} step${nodes.length === 1 ? "" : "s"} completed before this run was interrupted, so this may be a host or capability problem rather than the workflow. Run it again once you've ruled that out.`
+                    //
+                    // Codex review on #1821 (tenth pass): `WorkflowNodeFinished`
+                    // is appended best-effort (`runner.rs`'s progress collector
+                    // — a failed append is `warn!`-logged and the run proceeds
+                    // unaffected), so a missing finish row is NOT proof the
+                    // node behind it never failed; the append for the actual
+                    // culprit can silently drop while `run.error` still lands.
+                    // Naming a specific alternate cause ("host or capability
+                    // problem") overclaimed what an absent row can prove — this
+                    // now says only that the record may be incomplete, the same
+                    // epistemic stance the legend definition above already
+                    // takes ("Read the error before assuming the workflow needs
+                    // correcting").
+                    `Review the error details — ${nodes.length} step${nodes.length === 1 ? "" : "s"} completed before this run ended. What actually went wrong may not be fully recorded here, so read the error before deciding whether the workflow needs a fix.`
                   : // Codex review on #1821 (eighth pass): `failedNode` is null in
                     // exactly the cases the legend definition above already hedges
                     // on — a host restart, a capability that failed to build, or a
