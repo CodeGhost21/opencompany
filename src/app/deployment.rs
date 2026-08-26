@@ -79,12 +79,35 @@ impl Deployment {
 
     /// Resolves the deployment kind from the environment.
     ///
-    /// `OPENCOMPANY_DEPLOYMENT` wins outright. Failing that, a tenant namespace
-    /// names a hosted tenant (see the module docs for why that inference is the
-    /// only one taken). Everything else is self-hosted.
+    /// `OPENCOMPANY_DEPLOYMENT` wins outright — **including when this process
+    /// cannot read it**. Failing that, a tenant namespace names a hosted tenant
+    /// (see the module docs for why that inference is the only one taken).
+    /// Everything else is self-hosted.
     pub fn from_env(env: &dyn EnvSource) -> Self {
-        if let Some(declared) = env.get(DEPLOYMENT_ENV) {
-            return Self::parse(&declared);
+        // Read through `get_os`, not `get`. [`EnvSource::get`] maps a
+        // non-Unicode value to `None`, which here read as "nobody declared
+        // anything" and fell through to the tenant inference below — so an
+        // unreadable declaration alongside `OPENCOMPANY_TENANT_ID`
+        // (shared-single-DB mode) returned `HostedTenant` and switched
+        // reporting **on**. A fail-open on the discriminator the whole
+        // analytics posture rests on, arriving by a route [`Self::parse`] never
+        // sees.
+        //
+        // A declaration this process cannot read is still a declaration: it
+        // wins, and it resolves to the silent default. When we cannot tell what
+        // kind of install this is, the safe answer is the one that sends
+        // nothing. `crate::analytics::config::resolve` reads its own switch
+        // through `get_os` for exactly this reason, and the trait's own docs
+        // point every reader that must tell *malformed* from *unset* at it.
+        //
+        // Empty stays absent, exactly as `EnvSource::get` treats it and exactly
+        // as the analytics switch treats a blank one: a launcher that exported
+        // the variable without a value has said nothing, and must not cost a
+        // hosted tenant the inference it would otherwise have had.
+        if let Some(raw) = env.get_os(DEPLOYMENT_ENV).filter(|raw| !raw.is_empty()) {
+            return raw
+                .into_string()
+                .map_or(Self::SelfHosted, |declared| Self::parse(&declared));
         }
         if env.get(TENANT_ENV).is_some() {
             return Self::HostedTenant;
@@ -127,10 +150,113 @@ mod test {
 
     /// A typo must fall to silence, never to reporting. The dangerous direction
     /// is the only one worth a test.
+    ///
+    /// `OPENCOMPANY_TENANT_ID` is set on purpose: the interesting question is
+    /// not whether `parse` maps an unknown slug to `SelfHosted` — it plainly
+    /// does — but whether an unrecognised declaration **wins over** the tenant
+    /// inference rather than falling through to it. Without the tenant variable
+    /// this test passes either way and proves nothing about the fall-through,
+    /// which is the shape the non-Unicode leak below actually had.
     #[test]
     fn an_unrecognised_declaration_falls_back_to_silence() {
-        let env = MapEnv::new([("OPENCOMPANY_DEPLOYMENT", "hosted-tenat")]);
-        assert_eq!(Deployment::from_env(&env), Deployment::SelfHosted);
+        for typo in [
+            "hosted-tenat",
+            "hosted-tennant",
+            "hosted tenant",
+            "Hosted-Tenent",
+        ] {
+            let env = MapEnv::new([
+                ("OPENCOMPANY_DEPLOYMENT", typo),
+                ("OPENCOMPANY_TENANT_ID", "acme"),
+            ]);
+            assert_eq!(
+                Deployment::from_env(&env),
+                Deployment::SelfHosted,
+                "{typo:?} must not fall through to the tenant inference"
+            );
+        }
+    }
+
+    /// **A declaration that is set but is not text fails closed too.**
+    ///
+    /// `EnvSource::get` maps a non-Unicode value to `None`, so reading through
+    /// it treated `OPENCOMPANY_DEPLOYMENT=<invalid bytes>` as an absent
+    /// declaration, fell through to the tenant inference, and returned
+    /// `HostedTenant` — turning reporting **on** for an install whose operator
+    /// had explicitly declared something. The same leak as the unrecognised
+    /// spelling above, by a different route, and the one direction of failure
+    /// this discriminator must never take.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_declaration_falls_closed_to_self_hosted() {
+        use crate::app::config::EnvSource;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        struct NonUnicodeDeclaration;
+        impl EnvSource for NonUnicodeDeclaration {
+            fn get_os(&self, key: &str) -> Option<OsString> {
+                match key {
+                    // `0xff 0xfe` is not valid UTF-8 in any position; the tail
+                    // spells `hosted-tenant`, so a lossy read would have said
+                    // the operator asked for a hosted tenant.
+                    DEPLOYMENT_ENV => Some(OsString::from_vec(
+                        [&[0xff, 0xfe][..], b"hosted-tenant"].concat(),
+                    )),
+                    TENANT_ENV => Some(OsString::from("acme")),
+                    _ => None,
+                }
+            }
+        }
+
+        // The premise: this really is a value `get` cannot see at all, and the
+        // tenant inference really is standing by to answer for it.
+        assert_eq!(NonUnicodeDeclaration.get(DEPLOYMENT_ENV), None);
+        assert!(NonUnicodeDeclaration.get_os(DEPLOYMENT_ENV).is_some());
+        assert_eq!(
+            Deployment::from_env(&MapEnv::new([("OPENCOMPANY_TENANT_ID", "acme")])),
+            Deployment::HostedTenant,
+            "without the declaration this environment resolves to a hosted tenant, \
+             so the assertion below is about the declaration and nothing else"
+        );
+
+        assert_eq!(
+            Deployment::from_env(&NonUnicodeDeclaration),
+            Deployment::SelfHosted,
+            "a declaration set to bytes this process cannot read must not read as unset"
+        );
+    }
+
+    /// The control for the two above: a **blank** declaration is an absent one,
+    /// not an unreadable one — consistent with `EnvSource::get`, with the
+    /// analytics switch, and with the rest of the tree. A launcher that
+    /// exported `OPENCOMPANY_DEPLOYMENT=` has said nothing, and must not cost a
+    /// hosted tenant its inference. Without this control, "everything is
+    /// self-hosted now" would pass the two tests above just as well.
+    #[test]
+    fn a_blank_declaration_is_treated_as_absent() {
+        let env = MapEnv::new([
+            ("OPENCOMPANY_DEPLOYMENT", ""),
+            ("OPENCOMPANY_TENANT_ID", "acme"),
+        ]);
+        assert_eq!(Deployment::from_env(&env), Deployment::HostedTenant);
+    }
+
+    /// And the other control: a **recognised** declaration still resolves to
+    /// the kind it names, so the fail-closed paths above are finding malformed
+    /// values rather than refusing every declaration.
+    #[test]
+    fn a_recognised_declaration_still_resolves() {
+        for (declared, expected) in [
+            ("hosted-tenant", Deployment::HostedTenant),
+            ("  Hosted-Tenant\n", Deployment::HostedTenant),
+            ("hosted", Deployment::HostedTenant),
+            ("desktop", Deployment::Desktop),
+            ("self-hosted", Deployment::SelfHosted),
+        ] {
+            let env = MapEnv::new([("OPENCOMPANY_DEPLOYMENT", declared)]);
+            assert_eq!(Deployment::from_env(&env), expected, "{declared:?}");
+        }
     }
 
     #[test]
