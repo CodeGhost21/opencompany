@@ -809,19 +809,35 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// is never deflected, so the table erring small only ever means the S1 brief
 /// still applies while the hard block does not — never a false deny.
 ///
-/// Each entry pairs a host with an optional required path prefix (PR #1780
-/// review). Most providers front their API from a dedicated subdomain
-/// (`api.github.com`, `*.googleapis.com`, …), where a bare host match is exactly
-/// right. Slack and Discord are the exception: their REST API is served from
-/// the SAME host as their public web product (`slack.com/api/*`,
-/// `discord.com/api/*`), so matching the bare host would also deflect a
-/// `web_fetch` of a public help page or invite link that needs no connection
-/// and has no equivalent Composio action. `www.googleapis.com` is the same
-/// shape one layer up: it is Google's shared legacy API gateway for many
-/// products, not just Drive (`www.googleapis.com/youtube/v3/...` is unrelated
-/// to Drive), so the Drive entry for it is scoped to `/drive/` — the dedicated
-/// `drive.googleapis.com` host stays an unscoped match since it fronts nothing
-/// else. The path prefix narrows these entries to the API surface only.
+/// Each entry pairs a host with a *set* of acceptable path prefixes (PR #1780
+/// review, rounds 2-4): an empty set means the bare host is the whole API
+/// surface, a non-empty set means the URL's path must start with at least one
+/// of them. This is a set, not a single `Option<&str>`, because two rounds of
+/// review (findings 7 and 8) landed on the same lesson from opposite
+/// providers — a shared gateway's API surface for one product is not always
+/// describable as a single path prefix, so the table needs to express "any of
+/// these prefixes" once per host instead of gaining a second row (or
+/// under-matching) every time a provider turns out to have more than one API
+/// path family. Most providers front their API from a dedicated subdomain
+/// (`api.github.com`, `*.googleapis.com`, …), where a bare host match — the
+/// empty set — is exactly right. Slack and Discord are the exception: their
+/// REST API is served from the SAME host as their public web product
+/// (`slack.com/api/*`, `discord.com/api/*`), so matching the bare host would
+/// also deflect a `web_fetch` of a public help page or invite link that needs
+/// no connection and has no equivalent Composio action.
+///
+/// `www.googleapis.com` is the same shape one layer up: it is Google's shared
+/// legacy API gateway for many products, not just Drive
+/// (`www.googleapis.com/youtube/v3/...` is unrelated to Drive), so each
+/// product's entry for it is scoped to that product's prefixes — the
+/// dedicated `drive.googleapis.com` / `calendar.googleapis.com` /
+/// `gmail.googleapis.com` hosts stay an unscoped match since they front
+/// nothing else. Drive's REST surface on the shared gateway is not one
+/// prefix: `/drive/v3/...` is the CRUD API, but the resumable/media upload
+/// route an agent uploading a file actually hits is
+/// `/upload/drive/v3/files` (finding 7) — a *sibling* prefix, not a deeper
+/// path under `/drive/`, so it needs its own entry in the set rather than a
+/// looser single prefix.
 ///
 /// Jira is a third shape (PR #1780 review): `api.atlassian.com` is the
 /// OAuth-3LO gateway (`/ex/jira/{cloudId}/...`), but the far more common path
@@ -830,37 +846,41 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// one, and it is what the product surfaces as "your Jira URL". The host
 /// itself is per-tenant, not fixed, so the table entry is the shared parent
 /// `atlassian.net`: [`host_is`]'s suffix match catches any `<site>.` in front
-/// of it. Scoped to `/rest/api/` because the same tenant host also serves the
-/// ordinary Jira web UI (browsing issues, dashboards), which needs no
-/// connection and has no Composio equivalent.
-fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, Option<&'static str>)] {
+/// of it. `/rest/api/` alone under-matched (finding 8): Jira Software's Agile
+/// endpoints (boards, sprints) live under `/rest/agile/`, and Jira ships
+/// other REST families the same way (`/rest/servicedeskapi/`,
+/// `/rest/greenhopper/`, …) — the tenant host's REST surface is not one
+/// family, it is everything under `/rest/`. The prefix is widened to
+/// `/rest/` rather than enumerated family-by-family: the tenant host's *web*
+/// UI (browsing issues, dashboards, `/jira/software/...`,
+/// `/browse/...`) lives outside `/rest/` entirely, so `/rest/` is still the
+/// exact API/UI boundary on this host, just drawn at its real location
+/// instead of one family under it.
+fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
-        "github" => &[("api.github.com", None)],
+        "github" => &[("api.github.com", &[])],
         "gmail" => &[
-            ("gmail.googleapis.com", None),
-            ("www.googleapis.com", Some("/gmail/")),
+            ("gmail.googleapis.com", &[]),
+            ("www.googleapis.com", &["/gmail/"]),
         ],
         "googlecalendar" => &[
-            ("calendar.googleapis.com", None),
-            ("www.googleapis.com", Some("/calendar/")),
+            ("calendar.googleapis.com", &[]),
+            ("www.googleapis.com", &["/calendar/"]),
         ],
         "googledrive" => &[
-            ("drive.googleapis.com", None),
-            ("www.googleapis.com", Some("/drive/")),
+            ("drive.googleapis.com", &[]),
+            ("www.googleapis.com", &["/drive/", "/upload/drive/"]),
         ],
-        "slack" => &[("slack.com", Some("/api/"))],
-        "notion" => &[("api.notion.com", None)],
-        "linear" => &[("api.linear.app", None)],
-        "hubspot" => &[("api.hubapi.com", None)],
-        "stripe" => &[("api.stripe.com", None)],
+        "slack" => &[("slack.com", &["/api/"])],
+        "notion" => &[("api.notion.com", &[])],
+        "linear" => &[("api.linear.app", &[])],
+        "hubspot" => &[("api.hubapi.com", &[])],
+        "stripe" => &[("api.stripe.com", &[])],
         "jira" => &[
-            ("api.atlassian.com", Some("/ex/jira/")),
-            ("atlassian.net", Some("/rest/api/")),
+            ("api.atlassian.com", &["/ex/jira/"]),
+            ("atlassian.net", &["/rest/"]),
         ],
-        "discord" => &[
-            ("discord.com", Some("/api/")),
-            ("discordapp.com", Some("/api/")),
-        ],
+        "discord" => &[("discord.com", &["/api/"]), ("discordapp.com", &["/api/"])],
         _ => &[],
     }
 }
@@ -885,10 +905,10 @@ fn host_is(host: &str, api_host: &str) -> bool {
 /// `None` (pass through) covers the four cases the guardrail must NOT block: a
 /// non-provider host, a provider host whose toolkit is **not** in `connected`
 /// (the company may legitimately hit a public endpoint of a provider it has not
-/// wired), a provider host outside the API path prefix the table requires (a
-/// public Slack/Discord page, not the Web API), and a URL that does not parse
-/// to a host. The deny is scoped strictly to the API surface of toolkits this
-/// company actually connected, per requirement #2.
+/// wired), a provider host outside every API path prefix the table requires for
+/// it (a public Slack/Discord page, not the Web API), and a URL that does not
+/// parse to a host. The deny is scoped strictly to the API surface of toolkits
+/// this company actually connected, per requirement #2.
 pub fn web_call_deflection(connected: &[String], url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
@@ -900,9 +920,9 @@ pub fn web_call_deflection(connected: &[String], url: &str) -> Option<String> {
         }
         if toolkit_api_hosts(&toolkit)
             .iter()
-            .any(|(api_host, path_prefix)| {
+            .any(|(api_host, prefixes)| {
                 host_is(&host, api_host)
-                    && path_prefix.is_none_or(|prefix| path.starts_with(prefix))
+                    && (prefixes.is_empty() || prefixes.iter().any(|p| path.starts_with(p)))
             })
         {
             return Some(web_deflection_message(&toolkit, &host));
@@ -1568,6 +1588,14 @@ mod tests {
                 .is_some(),
             "the dedicated Drive host stays deflected unscoped"
         );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://www.googleapis.com/upload/drive/v3/files"
+            )
+            .is_some(),
+            "the resumable/media upload route on the legacy gateway host must also be deflected"
+        );
     }
 
     /// PR #1780 review: `api.atlassian.com` only covers the OAuth-3LO gateway.
@@ -1612,6 +1640,14 @@ mod tests {
             .is_none(),
             "another Atlassian product on the shared gateway must pass through — \
              a jira connection is not a Confluence one"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://my-company.atlassian.net/rest/agile/1.0/board"
+            )
+            .is_some(),
+            "Jira Software's Agile REST family on the tenant host must also be deflected"
         );
     }
 
