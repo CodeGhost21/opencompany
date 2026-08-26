@@ -1329,6 +1329,14 @@ fn humanise_elapsed(elapsed: Duration) -> String {
 /// lost it is worse than a wordy one. The console strips known wrapper prefixes
 /// (`run-error-message.ts`) and leaves this leaf intact.
 ///
+/// Rendered `{err:#}` — the whole chain — rather than `{err}`, which is only
+/// the outermost context. Today's leaf happens to arrive flattened
+/// (`vendor/openhuman/.../agent/tinyagents/mod.rs` interpolates it into a
+/// single `anyhow!`), but [`is_wall_clock_ceiling`] already searches `{err:#}`
+/// precisely because a chained one is possible; the two halves must agree, and
+/// only one of them is safe if it is. On a flat error the two render
+/// identically, so this costs nothing to be right about.
+///
 /// ## Why the ceiling's value is not quoted
 ///
 /// `DEFAULT_AGENT_TURN_TIMEOUT_SECS` is private to the vendored openhuman crate
@@ -1351,7 +1359,7 @@ fn wall_clock_ceiling_message(agent_id: &str, elapsed: Duration, err: &anyhow::E
          The ceiling bounds the whole turn, model time included, so the figure below is \
          the budget that REMAINED when the last call started — not a limit on that call. \
          Give this step less to do, or raise the ceiling with \
-         OPENHUMAN_AGENT_TURN_TIMEOUT_SECS. Underlying error: {err}",
+         OPENHUMAN_AGENT_TURN_TIMEOUT_SECS. Underlying error: {err:#}",
         humanise_elapsed(elapsed)
     )
 }
@@ -6119,6 +6127,50 @@ description = "Builds the product."
             "tinyagents harness run failed; model error; run timed out; model call for run \
              'agent_turn' exceeded its remaining wall-clock budget (56636 ms)"
         )
+    }
+
+    /// The same failure as [`ceiling_error`], but arriving as an `anyhow`
+    /// context chain instead of one flattened string. Nothing guarantees the
+    /// vendored crate keeps flattening it, and `is_wall_clock_ceiling` already
+    /// assumes it might not.
+    fn chained_ceiling_error() -> anyhow::Error {
+        use anyhow::Context as _;
+        Err::<(), _>(anyhow::anyhow!(
+            "model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)"
+        ))
+        .context("run timed out")
+        .context("model error")
+        .context("tinyagents harness run failed")
+        .unwrap_err()
+    }
+
+    /// A chain must not lose its leaf. `{err}` renders only the outermost
+    /// context — `tinyagents harness run failed` — which drops both the
+    /// remaining-budget figure and the call that was in flight, the two things
+    /// the message promises to keep. `{err:#}` renders the whole chain.
+    #[test]
+    fn a_chained_ceiling_error_keeps_its_leaf() {
+        let err = chained_ceiling_error();
+        assert_eq!(
+            format!("{err}"),
+            "tinyagents harness run failed",
+            "the premise: the outermost context alone says nothing useful"
+        );
+        assert!(
+            is_wall_clock_ceiling(&err),
+            "a chained ceiling hit is still a ceiling hit"
+        );
+
+        let msg =
+            wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
+        assert!(
+            msg.contains("56636 ms"),
+            "the remaining-budget figure survives the chain: {msg}"
+        );
+        assert!(
+            msg.contains("model call for run 'agent_turn'"),
+            "and so does the call that was in flight: {msg}"
+        );
     }
 
     #[test]
