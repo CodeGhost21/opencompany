@@ -10,6 +10,10 @@ The short version, and the only three sentences most readers need:
   default" in the sense of a flag someone could flip in a config file — the
   network client is behind a cargo feature the shipped default build does not
   compile, so there is no code in that binary that could make the request.
+  Getting one out of that state takes a **recompile**: `--features analytics`
+  *and* an explicit `OPENCOMPANY_ANALYTICS=on`, both deliberate, and neither
+  reachable from anything a shipped binary reads at runtime. See
+  [Configuration](#configuration) for the four conditions in full.
 - A **hosted tenant** — a container the OpenCompany platform provisioned and
   operates — reports **shape and outcome only**, under an **opaque id**.
 - Nothing an operator or an agent wrote ever leaves the process this way. Not
@@ -132,6 +136,13 @@ Reporting happens only when **all** of these hold:
 3. the deployment is `hosted-tenant`, **or** `OPENCOMPANY_ANALYTICS=on`;
 4. a project token is configured.
 
+Condition 1 is met in exactly one place in this repository: `TENANT_FEATURES` in
+`.github/workflows/deploy-staging.yml`, the hosted tenant image's feature set.
+Nothing else compiles the feature — not the desktop (`src-tauri/Cargo.toml`),
+not the default build, not any CI lane but the scoped analytics one. A hosted
+image whose feature list drops `analytics` reports nothing however the manager
+configures it, and says so at boot rather than failing quietly.
+
 `OPENCOMPANY_TENANT_ID` implies `hosted-tenant` when `OPENCOMPANY_DEPLOYMENT`
 says nothing — the control plane injects it and nothing else does. That is the
 only inference taken. A discriminator sniffed from something incidental (the
@@ -147,7 +158,7 @@ reports.
 Set `OPENCOMPANY_ANALYTICS=off`. It outranks the deployment kind and the token,
 and it is the first thing checked. Boot prints one line either way:
 
-```
+```text
 analytics: off (not a hosted tenant and no explicit opt-in)
 analytics: reporting to https://api.mixpanel.com/track
 ```
@@ -160,8 +171,8 @@ The endpoint is named; the token never is.
 |---|---|---|
 | `turn_finished` | `runtime::cycle::CycleRunner::run_bracketed` | The cycle's whole span, including the wait on the per-company serial lock — which is the part an operator experiences as "nothing is happening". |
 | `turn_metered` | `analytics::meter::TrackingUsageMeter`, a decorator over the `UsageMeter` port | Every `metering::record_*` path ends there, on every build. The harness cost hook is richer but `openhuman`-gated, and the cycle-level path deliberately reports zero tokens on that build so spend is not double-counted — so an event at either one is blind on the other half of the fleet. |
-| `instance_started` | `analytics::boot::install` | After companies register: the company count and the cognition path are not known before that. |
-| flush | `src/bin/opencompany.rs`, after `server::serve` returns | The server has already drained, so a last-moment turn's event still leaves. |
+| `instance_started` | `analytics::boot::install` | After companies register **and after the port is bound**: the company count and the cognition path are not known before the first, and a host that never took its address never started in any sense worth counting. |
+| flush | `src/bin/opencompany.rs`, after the bound host stops serving | The server has already drained, so a last-moment turn's event still leaves. |
 
 Failure is silent by construction: `Tracker::track` is synchronous and
 infallible and returns nothing, so a call site cannot await a network or branch

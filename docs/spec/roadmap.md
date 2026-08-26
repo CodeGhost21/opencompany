@@ -140,8 +140,10 @@ locally:
   fields — never message text, prompts, file names, ledger values, tool
   arguments or addresses, under an opaque id rather than a company name, and
   **only** for tenants the hosting platform provisions and operates. A desktop
-  or self-hosted build sends nothing and *cannot*: the network client is behind
-  a cargo feature the default build does not compile, which is also what keeps
+  or self-hosted **default** build sends nothing and *cannot*: the network
+  client is behind a cargo feature that build does not compile, and leaving that
+  state takes a recompile plus an explicit `OPENCOMPANY_ANALYTICS=on` rather
+  than anything a shipped binary reads at runtime. That gate is also what keeps
   the offline lane ([runtime/offline.md](runtime/offline.md)) honest.
 - **No prosumer-visible runtime internals.** UI or product text exposing
   "agent graph", tiers, or dispatch is a spec violation
