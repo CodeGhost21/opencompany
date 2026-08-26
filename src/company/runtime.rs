@@ -1714,6 +1714,25 @@ impl CompanyRuntime {
     /// defense-in-depth call — can run it unconditionally without needing to
     /// coordinate who "owns" the bank. A no-op for a denial, an id this
     /// journal never parked, or a turn that is not a blocked agent node's.
+    ///
+    /// # Why the durable write retries inline (P1 follow-up)
+    ///
+    /// Both inline callers reach this only after
+    /// `approval_gate.resolve_outcome` has already popped `id` from the
+    /// parked set (issue #243's double-submit guard) — that is what makes the
+    /// call idempotent-safe rather than a second decision. It also means a
+    /// re-click of "approve" on the same id short-circuits to
+    /// `ResolveReceipt::AlreadyResolved` upstream and never reaches this
+    /// function again: unlike `spawn_blocked_node_continuation`'s dispatch
+    /// write (which a caller-visible `Err` lets `resume_blocked_agent_node`
+    /// retry, because that stash and approval are still sitting there to
+    /// retry from), there is no external actor who can retry *this* write.
+    /// It is only ever retryable from inside this call. A single failed
+    /// attempt on this node's last decision is invisible to
+    /// `reconcile_stranded_blocked_nodes` (see this function's doc above) and
+    /// strands the grant permanently, not until the next transient blip
+    /// clears — so a bounded, synchronous retry runs before this call returns
+    /// to the caller, rather than warning once and moving on.
     pub(crate) async fn bank_blocked_node_approval(&self, id: &ApprovalId, verdict: Verdict) {
         if verdict != Verdict::Approve {
             return;
@@ -1725,13 +1744,30 @@ impl CompanyRuntime {
             return;
         }
         self.blocked_nodes.mark_approved(&turn);
-        if let Err(error) = self.journal.record_blocked_node_approved(&turn).await {
-            tracing::warn!(
+        const ATTEMPTS: u32 = 3;
+        let mut last_error = None;
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(u64::from(attempt) * 50)).await;
+            }
+            match self.journal.record_blocked_node_approved(&turn).await {
+                Ok(()) => return,
+                Err(error) => last_error = Some(error),
+            }
+        }
+        // Every attempt failed. `error!`, not `warn!`: nothing downstream
+        // re-attempts this write (see the doc above — there is no retryable
+        // caller for this one), so this line is the only record that a
+        // restart landing on this node's last decision will now strand the
+        // grant with no further recovery.
+        if let Some(error) = last_error {
+            tracing::error!(
                 company = %self.id,
                 %turn,
                 %error,
-                "[approval] a blocked node's approval could not be durably banked; a \
-                 restart before this node's last decision may now strand this grant"
+                "[approval] a blocked node's approval could not be durably banked after \
+                 retrying; a restart before this node's last decision will now strand this \
+                 grant with no further recovery"
             );
         }
     }
