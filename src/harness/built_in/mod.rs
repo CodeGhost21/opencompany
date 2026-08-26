@@ -1367,6 +1367,17 @@ fn humanise_elapsed(elapsed: Duration) -> String {
 /// knob's NAME is a fact independent of its value, so both can be stated
 /// honestly while the number cannot.
 ///
+/// ## Why it hedges about the figure
+///
+/// "**any** millisecond figure below", not "the figure below", because the two
+/// spellings this classifies do not both carry one. `with_call_budget` raises
+/// `… exceeded its remaining wall-clock budget (56636 ms)`; the run loop and the
+/// tool loop raise `run \`agent_turn\` exceeded its wall-clock deadline`, which
+/// has no number in it at all. Pointing at a figure that is not there would
+/// reintroduce this issue's own defect one spelling over — an accurate sentence
+/// that cannot be followed. One clause covers both; a branch on the spelling
+/// would be two messages to keep true.
+///
 /// ## Why it is not longer than this
 ///
 /// `RunHistoryPanel` renders a journaled run's error as the row's **headline**
@@ -1378,9 +1389,9 @@ fn humanise_elapsed(elapsed: Duration) -> String {
 fn wall_clock_ceiling_message(agent_id: &str, elapsed: Duration, err: &anyhow::Error) -> String {
     format!(
         "turn for '{agent_id}' hit the harness's per-turn wall-clock ceiling after {}. \
-         The ceiling bounds the whole turn, model time included, so the figure below is \
-         the budget that REMAINED when the last call started — not a limit on that call. \
-         Give this step less to do, or raise the ceiling with \
+         The ceiling bounds the whole turn, model time included, so any millisecond \
+         figure below is the budget that REMAINED when the last call started — not a \
+         limit on that call. Give this step less to do, or raise the ceiling with \
          OPENHUMAN_AGENT_TURN_TIMEOUT_SECS. Underlying error: {err:#}",
         humanise_elapsed(elapsed)
     )
@@ -6289,6 +6300,41 @@ description = "Builds the product."
     /// At the classifier, where the retry wrapper actually reads it: a ceiling
     /// hit stays HARD (a ten-minute failure must not be retried into twenty),
     /// and carries the honest message rather than the bare `turn for 'x': …`.
+    /// The other spelling the harness raises carries **no** figure — `run
+    /// `agent_turn` exceeded its wall-clock deadline` — so the message must not
+    /// point the operator at one. Being accurate but unfollowable is the exact
+    /// defect #1680 was filed on; reintroducing it one spelling over would be a
+    /// poor way to close it.
+    #[test]
+    fn the_figure_less_spelling_is_not_promised_a_figure() {
+        let err = anyhow::anyhow!(
+            "tinyagents harness run failed: run timed out: run `agent_turn` exceeded its \
+             wall-clock deadline"
+        );
+        assert!(
+            is_wall_clock_ceiling(&err),
+            "it is still the ceiling, and still classified here"
+        );
+
+        let msg = wall_clock_ceiling_message("ceo", Duration::from_secs(600), &err);
+        assert!(
+            !msg.contains("the figure below"),
+            "there is no figure below to point at: {msg}"
+        );
+        assert!(
+            msg.contains("10m 00s"),
+            "the measured elapsed still leads: {msg}"
+        );
+        assert!(
+            msg.contains("OPENHUMAN_AGENT_TURN_TIMEOUT_SECS"),
+            "and the knob is still named: {msg}"
+        );
+        assert!(
+            msg.contains("exceeded its wall-clock deadline"),
+            "the leaf survives verbatim: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn classify_turn_reframes_a_ceiling_hit_and_keeps_it_hard() {
         let (agent, _deps) = scripted_agent(vec![]);
