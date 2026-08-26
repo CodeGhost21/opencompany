@@ -594,6 +594,35 @@ impl AppState {
         self.acp_agents.clone()
     }
 
+    /// Whether a `transport = "local"` ACP harness can actually run here.
+    ///
+    /// Issue #1814. Two callers — the harness picker and the teammate `PATCH`
+    /// validator — used to ask [`acp_agents`](Self::acp_agents) directly, which
+    /// answers a different question: whether a factory was HANDED OVER, not
+    /// whether this build can use one. Those coincide on every server build and
+    /// on a desktop compiled with `acp`, and diverge on exactly one
+    /// configuration — a desktop compiled WITHOUT it:
+    ///
+    /// * [`with_acp_agents`](Self::with_acp_agents) is deliberately ungated, so
+    ///   that `src-tauri` can hand over a factory without pulling the whole
+    ///   embedded harness in behind `crate::harness` (`crate::ports::acp` exists
+    ///   for that reason). The desktop shell calls it unconditionally.
+    /// * The runtime cannot use what it was given: `RuntimeBuilder` forces
+    ///   `acp_agents = None` under `cfg(not(feature = "acp"))`, and
+    ///   `lanes::resolve_acp_engine` is an unconditional `Err` there — its
+    ///   factory parameter is typed `Infallible`, so `Some` is uninhabited.
+    ///
+    /// The result was a picker that offered `claude` and `codex`, a `PATCH`
+    /// that accepted the binding, and then every turn failing with `lanes.rs`'s
+    /// "run it from the desktop app" — advice for somebody already in it.
+    ///
+    /// One method rather than the same conjunct at both call sites: they were
+    /// already copy-paste siblings, comments included, and a predicate the two
+    /// can state differently is what opened the gap in the first place.
+    pub fn can_run_local_acp(&self) -> bool {
+        cfg!(feature = "acp") && self.acp_agents.is_some()
+    }
+
     /// Sessions opened through the host's ACP HTTP transport.
     #[cfg(feature = "acp")]
     pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
