@@ -25,6 +25,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyStatus } from "@/api/types";
 import { adminEmailProblem } from "@/lib/company-setup";
 import {
+  autoCompanyId,
   buildManifestToml,
   collidesWithArchived,
   describeProvisionError,
@@ -142,8 +143,10 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // same id (`company_id_from_name`) — reprovisioning over the archived
     // company's own durable record instead of a clean one. See
     // `resetReplacementId`. The operator can still overwrite it from
-    // Advanced; `create` leaves this blank as before, since there is no prior
-    // company for a fresh name to collide with.
+    // Advanced; `create` leaves this blank on open regardless — its name
+    // field is still empty at this point, so there is nothing yet to derive
+    // an id from. `submit` generates one (`autoCompanyId`) once a name
+    // exists, same as the reset default, if the operator never fills this in.
     setExplicitId(request.kind === "reset" ? resetReplacementId(request.company) : "");
     setAdvanced(false);
     setBusy(false);
@@ -237,20 +240,27 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     }
 
     const explicit = explicitId.trim();
-    // A reset always sends an explicit id, even if the operator cleared the
-    // Advanced field back to empty: falling through to the unset-id default
-    // would have the host re-derive the archived company's own id from the
-    // (possibly untouched) name field above. See `resetReplacementId`.
-    const id = explicit || (request.kind === "reset" ? resetReplacementId(request.company) : "");
+    // Both a reset and a plain create always send an explicit id, even if the
+    // operator cleared the Advanced field back to empty: falling through to
+    // the unset-id default would have the host derive one itself — on a
+    // reset, re-deriving the archived company's own id from the (possibly
+    // untouched) name field above (see `resetReplacementId`); on a create,
+    // an id this client can never safely reconcile against if the response
+    // is lost (see `autoCompanyId`).
+    const id =
+      explicit ||
+      (request.kind === "reset"
+        ? resetReplacementId(request.company)
+        : autoCompanyId(trimmedName));
     // Whether `id` is one this client generated itself, rather than one the
     // operator typed — declared outside the try below so the catch block can
     // see it. Two cases count as ours: the field still holds exactly what
-    // `resetReplacementId` seeded it with on open (`!idTouched`), or the
-    // operator cleared it back to blank, which — per the fallback above —
-    // still lands on a freshly generated id, never the unset-id default.
-    // Anything else the operator has typed in is theirs; reconciling that by
-    // looking it up could resolve to an unrelated, pre-existing company.
-    const selfGenerated = request.kind === "reset" && (!idTouched || explicit === "");
+    // the fallback above seeded it with (`!idTouched`), or the operator
+    // cleared it back to blank, which — per that same fallback — still lands
+    // on a freshly generated id, never the unset-id default. Anything else
+    // the operator has typed in is theirs; reconciling that by looking it up
+    // could resolve to an unrelated, pre-existing company.
+    const selfGenerated = !idTouched || explicit === "";
     const autoId = selfGenerated ? id : "";
 
     try {
@@ -285,7 +295,11 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
           // Genuinely not there — fall through to the ordinary error path.
         }
       }
-      const reason = describeProvisionError(err);
+      // `!selfGenerated` — a `company_exists` refusal at this point is about
+      // whatever the operator typed into the Advanced id field, not the name
+      // field, and the message needs to point at the right one (see
+      // `describeProvisionError`).
+      const reason = describeProvisionError(err, !selfGenerated);
       // The dangerous half-state: the old company is archived but its
       // replacement did not land. Never swallow it — name both facts so the
       // operator understands the picker no longer lists the old company and
@@ -405,7 +419,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
                   placeholder={
                     isReset
                       ? "auto-generated, distinct from the archived id"
-                      : "derived from the name when left blank"
+                      : "auto-generated from the name when left blank"
                   }
                   disabled={busy}
                   className="font-mono text-xs"

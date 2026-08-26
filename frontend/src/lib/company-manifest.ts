@@ -99,11 +99,24 @@ export function buildManifestToml(input: ManifestInput): string {
  * The host's own message is already prose for most refusals (a quota is "tenant
  * company quota of N reached", ownership is a full sentence ending "retry the
  * request"), so those are shown verbatim. Only two codes get a console-authored
- * line: `company_exists`, where the host names the id but the operator typed a
- * name, and the platform-scope refusal, which the console can explain in terms
- * of the sign-in rather than the raw `401`.
+ * line: `company_exists`, where the host's check
+ * (`format!("company already exists: {id}")`, `server/provision.rs`) is
+ * always about the **id**, and the platform-scope refusal, which the console
+ * can explain in terms of the sign-in rather than the raw `401`.
+ *
+ * `operatorTypedId` distinguishes which field a `company_exists` refusal is
+ * actionable from. The common case — Advanced never opened, the id left for
+ * the host (or this client, via `autoCompanyId`/`resetReplacementId`) to
+ * derive from the name — is a genuine name collision from the operator's
+ * point of view, since they never saw an id field at all: "choose a different
+ * name" is correct and the only field they can act on. But when the operator
+ * opened Advanced and typed an id themselves, the collision the host reports
+ * is about THAT id, not the name — the two can be unrelated (`"Acme Robotics"`
+ * saved under a deliberately-chosen `acme-2`) — and telling them to rename
+ * sends them to edit a field that was never the problem, retry, and hit the
+ * exact same refusal again (issue #1828 comment 3865190508).
  */
-export function describeProvisionError(err: unknown): string {
+export function describeProvisionError(err: unknown, operatorTypedId: boolean = false): string {
   if (!(err instanceof ApiError)) {
     return "Something went wrong creating the company. Try again.";
   }
@@ -118,7 +131,9 @@ export function describeProvisionError(err: unknown): string {
 
   switch (err.code) {
     case "company_exists":
-      return "A company with that name already exists on this host. Choose a different name.";
+      return operatorTypedId
+        ? "That company id is already in use on this host. Change it, or clear the field for an auto-generated one."
+        : "A company with that name already exists on this host. Choose a different name.";
     case "network_error":
       return err.message;
     // quota_exceeded, ownership_not_persisted, auth_mode_none_not_allowed,
@@ -127,6 +142,46 @@ export function describeProvisionError(err: unknown): string {
     default:
       return err.message;
   }
+}
+
+/**
+ * A short id suffix, random enough that a self-generated id can never
+ * plausibly collide with a pre-existing, unrelated company.
+ *
+ * That property is what lets `submit` (in `create-company-dialog.tsx`) treat
+ * an ambiguous provisioning outcome — {@link wasAmbiguousProvisionOutcome} —
+ * as "this is our own retry landing on the id we ourselves just asked for"
+ * rather than "a genuine collision with someone else's company": the odds of
+ * this suffix matching one already in use are negligible, so reconciling by
+ * looking the id up is safe in a way it would not be for a purely
+ * name-derived id (see {@link autoCompanyId}).
+ */
+function randomIdSuffix(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Filesystem-and-URL-safe slug from a display name — mirrors
+ * `company_id_from_name` in `runtime/builder.rs` (`"Acme Co!"` → `"acme-co"`),
+ * so a self-generated id still reads like the one the host would have derived
+ * on its own.
+ */
+function slugFromName(name: string): string {
+  let slug = "";
+  let prevDash = false;
+  for (const ch of name) {
+    if (/[a-z0-9]/i.test(ch)) {
+      slug += ch.toLowerCase();
+      prevDash = false;
+    } else if (!prevDash) {
+      slug += "-";
+      prevDash = true;
+    }
+  }
+  const trimmed = slug.replace(/^-+|-+$/g, "");
+  return trimmed || "company";
 }
 
 /**
@@ -148,11 +203,33 @@ export function describeProvisionError(err: unknown): string {
  * about the id, not the display name.
  */
 export function resetReplacementId(oldId: string): string {
-  const suffix =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID().slice(0, 8)
-      : Math.random().toString(36).slice(2, 10);
-  return `${oldId}-${suffix}`;
+  return `${oldId}-${randomIdSuffix()}`;
+}
+
+/**
+ * A fresh, self-generated id for an ordinary "create" request left on its
+ * default (issue #1828 comment 3865190498).
+ *
+ * Left unset, `submit` used to omit `id` from the request entirely and let
+ * the host derive one from `[company].name` itself. That left a plain create
+ * unable to share `resetReplacementId`'s reconciliation trick: a dropped
+ * connection after a successful provision (or a retry landing on
+ * `company_exists`) had no id to look up, so every retry reported failure
+ * and — worse — every retry derives the exact same name-based id and gets
+ * refused again, with no way out short of picking a new name. Generating (and
+ * explicitly sending) an id here, the same way {@link resetReplacementId}
+ * already does for a reset, gives `submit` something safe to reconcile
+ * against.
+ *
+ * The random suffix is what makes that safe. A bare `slugFromName` id, sent
+ * with no suffix, would be indistinguishable from a genuine collision with
+ * some unrelated, pre-existing company that already happens to sit at the
+ * same slug — reconciling THAT the way `resetReplacementId`'s id is
+ * reconciled would silently switch the operator into a company they never
+ * created. See {@link wasAmbiguousProvisionOutcome}.
+ */
+export function autoCompanyId(name: string): string {
+  return `${slugFromName(name)}-${randomIdSuffix()}`;
 }
 
 /**
