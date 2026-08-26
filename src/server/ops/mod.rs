@@ -15,6 +15,9 @@
 //! mocks in tests, real impls when a feature is on); the OAuth write routes are
 //! compiled only under the `oauth` feature and 404 otherwise.
 
+/// `GET {scope}/activation` — the account-activation funnel read projection
+/// (issue #1843). See [`crate::company::activation`] for the derivation.
+pub mod activation;
 pub mod artifacts;
 /// Avatar uploads (`docs/spec/runtime/avatars.md`): the custom-image half of
 /// choosing a face for a teammate or for yourself.
@@ -226,6 +229,7 @@ pub fn router() -> Router<AppState> {
         .merge(inference::router())
         .merge(team::router())
         .merge(setup::router())
+        .merge(activation::router())
         .merge(policy::router())
         .merge(workflows::router())
         .merge(mail::router());
