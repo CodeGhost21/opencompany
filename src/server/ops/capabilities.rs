@@ -1160,6 +1160,7 @@ mod tests {
                     cost_usd: 0.0,
                     kind: SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -1217,6 +1218,7 @@ mod tests {
                     cost_usd: 0.0,
                     kind: SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await

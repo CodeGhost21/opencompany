@@ -1899,6 +1899,7 @@ base_url = "https://byo.example/v1"
                 // A stub brain meters per turn and reports zero usage, so
                 // nothing is double-counted (see `Brain::cognition`).
                 provider: "stub",
+                model: None,
                 metering: crate::ports::UsageMetering::PerTurn,
             }
         }

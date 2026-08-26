@@ -109,6 +109,8 @@ impl Brain for EchoBrain {
         Cognition {
             path: ECHO_PATH,
             provider: "none",
+            // No model is called on this path, so there is no model to name.
+            model: None,
             metering: UsageMetering::None,
         }
     }

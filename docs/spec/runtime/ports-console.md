@@ -426,6 +426,29 @@ write is a money bug. **Retention:** backends evict samples older than
 anchored to the newest observed sample for deterministic eviction. Samples are
 non-secret accounting rows; money still resolves from the ledger and `[budget]`.
 
+**Model attribution (issue #1749).** `UsageSample::model` is an
+`Option<ModelSlug>`, not a `String`. `provider` says *who served* the tokens
+(`subscription`, `byok`, `ollama`); only `model` says *what ran*, which is what
+"is this company's spend going to Sonnet or to Haiku?" asks. It is a closed
+vocabulary — `<vendor>` or `<vendor>-<line>`, plus this repo's four workload
+tiers, plus `other` — because a BYOK or `openai_compatible` tenant names its
+models itself and that string is operator-authored free text: as a payload it
+is a content leak, and as a stored column it is unbounded-cardinality data kept
+for 90 days. The raw name is classified inside the harness, at the same place it
+is put on the wire (`HarnessModel::telemetry_model`), and never leaves it; the
+vocabulary and the rule for extending it are documented in
+`src/metering/model.rs`; `ModelSlug::as_str` returns a `&'static str`, so a
+telemetry payload can carry it directly without a second classifier. `ModelSlug`'s `Deserialize` re-classifies, so a stored
+row cannot smuggle raw text back into the process either. A provider publishes
+that value only **after its own call has succeeded**: one provider is shared by
+every agent on a company and the cache is read after a turn finishes, so a turn
+that was rejected — and therefore metered nothing — must not name the model for
+a concurrent turn that did run. `None` means no model
+to name — an `OauthCall`/`SearchCall`, a path that cannot identify one, or a
+sample written before the field existed; the field is `#[serde(default,
+skip_serializing_if)]`, so pre-existing rows on all three backends load
+unchanged and need no migration.
+
 ### SkillStateStore
 
 Per-company installed-skill state overlay (`src/ports/skills_state.rs`) —
