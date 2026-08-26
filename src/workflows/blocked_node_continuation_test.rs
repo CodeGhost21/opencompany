@@ -396,6 +396,148 @@ async fn runtime_with_gated_journal_store(
     (Arc::new(rt), store, runner)
 }
 
+/// A [`JournalStore`] that fails `append_journal` with
+/// [`OpenCompanyError::Store`] for exactly the first `fail_count` appends
+/// whose line contains `match_substr`, then passes every append — including
+/// later ones matching the same substring — straight through to an in-memory
+/// backend.
+///
+/// Issue #1825 (P1 follow-ups, found by chatgpt-codex-connector): two
+/// separate durable writes on this path — `record_blocked_node_dispatched`
+/// and `record_blocked_node_approved` — used to swallow their own failure
+/// (`tracing::warn!` and move on) rather than treat it as the load-bearing
+/// fact it is. This is the harness that reproduces a *genuine* write failure
+/// (as opposed to [`GatedJournalStore`]'s crash-race simulation) so a test
+/// can assert on what each call site actually does with it: abort without
+/// launching (the dispatch marker) or retry before giving up (the approval
+/// bank).
+struct FailNJournalStore {
+    inner: MemoryJournalStore,
+    match_substr: &'static str,
+    remaining_failures: std::sync::atomic::AtomicUsize,
+}
+
+impl FailNJournalStore {
+    fn new(match_substr: &'static str, fail_count: usize) -> Self {
+        Self {
+            inner: MemoryJournalStore::default(),
+            match_substr,
+            remaining_failures: std::sync::atomic::AtomicUsize::new(fail_count),
+        }
+    }
+}
+
+#[async_trait]
+impl JournalStore for FailNJournalStore {
+    async fn append_journal(
+        &self,
+        id: &CompanyId,
+        line: &str,
+        durability: Durability,
+    ) -> crate::Result<()> {
+        if line.contains(self.match_substr) {
+            let prev =
+                self.remaining_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                        if n == 0 { None } else { Some(n - 1) }
+                    });
+            if prev.is_ok() {
+                return Err(OpenCompanyError::Store(format!(
+                    "FailNJournalStore: forced failure on a line matching {:?}",
+                    self.match_substr
+                )));
+            }
+        }
+        self.inner.append_journal(id, line, durability).await
+    }
+
+    async fn read_journal(&self, id: &CompanyId) -> crate::Result<Vec<String>> {
+        self.inner.read_journal(id).await
+    }
+
+    async fn journal_imported(&self, id: &CompanyId) -> crate::Result<bool> {
+        self.inner.journal_imported(id).await
+    }
+
+    async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> crate::Result<()> {
+        self.inner.complete_import(id, lines).await
+    }
+}
+
+/// [`runtime`]'s twin, wired identically except the journal's durable sink is
+/// a [`FailNJournalStore`] that fails the first `fail_count` appends matching
+/// `match_substr`.
+async fn runtime_with_failing_journal_store(
+    home: &std::path::Path,
+    turns: Vec<Turn>,
+    match_substr: &'static str,
+    fail_count: usize,
+) -> (
+    Arc<crate::company::runtime::CompanyRuntime>,
+    Arc<FailNJournalStore>,
+    Arc<RecordingRunner>,
+) {
+    let store = Arc::new(FailNJournalStore::new(match_substr, fail_count));
+    let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_seed_dir(home.to_path_buf())
+        .with_journal_store(store.clone())
+        .build()
+        .await
+        .expect("runtime builds");
+
+    let (base_url, _script) = spawn_script_recording(turns).await;
+    let (mut deps, _unused) = deps(base_url, home);
+    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
+    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
+    delivery.parking = Some(super::delivery::DeliveryParking {
+        approvals: rt.approvals.clone(),
+        journal: rt.journal().clone(),
+        continuations: rt.continuations.clone(),
+        gates: rt.workflow_gates().clone(),
+        blocked_nodes: rt.blocked_nodes().clone(),
+    });
+
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record(), &deps).await.expect("roster builds");
+    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+        pool,
+        Arc::new(deps.clone()),
+    ));
+    let runner = Arc::new(RecordingRunner {
+        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
+        started: Mutex::new(Vec::new()),
+    });
+    rt.set_workflow_runner(runner.clone());
+    (Arc::new(rt), store, runner)
+}
+
+/// Whether the store's own backing log — not `RuntimeJournal`'s in-memory
+/// mirror, which a live `record_*` call updates optimistically before the
+/// fallible durable append it guards even runs — actually holds a line
+/// naming `turn` under `record_kind` (e.g. `"BlockedNodeApproved"`).
+///
+/// The in-memory mirror is what `blocked_node_approvals()`/
+/// `blocked_node_dispatched()` read, and it is correct for their one real
+/// caller — boot-time rearm, which constructs a fresh `RuntimeJournal` from a
+/// replay of what is genuinely on disk, never from a live optimistic write.
+/// Mid-session, though, it is not a reliable oracle for "did this attempt's
+/// write actually land", which is exactly what these tests need to tell a
+/// retried success apart from a failure the retry never actually recovered.
+async fn store_durably_has(
+    store: &FailNJournalStore,
+    company: &CompanyId,
+    record_kind: &str,
+    turn: &str,
+) -> bool {
+    store
+        .inner
+        .read_journal(company)
+        .await
+        .expect("the in-memory backend never fails to read")
+        .iter()
+        .any(|line| line.contains(record_kind) && line.contains(turn))
+}
+
 /// A [`CompanyStore`] that suspends its `load` calls on a gate the test
 /// controls, wrapping the real filesystem store so every other call — and
 /// every `load` before the gate is armed — behaves exactly as it always did.
@@ -1543,5 +1685,223 @@ async fn a_capacity_refusal_keeps_the_stash_for_a_later_retry() {
     assert!(
         !rt.blocked_nodes().is_armed(&turn),
         "the stash is retired once the retried continuation actually runs"
+    );
+}
+
+/// Issue #1825 (P1 follow-up, found by chatgpt-codex-connector): a
+/// `record_blocked_node_dispatched` write that genuinely fails must abort the
+/// launch, not warn and proceed unmarked.
+///
+/// Before this fix, a failed dispatch-marker write only logged a warning and
+/// still called `spawn_admitted` — so a crash between that unmarked launch
+/// and `BlockedNodeReleased` landing left a run genuinely in flight with
+/// nothing durable saying so, and `reconcile_stranded_blocked_nodes` would
+/// dispatch it a second time. [`FailNJournalStore`] forces the marker's own
+/// append to fail for real (as opposed to [`GatedJournalStore`]'s crash-race
+/// simulation), so this proves the call site's actual reaction: the run must
+/// not launch, and the stash and its approval must stay exactly as durably
+/// retryable as they were before the attempt — the same shape
+/// `a_capacity_refusal_keeps_the_stash_for_a_later_retry` already proves for
+/// the concurrency-ceiling refusal.
+///
+/// # Why this stops at "durably retryable" rather than driving a retry
+///
+/// `record_blocked_node_dispatched` (like every sibling `record_*` on this
+/// journal — `record_blocked_node_stashed`, `record_blocked_node_approved`)
+/// inserts into its in-memory mirror **before** attempting the durable
+/// append, and does not rebuild that state on `main` from anything but a
+/// process-inheriting rebuild or a fresh boot's replay. So this specific
+/// process's `blocked_node_dispatched()` mirror is left saying `turn` is
+/// dispatched even though the append that would have made it true just
+/// failed — calling `reconcile_stranded_blocked_nodes` again in the *same*
+/// process would read that stale `true`, treat this exactly like the
+/// crash-race case `reconciliation_does_not_redispatch_a_node_whose_dispatch_already_landed`
+/// proves correct, and retire the stash without ever having dispatched it —
+/// reintroducing the loss this whole fix exists to close, through a path
+/// none of these three P1s named. It is not reachable on `main` today
+/// because `reconcile_stranded_blocked_nodes` has exactly one call site,
+/// at boot, against a `RuntimeJournal` built fresh from replaying what is
+/// genuinely on disk — which correctly excludes this failed write. This test
+/// stops short of driving a real second boot (which would mean sharing a
+/// `FailNJournalStore` across two full `RuntimeBuilder::build()` calls and
+/// re-wiring a second harness pool) and instead asserts the boundary that
+/// finding actually sits on: the durable, on-disk facts a genuine boot's
+/// replay would see are correct. A same-process `reconcile_stranded_blocked_nodes`
+/// call staying safe requires that in-memory mirror to be exactly as
+/// truthful as the store — which is a pre-existing, documented property of
+/// this journal (see `record_blocked_node_released`'s own doc comment) that
+/// these three findings did not ask this round to change, so it is flagged
+/// here rather than silently patched.
+#[tokio::test]
+async fn a_failed_dispatch_marker_write_aborts_the_launch_instead_of_launching_unmarked() {
+    let home = seed_home();
+    let (rt, store, runner) = runtime_with_failing_journal_store(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+        "BlockedNodeDispatched",
+        1,
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    let result = rt
+        .resolve_approval(&cards[0], Verdict::Approve, operator())
+        .await;
+
+    assert!(
+        matches!(result, Err(OpenCompanyError::Store(_))),
+        "resolve_approval must propagate the dispatch marker's write failure: {result:?}"
+    );
+    assert_eq!(
+        runner.started(),
+        1,
+        "a failed marker write must not launch the continuation unmarked"
+    );
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "the failed attempt must not retire the stash — it is still the only durable record \
+         able to resume this approval"
+    );
+    assert!(
+        rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "the durable approval bank must also survive the failed dispatch attempt"
+    );
+    assert!(
+        !store_durably_has(&store, rt.id(), "BlockedNodeDispatched", &turn).await,
+        "nothing was actually dispatched, so no dispatch marker must be durably recorded — a \
+         real reboot's replay, which is the only thing that reads this journal's in-memory \
+         mirror back out at a point where it can matter, sees exactly this and would retry"
+    );
+    assert!(
+        store_durably_has(&store, rt.id(), "BlockedNodeApproved", &turn).await,
+        "the durable approval fact must have landed before the failed dispatch attempt, so a \
+         real reboot's replay still knows this turn was approved"
+    );
+}
+
+/// Issue #1825 (P1 follow-up, found by chatgpt-codex-connector): a
+/// transient `record_blocked_node_approved` failure must be retried inline,
+/// before `bank_blocked_node_approval` returns, rather than warned past once.
+///
+/// Unlike the dispatch marker above, there is no external caller who can
+/// retry this write: `settle_approval`/`settle_approval_amended` reach it
+/// only after `approval_gate.resolve_outcome` has already popped the id from
+/// the parked set, so a re-click of "approve" on the same id short-circuits
+/// to `AlreadyResolved` and never reaches this call again. Forcing exactly
+/// two failures — one fewer than the bounded retry allows — proves the write
+/// still lands, and the operator-visible outcome (the receipt, and the
+/// continuation it dispatches) is unaffected by the transient blip.
+#[tokio::test]
+async fn a_transient_approval_bank_failure_is_retried_before_giving_up() {
+    let home = seed_home();
+    let (rt, store, runner) = runtime_with_failing_journal_store(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+        "BlockedNodeApproved",
+        2,
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    let result = rt
+        .resolve_approval(&cards[0], Verdict::Approve, operator())
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "two transient failures are within the bounded retry — the resolve must still \
+         succeed: {result:?}"
+    );
+    assert_eq!(
+        runner.started(),
+        2,
+        "the continuation still dispatches once the retried bank succeeds"
+    );
+    assert!(
+        store_durably_has(&store, rt.id(), "BlockedNodeApproved", &turn).await,
+        "the durable approval fact must have landed despite the two failed attempts that \
+         preceded it — this is exactly what a boot's `reconcile_stranded_blocked_nodes` reads \
+         to find a stash stranded on its last decision"
+    );
+}
+
+/// Issue #1825 (P1 follow-up): the bound on
+/// `bank_blocked_node_approval`'s retry is real, not merely nominal — a
+/// failure that outlasts every attempt still leaves the operator's click
+/// succeeding (there is nothing else useful to tell them; the verdict and
+/// the grant are already durable) but the durable approval fact genuinely
+/// absent, exactly the gap this same fix's doc comment names rather than
+/// pretending is closed.
+#[tokio::test]
+async fn a_persistent_approval_bank_failure_is_not_hidden_by_the_retry() {
+    let home = seed_home();
+    let (rt, store, runner) = runtime_with_failing_journal_store(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+        "BlockedNodeApproved",
+        usize::MAX,
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    let result = rt
+        .resolve_approval(&cards[0], Verdict::Approve, operator())
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "a persistently failing durable bank must not fail the resolve itself — the verdict \
+         and the grant are already durable by this point: {result:?}"
+    );
+    assert_eq!(
+        runner.started(),
+        2,
+        "the live process still dispatches the continuation from its in-memory state \
+         regardless of whether the durable bank landed"
+    );
+    assert!(
+        !store_durably_has(&store, rt.id(), "BlockedNodeApproved", &turn).await,
+        "a genuinely persistent failure is not something the bounded retry can paper over — \
+         the durable fact is honestly absent, not silently assumed present"
     );
 }
