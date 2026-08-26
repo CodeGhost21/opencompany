@@ -455,6 +455,18 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} has an invalid `id` — use snake_case (lowercase letters, digits, and underscores, starting with a letter)."
                 ));
+            } else if chat.id == crate::runtime::channel::OPERATOR_CHANNEL {
+                // Issue #1757: `operator` is the reserved id of the built-in,
+                // read-only Operator system channel — every company gets one,
+                // listed and durable. A manifest desk claiming that id would be
+                // indistinguishable from it in the desk list, and every message
+                // sent there would be refused by the read-only guard in
+                // `chat_and_emit` (`src/server/operator.rs`), which treats any
+                // `chat_id == OPERATOR_CHANNEL` as the system feed regardless of
+                // where it came from.
+                problems.push(format!(
+                    "{label} uses the id `operator`, which is reserved for the built-in Operator channel — choose a different id."
+                ));
             } else if !chat_ids.insert(chat.id.as_str()) {
                 problems.push(format!(
                     "group chat `id` `{}` is used more than once — ids must be unique.",
@@ -1789,6 +1801,28 @@ mod tests {
         let problems = manifest.validate();
         assert!(problems.iter().any(|p| p.contains("snake_case")));
         assert!(problems.iter().any(|p| p.contains("more than once")));
+    }
+
+    /// Issue #1757: `operator` is reserved for the built-in, read-only
+    /// Operator system channel. A manifest desk claiming it would be
+    /// indistinguishable from the system channel in the desk list, and every
+    /// message sent there would be refused by `chat_and_emit`'s read-only
+    /// guard (`src/server/operator.rs`), which does not know or care where a
+    /// `chat_id == OPERATOR_CHANNEL` came from.
+    #[test]
+    fn rejects_a_group_chat_claiming_the_reserved_operator_id() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Operator\"\nmembers = [\"ceo\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("reserved") && p.contains("operator")),
+            "{problems:?}"
+        );
     }
 
     #[test]
