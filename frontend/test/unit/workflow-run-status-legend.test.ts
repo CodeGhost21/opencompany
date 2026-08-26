@@ -586,6 +586,45 @@ describe("the cancelled-run sentence matches whether a step was actually cut off
   });
 });
 
+/** A run cancelled on a host predating #1010/#382: no `startedNodes` field at
+ * all, so whether the step in progress when the stop landed finished is
+ * genuinely unknowable — `WorkflowRunOutcome.startedNodes`'s own doc comment
+ * says absence must read as "no start trail", never as "nothing started". */
+function cancelledLegacyRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 12,
+    cancelled: true,
+    nodes: [{ nodeId: "n_3", status: "ok", elapsedMs: 40 }],
+  });
+}
+
+// Codex review on #1821 (ninth pass): `midFlightNode` folded `run.startedNodes
+// ?? []` into "no node was mid-flight" for BOTH a settled run whose receipt
+// confirms every started step finished AND a legacy run with no receipt at
+// all — collapsing "known complete" and "unknown" into the same unconditional
+// completion claim.
+describe("the cancelled-run sentence hedges when the start trail itself is missing", () => {
+  it("does not claim every started step completed when startedNodes is absent", async () => {
+    await renderHistory(cancelledLegacyRun());
+    const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
+    expect(row?.textContent).not.toContain(
+      "Every step that had started completed",
+    );
+    expect(row?.textContent).not.toContain("stopped where it was");
+    expect(row?.textContent).toContain("is not recorded for this run");
+  });
+
+  it("still asserts completion when startedNodes is present and empty (known: nothing had started)", async () => {
+    await renderHistory(
+      baseRun({ seq: 13, cancelled: true, startedNodes: [] }),
+    );
+    const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
+    expect(row?.textContent).toContain(
+      "Every step that had started completed and was recorded before the stop took effect.",
+    );
+  });
+});
+
 describe("the unparkable-only blocked remedy stops naming a policy cause", () => {
   // Codex review on #1821 (eighth pass, same site as the sixth): `parkFailed`
   // fires both when the approvals queue refused the write and when this
