@@ -220,6 +220,7 @@ export function OperatorOverview({
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="operator-overview" data-tour="operator-overview">
       <PageHeader
+        gutter="px-5 sm:px-8"
         title="Overview"
         width="5xl"
         eyebrow={companyName}

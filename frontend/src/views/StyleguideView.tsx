@@ -148,6 +148,7 @@ function Header() {
       <PageHeader
         title="Styleguide"
         width="5xl"
+        gutter="px-6"
         eyebrow={
           <span className="text-2xs font-medium tracking-wide text-sidebar-accent-foreground uppercase">
             OpenCompany design system

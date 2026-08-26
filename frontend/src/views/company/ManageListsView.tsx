@@ -87,6 +87,7 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
         <PageHeader
           title="Manage lists"
           className="-mx-6 -mt-6"
+          gutter="px-6"
           leading={
             <Button
               variant="ghost"
@@ -129,6 +130,10 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
       <PageHeader
         title="Manage lists"
         className="-mx-6 -mt-6"
+        // The bleed puts the bar on the surface's own edges; the body sits on
+        // the surface's `p-6`, so the row has to as well or the title and the
+        // first card disagree by 8px.
+        gutter="px-6"
         leading={
           /* `history.back()`, not a fixed destination (issue #1284): this
              screen is reached from wherever a list's own switcher was open,

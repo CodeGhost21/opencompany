@@ -75,16 +75,36 @@ import { cn } from "@/lib/utils";
 const TITLE = "min-w-0 truncate text-lg font-semibold tracking-tight";
 
 /**
- * The bar. `px-4 py-3` is Workflows' own padding, kept so the reference page is
- * unchanged by adopting the component that was derived from it — the `px-4`
- * rides on the inner column rather than here, so that a `width="page"` header
- * takes the same gutter its page body does and the title lands on the same
- * vertical as the first word beneath it.
+ * The bar. `py-3` is Workflows' own padding, kept so the reference page is
+ * unchanged by adopting the component that was derived from it. The horizontal
+ * gutter rides on the inner column rather than here, so that the bar and its
+ * hairline still span the surface while the title sits on the page's own
+ * column.
+ *
+ * That gutter is `GUTTER` below by default and the caller may override it,
+ * because it has to equal whatever the page body uses. A fixed `px-4` was
+ * *stated* to make "the title land on the same vertical as the first word
+ * beneath it" and did not: measured in Chromium at 1440px, the Overview body
+ * (`p-5 sm:p-8`) put its content 16px inside the title, and the Styleguide
+ * (`px-6`) 8px — both of which had been aligned before adopting this
+ * component (codex review, #1785). A promise the code does not keep is worse
+ * than no promise, so the code now keeps it.
  *
  * The hairline is the load-bearing half: it is what separates "the page's name"
  * from "the page", and it is what every floating title was missing.
  */
 const BAR = "shrink-0 border-b py-3";
+
+/**
+ * The default horizontal gutter: Workflows' own, and right for the many pages
+ * whose body is `px-4`.
+ *
+ * A page whose body uses anything else passes its own through `gutter`. There
+ * is no clever derivation available here — the body is a sibling this
+ * component never sees — so the caller states it, and the rule is simply that
+ * the two must be the same.
+ */
+const GUTTER = "px-4";
 
 /**
  * The width of the header's *row*, which must match the width of the column the
@@ -157,6 +177,15 @@ export type PageHeaderProps = {
    */
   hidden?: boolean;
   width?: PageHeaderWidth;
+  /**
+   * The row's horizontal padding, which **must match the page body's**.
+   *
+   * Defaults to `px-4`. Pass the body's own classes when it differs —
+   * `gutter="px-5 sm:px-8"` for a `p-5 sm:p-8` body — so the title and the
+   * first word beneath it share a vertical. Responsive values are why this is
+   * a class string rather than a token: the Overview's gutter changes at `sm`.
+   */
+  gutter?: string;
   /** On the bar, for a page that needs to find its own header in a test. */
   "data-testid"?: string;
   /**
@@ -181,6 +210,7 @@ export function PageHeader({
   children,
   hidden = false,
   width = "full",
+  gutter = GUTTER,
   rowTestId,
   titleTestId,
   className,
@@ -196,7 +226,7 @@ export function PageHeader({
 
   return (
     <div className={cn(BAR, className)} data-testid={testId}>
-      <div className={cn("px-4", COLUMN[width])}>
+      <div className={cn(gutter, COLUMN[width])}>
         {eyebrow && <div className="text-sm text-muted-foreground">{eyebrow}</div>}
         {/*
           `ml-auto` on the actions rather than `justify-between` on the row: with
