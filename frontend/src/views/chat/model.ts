@@ -34,6 +34,27 @@ export function deskFromDto(d: DeskDto): Desk {
 }
 
 /**
+ * Shape a `/desks` response into the console's `Desk[]`, applying the
+ * empty-response fallback (issue #370): a host with no declared
+ * `[[group_chat]]` entries still gets the default desks, so the workspace
+ * isn't left with nothing to address.
+ *
+ * The fallback is keyed on *real* (non-system) desks, not the raw response
+ * length. The always-present Operator system channel (issue #1757) means a
+ * desk-less company's `/desks` answer is never actually empty, so checking
+ * raw length would silently swap the writable default desks for the
+ * read-only Operator feed alone, losing the main/general line a fresh
+ * company needs. Any system desks the host did send (Operator) are kept
+ * either way, so falling back never drops that feed either.
+ */
+export function resolveDesks(dtos: DeskDto[]): Desk[] {
+  const real = dtos.filter((d) => !d.system);
+  if (real.length) return dtos.map(deskFromDto);
+  const system = dtos.filter((d) => d.system).map(deskFromDto);
+  return [...defaultDesks(), ...system];
+}
+
+/**
  * Every channel's transcript, keyed by channel id. Owned by `AppShell`, not
  * `ChatView`, so a transcript survives `ChatView` unmounting when the operator
  * steps into Tasks, Settings, or any other view and comes back.

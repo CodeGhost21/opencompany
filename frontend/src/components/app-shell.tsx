@@ -107,9 +107,9 @@ import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
-  deskFromDto,
   dmChannelId,
   HISTORY_UNSTARTED,
+  resolveDesks,
   type DecidedApproval,
   type HistoryHydration,
   type HistoryStatus,
@@ -1038,7 +1038,7 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        const chatDesks = desks.length ? desks.map(deskFromDto) : defaultDesks();
+        const chatDesks = resolveDesks(desks);
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));

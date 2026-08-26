@@ -79,7 +79,6 @@ import {
   channelIdFromSegment,
   channelMembers,
   channelTitle,
-  deskFromDto,
   dmChannelId,
   findChannel,
   firstChannel,
@@ -89,6 +88,7 @@ import {
   directMessageChannels,
   directMessageForId,
   offersDeliverableChoice,
+  resolveDesks,
   resolveDmChannelId,
   toggleReaction,
   type DecidedApproval,
@@ -684,7 +684,7 @@ export function ChatView({
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
-      setDesks(dtos.length ? dtos.map(deskFromDto) : defaultDesks());
+      setDesks(resolveDesks(dtos));
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
