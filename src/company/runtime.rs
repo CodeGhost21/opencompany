@@ -721,6 +721,24 @@ impl CompanyRuntime {
         self.roster_builder.as_ref()
     }
 
+    /// The pass that drafts one teammate's mandate or persona (issue #1776).
+    ///
+    /// Built on demand from the same harness deps the workflow builder holds —
+    /// the same provider and model override — so a console BYOK switch reaches
+    /// drafting with no second credential path and no second wiring site. It is
+    /// two `Arc` clones and carries no state between calls, so there is nothing
+    /// to attach at boot and nothing to rebuild.
+    ///
+    /// `None` means this company has no harness path, which is a supported
+    /// configuration: the route answers `no_model` and the console says so,
+    /// rather than offering a control that can only fail.
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn profile_drafter(&self) -> Option<crate::harness::profile_draft::ProfileDrafter> {
+        Some(crate::harness::profile_draft::ProfileDrafter::from_deps(
+            self.workflow_harness_deps.as_ref()?,
+        ))
+    }
+
     /// Attaches the embedded MCP runtime used by REST and harness agents.
     #[cfg(feature = "mcp")]
     pub fn set_mcp(&mut self, mcp: Arc<crate::harness::mcp::McpRuntime>) {

@@ -249,11 +249,10 @@ mod live {
         let key = config.api_key.clone();
         match config.provider.as_str() {
             "brave" => vec![
-                alias(BraveWebSearchTool::new(
-                    key.clone(),
-                    DEFAULT_MAX_RESULTS,
-                    TIMEOUT_SECS,
-                )),
+                alias(
+                    BraveWebSearchTool::new(key.clone(), DEFAULT_MAX_RESULTS, TIMEOUT_SECS),
+                    "Brave web search",
+                ),
                 Box::new(BraveNewsSearchTool::new(
                     key.clone(),
                     DEFAULT_MAX_RESULTS,
@@ -271,12 +270,10 @@ mod live {
                 )),
             ],
             "exa" => vec![
-                alias(ExaSearchTool::new(
-                    key.clone(),
-                    None,
-                    DEFAULT_MAX_RESULTS,
-                    TIMEOUT_SECS,
-                )),
+                alias(
+                    ExaSearchTool::new(key.clone(), None, DEFAULT_MAX_RESULTS, TIMEOUT_SECS),
+                    "Exa web search",
+                ),
                 Box::new(ExaFindSimilarTool::new(
                     key.clone(),
                     None,
@@ -290,24 +287,25 @@ mod live {
                     TIMEOUT_SECS,
                 )),
             ],
-            "querit" => vec![alias(QueritSearchTool::new(
-                key,
-                None,
-                DEFAULT_MAX_RESULTS,
-                TIMEOUT_SECS,
-            ))],
+            "querit" => vec![alias(
+                QueritSearchTool::new(key, None, DEFAULT_MAX_RESULTS, TIMEOUT_SECS),
+                "Querit web search",
+            )],
             "searxng" => {
                 // Resolution guarantees the endpoint for this provider; the
                 // `unwrap_or_default` is the belt to that braces, and an empty
                 // base URL makes the tool report an unreachable instance rather
                 // than panic.
                 let base_url = config.endpoint.clone().unwrap_or_default();
-                vec![alias(SearxngSearchTool::new(
-                    base_url,
-                    DEFAULT_MAX_RESULTS,
-                    SEARXNG_LANGUAGE.to_string(),
-                    TIMEOUT_SECS,
-                ))]
+                vec![alias(
+                    SearxngSearchTool::new(
+                        base_url,
+                        DEFAULT_MAX_RESULTS,
+                        SEARXNG_LANGUAGE.to_string(),
+                        TIMEOUT_SECS,
+                    ),
+                    "SearXNG web search",
+                )]
             }
             other => {
                 tracing::warn!(
@@ -320,11 +318,15 @@ mod live {
     }
 
     /// Present `tool` to the model under OpenCompany's canonical
-    /// [`WEB_SEARCH_TOOL`] name.
-    fn alias(tool: impl Tool + 'static) -> Box<dyn Tool> {
+    /// [`WEB_SEARCH_TOOL`] name, with `label` as its operator-facing step
+    /// label — the provider's name, since a BYO tool's engine is fixed at
+    /// construction ("Exa web search"), matching the managed tool's branded
+    /// label rather than the humanized alias name.
+    fn alias(tool: impl Tool + 'static, label: &'static str) -> Box<dyn Tool> {
         Box::new(AliasedTool {
             inner: Box::new(tool),
             name: WEB_SEARCH_TOOL,
+            label,
         })
     }
 
@@ -339,12 +341,20 @@ mod live {
     struct AliasedTool {
         inner: Box<dyn Tool>,
         name: &'static str,
+        label: &'static str,
     }
 
     #[async_trait]
     impl Tool for AliasedTool {
         fn name(&self) -> &str {
             self.name
+        }
+
+        // Not delegated: the inner tool's label names the upstream tool, and
+        // the default would humanize the alias into a provider-less
+        // "Web search".
+        fn display_label(&self, _args: &Value) -> Option<String> {
+            Some(self.label.to_string())
         }
 
         fn description(&self) -> &str {
@@ -572,6 +582,38 @@ mod tests {
             assert!(
                 names.contains(&crate::harness::search::WEB_SEARCH_TOOL.to_string()),
                 "{provider} wired {names:?} with no canonical web_search"
+            );
+        }
+    }
+
+    /// The alias wears the canonical name but the step timeline names the
+    /// engine — the humanized fallback would collapse every provider to a
+    /// provider-less "Web search".
+    #[test]
+    fn the_aliased_tool_step_label_names_the_provider() {
+        for (provider, endpoint, label) in [
+            ("brave", None, "Brave web search"),
+            ("exa", None, "Exa web search"),
+            ("querit", None, "Querit web search"),
+            (
+                "searxng",
+                Some("https://searx.example".to_string()),
+                "SearXNG web search",
+            ),
+        ] {
+            let config = TenantSearch {
+                provider: provider.to_string(),
+                api_key: Some("test-key".to_string()),
+                endpoint,
+            };
+            let aliased = byo_search_tools(&config)
+                .into_iter()
+                .find(|tool| tool.name() == crate::harness::search::WEB_SEARCH_TOOL)
+                .expect("every provider wires a canonical web_search");
+            assert_eq!(
+                aliased.display_label(&serde_json::json!({})).as_deref(),
+                Some(label),
+                "{provider}"
             );
         }
     }
