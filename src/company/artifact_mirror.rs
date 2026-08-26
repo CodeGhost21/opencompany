@@ -336,6 +336,7 @@ pub async fn materialize_run(
         PublishTarget {
             agent_id: target.agent_id,
             task_id: "runs",
+            task_title: None,
             source: &source,
             payload: target.payload,
             existing_node_id: None,
