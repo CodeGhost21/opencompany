@@ -186,6 +186,16 @@ describe("a plain create from an explicit-company console", () => {
       nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
+    // Required after codex review comment 3864885200 — unrelated to what
+    // this file pins (the ?company= URL retarget), so the submit needs one
+    // filled in first or validation blocks it before provisioning runs.
+    const adminInput = document.querySelector<HTMLInputElement>("#create-company-admin");
+    expect(adminInput, "create-company-admin field not found").toBeTruthy();
+    await act(async () => {
+      setValue.call(adminInput, "ceo@beta.test");
+      adminInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
     const submit = Array.from(
       document.querySelectorAll<HTMLButtonElement>('[data-slot="dialog-content"] button'),
     ).find((b) => b.textContent?.trim() === "Create company");

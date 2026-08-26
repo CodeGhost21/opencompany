@@ -69,6 +69,20 @@ async function open(client: OpenCompanyClient) {
   });
 }
 
+// Required after codex review comment 3864885200 — unrelated to what this
+// file pins (busy-dismiss gating), so the submit needs one filled in first or
+// validation blocks it before the archive leg (and the busy window this test
+// exercises) is ever reached.
+async function fillAdminEmail(value = "ceo@acme.test") {
+  const input = document.querySelector<HTMLInputElement>("#create-company-admin");
+  expect(input, "no admin-email field").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 /** Presses Escape on the popup — the same key Base UI's dialog listens for to
  * fire `onOpenChange(false)` on the root. */
 async function pressEscape() {
@@ -103,6 +117,7 @@ describe("the create/reset dialog while a submit is in flight", () => {
       });
     await open(stubClient({ provisionCompany }));
 
+    await fillAdminEmail();
     await act(async () => {
       submitButton().click();
     });

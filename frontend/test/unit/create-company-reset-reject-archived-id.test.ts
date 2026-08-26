@@ -93,6 +93,20 @@ async function submit() {
   });
 }
 
+// Required after codex review comment 3864885200 — unrelated to what this
+// file pins (the archived-id collision guard), so every submit needs one
+// filled in first or the earlier email check masks the guard this file
+// exercises.
+async function fillAdminEmail(value = "ceo@acme.test") {
+  const input = document.querySelector<HTMLInputElement>("#create-company-admin");
+  expect(input, "no admin-email field").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
@@ -117,6 +131,7 @@ describe("resetting a company with the replacement id edited back to the archive
     await open(stubClient({ lifecycle, provisionCompany }));
 
     // The archived company's own id, typed back in from Advanced.
+    await fillAdminEmail();
     await setExplicitId("acme");
     await submit();
 
@@ -151,6 +166,7 @@ describe("resetting a tenant-namespaced company with the bare archived id typed 
 
     // The bare id, not the full namespaced one the archived company actually
     // carries — this is exactly the form an exact-string check misses.
+    await fillAdminEmail();
     await setExplicitId("acme");
     await submit();
 

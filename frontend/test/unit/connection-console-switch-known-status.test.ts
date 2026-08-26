@@ -152,6 +152,16 @@ describe("a create provisioning a company whose follow-up status lookup would fa
       nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
+    // Required after codex review comment 3864885200 — unrelated to what
+    // this file pins (skipping the redundant status lookup), so the submit
+    // needs one filled in first or validation blocks it before provisioning.
+    const adminInput = document.querySelector<HTMLInputElement>("#create-company-admin");
+    expect(adminInput, "create-company-admin field not found").toBeTruthy();
+    await act(async () => {
+      setValue.call(adminInput, "ceo@fresh.test");
+      adminInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
     const submit = Array.from(
       document.querySelectorAll<HTMLButtonElement>('[data-slot="dialog-content"] button'),
     ).find((b) => b.textContent?.trim() === "Create company");

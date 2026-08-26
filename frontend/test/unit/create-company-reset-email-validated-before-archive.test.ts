@@ -135,7 +135,7 @@ describe("resetting a company with a malformed admin email", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves a blank admin email alone — it's optional", async () => {
+  it("refuses a blank admin email — this dialog cannot confirm a bootstrap admin exists (codex review on #1828, PR comment 3864885200)", async () => {
     const lifecycle = vi.fn(() => Promise.resolve());
     const provisionCompany = vi.fn((_body: ProvisionBody) =>
       Promise.resolve({ id: "acme-x" } as unknown as CompanyStatus),
@@ -144,7 +144,20 @@ describe("resetting a company with a malformed admin email", () => {
 
     await submit();
 
-    expect(lifecycle).toHaveBeenCalledWith("archive", "acme");
-    expect(provisionCompany).toHaveBeenCalledTimes(1);
+    // Blank used to be a fine answer: the field was optional on the theory
+    // that "whoever provisioned this host can already sign in". That is only
+    // true when the deployment injected `OPENCOMPANY_ADMIN_EMAIL` — a
+    // self-hosted `serve` with no manager leaves it unset (a documented
+    // no-op, AGENTS.md), and this dialog has no way to tell the two apart.
+    // Archiving the old company before creating a replacement nobody can
+    // reach is the destructive half of the bug; refusing here keeps the old
+    // company intact instead.
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(provisionCompany).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+
+    const error = document.querySelector('[data-testid="create-company-error"]');
+    expect(error, "no error shown").toBeTruthy();
+    expect(error!.textContent).toContain("address");
   });
 });

@@ -168,7 +168,19 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // "Archived X, but couldn't create the new company" for a typo that a
     // pure check catches for free. Same rule `company-setup.ts` uses for the
     // same reason (codex review on #1828, PR comment 3862711345).
-    const emailProblem = adminEmailProblem(adminEmail, false);
+    //
+    // `required: true` — this dialog cannot tell whether the host has a
+    // deployment-wide `OPENCOMPANY_ADMIN_EMAIL` bootstrap grant (`serve`
+    // without a manager injecting it is a documented no-op, AGENTS.md
+    // "OPENCOMPANY_ADMIN_EMAIL"), so it must not assume one exists the way
+    // the help text below used to. Leaving this blank on a host with no
+    // bootstrap admin provisions — or, on a reset, *reprovisions* —  a
+    // company whose manifest names nobody: `no_env_admin_leaves_a_provisioned
+    // _company_refusing_everyone` confirms no address can then sign in. On a
+    // reset that is destructive: the usable old company is archived before
+    // its now-inaccessible replacement exists (codex review on #1828, PR
+    // comment 3864885200).
+    const emailProblem = adminEmailProblem(adminEmail, true);
     if (emailProblem) {
       setError(emailProblem);
       return;
@@ -332,7 +344,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
         </div>
 
         <div className="grid gap-1.5">
-          <Label htmlFor="create-company-admin">Admin email (optional)</Label>
+          <Label htmlFor="create-company-admin">Admin email</Label>
           <Input
             id="create-company-admin"
             type="email"
@@ -342,8 +354,9 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
             disabled={busy}
           />
           <p className="text-2xs text-muted-foreground">
-            Whoever provisioned this host can already sign in; add an address here
-            to let someone else in without an invite first.
+            Required — a company provisioned with no admin here has nobody
+            eligible to sign in unless this host has its own bootstrap admin
+            configured.
           </p>
         </div>
 

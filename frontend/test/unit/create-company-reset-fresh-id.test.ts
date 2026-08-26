@@ -78,6 +78,19 @@ async function submit() {
   });
 }
 
+// The admin email became required after codex review comment 3864885200 —
+// unrelated to what this file pins (id derivation), so every submit here
+// needs one filled in first or it never reaches the archive leg at all.
+async function fillAdminEmail(value = "ceo@acme.test") {
+  const input = document.querySelector<HTMLInputElement>("#create-company-admin");
+  expect(input, "no admin-email field").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
@@ -101,6 +114,7 @@ describe("resetting a company", () => {
     );
     await open(stubClient({ lifecycle, provisionCompany }));
 
+    await fillAdminEmail();
     await submit();
 
     expect(lifecycle).toHaveBeenCalledWith("archive", "acme");
@@ -138,6 +152,7 @@ describe("resetting a company", () => {
       idInput!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
+    await fillAdminEmail();
     await submit();
 
     const body = provisionCompany.mock.calls[0][0];

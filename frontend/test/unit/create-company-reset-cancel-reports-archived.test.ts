@@ -86,6 +86,20 @@ async function settle() {
   });
 }
 
+// Required after codex review comment 3864885200 — unrelated to what this
+// file pins (whether `onClose` reports the archive as landed), so every
+// submit needs one filled in first or the earlier email check blocks the
+// archive leg these tests are about before it ever runs.
+async function fillAdminEmail(value = "ceo@acme.test") {
+  const input = document.querySelector<HTMLInputElement>("#create-company-admin");
+  expect(input, "no admin-email field").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
@@ -112,6 +126,7 @@ describe("cancelling a reset after the archive already landed", () => {
       name: "Acme Robotics",
     });
 
+    await fillAdminEmail();
     await act(async () => {
       submitButton().click();
     });
@@ -145,6 +160,7 @@ describe("cancelling a reset after the archive already landed", () => {
     );
     await open(stubClient({ provisionCompany }), { kind: "create" });
 
+    await fillAdminEmail();
     await act(async () => {
       submitButton().click();
     });
@@ -166,6 +182,7 @@ describe("cancelling a reset after the archive already landed", () => {
       name: "Acme Robotics",
     });
 
+    await fillAdminEmail();
     await act(async () => {
       submitButton().click();
     });

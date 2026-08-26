@@ -79,6 +79,19 @@ async function submit() {
   });
 }
 
+// Required after codex review comment 3864885200 — unrelated to what this
+// file pins (archive-not-found reconciliation), so every submit needs one
+// filled in first or validation blocks it before the archive leg even runs.
+async function fillAdminEmail(value = "ceo@acme.test") {
+  const input = document.querySelector<HTMLInputElement>("#create-company-admin");
+  expect(input, "no admin-email field").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
@@ -104,6 +117,7 @@ describe("a reset whose archive answers company_not_found", () => {
     );
     await open(stubClient({ lifecycle, provisionCompany }));
 
+    await fillAdminEmail();
     await submit();
 
     expect(lifecycle).toHaveBeenCalledWith("archive", "acme");
@@ -123,8 +137,10 @@ describe("a reset whose archive answers company_not_found", () => {
     );
     await open(stubClient({ lifecycle, provisionCompany }));
 
+    await fillAdminEmail();
     await submit();
 
+    expect(lifecycle).toHaveBeenCalledWith("archive", "acme");
     expect(provisionCompany).not.toHaveBeenCalled();
     expect(onCreated).not.toHaveBeenCalled();
     expect(document.querySelector('[data-testid="create-company-error"]')).toBeTruthy();

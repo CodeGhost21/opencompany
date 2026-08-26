@@ -98,6 +98,19 @@ async function submit() {
   });
 }
 
+// Required after codex review comment 3864885200 — unrelated to what this
+// file pins (ambiguous-provision reconciliation), so every submit needs one
+// filled in first or validation blocks it before the archive leg even runs.
+async function fillAdminEmail(value = "ceo@acme.test") {
+  const input = document.querySelector<HTMLInputElement>("#create-company-admin");
+  expect(input, "no admin-email field").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
@@ -123,6 +136,7 @@ describe("a reset whose provision answers ambiguously", () => {
     );
     await open(stubClient({ provisionCompany, status }));
 
+    await fillAdminEmail();
     await submit();
 
     expect(provisionCompany).toHaveBeenCalledTimes(1);
@@ -144,6 +158,7 @@ describe("a reset whose provision answers ambiguously", () => {
     );
     await open(stubClient({ provisionCompany, status }));
 
+    await fillAdminEmail();
     await submit();
 
     expect(onCreated).toHaveBeenCalledTimes(1);
@@ -159,6 +174,7 @@ describe("a reset whose provision answers ambiguously", () => {
     );
     await open(stubClient({ provisionCompany, status }));
 
+    await fillAdminEmail();
     await submit();
 
     expect(onCreated).not.toHaveBeenCalled();
@@ -177,6 +193,7 @@ describe("a reset whose provision answers ambiguously", () => {
     await open(stubClient({ provisionCompany, status }));
 
     await setExplicitId("someone-elses-company");
+    await fillAdminEmail();
     await submit();
 
     // No reconciliation lookup for a typed id — the console must never
