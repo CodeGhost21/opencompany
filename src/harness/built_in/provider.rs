@@ -802,8 +802,17 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
 
     // Reasoning-model fallback: a reasoning-only turn returns `content: null`
     // with the visible text under `reasoning` / `reasoning_content` (string or
-    // array-of-parts). Recover it so the turn is not lost to a hard error.
-    if content.is_empty() && tool_calls.is_empty() {
+    // array-of-parts). Recover it so the turn is not lost to a hard error —
+    // but only when the model actually finished. A `length` or
+    // `content_filter` finish reason means the chain of thought itself was
+    // cut off mid-stream, so promoting it here would hand downstream
+    // consumers a truncated/filtered partial as if it were the final answer.
+    // Fall through to the empty-response error below instead.
+    let truncated_or_filtered = matches!(
+        finish_reason.as_deref(),
+        Some("length") | Some("content_filter")
+    );
+    if content.is_empty() && tool_calls.is_empty() && !truncated_or_filtered {
         content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
         if content.is_empty() {
             content = extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
@@ -1924,6 +1933,58 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("length"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A reasoning-only turn truncated by `finish_reason: "length"` (max_tokens
+    /// hit mid chain-of-thought) must still error, even though `reasoning`
+    /// carries text — the reasoning-fallback exists to recover a *complete*
+    /// answer that only landed under `reasoning`, not to promote a cut-off
+    /// chain of thought into a fabricated final reply. Pre-fix, this payload
+    /// parsed successfully with `resp.text() == "The answer is"`, silently
+    /// handing a partial thought to downstream consumers as if it were the
+    /// finished answer (Codex review on #1779).
+    #[test]
+    fn truncated_reasoning_only_turn_errors_instead_of_promoting_partial_thought() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The answer is"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("truncated reasoning-only turn must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("length"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same as above but for `content_filter` — a filtered reasoning stream is
+    /// just as unfinished as a truncated one and must not be promoted either.
+    #[test]
+    fn content_filtered_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "Let's think about how to"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("content-filtered reasoning-only turn must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("content_filter"),
             "error must name finish_reason for diagnosis, got: {msg}"
         );
     }
