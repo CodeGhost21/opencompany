@@ -716,6 +716,12 @@ async fn company_events(
         .as_ref()
         .map(|actor| Viewer::User(actor.id.clone()))
         .unwrap_or(Viewer::Operator);
+    // Threaded into the projection below so a live `AgentReply` from the
+    // owner-fallback pseudo-author is gated the same way a reload's
+    // `history_for_desk` already gates it (issue #1781 review, Codex P1) — a
+    // non-admin must never see the admin-only report just because they had
+    // the stream open when it landed.
+    let is_admin = scope.is_admin;
     let subscription = scope.runtime.events().subscribe(&company);
     // Roster display labels for mention chips. Held in a shared lock rather
     // than captured once: the stream outlives membership changes that can add
@@ -759,7 +765,7 @@ async fn company_events(
         let authors = authors
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let event = project_stream_item_for_viewer(&item, &authors, &viewer)
+        let event = project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
             .map(|value| Ok(Event::default().data(value.to_string())));
         std::future::ready(event)
     });
@@ -817,9 +823,12 @@ fn project_stream_item_for_viewer(
     item: &EventStreamItem,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
+    is_admin: bool,
 ) -> Option<serde_json::Value> {
     match item {
-        EventStreamItem::Event(stored) => project_event_for_viewer(stored, authors, viewer),
+        EventStreamItem::Event(stored) => {
+            project_event_for_viewer(stored, authors, viewer, is_admin)
+        }
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
             "missed": missed,
@@ -844,15 +853,34 @@ fn project_stream_item_for_viewer(
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
+///
+/// [`Viewer::Operator`] is always admin here, same as `Chat.history`'s
+/// GraphQL resolver treats the platform bearer (issue #1781 review, Codex
+/// P1) — this test helper's callers all use that viewer.
 #[cfg(test)]
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
-    project_event_for_viewer(stored, &std::collections::HashMap::new(), &Viewer::Operator)
+    project_event_for_viewer(
+        stored,
+        &std::collections::HashMap::new(),
+        &Viewer::Operator,
+        true,
+    )
 }
 
+/// `is_admin` gates an owner-fallback `AgentReply` — journaled under
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// — the same way [`history_for_desk`](crate::server::chat_history::history_for_desk)
+/// already gates it for a reload (issue #1781 review, Codex P1): a non-admin
+/// viewer must never see the admin-only report just because it landed while
+/// their SSE stream was open. The row is dropped outright rather than
+/// projected with a redacted body — this stream has no partial-reveal shape
+/// for any other event either, and a live listener that cannot see the row on
+/// reload should not see it live.
 fn project_event_for_viewer(
     stored: &StoredEvent,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
+    is_admin: bool,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
 
@@ -875,6 +903,11 @@ fn project_event_for_viewer(
             mentions,
             ..
         } => {
+            // See this fn's doc: an owner-fallback report is admin-only, live
+            // exactly as it is on reload (issue #1781 review, Codex P1).
+            if !is_admin && agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR {
+                return None;
+            }
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
@@ -8562,6 +8595,7 @@ mode = "full"
             &EventStreamItem::Gap { missed: 44 },
             &std::collections::HashMap::new(),
             &Viewer::Operator,
+            true,
         )
         .expect("a gap must reach the console");
         assert_eq!(
@@ -8631,8 +8665,9 @@ mode = "full"
             steps: Vec::new(),
         });
         let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
-        let value = super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()))
-            .expect("agent_reply is an attention signal");
+        let value =
+            super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()), false)
+                .expect("agent_reply is an attention signal");
         assert_eq!(
             value["mentions"],
             serde_json::json!([
@@ -8641,6 +8676,59 @@ mode = "full"
             ])
         );
     }
+
+    /// Issue #1781 review, Codex P1: `history_for_desk` already hides an
+    /// owner-fallback report from a non-admin on reload; this proves the live
+    /// SSE projection agrees, rather than handing a non-admin console the full
+    /// admin-only text the instant it lands.
+    #[test]
+    fn drops_owner_fallback_report_from_a_non_admin_viewer() {
+        let event = stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "operator".into(),
+            agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+            text: "no admin has a mailbox".into(),
+            steps: Vec::new(),
+        });
+
+        let non_admin = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::User("member-1".into()),
+            false,
+        );
+        assert!(
+            non_admin.is_none(),
+            "a non-admin viewer must not receive the admin-only report live: {non_admin:?}"
+        );
+
+        let admin = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::User("admin-1".into()),
+            true,
+        )
+        .expect("an admin viewer still receives the report live");
+        assert_eq!(
+            admin["agentId"],
+            crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+        );
+
+        // The Operator viewer (issue #66's original, unrestricted principal)
+        // must see it too — same as `project_event`'s `is_admin: true` default.
+        let operator = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("the operator viewer still receives the report live");
+        assert_eq!(operator["text"], "no admin has a mailbox");
+    }
+
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
