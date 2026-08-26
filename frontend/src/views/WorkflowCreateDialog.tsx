@@ -55,6 +55,16 @@ import { CronPreviewLine } from "@/views/CronPreviewLine";
 import { NodeConfigFields } from "@/views/workflows/NodeConfigFields";
 import type { TeamMemberDto } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -790,6 +800,19 @@ export function WorkflowCreateDialog({
    * a click, any caller added later — would both read `false` and both post. The
    * state stays because the render needs it; the ref is what actually guards. */
   const submittingRef = useRef(false);
+  /**
+   * Whether the create-time id confirm is on screen (issue #1808).
+   *
+   * The id is a permanent backend join key — it keys the overlay body, the
+   * revision store, the scheduler's armed state, run history, and cross-graph
+   * `sub_workflow` references — so the host answers 400 to a rename. Creation is
+   * the only moment it can be set, and in create mode it is silently derived
+   * from the name, so a name typo becomes a permanent id with no acknowledgement.
+   * `submit()` gates on this in create mode: the first Create shows the confirm,
+   * the confirm's own action runs the write. Never true in edit mode — the id is
+   * fixed there and the form field is read-only.
+   */
+  const [confirmingId, setConfirmingId] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
@@ -934,6 +957,9 @@ export function WorkflowCreateDialog({
     let nextEdges = workflow ? draftEdges(workflow) : [];
     setError(null);
     setFieldErrors({});
+    // Issue #1808: a fresh open (or a re-hydrate) never carries a prior attempt's
+    // pending id confirm — the previewed id it named may not be this graph's.
+    setConfirmingId(false);
     // Issue #274: a fresh open (or a re-hydrate after a restore) must not carry
     // the previous graph's history. It re-loads on the next expand, and against
     // the freshly-restored body's version token.
@@ -1220,6 +1246,10 @@ export function WorkflowCreateDialog({
   function changeName(value: string) {
     setName(value);
     clearSubmitError();
+    // Issue #1808: the name derives the previewed id, so editing it after a
+    // Back invalidates whatever the confirm was showing — retire the pending
+    // confirm so a stale preview can't reappear on the next Create.
+    setConfirmingId(false);
     // Issue #1053: the form used to reject "Weekly digest" for a missing id,
     // then reject "weekly digest" for an unsafe one — twice, for something it
     // could derive. Derived only while the id is nobody's yet, and never in edit
@@ -1240,6 +1270,9 @@ export function WorkflowCreateDialog({
     // including when they clear it back to empty, which is a decision too.
     setAuthoredId(value);
     clearSubmitError();
+    // Issue #1808: the id the confirm would show just changed under it — retire
+    // the pending confirm so Back-then-edit re-derives the new one.
+    setConfirmingId(false);
   }
 
   function changeDescription(value: string) {
@@ -1682,25 +1715,18 @@ export function WorkflowCreateDialog({
     });
   }
 
-  async function submit() {
-    // Re-entrancy guard (issue #1005). The Create button disables while a write
-    // is in flight, but `disabled` is a property of one DOM node: a second
-    // activation landing in the same tick as the first, an Enter keypress, or
-    // any future caller would otherwise post the graph twice — and for create
-    // that means two workflows, or a 409 the operator did nothing to earn.
-    //
-    // It reads the REF, not `submitting`: the state value here is the one from
-    // the render that built this closure, so two calls in the same tick would
-    // both see `false` and the guard would pass twice. The ref is written below
-    // before the first `await`, which makes it true for every later caller.
-    if (submittingRef.current) return;
-    const problem = validate();
-    if (problem) {
-      showError(problem);
-      return;
-    }
-    // Set before the first `await` — after `validate()`, so a draft the client
-    // rejects never latches the guard and the operator can fix it and retry.
+  /**
+   * Assembles the graph and runs one write, carrying the submit-time guard,
+   * the spinner state, and the host-error handling (issue #1005/#1016).
+   *
+   * Both Create and Save go through here so there is a SINGLE write path: the
+   * re-entrancy guard, the `workflow_invalid` per-node mapping, and the 409
+   * conflict handoff live once. The caller supplies only the verb — `create()`
+   * posts, the edit branch of `submit()` puts — via `write`.
+   */
+  async function runWrite(write: (graph: WorkflowGraph) => Promise<void>) {
+    // Set before the first `await` — the caller has already run `validate()`, so
+    // a draft the client rejects never latches the guard.
     submittingRef.current = true;
     setSubmitting(true);
     setError(null);
@@ -1720,27 +1746,7 @@ export function WorkflowCreateDialog({
         showError(`${nodeLabel(assembled.node)}: ${assembled.error}`);
         return;
       }
-      const graph = assembled.graph;
-      if (workflow) {
-        // The id keys the saved graph, the schedule and the run history, so it
-        // is the graph's own id that is sent, not the (read-only) field —
-        // there is no path here that renames anything, and the host answers
-        // 400 if one ever appeared. `version` makes the write conditional: it
-        // means "save over the graph I was looking at", not "over whatever is
-        // there now". The response carries a fresh token, so a second save
-        // needs no intervening read.
-        const saved = await updateWorkflow(
-          client,
-          company,
-          workflow.id,
-          graph,
-          workflow.version,
-        );
-        onSaved?.(saved);
-      } else {
-        const created = await createWorkflow(client, company, graph);
-        onCreated?.(created);
-      }
+      await write(assembled.graph);
       onOpenChange(false);
     } catch (e) {
       // Issue #1016: a `workflow_invalid` refusal carries per-node `problems`.
@@ -1809,10 +1815,77 @@ export function WorkflowCreateDialog({
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
+      // Issue #1808: the create-mode confirm steps aside on every terminal
+      // state. Success closes the whole dialog above; a failure surfaces the
+      // banner on the form the confirm was covering — either way the modal must
+      // not linger, or its inert backdrop swallows the next click. A no-op in
+      // edit mode, where `confirmingId` is never set.
+      setConfirmingId(false);
     }
   }
 
+  /**
+   * The create write, gated behind the id confirm (issue #1808). The confirm's
+   * primary action calls this; the shared guard in {@link runWrite} keeps it
+   * single-fire even though it is reachable only after the confirm opens.
+   */
+  async function create() {
+    if (submittingRef.current) return;
+    await runWrite(async (graph) => {
+      const created = await createWorkflow(client, company, graph);
+      onCreated?.(created);
+    });
+  }
+
+  async function submit() {
+    // Re-entrancy guard (issue #1005). The Create button disables while a write
+    // is in flight, but `disabled` is a property of one DOM node: a second
+    // activation landing in the same tick as the first, an Enter keypress, or
+    // any future caller would otherwise post the graph twice — and for create
+    // that means two workflows, or a 409 the operator did nothing to earn.
+    //
+    // It reads the REF, not `submitting`: the state value here is the one from
+    // the render that built this closure, so two calls in the same tick would
+    // both see `false` and the guard would pass twice.
+    if (submittingRef.current) return;
+    const problem = validate();
+    if (problem) {
+      showError(problem);
+      return;
+    }
+    // Issue #1808: create mode confirms the permanent id before it writes. The
+    // previewed id is valid by here (validate() passed), so the confirm shows a
+    // real id, and the confirm's own action runs `create()`. Edit mode falls
+    // straight through — the id keys the saved graph and the field is read-only,
+    // so there is nothing to confirm.
+    if (!editing) {
+      if (!confirmingId) {
+        setConfirmingId(true);
+        return;
+      }
+      await create();
+      return;
+    }
+    await runWrite(async (graph) => {
+      // The id keys the saved graph, the schedule and the run history, so it is
+      // the graph's own id that is sent, not the (read-only) field — there is no
+      // path here that renames anything, and the host answers 400 if one ever
+      // appeared. `version` makes the write conditional: "save over the graph I
+      // was looking at", not "over whatever is there now". The response carries a
+      // fresh token, so a second save needs no intervening read.
+      const saved = await updateWorkflow(
+        client,
+        company,
+        workflow!.id,
+        graph,
+        workflow!.version,
+      );
+      onSaved?.(saved);
+    });
+  }
+
   return (
+    <>
     <Dialog
       open={open}
       onOpenChange={(o) => {
@@ -2290,6 +2363,64 @@ export function WorkflowCreateDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+      {/* Issue #1808: the create-time id confirm. The id is a permanent backend
+          join key set only at creation and silently derived from the name, so a
+          typo becomes a permanent id with no acknowledgement — this is the one
+          moment to surface it. Create mode only; an edit has no id to set. An
+          AlertDialog (focus-trapped, labelled, matching the console) rather than
+          `window.confirm`, and it surfaces the exact id the write will send. */}
+      {!editing && (
+        <AlertDialog
+          open={confirmingId}
+          onOpenChange={(o) => {
+            // Opening is driven by `submit()`; only react to a dismiss — Esc, an
+            // outside click, or the Close primitive behind Back/Create.
+            if (!o) setConfirmingId(false);
+          }}
+        >
+          <AlertDialogContent data-testid="workflow-id-confirm">
+            <AlertDialogHeader>
+              <AlertDialogTitle>Confirm the workflow ID</AlertDialogTitle>
+              <AlertDialogDescription>
+                The ID is permanent — it keys this workflow’s schedule and run
+                history and can’t be changed after creation. Check it now.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="grid gap-1 rounded-md border bg-muted/40 p-3 text-center">
+              {name.trim() && (
+                <span className="text-xs text-muted-foreground">{name.trim()}</span>
+              )}
+              <code
+                data-testid="workflow-id-confirm-value"
+                className="font-mono text-lg font-semibold break-all"
+              >
+                {id.trim()}
+              </code>
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel
+                data-testid="workflow-id-confirm-back"
+                onClick={() => setConfirmingId(false)}
+                disabled={submitting}
+              >
+                Back
+              </AlertDialogCancel>
+              {/* Fire-and-forget, the repo idiom for an async confirm action:
+                  our handler runs before the primitive's Close, so the write is
+                  launched and the confirm dismisses in the same click. */}
+              <AlertDialogAction
+                data-testid="workflow-id-confirm-create"
+                onClick={() => void create()}
+                disabled={submitting}
+              >
+                {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
+                Create workflow
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+    </>
   );
 }
 
