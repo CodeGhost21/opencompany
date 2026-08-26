@@ -2157,7 +2157,8 @@ admins = [{list}]
     /// With no mailbox wired, `owner` falls back to the DURABLE operator channel
     /// (issue #1757): a genuine, journal-backed delivery — not the discard-on-an-
     /// in-memory-buffer failure it used to report. The report lands in the event
-    /// log on the operator's main line, and the interactive buffer is untouched.
+    /// log on the dedicated Operator line, and the interactive buffer is
+    /// untouched.
     #[tokio::test]
     async fn owner_falls_back_to_the_durable_operator_channel_without_mail() {
         let dir = tempfile::tempdir().unwrap();
@@ -2181,9 +2182,10 @@ admins = [{list}]
         assert_eq!(reports[0].reason, DeliveryReason::OwnerFellBackNoMailbox);
         // The interactive in-memory buffer is never a delivery surface.
         assert!(h.channel.sent().is_empty());
-        // The report is durable: an `AgentReply` landed on the operator's main
-        // line (the General desk), carrying the workflow's subject header so it
-        // reads as a workflow report, not an agent's own reply.
+        // The report is durable: an `AgentReply` landed on the dedicated
+        // Operator line — never the General desk — carrying the workflow's
+        // subject header so it reads as a workflow report, not an agent's own
+        // reply.
         let landed = h.operator_reports().await;
         assert_eq!(landed.len(), 1, "the report must be journaled: {landed:?}");
         assert!(landed[0].contains("Q3 is up 12%."), "{landed:?}");
