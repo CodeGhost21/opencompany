@@ -14,6 +14,12 @@ export function runState(run: ObservatoryRun): SpanState {
   switch (run.status) {
     case "succeeded":
       return "done";
+    // A by-design decline (issue #1809) is a clean terminal outcome, not a
+    // failure and not still in flight — it paints "done" like a success, never
+    // red, and never the `default` "running" that would leave a settled attempt
+    // reading as live forever.
+    case "declined":
+      return "done";
     case "failed":
     case "cancelled":
       return "failed";
