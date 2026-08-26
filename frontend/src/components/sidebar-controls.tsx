@@ -1,4 +1,4 @@
-import { Building2, MessageSquareWarning, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Building2, MessageSquareWarning, PanelLeftClose, PanelLeftOpen, Plus } from "lucide-react";
 
 import type { CompanyStatus } from "@/api/types";
 import type { View } from "@/components/app-shell";
@@ -72,6 +72,14 @@ interface Props {
   activeCompany: string | null;
   onSwitchCompany: (id: string) => void;
   onBackToPicker?: () => void;
+  /** Start the New-company flow (issue #1807). Omitted when unavailable. */
+  onCreateCompany?: () => void;
+  /**
+   * Whether provisioning is reachable on this sign-in. When false the New
+   * company item renders disabled with an honest note rather than 401ing after
+   * the click — never silently hidden (the #1401 dishonest-button lesson).
+   */
+  canCreateCompany?: boolean;
   /** The active view, so the Feedback row can show as selected. */
   view: View;
   onNavigate: (view: View) => void;
@@ -95,6 +103,8 @@ export function SidebarControls({
   activeCompany,
   onSwitchCompany,
   onBackToPicker,
+  onCreateCompany,
+  canCreateCompany,
   view,
   onNavigate,
 }: Props) {
@@ -149,8 +159,11 @@ export function SidebarControls({
 
       {/* Switching companies lived in the header block that was removed. It
           is a real capability, so it moves here rather than disappearing —
-          hidden entirely when there is only one company to be in. */}
-      {(companies.length > 1 || onBackToPicker) && (
+          hidden entirely when there is only one company to be in and no
+          create/back affordance to offer. New company (issue #1807) also lives
+          here, so the menu opens whenever it is on offer even on a one-company
+          console. */}
+      {(companies.length > 1 || onBackToPicker || onCreateCompany) && (
         <SidebarMenuItem>
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -171,6 +184,19 @@ export function SidebarControls({
               ))}
               {onBackToPicker && (
                 <DropdownMenuItem onClick={onBackToPicker}>All companies…</DropdownMenuItem>
+              )}
+              {onCreateCompany && (
+                // Disabled rather than hidden when this sign-in can't provision,
+                // so the capability is discoverable and honest about why it is
+                // out of reach — never an enabled item that 401s (#1401).
+                <DropdownMenuItem
+                  onClick={onCreateCompany}
+                  disabled={!canCreateCompany}
+                  data-testid="switcher-new-company"
+                >
+                  <Plus />
+                  <span>New company</span>
+                </DropdownMenuItem>
               )}
             </DropdownMenuContent>
           </DropdownMenu>

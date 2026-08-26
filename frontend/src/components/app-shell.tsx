@@ -407,6 +407,13 @@ interface Props {
   companies: CompanyStatus[];
   onSwitchCompany: (id: string) => void;
   onBackToPicker?: () => void;
+  /** Start the New-company flow (issue #1807), owned by `ConnectionConsole`. */
+  onCreateCompany?: () => void;
+  /**
+   * Start the reset (archive + start clean) flow for the given company. Called
+   * from Settings → Lifecycle with the active company's id and name.
+   */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
@@ -417,6 +424,8 @@ export function AppShell({
   companies,
   onSwitchCompany,
   onBackToPicker,
+  onCreateCompany,
+  onResetCompany,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -2458,6 +2467,8 @@ export function AppShell({
             activeCompany={company}
             onSwitchCompany={onSwitchCompany}
             onBackToPicker={onBackToPicker}
+            onCreateCompany={onCreateCompany}
+            canCreateCompany={client.carriesPlatformBearer}
             view={view}
             onNavigate={setView}
           />
@@ -2862,6 +2873,7 @@ export function AppShell({
               feed={feed}
               sub={sub}
               onFlag={() => setFeedbackOpen(true)}
+              onResetCompany={onResetCompany}
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
