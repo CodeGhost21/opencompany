@@ -4341,6 +4341,8 @@ agent = "claude"
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         record.overlay_agents.push(crate::ports::OverlayAgent {
             id: "growth".to_string(),
@@ -4428,6 +4430,8 @@ agent = "claude"
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
