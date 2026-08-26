@@ -491,6 +491,49 @@ describe("the failed-run remedy matches whether a node was actually at fault", (
   });
 });
 
+/** A run interrupted by a host restart after some nodes had already
+ * completed: none of those finish rows carries an error — the synthetic
+ * outcome the boot sweep writes belongs to no node — so `failedNodeOf` is
+ * null the same as `failedRun()`, but this run did NOT fail "before any node
+ * ran". `failureLocation` in `graph.ts` already distinguishes the two; the
+ * row body must too. */
+function failedAfterNodesRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 11,
+    error: "harness error: host restarted mid-run",
+    nodes: [
+      { nodeId: "start", status: "ok", elapsedMs: 5 },
+      { nodeId: "n_2", status: "ok", elapsedMs: 800 },
+    ],
+  });
+}
+
+// Codex review on #1821 (ninth pass): the eighth-pass fix above gated the
+// remedy sentence on `failedNode` alone, so a run interrupted after nodes
+// already completed collapsed into the same "nothing in the graph got the
+// chance to run" claim as a run that never started at all — contradicting
+// the finish rows sitting right above it in the same card.
+describe("the failed-run remedy distinguishes an interrupted run from one that never started", () => {
+  it("names the steps that completed instead of claiming nothing ran", async () => {
+    await renderHistory(failedAfterNodesRun());
+    const row = container.querySelector('[data-testid="workflow-run-row"]');
+    expect(row?.textContent).not.toContain(
+      "nothing in the graph got the chance to run",
+    );
+    expect(row?.textContent).toContain(
+      "2 steps completed before this run was interrupted",
+    );
+  });
+
+  it("still says nothing ran for a run that failed with no nodes at all", async () => {
+    await renderHistory(failedRun());
+    const row = container.querySelector('[data-testid="workflow-run-row"]');
+    expect(row?.textContent).toContain(
+      "nothing in the graph got the chance to run",
+    );
+  });
+});
+
 /** A run cancelled cleanly at a node boundary: every node it started also
  * finished, so `RunCancel`'s own contract — the active step normally
  * completes and is journaled — held, and nothing was actually cut off. */
