@@ -396,3 +396,97 @@ describe("the legend popup names itself for assistive technology", () => {
     expect(heading?.textContent).toBe("What these statuses mean");
   });
 });
+
+/**
+ * Codex review on #1821 (eighth pass): three definitions above were reworded,
+ * over three earlier rounds, to stop presuming a cause the data doesn't
+ * support — but the ROW BODY text a few hundred lines further down
+ * `RunHistoryPanel.tsx` (the paragraph under the failed card, the cancelled
+ * sentence, the blocked-unparkable remedy) still spoke the old, unconditional
+ * story for the very same run, so a single row could show an accurate
+ * definition on hover and a contradicting remedy in the body at once. These
+ * tests pin the row body, not the `title` attribute the earlier rounds
+ * already cover above.
+ */
+
+/** A run whose error traces to a specific node — the ordinary failure case,
+ * kept as the positive control: the workflow-fault remedy and the copilot fix
+ * must both still show here. */
+function failedAtNodeRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 8,
+    runId: "run-failed-8",
+    error: "the writer agent has no model",
+    nodes: [{ nodeId: "n_3", status: "error", elapsedMs: 12 }],
+  });
+}
+
+describe("the failed-run remedy matches whether a node was actually at fault", () => {
+  it("still tells the operator to correct the workflow when a node errored", async () => {
+    await renderHistory(failedAtNodeRun());
+    const row = container.querySelector('[data-testid="workflow-run-row"]');
+    expect(row?.textContent).toContain(
+      "Review the error details, then correct the workflow and run it again.",
+    );
+  });
+
+  // Codex review on #1821 (eighth pass): `failedRun()` traces to no node at
+  // all — a graph that would not compile, a capability that could not be
+  // built, or a host restart — exactly what the legend definition (fixed two
+  // rounds ago, tested above) already says is "rather than anything wrong
+  // with the workflow". This paragraph still told the operator to correct the
+  // workflow unconditionally.
+  it("does not tell the operator to correct the workflow when no node was at fault", async () => {
+    await renderHistory(failedRun());
+    const row = container.querySelector('[data-testid="workflow-run-row"]');
+    expect(row?.textContent).not.toContain(
+      "correct the workflow and run it again",
+    );
+    expect(row?.textContent).toContain("may be a host or capability problem");
+  });
+
+  it("offers Fix with copilot for a node-level failure", async () => {
+    await act(async () => {
+      root.render(
+        createElement(RunHistoryPanel, {
+          runs: [failedAtNodeRun()],
+          graph: null,
+          workflowName: "Daily digest",
+          onClose: () => {},
+          selectedRunSeq: null,
+          onSelectRun: () => {},
+          onFixWithCopilot: () => {},
+        }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-run-fix-with-copilot"]'),
+    ).not.toBeNull();
+  });
+
+  // Codex review on #1821 (eighth pass): the copilot re-wires the workflow, so
+  // offering it here dangles the same wrong remedy as the sentence above for a
+  // run with no evidence the workflow was ever at fault.
+  it("does not offer Fix with copilot when no node was at fault", async () => {
+    // `runId` set explicitly: `failedRun()` omits it, and the button's OTHER
+    // guard (`run.runId`) would then hide it for a reason unrelated to this
+    // test — this run must satisfy every other guard so `failedNode` is the
+    // only thing left that can be under test.
+    await act(async () => {
+      root.render(
+        createElement(RunHistoryPanel, {
+          runs: [{ ...failedRun(), runId: "run-failed-no-node" }],
+          graph: null,
+          workflowName: "Daily digest",
+          onClose: () => {},
+          selectedRunSeq: null,
+          onSelectRun: () => {},
+          onFixWithCopilot: () => {},
+        }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-run-fix-with-copilot"]'),
+    ).toBeNull();
+  });
+});
