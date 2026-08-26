@@ -120,6 +120,7 @@ mod test {
             cost_usd: 0.5,
             kind: SampleKind::Inference,
             run_id: Some("run-1".into()),
+            model: None,
         }
     }
 
@@ -140,6 +141,43 @@ mod test {
             vec![Event::TurnMetered {
                 kind: "inference",
                 provider: "openrouter",
+                model: None,
+                input_tokens: 10,
+                output_tokens: 4,
+                cached_input_tokens: 2,
+                cost_usd: 0.5,
+                attributed_to_run: true,
+            }]
+        );
+    }
+
+    /// The model the sample was classified against reaches the event. This is
+    /// the seam #1749 stops at: it puts a [`ModelSlug`] on every sample, and
+    /// without this forwarding the fleet-wide "what is the spend going to?"
+    /// question is answerable from a company's own meter and from nowhere else.
+    ///
+    /// [`ModelSlug`]: crate::metering::ModelSlug
+    #[tokio::test]
+    async fn a_sample_model_reaches_the_event() {
+        let inner = Arc::new(InMemory::default());
+        let tracker = Arc::new(RecordingTracker::new());
+        let meter = TrackingUsageMeter::new(inner, tracker.clone());
+
+        let mut with_model = sample();
+        with_model.model = Some(crate::metering::ModelSlug::classify(
+            "anthropic/claude-sonnet-4-6",
+        ));
+        meter
+            .record(&CompanyId::new("acme"), &with_model)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tracker.events(),
+            vec![Event::TurnMetered {
+                kind: "inference",
+                provider: "openrouter",
+                model: Some("anthropic-sonnet"),
                 input_tokens: 10,
                 output_tokens: 4,
                 cached_input_tokens: 2,

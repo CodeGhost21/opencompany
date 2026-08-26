@@ -8,6 +8,7 @@ use super::*;
 use crate::analytics::types::{OpaqueId, provider_slug, sample_kind_slug};
 use crate::app::deployment::Deployment;
 use crate::error::OpenCompanyError;
+use crate::metering::ModelSlug;
 use crate::ports::brain::{Cognition, UsageMetering};
 use crate::ports::usage::{SampleKind, UsageSample};
 
@@ -30,6 +31,7 @@ fn envelope() -> Envelope {
         Cognition {
             path: "harness",
             provider: "openrouter",
+            model: None,
             metering: UsageMetering::PerTurn,
         },
     )
@@ -48,6 +50,10 @@ fn hostile_events() -> Vec<Event> {
         cost_usd: 0.25,
         kind: SampleKind::Inference,
         run_id: Some("/Users/someone/companies/acme/secrets".into()),
+        // A BYOK tenant names its model whatever it likes, and what it likes is
+        // often its own brand. `ModelSlug::classify` folds it to `other` at the
+        // harness; this sample proves the analytics payload cannot undo that.
+        model: Some(ModelSlug::classify("AcmeCorp Holdings project-titan")),
     };
 
     let err = OpenCompanyError::Store(
@@ -62,6 +68,15 @@ fn hostile_events() -> Vec<Event> {
     let unknown_provider = UsageSample {
         provider: "AcmeCorp Holdings".into(),
         kind: SampleKind::OauthCall,
+        model: None,
+        ..sample.clone()
+    };
+
+    // A third sample on the happy path: a model the vocabulary *can* name. The
+    // two above only ever reach `other`, so on their own they would let the
+    // `model` property be deleted outright without a payload changing.
+    let named_model = UsageSample {
+        model: Some(ModelSlug::classify("anthropic/claude-sonnet-4-6")),
         ..sample.clone()
     };
 
@@ -81,6 +96,7 @@ fn hostile_events() -> Vec<Event> {
         },
         Event::metered(&sample),
         Event::metered(&unknown_provider),
+        Event::metered(&named_model),
     ]
 }
 
@@ -184,6 +200,18 @@ fn vocabulary() -> Vec<&'static str> {
         SampleKind::SetupCall,
     ] {
         words.push(sample_kind_slug(kind));
+    }
+    // Model slugs, taken from `ModelSlug::classify` for the same reason the
+    // provider slugs are taken from `provider_slug`: this module owns no model
+    // vocabulary of its own — it forwards the one `crate::metering::model`
+    // already folded a raw name onto, and a second hand-written copy here would
+    // be a second place for the two to disagree.
+    for model in [
+        "anthropic/claude-sonnet-4-6",
+        "chat-v1",
+        "AcmeCorp Holdings project-titan",
+    ] {
+        words.push(ModelSlug::classify(model).as_str());
     }
     words
 }
@@ -289,6 +317,101 @@ fn an_unknown_provider_folds_to_other() {
     assert_eq!(provider_slug("OpenRouter"), "openrouter");
 }
 
+/// The point of #1749 reaching analytics at all: "which model is this fleet's
+/// spend going to?" is answerable from `turn_metered` alone. `provider` names
+/// *who served* the tokens, so on a subscription tenant every sample says
+/// `subscription` whichever of four workloads produced it.
+///
+/// Fails if the `("model", …)` push in `Event::props` is deleted — the
+/// mutation that would otherwise leave every other assertion here green.
+#[test]
+fn a_metered_event_names_the_model_it_spent_on() {
+    let sample = UsageSample {
+        at_millis: 1,
+        agent: "maya".into(),
+        provider: "subscription".into(),
+        input_tokens: 10,
+        output_tokens: 4,
+        cached_input_tokens: 0,
+        cost_usd: 0.25,
+        kind: SampleKind::Inference,
+        run_id: None,
+        model: Some(ModelSlug::classify("anthropic/claude-sonnet-4-6")),
+    };
+
+    let rendered = payload(&envelope(), &Event::metered(&sample));
+    assert_eq!(
+        rendered["properties"]["model"], "anthropic-sonnet",
+        "the slug the harness already classified, forwarded verbatim: {rendered}"
+    );
+}
+
+/// A sample that named no model omits the property rather than reporting a
+/// word for it. `other` means "a model ran that this build cannot name", and
+/// an OAuth call that ran no model at all is a different fact — collapsing the
+/// two would silently inflate the `other` bucket with every tool call.
+///
+/// Fails if the conditional push becomes an unconditional
+/// `PropValue::Word(model.unwrap_or(OTHER))` — or `.unwrap_or("none")`.
+#[test]
+fn a_sample_with_no_model_carries_no_model_property() {
+    let sample = UsageSample {
+        at_millis: 1,
+        agent: "maya".into(),
+        provider: "github".into(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_input_tokens: 0,
+        cost_usd: 0.0,
+        kind: SampleKind::OauthCall,
+        run_id: None,
+        model: None,
+    };
+
+    let rendered = payload(&envelope(), &Event::metered(&sample));
+    let properties = rendered["properties"]
+        .as_object()
+        .expect("properties is an object");
+    assert!(
+        !properties.contains_key("model"),
+        "no model ran, so there is nothing to say: {rendered}"
+    );
+    assert_eq!(properties["sample_kind"], "oauth-call");
+}
+
+/// The whole reason the property is a [`ModelSlug`] and not the raw name: a
+/// BYOK or `openai_compatible` tenant can call its model anything, including
+/// its own brand, and that name is folded at the harness before it is ever
+/// stored.
+#[test]
+fn a_byok_model_name_reaches_the_payload_only_as_other() {
+    assert_eq!(
+        ModelSlug::classify("AcmeCorp Holdings project-titan").as_str(),
+        types::OTHER,
+        "the premise: an unrecognised model folds to the catch-all"
+    );
+
+    let sample = UsageSample {
+        at_millis: 1,
+        agent: "maya".into(),
+        provider: "openai_compatible".into(),
+        input_tokens: 10,
+        output_tokens: 4,
+        cached_input_tokens: 0,
+        cost_usd: 0.25,
+        kind: SampleKind::Inference,
+        run_id: None,
+        model: Some(ModelSlug::classify("AcmeCorp Holdings project-titan")),
+    };
+
+    let rendered = payload(&envelope(), &Event::metered(&sample))
+        .to_string()
+        .to_ascii_lowercase();
+    assert!(!rendered.contains("acmecorp"), "{rendered}");
+    assert!(!rendered.contains("project-titan"), "{rendered}");
+    assert!(rendered.contains(types::OTHER), "{rendered}");
+}
+
 /// The default tracker in every build sends nothing and records nothing.
 #[tokio::test]
 async fn the_null_tracker_is_a_no_op() {
@@ -386,6 +509,7 @@ fn an_envelope_relabels_its_cognition() {
     envelope.set_cognition(Cognition {
         path: "harness",
         provider: "openrouter",
+        model: None,
         metering: UsageMetering::PerTurn,
     });
 
@@ -403,6 +527,7 @@ fn a_relabelled_cognition_still_goes_through_the_closed_vocabulary() {
     envelope.set_cognition(Cognition {
         path: "harness",
         provider: "AcmeCorp Holdings",
+        model: None,
         metering: UsageMetering::PerTurn,
     });
     let rendered = payload(
@@ -426,6 +551,7 @@ async fn a_deferred_tracker_forwards_a_cognition_observation() {
     let cognition = Cognition {
         path: "harness",
         provider: "openrouter",
+        model: None,
         metering: UsageMetering::PerTurn,
     };
     let deferred = DeferredTracker::new();

@@ -44,7 +44,20 @@ Three events today. Each carries the context envelope below.
 |---|---|---|
 | `instance_started` | the host finished booting and registered its companies | `companies` (count), `storage` (`fs`/`sqlite`/`mongodb`), `setup_complete` |
 | `turn_finished` | one cycle — the product's unit of work — ended | `trigger`, `outcome` (`ok`/`failed`), `failure` (coarse class), `duration_ms`, `effects_executed`, `approvals_parked` |
-| `turn_metered` | one usage sample was recorded | `sample_kind`, `provider`, `input_tokens`, `output_tokens`, `cached_input_tokens`, `cost_usd`, `attributed_to_run` |
+| `turn_metered` | one usage sample was recorded | `sample_kind`, `provider`, `model` (omitted when the sample named none), `input_tokens`, `output_tokens`, `cached_input_tokens`, `cost_usd`, `attributed_to_run` |
+
+`model` is the closed `ModelSlug` vocabulary from
+[`metering`](../../../src/metering/model.rs) (issue #1749), already folded at the
+harness — `anthropic-sonnet`, `openai-gpt`, `chat-v1`, …, or `other` for a model
+this build cannot name. It is forwarded, never re-classified: `ModelSlug`'s inner
+value is a compiled-in literal, so a BYOK tenant's raw model name cannot reach a
+payload even in principle, and analytics needs no classifier of its own for it.
+
+The property is **omitted** when the sample named no model — every OAuth and
+search call, a cognition path that cannot identify one, and any row written
+before the field existed. Absent rather than `other`, so "no model ran" stays a
+different answer from "a model ran that this build cannot name"; collapsing them
+would inflate the `other` bucket with every tool call.
 
 ### The context envelope
 

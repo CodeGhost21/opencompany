@@ -748,7 +748,9 @@ async fn e2e_hosted_catalog_advertises_delegation_tools() {
     rt.run_cycle(vec![CompanyEvent::OperatorMessage {
         mentions: Vec::new(),
         parent: None,
-        text: "hi".into(),
+        // Issue #1725: not "hi". A bare pleasantry is answered by the runtime
+        // without reaching a brain, so no catalog would be registered at all.
+        text: "ship the landing page".into(),
         by: None,
         chat: None,
         deliverable: None,

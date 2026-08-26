@@ -550,6 +550,21 @@ pub enum Event {
         kind: &'static str,
         /// The provider, folded onto the closed vocabulary.
         provider: &'static str,
+        /// The model, as the closed [`ModelSlug`](crate::metering::ModelSlug)
+        /// vocabulary already folded it (issue #1749).
+        ///
+        /// A `&'static str` and not a `String` because a `ModelSlug`'s inner
+        /// value is a compiled-in literal and `as_str` hands one back — so the
+        /// raw model name a BYOK tenant configured cannot reach a payload even
+        /// in principle, and this module needs no classifier of its own.
+        ///
+        /// `None` when the sample named no model: an OAuth or search call, a
+        /// cognition path that cannot identify one, or a row written before
+        /// [`UsageSample::model`] existed. Absent rather than folded onto
+        /// [`OTHER`], so "no model ran" stays a different answer from "a model
+        /// ran that this build cannot name" — the property is **omitted** from
+        /// the payload rather than sent as `other` or as a null.
+        model: Option<&'static str>,
         /// Prompt tokens.
         input_tokens: u64,
         /// Completion tokens.
@@ -573,6 +588,11 @@ impl Event {
         Self::TurnMetered {
             kind: sample_kind_slug(sample.kind),
             provider: provider_slug(&sample.provider),
+            // No `provider_slug`-style fold here on purpose: `ModelSlug` is
+            // itself the closed vocabulary, classified once at the harness, and
+            // `as_str` is already a `&'static str`. Re-classifying a folded
+            // value would be a second place for the two lists to disagree.
+            model: sample.model.map(|slug| slug.as_str()),
             input_tokens: sample.input_tokens,
             output_tokens: sample.output_tokens,
             cached_input_tokens: sample.cached_input_tokens,
@@ -623,20 +643,32 @@ impl Event {
             Self::TurnMetered {
                 kind,
                 provider,
+                model,
                 input_tokens,
                 output_tokens,
                 cached_input_tokens,
                 cost_usd,
                 attributed_to_run,
-            } => vec![
-                ("sample_kind", PropValue::Word(kind)),
-                ("provider", PropValue::Word(provider)),
-                ("input_tokens", PropValue::Count(input_tokens)),
-                ("output_tokens", PropValue::Count(output_tokens)),
-                ("cached_input_tokens", PropValue::Count(cached_input_tokens)),
-                ("cost_usd", PropValue::Amount(cost_usd)),
-                ("attributed_to_run", PropValue::Flag(attributed_to_run)),
-            ],
+            } => {
+                let mut props = vec![
+                    ("sample_kind", PropValue::Word(kind)),
+                    ("provider", PropValue::Word(provider)),
+                    ("input_tokens", PropValue::Count(input_tokens)),
+                    ("output_tokens", PropValue::Count(output_tokens)),
+                    ("cached_input_tokens", PropValue::Count(cached_input_tokens)),
+                    ("cost_usd", PropValue::Amount(cost_usd)),
+                    ("attributed_to_run", PropValue::Flag(attributed_to_run)),
+                ];
+                // Pushed only when the sample named a model. A `map_or("none",
+                // …)` here would spend a vocabulary slot on the same fact the
+                // property's absence already states, and an operator segmenting
+                // spend by model would have to know that `none` and `other` are
+                // different kinds of nothing.
+                if let Some(model) = model {
+                    props.push(("model", PropValue::Word(model)));
+                }
+                props
+            }
         }
     }
 }
