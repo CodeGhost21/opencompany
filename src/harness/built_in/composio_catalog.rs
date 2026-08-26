@@ -836,8 +836,14 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, Option<&'static str>)] {
     match toolkit {
         "github" => &[("api.github.com", None)],
-        "gmail" => &[("gmail.googleapis.com", None)],
-        "googlecalendar" => &[("calendar.googleapis.com", None)],
+        "gmail" => &[
+            ("gmail.googleapis.com", None),
+            ("www.googleapis.com", Some("/gmail/")),
+        ],
+        "googlecalendar" => &[
+            ("calendar.googleapis.com", None),
+            ("www.googleapis.com", Some("/calendar/")),
+        ],
         "googledrive" => &[
             ("drive.googleapis.com", None),
             ("www.googleapis.com", Some("/drive/")),
@@ -1606,6 +1612,71 @@ mod tests {
             .is_none(),
             "another Atlassian product on the shared gateway must pass through — \
              a jira connection is not a Confluence one"
+        );
+    }
+
+    /// PR #1780 review (finding 6): `www.googleapis.com` is the same shared
+    /// legacy gateway for Calendar as it is for Drive. Before the fix
+    /// `googlecalendar` only recognised `calendar.googleapis.com`, so the
+    /// standard REST URL most examples and agents actually curl,
+    /// `www.googleapis.com/calendar/v3/...`, passed straight through with no
+    /// credential instead of being deflected to Composio.
+    #[test]
+    fn calendar_deflection_on_the_legacy_host_is_scoped_to_calendar_paths() {
+        let connected = vec!["googlecalendar".to_string()];
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+            )
+            .is_some(),
+            "a real Calendar call on the legacy gateway host must be deflected"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://www.googleapis.com/youtube/v3/search?q=rust"
+            )
+            .is_none(),
+            "an unrelated Google API sharing the legacy gateway host must pass through"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://calendar.googleapis.com/calendar/v3/calendars/primary/events"
+            )
+            .is_some(),
+            "the dedicated Calendar host stays deflected unscoped"
+        );
+    }
+
+    /// Same shape as Calendar and Drive: `gmail.googleapis.com` is the
+    /// dedicated host, but `www.googleapis.com/gmail/v1/...` is the same
+    /// shared legacy gateway an agent plausibly curls by hand. Before the fix
+    /// the table only had the dedicated host, so this call passed through
+    /// unscoped.
+    #[test]
+    fn gmail_deflection_on_the_legacy_host_is_scoped_to_gmail_paths() {
+        let connected = vec!["gmail".to_string()];
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://www.googleapis.com/gmail/v1/users/me/messages"
+            )
+            .is_some(),
+            "a real Gmail call on the legacy gateway host must be deflected"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://www.googleapis.com/drive/v3/files").is_none(),
+            "an unrelated Google API sharing the legacy gateway host must pass through"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+            )
+            .is_some(),
+            "the dedicated Gmail host stays deflected unscoped"
         );
     }
 }
