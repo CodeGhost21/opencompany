@@ -80,6 +80,12 @@ pub mod mcp_oauth;
 // rules are ordinary text handling with real edge cases, and they are worth
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
+// The shape of one drafted teammate mandate or persona (issue #1776). Same
+// always-compiled argument as `prompt` above: the model call that produces a
+// draft is behind `openhuman`, but what a draft IS — which fields are
+// draftable, the bound each obeys, and the three distinct reasons there might
+// be no draft — is ordinary data handling the default build should test.
+pub mod profile_draft;
 // Rendering that composition back out for a human, from a manifest alone. Same
 // always-compiled argument as `prompt` above, one step further: a debugging
 // surface that only existed in a `--features openhuman` build is one nobody

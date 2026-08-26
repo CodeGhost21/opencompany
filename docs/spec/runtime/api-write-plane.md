@@ -51,6 +51,8 @@ DELETE …/team/{agentId}                      remove a teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
+POST   …/team/{agentId}/draft                one copilot turn on this teammate's mandate or persona (writes nothing)
+POST   …/team/draft                          the same, for a teammate being added
 POST   …/avatars                            upload an image → an avatar reference (avatars.md)
 POST   …/setup/roster                       propose a starting team from three answers (company-setup/overview.md)
 GET    …/policy                              the autonomy tier + spend cap + deadline + always-ask list
@@ -284,6 +286,16 @@ re-deriving the rule. `tools` is admin-only for both kinds — an empty list mea
 "the company's standard grant", so a `tools` edit is a potential *widening* —
 and `tier` is read-only for both: it has no override layer, and adding one is a
 policy decision rather than a form field.
+
+### Drafting a mandate or a persona
+
+`POST …/team/{agentId}/draft` and `POST …/team/draft` run one turn of a
+conversation about a teammate's `description` or `instructions`. **Neither
+writes**: the answer is text beside the field, and it becomes a persona only
+through the ordinary `PATCH` a Save performs. The conversation shape, the
+host-side grounding, the four refusal reasons and the argument for why the
+first-run design pass's rule still stands are in
+[api-team-drafting.md](api-team-drafting.md).
 
 `DELETE …/team/{agentId}` removes a teammate. An overlay teammate is deleted
 outright — the record is the only thing that declares it. A **manifest**
