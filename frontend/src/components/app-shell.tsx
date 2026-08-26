@@ -57,6 +57,10 @@ import {
   setupHandoffHasScope,
 } from "@/setup/state";
 import { TourController } from "@/tour/TourController";
+import { OnboardingGate } from "@/onboarding/OnboardingGate";
+import { useActivationGate } from "@/onboarding/useActivationGate";
+import { gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import { shouldShowOnboardingGate } from "@/onboarding/gate-logic";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
 import {
@@ -779,6 +783,28 @@ export function AppShell({
   // decisions are in flight or freshly settled, which is never many.
   const ownApprovalDecisionsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
+
+  /**
+   * The account-activation funnel (issue #1844): blocks the shell behind
+   * `OnboardingGate` until the company is named, has an integration and has
+   * run a workflow — see `useActivationGate` for the polling contract.
+   *
+   * `gateSkippedThisSession` is read once, into state rather than a plain
+   * `const`, so clicking "skip for now" re-renders past the gate without a
+   * page reload — `sessionStorage` alone would need one. Declared before the
+   * poll below so `!gateSkipped` can gate it: nothing left for the gate to
+   * decide once the operator dismissed it, so there is nothing worth polling
+   * `{scope}/activation` for either.
+   */
+  const [gateSkipped, setGateSkipped] = useState(() => gateSkippedThisSession(scope));
+  useEffect(() => {
+    setGateSkipped(gateSkippedThisSession(scope));
+  }, [scope]);
+  const skipGate = useCallback(() => {
+    markGateSkipped(scope);
+    setGateSkipped(true);
+  }, [scope]);
+  const activationGate = useActivationGate(client, company, !gateSkipped);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;
@@ -2465,6 +2491,39 @@ export function AppShell({
       });
     }, []),
   });
+
+  // Issue #1844: the blocking first-run gate. Held behind `!setupOpen` —
+  // `setupOpen` is already true for as long as `SetupController`'s dialog is
+  // open OR the company is unstaffed (see its own `onOpenChange`), the exact
+  // signal `TourController` holds on below for the same reason: staffing runs
+  // first, so an operator is never asked to run a workflow with nobody on the
+  // roster yet to have written it. `activationGate.status` gates on `checked`
+  // rather than rendering the instant `company` is known, so a fresh mount
+  // never flashes the gate open for the one round trip it takes to learn the
+  // company already cleared it.
+  if (
+    shouldShowOnboardingGate({
+      status: activationGate.status,
+      checked: activationGate.checked,
+      setupOpen,
+      skippedThisSession: gateSkipped,
+    }) &&
+    // Narrows `status` for the render below — `shouldShowOnboardingGate`
+    // already guarantees this is non-null whenever it returns `true`, but
+    // that guarantee lives in a separate module TypeScript cannot see through.
+    activationGate.status
+  ) {
+    return (
+      <OnboardingGate
+        client={client}
+        company={company}
+        status={activationGate.status}
+        currentName={feed.status.name}
+        onRefresh={activationGate.refresh}
+        onSkip={skipGate}
+      />
+    );
+  }
 
   return (
     // The ambient `(client, company)` for the leaves that have to fetch and are
