@@ -1048,6 +1048,16 @@ impl BudgetPauseSet {
 
     /// Takes the parked marker for `agent`, if one exists — single-use, like
     /// a [`GrantedCall`] redemption.
+    ///
+    /// Also the redeem route's RESERVATION step (issue #1846 review, Codex
+    /// #3865395849): taking the marker atomically, before re-dispatching,
+    /// is what closes the race two concurrent redeem requests could hit —
+    /// both `peek`ing the same marker before either finished, then both
+    /// re-dispatching it, with only one of two later consume calls actually
+    /// winning while the loser still reported success. The second caller's
+    /// `redeem` here finds nothing (the first already took it) and 404s
+    /// before it ever re-dispatches. [`restore_if_absent`](Self::restore_if_absent)
+    /// is the undo half, for a re-dispatch that fails after reserving.
     pub fn redeem(&self, agent: &str) -> Option<BudgetPauseMarker> {
         self.by_agent
             .lock()
@@ -1055,33 +1065,32 @@ impl BudgetPauseSet {
             .remove(agent)
     }
 
-    /// Consumes the parked marker for `agent`, but only when it is still the
-    /// SAME marker named by `id` (issue #1846 review, Codex #3864988181).
+    /// Restores a marker the caller reserved via [`redeem`](Self::redeem) but
+    /// whose redispatch failed to complete — guarded on absence (issue #1846
+    /// review, Codex #3865395849, replacing the peek/redeem_matching shape
+    /// Codex #3864988181 added).
     ///
-    /// The redeem route cannot call plain [`redeem`](Self::redeem) up front:
-    /// that consumes the marker before the re-dispatch it names has actually
-    /// run, and a re-dispatch failure (the event store hiccups, the request
-    /// is cancelled) then loses the marker for good — a retry sees nothing
-    /// parked and 404s, even though no successful redispatch ever happened.
-    /// The route instead [`peek`](Self::peek)s, re-dispatches, and only then
-    /// calls this to consume — so a failed re-dispatch leaves the marker
-    /// parked for the retry to find.
+    /// The redeem route reserves the marker with plain [`redeem`](Self::redeem)
+    /// **before** re-dispatching, so a re-dispatch failure (the event store
+    /// hiccups, the request is cancelled) would otherwise lose the marker for
+    /// good — a retry sees nothing parked and 404s, even though no successful
+    /// redispatch ever happened. This is what puts it back for the retry to
+    /// find.
     ///
-    /// The `id` check is what makes that safe rather than merely later: the
-    /// re-dispatch re-enters the SAME cycle path an ordinary message takes,
-    /// which can itself pause again on the same agent before this call runs.
-    /// A plain `redeem(agent)` here would remove THAT fresh marker — the
-    /// operator's payload for the pause that just happened, never yet shown
-    /// to them — while believing it was cleaning up the one it re-dispatched.
-    /// Matching on `id` (minted fresh by every [`park`](Self::park), per its
-    /// own doc) ensures this only ever removes the marker it was told to.
-    pub fn redeem_matching(&self, agent: &str, id: &str) -> Option<BudgetPauseMarker> {
-        let mut by_agent = self.by_agent.lock().expect("budget-pause set poisoned");
-        if by_agent.get(agent).is_some_and(|marker| marker.id == id) {
-            by_agent.remove(agent)
-        } else {
-            None
-        }
+    /// `or_insert` rather than a plain overwrite is what makes that safe
+    /// rather than merely later: the failed re-dispatch re-enters the SAME
+    /// cycle path an ordinary message takes, which can itself pause again on
+    /// the same agent before this call runs. Restoring unconditionally would
+    /// blow away THAT fresh marker — the operator's payload for the pause
+    /// that just happened, never yet shown to them — with the stale one this
+    /// call is putting back. Absence-only insertion means the fresh marker,
+    /// once parked, always wins.
+    pub fn restore_if_absent(&self, marker: BudgetPauseMarker) {
+        self.by_agent
+            .lock()
+            .expect("budget-pause set poisoned")
+            .entry(marker.agent.clone())
+            .or_insert(marker);
     }
 
     /// Every currently-parked marker, agent-sorted for a stable listing.
@@ -2052,37 +2061,55 @@ mod test {
     }
 
     #[test]
-    fn redeem_matching_consumes_only_when_the_id_still_matches() {
-        // Issue #1846 review (Codex #3864988181): the redeem route peeks
-        // before re-dispatching so a failed re-dispatch leaves the marker
-        // parked for a retry — this pins the consuming half it then calls.
+    fn redeem_reserves_atomically_so_a_second_concurrent_redeem_finds_nothing() {
+        // Issue #1846 review (Codex #3865395849): two redeem requests that
+        // both read the marker before either re-dispatches would both
+        // re-dispatch the same non-idempotent message. Reserving with plain
+        // `redeem` up front — rather than `peek`, then consume after — means
+        // the SECOND caller's own `redeem` finds nothing, closing the race
+        // before it ever gets to re-dispatch.
         let set = BudgetPauseSet::default();
         let marker = set.park("ceo", None, "hi", "paused", 1_000);
 
-        let consumed = set
-            .redeem_matching("ceo", &marker.id)
-            .expect("the id matches what was parked");
-        assert_eq!(consumed.id, marker.id);
+        let first = set.redeem("ceo").expect("the first reservation wins");
+        assert_eq!(first.id, marker.id);
         assert!(
-            set.peek("ceo").is_none(),
-            "the matching marker was consumed"
+            set.redeem("ceo").is_none(),
+            "a second, concurrent reservation finds nothing parked"
         );
     }
 
     #[test]
-    fn redeem_matching_leaves_a_fresher_marker_untouched() {
+    fn restore_if_absent_puts_a_failed_redispatchs_marker_back() {
+        let set = BudgetPauseSet::default();
+        let marker = set.park("ceo", None, "hi", "paused", 1_000);
+
+        let reserved = set.redeem("ceo").expect("reserved for redispatch");
+        assert!(set.peek("ceo").is_none(), "reserved out of the set");
+
+        // The redispatch failed — restore it for a retry to find.
+        set.restore_if_absent(reserved);
+        let restored = set.peek("ceo").expect("restored after the failure");
+        assert_eq!(restored.id, marker.id);
+        assert_eq!(restored.message, "hi");
+    }
+
+    #[test]
+    fn restore_if_absent_leaves_a_fresher_marker_untouched() {
         // The re-dispatch a redeem triggers can itself re-pause the same
-        // agent before the caller gets back here (see `redeem_matching`'s own
-        // doc). A stale id must not delete the operator's not-yet-seen fresh
-        // marker out from under them.
+        // agent before the failed-redispatch's restore call runs. The stale
+        // marker being restored must not delete the operator's not-yet-seen
+        // fresh one out from under them.
         let set = BudgetPauseSet::default();
         let stale = set.park("ceo", None, "first stuck message", "paused once", 1_000);
+        let reserved = set.redeem("ceo").expect("reserved for redispatch");
+        assert_eq!(reserved.id, stale.id);
+
+        // The (failed) redispatch itself re-entered the cycle and paused
+        // again before the restore call below runs.
         set.park("ceo", None, "second stuck message", "paused again", 2_000);
 
-        assert!(
-            set.redeem_matching("ceo", &stale.id).is_none(),
-            "the id no longer matches what is currently parked"
-        );
+        set.restore_if_absent(reserved);
         let still_parked = set.peek("ceo").expect("the fresher marker survives");
         assert_eq!(still_parked.message, "second stuck message");
     }
