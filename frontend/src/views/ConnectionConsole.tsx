@@ -238,25 +238,38 @@ export function ConnectionConsole({
       // company that is now gone.
       const archived =
         createRequest?.kind === "reset" ? createRequest.company : undefined;
+      // The URL and the persisted profile both name whatever company this
+      // connection was scoped to *before* this create/reset — read it before
+      // `retargetDefaultCompany` below overwrites it. `retargetDefaultCompany`
+      // does not distinguish create from reset, so a plain "New company"
+      // triggered from inside an explicit-company console retargets the
+      // profile exactly the same way a reset does. Gating the URL fix on
+      // `archived` (reset-only) missed that case: the profile moved but the
+      // `?company=` link didn't, so the next reload's `findProfile` lookup no
+      // longer matched the retargeted profile and minted a duplicate
+      // connection back on the company the operator just left (codex review
+      // on #1828, PR comment 3864628310).
+      const priorDefaultCompany = connection?.defaultCompany ?? null;
       setCreateRequest(null);
       const next = [
         ...knownCompanies.filter((c) => c.id !== status.id && c.id !== archived),
         status,
       ];
       // Retarget an explicit-company connection's boot default, or the next
-      // reload asks for the id this reset just archived. A no-op for a
+      // reload asks for the id this create/reset just left. A no-op for a
       // connection that was never company-scoped.
       retargetDefaultCompany(connectionId, status.id);
       // The registry fix above does not reach a `?company=` link's own URL —
       // see `retargetCompanyUrlParam` for why a stale param there still
-      // orphans the retargeted profile on the next reload.
-      if (archived) retargetCompanyUrlParam(archived, status.id);
+      // orphans the retargeted profile on the next reload. A no-op when the
+      // connection was never company-scoped in the first place.
+      if (priorDefaultCompany) retargetCompanyUrlParam(priorDefaultCompany, status.id);
       // Enter the new company with the status this call already has —
       // `switchCompany`'s own `knownStatus` short-circuit skips a redundant
       // second `client.status` fetch (PR comment 3864628314).
       void switchCompany(status.id, next, status);
     },
-    [connectionId, createRequest, knownCompanies, switchCompany],
+    [connection, connectionId, createRequest, knownCompanies, switchCompany],
   );
 
   const createDialog = (
