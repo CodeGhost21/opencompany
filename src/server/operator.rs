@@ -2405,62 +2405,12 @@ async fn chat_and_emit(
     // `operator` line (which would both make it writable and mix chatter into the
     // report feed). The frontend hides its send box; this is the safety net.
     //
-    // Migration carve-out: `operator` was not reserved before this issue, so a
-    // company provisioned earlier can already have a real manifest or overlay
-    // desk using that id (`from_stored_toml` deliberately never re-validates a
-    // stored manifest, so the guard in `company/manifest.rs` never sees it, and
-    // an overlay desk created before `create_desk`'s guard existed persists
-    // as-is). This check does not know the sender's company by itself — a
-    // desk id is company-scoped — so it re-loads the record to ask whether a
-    // real desk already owns it before treating the send as addressed to the
-    // synthetic system channel. Without this, a pre-existing desk quietly
-    // becomes permanently unwritable the moment this feature ships, with no
-    // way for its company to get it back — the same failure mode `905297aef`
-    // fixed for the desk *list*, here on the *write* path.
-    //
-    // The same grandfather clause applies to a **teammate** — a manifest or
-    // overlay agent — already named `operator`: `ChatView` addresses a DM by
-    // the teammate's bare id (issue #364), so a message meant for that person
-    // arrives here as `chat == "operator"` too, indistinguishable at this
-    // point from a send meant for the system feed. `desk_exists` alone would
-    // miss it — it only walks `group_chats` and `overlay_desks`, never the
-    // roster — so a company that named someone "Operator" before this feature
-    // shipped would find that teammate suddenly unreachable, with no console
-    // affordance to rename or migrate them out of the collision. Checking
-    // `is_roster_agent` alongside `desk_exists` is the same carve-out, applied
-    // to the other namespace `RESERVED_AGENT_IDS` reserves.
-    //
-    // The load's `?` propagates a real store failure as itself, rather than
-    // collapsing it into "no real desk" — that would misreport a transient
-    // store error as the ordinary read-only refusal for every company, not
-    // only a grandfathered one, and journal the failure nowhere.
-    // `OPERATOR_CHANNEL_COLLISION_FALLBACK` is refused unconditionally, same
-    // sentence: it is the id `list_desks` hands out for the synthetic system
-    // desk on a company in the roster-teammate collision (see
-    // `CompanyRecord::operator_feed_channel`), and nothing should ever be
-    // minting or hand-addressing it directly — it is unmintable by
-    // construction (see the constant's doc), so there is no grandfather case
-    // to carve out here the way there is for the literal `operator` below.
-    if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(
-            "the Operator channel is a read-only feed of workflow reports and notifications — \
-             it cannot be posted to"
-                .to_string(),
-        )));
-    }
-    if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
-        let has_real_operator_recipient = runtime.store().load(id).await?.is_some_and(|record| {
-            record.desk_exists(crate::runtime::OPERATOR_CHANNEL)
-                || record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL)
-        });
-        if !has_real_operator_recipient {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(
-                "the Operator channel is a read-only feed of workflow reports and notifications — \
-                 it cannot be posted to"
-                    .to_string(),
-            )));
-        }
-    }
+    // The check (migration carve-outs, error text) lives on `CompanyRuntime`
+    // itself now — `ensure_desk_writable` — so the ACP `session/prompt` route
+    // (issue #1781 review, Codex P1), which journals straight to
+    // `runtime.events()` without ever calling this function, runs the exact
+    // same guard rather than a second hand-copied one that could drift.
+    runtime.ensure_desk_writable(&desk).await?;
     // Issue #364: a thread reply names its parent by id. Rejected here rather
     // than dropped, so a console sending a malformed parent learns that its
     // reply would have landed in the channel instead of quietly finding it
