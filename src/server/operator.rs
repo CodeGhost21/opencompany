@@ -2367,11 +2367,17 @@ async fn chat_and_emit(
     // becomes permanently unwritable the moment this feature ships, with no
     // way for its company to get it back — the same failure mode `905297aef`
     // fixed for the desk *list*, here on the *write* path.
+    //
+    // The load's `?` propagates a real store failure as itself, rather than
+    // collapsing it into "no real desk" — that would misreport a transient
+    // store error as the ordinary read-only refusal for every company, not
+    // only a grandfathered one, and journal the failure nowhere.
     if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
-        let has_real_operator_desk = matches!(
-            runtime.store().load(id).await,
-            Ok(Some(record)) if record.desk_exists(crate::runtime::OPERATOR_CHANNEL)
-        );
+        let has_real_operator_desk = runtime
+            .store()
+            .load(id)
+            .await?
+            .is_some_and(|record| record.desk_exists(crate::runtime::OPERATOR_CHANNEL));
         if !has_real_operator_desk {
             return Err(ApiError(OpenCompanyError::InvalidRequest(
                 "the Operator channel is a read-only feed of workflow reports and notifications — \
