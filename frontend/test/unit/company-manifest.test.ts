@@ -32,6 +32,28 @@ describe("buildManifestToml (issue #1807)", () => {
     expect(toml).toContain('name = "A \\"quoted\\" C:\\\\orp"');
   });
 
+  /**
+   * Codex review on #1828 (PR comment 3865689246): TOML's `basic-unescaped`
+   * grammar excludes U+007F (DEL) — it falls outside both printable-ASCII
+   * ranges (`%x23-5B` / `%x5D-7E`) the spec allows literal — but the old
+   * condition only escaped code points below U+0020, so a name containing a
+   * pasted DEL byte produced a manifest the host's TOML parser refuses. On a
+   * reset that surfaces only after the old company is already archived.
+   */
+  it("escapes a DEL (U+007F) in the name so the host's TOML parser accepts it", () => {
+    const toml = buildManifestToml({ name: "Acme\u007fRobotics" });
+    expect(toml).toContain('name = "Acme\\u007fRobotics"');
+    // eslint-disable-next-line no-control-regex -- asserting the raw byte is gone
+    expect(toml).not.toMatch(/\u007f/);
+  });
+
+  it("leaves other C1-range and extended Unicode characters literal, unescaped", () => {
+    // U+0080 is the first `non-ascii` code point TOML allows literal in a
+    // basic string — confirms the fix didn't widen the escape past DEL.
+    const toml = buildManifestToml({ name: "Acme\u0080Robotics" });
+    expect(toml).toContain("name = \"Acme\u0080Robotics\"");
+  });
+
   it("writes [users].admins only when an admin email is given", () => {
     expect(buildManifestToml({ name: "Acme" })).not.toContain("admins");
 

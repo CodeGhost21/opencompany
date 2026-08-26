@@ -47,6 +47,15 @@ const TOML_NAMED_ESCAPES: Record<string, string> = {
  *
  * Built by walking code points rather than a control-character regex range so
  * the source carries no literal control byte of its own.
+ *
+ * The TOML spec's `basic-unescaped` grammar excludes exactly one code point
+ * above the U+0000–U+001F band covered below: U+007F (DEL) is not in either
+ * of its printable-ASCII ranges (`%x23-5B` / `%x5D-7E`), so a literal DEL
+ * left unescaped produces a manifest the host's TOML parser refuses — on a
+ * reset, only after the old company has already been archived, leaving no
+ * replacement for a name this client claimed to have escaped safely (issue
+ * #1828 comment 3865689246). Everything from U+0080 on is `non-ascii` and
+ * stays literal.
  */
 function tomlString(value: string): string {
   let out = '"';
@@ -57,7 +66,7 @@ function tomlString(value: string): string {
       out += '\\"';
     } else if (ch in TOML_NAMED_ESCAPES) {
       out += TOML_NAMED_ESCAPES[ch];
-    } else if (ch.charCodeAt(0) < 0x20) {
+    } else if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) {
       out += `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`;
     } else {
       out += ch;
