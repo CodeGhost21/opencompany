@@ -347,6 +347,27 @@ pub async fn ensure_agent_folder(
     company: &CompanyId,
     agent_id: &str,
 ) -> Result<String> {
+    Ok(ensure_agent_folder_tracked(store, company, agent_id)
+        .await?
+        .0)
+}
+
+/// [`ensure_agent_folder`], additionally reporting whether *this* call minted
+/// the member folder (issue #1801).
+///
+/// The bool is `true` only when `agents/<agent_id>/` did not exist and this call
+/// created it; an adopted or already-present folder answers `false`. A caller
+/// that has to undo a half-finished operation — a note create that then failed,
+/// which would otherwise leave the freshly-minted home standing empty — uses it
+/// to know which folder it, and only it, brought into existence, so
+/// [`rollback_empty_minted_folders`] can remove that folder and nothing it
+/// merely found. The eagerly-scaffolded root is deliberately never reported: an
+/// empty `agents/` is ordinary boot scaffolding, not this call's to undo.
+pub async fn ensure_agent_folder_tracked(
+    store: &dyn WorkspaceStore,
+    company: &CompanyId,
+    agent_id: &str,
+) -> Result<(String, bool)> {
     let agent_id = agent_id.trim();
     ensure_member_folder(
         store,
@@ -379,6 +400,19 @@ pub async fn ensure_artifact_folder(
     company: &CompanyId,
     agent_id: &str,
 ) -> Result<String> {
+    Ok(ensure_artifact_folder_tracked(store, company, agent_id)
+        .await?
+        .0)
+}
+
+/// [`ensure_artifact_folder`], additionally reporting whether *this* call minted
+/// the member folder (issue #1801) — the deliverable twin of
+/// [`ensure_agent_folder_tracked`], with the same contract on the bool.
+pub async fn ensure_artifact_folder_tracked(
+    store: &dyn WorkspaceStore,
+    company: &CompanyId,
+    agent_id: &str,
+) -> Result<(String, bool)> {
     let agent_id = agent_id.trim();
     ensure_member_folder(
         store,
@@ -415,14 +449,15 @@ pub async fn ensure_desk_folder(
     company: &CompanyId,
     desk_id: &str,
 ) -> Result<String> {
-    ensure_member_folder(
+    Ok(ensure_member_folder(
         store,
         company,
         DESKS_ROOT,
         desk_id.trim(),
         WorkspaceOrigin::Seed,
     )
-    .await
+    .await?
+    .0)
 }
 
 /// The shared body of [`ensure_agent_folder`] and [`ensure_desk_folder`]:
@@ -443,13 +478,22 @@ pub async fn ensure_desk_folder(
 /// that exists rather than minting a rival, and — because the root claim returns
 /// the *winner's* id — the member folder beneath it is claimed under the same
 /// parent either way.
+///
+/// Returns the folder's id and whether *this* call minted the **member** folder
+/// (issue #1801). The bool is `true` only in the arm that reaches
+/// [`WorkspaceStore::adopt_or_create_folder`] with a [`FolderClaim::Created`]
+/// result; adoption of an existing or legacy folder answers `false`. A freshly
+/// minted *root* is never folded into that signal — an empty `agents/` is
+/// scaffolding, not the empty member folder a failed write leaves behind.
+///
+/// [`FolderClaim::Created`]: crate::ports::workspace::FolderClaim::Created
 async fn ensure_member_folder(
     store: &dyn WorkspaceStore,
     company: &CompanyId,
     root: &str,
     id: &str,
     origin: WorkspaceOrigin,
-) -> Result<String> {
+) -> Result<(String, bool)> {
     // The id becomes a node name, and a name carrying a separator renders an
     // ambiguous or traversal-shaped path. The `fs` backend refuses such names
     // outright and the sqlite/mongodb backends do not, so the guard lives here
@@ -482,7 +526,7 @@ async fn ensure_member_folder(
     let name = kebab_name_or(id, id);
 
     match find(&nodes, Some(&root_id), &name) {
-        Found::Folder(existing) => Ok(existing),
+        Found::Folder(existing) => Ok((existing, false)),
         Found::Collision(why) => Err(OpenCompanyError::Conflict(why)),
         // Nothing carries the canonical name. Before minting it, look for the
         // folder an older build made under the id verbatim — `page_builder`
@@ -491,15 +535,112 @@ async fn ensure_member_folder(
         // work in one folder across the upgrade; creating beside it would split
         // the member's history in two and report neither half as incomplete.
         Found::Free => match legacy_alias(&nodes, &root_id, id, &name) {
-            Some(Found::Folder(existing)) => Ok(existing),
+            Some(Found::Folder(existing)) => Ok((existing, false)),
             Some(Found::Collision(why)) => Err(OpenCompanyError::Conflict(why)),
-            _ => Ok(store
-                .adopt_or_create_folder(company, Some(&root_id), &name, origin)
-                .await?
-                .into_node()
-                .id),
+            _ => {
+                let claim = store
+                    .adopt_or_create_folder(company, Some(&root_id), &name, origin)
+                    .await?;
+                // Adoption still hands back a node; only a genuine mint is a
+                // rollback candidate, so the flag rides `was_created` rather
+                // than "we took the create arm".
+                let created = claim.was_created();
+                Ok((claim.into_node().id, created))
+            }
         },
     }
+}
+
+/// Best-effort removal of folders a single create or publish freshly minted,
+/// run after a later write in that same operation failed and would otherwise
+/// leave them standing empty (issue #1801).
+///
+/// The seams that mint a member folder — `agents/<id>/`, `artifacts/<id>/`, a
+/// task folder — do so *before* the note or payload that gives the folder a
+/// reason to exist. When that write then fails (a store error, a quota refusal),
+/// the folder is what the Tidy(#700)/Repair(#759) buttons later have to sweep.
+/// This closes the non-race half of that at the source: the caller passes the
+/// ids it, and only it, brought into existence, and each is removed **only while
+/// still structurally empty on a fresh tree read**.
+///
+/// The still-empty guard is the whole safety of it. A folder that gained a child
+/// in the window — a concurrent publisher that adopted it, a note that did land
+/// — is left exactly as it stands and never recursively deleted out from under
+/// whoever filled it. Removal is child-first, so a member folder is cleared
+/// before a folder it was the only occupant of, letting an intermediate folder
+/// this same operation minted fall empty and be removed in turn. A reserved
+/// system root ([`SYSTEM_ROOTS`]) is refused outright even if handed in: an
+/// empty root is boot scaffolding, and the next boot re-lays it regardless.
+///
+/// Best-effort by design: it is undoing a path that has already failed, so a
+/// tree read or delete that itself errors is swallowed — the caller is already
+/// returning the original error, and a folder that survives cleanup is exactly
+/// the pre-fix state the Repair button still covers.
+pub(crate) async fn rollback_empty_minted_folders(
+    store: &dyn WorkspaceStore,
+    company: &CompanyId,
+    minted: &[String],
+) {
+    if minted.is_empty() {
+        return;
+    }
+    let nodes = match store.tree(company).await {
+        Ok(nodes) => nodes,
+        Err(_) => return,
+    };
+
+    // Deepest first, so a member/task folder is cleared before any folder it was
+    // the sole occupant of. A reserved root is dropped here rather than deleted.
+    let mut targets: Vec<&String> = minted
+        .iter()
+        .filter(|id| !is_reserved_root(&nodes, id))
+        .collect();
+    targets.sort_by_key(|id| std::cmp::Reverse(node_depth(&nodes, id)));
+
+    let mut removed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for id in targets {
+        // "Gained a child in the window" is measured against the fresh read plus
+        // whatever this loop has already removed, so a member folder cleared a
+        // moment ago does not keep its parent from being cleared too.
+        let has_live_child = nodes.iter().any(|node| {
+            node.parent_id.as_deref() == Some(id.as_str()) && !removed.contains(node.id.as_str())
+        });
+        if has_live_child {
+            continue;
+        }
+        if store.delete(company, id).await.unwrap_or(false) {
+            removed.insert(id.as_str());
+        }
+    }
+}
+
+/// Whether `id` names one of the eagerly-scaffolded roots at the workspace root
+/// — the nodes [`rollback_empty_minted_folders`] must never remove.
+fn is_reserved_root(nodes: &[WorkspaceNode], id: &str) -> bool {
+    nodes.iter().any(|node| {
+        node.id == id
+            && node.parent_id.is_none()
+            && SYSTEM_ROOTS
+                .iter()
+                .any(|root| node.name.eq_ignore_ascii_case(root))
+    })
+}
+
+/// The length of `id`'s parent chain within `nodes` — its depth from the
+/// workspace root, used to order [`rollback_empty_minted_folders`] child-first.
+fn node_depth(nodes: &[WorkspaceNode], id: &str) -> usize {
+    let mut depth = 0usize;
+    let mut current = nodes.iter().find(|node| node.id == id);
+    while let Some(node) = current {
+        match node.parent_id.as_deref() {
+            Some(parent) => {
+                depth += 1;
+                current = nodes.iter().find(|node| node.id == parent);
+            }
+            None => break,
+        }
+    }
+    depth
 }
 
 /// The pre-lowercase-dashed spelling of a member folder, when there is one to
@@ -1392,6 +1533,136 @@ mod tests {
             !nodes.iter().any(|n| n.name == "page-builder"),
             "a rival dashed folder would split the agent's work: {:?}",
             paths(&nodes)
+        );
+    }
+
+    // -- the created-vs-adopted signal and the compensating rollback (#1801) --
+
+    /// The tracked minter reports whether *this* call created the member folder:
+    /// `true` the first time, `false` once it is only adopting what stands. That
+    /// signal is what lets a failed write know which folder it, and only it,
+    /// brought into existence.
+    #[tokio::test]
+    async fn ensure_agent_folder_tracked_reports_created_then_adopted() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+        ensure_workspace_scaffold(ws.as_ref(), &company)
+            .await
+            .unwrap();
+
+        let (first, created) = ensure_agent_folder_tracked(ws.as_ref(), &company, "ceo")
+            .await
+            .unwrap();
+        assert!(created, "the first call mints the member folder");
+
+        let (second, created_again) = ensure_agent_folder_tracked(ws.as_ref(), &company, "ceo")
+            .await
+            .unwrap();
+        assert!(!created_again, "a second call adopts rather than minting");
+        assert_eq!(first, second, "and hands back the same folder");
+    }
+
+    /// A minted folder that never received the write it was made for is swept
+    /// when the caller rolls back — leaving no empty `agents/<id>/` for the
+    /// Repair button. The reserved root it hangs off is scaffolding and stays.
+    #[tokio::test]
+    async fn rollback_removes_a_minted_folder_that_stayed_empty() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+        ensure_workspace_scaffold(ws.as_ref(), &company)
+            .await
+            .unwrap();
+
+        let (home, created) = ensure_agent_folder_tracked(ws.as_ref(), &company, "ceo")
+            .await
+            .unwrap();
+        assert!(created);
+        assert!(
+            tree_paths(&ws, &company)
+                .await
+                .contains(&"agents/ceo".to_string())
+        );
+
+        rollback_empty_minted_folders(ws.as_ref(), &company, &[home]).await;
+
+        let paths = tree_paths(&ws, &company).await;
+        assert!(
+            !paths.contains(&"agents/ceo".to_string()),
+            "an empty minted folder must be swept when its write never landed: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"agents".to_string()),
+            "the scaffolded root must survive the rollback: {paths:?}"
+        );
+    }
+
+    /// The over-deletion guard: a folder that gained a child in the window — a
+    /// concurrent create, or the very write the caller thought had failed — is
+    /// left exactly as it stands, and its child is never deleted out from under
+    /// it by a recursive sweep.
+    #[tokio::test]
+    async fn rollback_keeps_a_minted_folder_that_gained_a_child() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+        ensure_workspace_scaffold(ws.as_ref(), &company)
+            .await
+            .unwrap();
+        let (home, _) = ensure_agent_folder_tracked(ws.as_ref(), &company, "ceo")
+            .await
+            .unwrap();
+
+        ws.create(
+            &company,
+            &WorkspaceNode {
+                id: "kept-note".to_string(),
+                name: "brief.md".to_string(),
+                kind: NodeKind::File,
+                parent_id: Some(home.clone()),
+                updated_at_millis: 1,
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
+            },
+            Some("# keep me"),
+        )
+        .await
+        .unwrap();
+
+        rollback_empty_minted_folders(ws.as_ref(), &company, &[home]).await;
+
+        let paths = tree_paths(&ws, &company).await;
+        assert!(
+            paths.contains(&"agents/ceo".to_string()),
+            "a folder that gained a child must survive: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"agents/ceo/brief.md".to_string()),
+            "and its child must not be deleted out from under it: {paths:?}"
+        );
+    }
+
+    /// A reserved root is never a rollback target even when handed in: an empty
+    /// `agents/` is ordinary boot scaffolding, and the next boot re-lays it.
+    #[tokio::test]
+    async fn rollback_never_removes_a_reserved_root() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+        let root = ws
+            .adopt_or_create_folder(&company, None, AGENTS_ROOT, WorkspaceOrigin::Seed)
+            .await
+            .unwrap()
+            .into_node()
+            .id;
+
+        rollback_empty_minted_folders(ws.as_ref(), &company, &[root]).await;
+
+        assert!(
+            tree_paths(&ws, &company)
+                .await
+                .contains(&"agents".to_string()),
+            "an empty reserved root must never be swept"
         );
     }
 }
