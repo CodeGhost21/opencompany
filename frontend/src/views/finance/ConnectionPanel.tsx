@@ -31,6 +31,16 @@ interface Props {
    * re-read their own status afterwards.
    */
   onGrant?: () => void;
+  /**
+   * Whether this viewer may widen the company's tool grants.
+   *
+   * Required alongside `onGrant`, and for the reason the hosting and search
+   * surfaces learned the hard way: `PUT …/tools/grants` is admin-only, so a
+   * member offered this button gets a 403 toast and nothing else — the old dead
+   * end wearing a control. Both finance pages always pass `onGrant`, so without
+   * this the button would render for everyone who can read the page.
+   */
+  canManage?: boolean;
   /** Whether that grant is in flight, so the control can say so. */
   granting?: boolean;
   /** The credential form. Rendered only while expanded. */
@@ -62,6 +72,7 @@ export function ConnectionPanel({
   onTest,
   testId,
   onGrant,
+  canManage = false,
   granting = false,
   children,
 }: Props) {
@@ -170,7 +181,7 @@ export function ConnectionPanel({
                   `[tools].allow`, and on a hosted tenant the manifest is a
                   read-only boot snapshot — which is what made it a product
                   failure rather than a copy failure. */}
-              {health.grantNamespace && onGrant ? (
+              {health.grantNamespace && onGrant && canManage ? (
                 <Button
                   size="sm"
                   variant="outline"

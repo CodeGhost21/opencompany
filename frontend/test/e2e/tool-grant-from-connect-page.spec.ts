@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, request as playwrightRequest, test } from "@playwright/test";
 
 import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
 
@@ -52,6 +52,55 @@ import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
 test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
 type Page = import("@playwright/test").Page;
+
+/**
+ * The namespaces these specs grant, withdrawn again when they are done.
+ *
+ * Load-bearing, not tidiness. `companies/e2e_harness` is **shared**: the lane
+ * runs `fullyParallel: false, workers: 1` against one host, and locally
+ * `reuseExistingServer` can hand the next run the same one. A grant left behind
+ * leaks two ways — the first spec here never sees `search-not-granted` on a
+ * second run and hangs out its 30s wait, and every later spec in the lane runs
+ * against a fixture that now grants `search` and `hosting`, which this company
+ * withholds on purpose so a wildcard can never buy a metered request.
+ *
+ * `DELETE …/tools/grants?namespace=` removes only what the console added, so
+ * this cannot damage the fixture's own `[tools].allow`.
+ */
+const GRANTED = ["search", "hosting"];
+
+/**
+ * Withdraws what these specs grant.
+ *
+ * A context of its own: the per-test fixtures are gone in `beforeAll`/`afterAll`,
+ * and the signed-in storage state is what makes the `DELETE` an admin's.
+ */
+async function revokeAll(baseURL: string | undefined, storageState: unknown) {
+  const context = await playwrightRequest.newContext({
+    baseURL,
+    storageState: storageState as string | undefined,
+  });
+  try {
+    for (const namespace of GRANTED) {
+      await context.delete(`/api/v1/company/tools/grants?namespace=${namespace}`);
+    }
+  } finally {
+    await context.dispose();
+  }
+}
+
+// Before as well as after. `afterAll` keeps the fixture clean for the rest of
+// the lane, but it cannot help a run that inherits a dirty host — a previous
+// run killed mid-suite, or `reuseExistingServer` handing this one the same
+// process. Starting from a known state is what makes the first spec's
+// "not granted" precondition true rather than hopeful.
+test.beforeAll(async ({ baseURL }, testInfo) => {
+  await revokeAll(baseURL, testInfo.project.use.storageState);
+});
+
+test.afterAll(async ({ baseURL }, testInfo) => {
+  await revokeAll(baseURL, testInfo.project.use.storageState);
+});
 
 /**
  * A fresh browser context has no tour state, so the first-run welcome dialog

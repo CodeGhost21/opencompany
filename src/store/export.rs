@@ -155,20 +155,24 @@ struct BundleMeta {
     /// `None` — the manifest's `[policy]` decides, exactly as before.
     #[serde(default)]
     overlay_policy: Option<PolicyOverride>,
-    /// The operator-set per-desk tool ceilings at export time. Preserved so an
-    /// export→import does not silently widen a desk back to the company's full
-    /// grant — the same class of loss `overlay_policy` above is carried to
-    /// prevent, on the axis that decides capability rather than autonomy.
-    /// `#[serde(default)]` for back-compat with older bundles, which read as
-    /// empty: the manifest's ceilings decide, exactly as before.
     /// The operator's console-added `[tools].allow` grants at export time
     /// (issue #1796). Preserved so an export→import does not silently revoke an
     /// integration the operator granted from a connect surface, leaving the
     /// restored company "Connected" and reaching nobody. `#[serde(default)]`
     /// for back-compat with older bundles, which read as `None`: the manifest's
     /// `[tools]` decides, exactly as before.
+    ///
+    /// Carries the **seed's** list beside it, not the record's materialised one
+    /// — see `read_via_ports` for why the bundle's `company.toml` must not name
+    /// what the console added.
     #[serde(default)]
     overlay_tool_grants: Option<ToolGrantsOverride>,
+    /// The operator-set per-desk tool ceilings at export time. Preserved so an
+    /// export→import does not silently widen a desk back to the company's full
+    /// grant — the same class of loss `overlay_policy` above is carried to
+    /// prevent, on the axis that decides capability rather than autonomy.
+    /// `#[serde(default)]` for back-compat with older bundles, which read as
+    /// empty: the manifest's ceilings decide, exactly as before.
     #[serde(default)]
     overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids switched off at export time (issue #276). Preserved so
@@ -2076,14 +2080,6 @@ mod test {
         }
     }
 
-    /// Issue #343: a bundle carrying two overrides for one teammate is **refused**
-    /// at import, not silently reduced to whichever row deserialized first.
-    ///
-    /// Import is the only boundary where `overlay_budgets` arrives from outside
-    /// this process, so it is the only place the write path's one-per-teammate
-    /// invariant can be broken. The two rows here disagree ($0 versus $50, set by
-    /// different people), which is the point: there is no correct row to pick,
-    /// and picking silently would either mute a teammate or restore an allowance
     /// **A console tool grant must not be promoted to a seed grant by a
     /// round-trip** (issue #1796).
     ///
@@ -2213,6 +2209,14 @@ mod test {
         );
     }
 
+    /// Issue #343: a bundle carrying two overrides for one teammate is **refused**
+    /// at import, not silently reduced to whichever row deserialized first.
+    ///
+    /// Import is the only boundary where `overlay_budgets` arrives from outside
+    /// this process, so it is the only place the write path's one-per-teammate
+    /// invariant can be broken. The two rows here disagree ($0 versus $50, set by
+    /// different people), which is the point: there is no correct row to pick,
+    /// and picking silently would either mute a teammate or restore an allowance
     /// an admin revoked, with the wrong name on the attribution either way.
     #[tokio::test]
     async fn a_bundle_with_duplicate_budget_overrides_is_rejected() {

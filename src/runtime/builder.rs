@@ -1548,6 +1548,67 @@ impl RuntimeBuilder {
             .map(|h| h.events.clone())
             .or(self.events)
             .unwrap_or_else(|| Arc::new(FsEventLog::new(home.clone())));
+        // Load the persisted record BEFORE constructing the brain so the brain's
+        // in-memory record carries the operator overlays (team, desk memberships,
+        // desk order/hierarchy, operator-created desks) rather than empty lists.
+        // The brain's `desk_lead` resolver reads `overlay_desk_order`, so seeding
+        // it from the persisted record is what makes a `/desks/{id}/order` reorder
+        // take effect on routing after the runtime is rebuilt — otherwise desk
+        // chats keep routing to the pre-reorder lead. `save` only writes
+        // company.toml + meta.json; the append-only ledger file is left untouched,
+        // so an existing ledger survives a rebuild.
+        //
+        // Read HERE, at the top of `build`, rather than beside the other overlay
+        // resolutions ~800 lines down (issue #1796). Nothing between the two
+        // points touches this store, so the value is identical; what moves is
+        // when the console's tool grants can be folded, and that has to happen
+        // before the first reader of `[tools].allow` rather than before most of
+        // them. The two readers that used to run ahead of the fold are the tool
+        // provider's grant list (`effective_grants` just below, which is what
+        // `call_tool` enforces against) and the hosted brain's `tool_catalog`.
+        // Both would have kept the seed's list forever — including across a
+        // restart, since a rebuild re-parses `company.toml` — so a granted
+        // integration would report "granted" on every console surface while the
+        // brain never advertised the tool and the provider refused the call.
+        let existing = store.load(&id).await?;
+
+        // Issue #1796: the namespaces an operator granted from a connect
+        // surface, carried across the rebuild under the same seed-wins rule as
+        // the policy override — and needing it most of the three, because this
+        // is the only overlay that *widens* `[tools]`. `seed_allow` recovers the
+        // seed's own list from the stored (seed-plus-grants) manifest first;
+        // comparing the materialised list would report an edit on every rebuild
+        // and make the layer inert.
+        //
+        // `self.manifest.tools` is still pristine at this point, which is what
+        // makes it the seed side of that comparison. The fold below is the last
+        // thing that may touch it.
+        let overlay_tool_grants = existing.as_ref().and_then(|r| {
+            let held = r.overlay_tool_grants.as_ref();
+            let carried = carry_tool_grants_override(
+                &seed_allow(&r.manifest.tools, held),
+                &self.manifest.tools,
+                held,
+            );
+            if carried.is_none() && held.is_some() {
+                tracing::info!(
+                    company = %id,
+                    "[tools] the seed `[tools]` changed, so the console tool grants \
+                     were cleared — version control wins when it speaks"
+                );
+            }
+            carried
+        });
+        // Fold into `self.manifest` itself, exactly as `[workflows].enabled` is
+        // merged further down and for the same stated reason: mutating the
+        // source keeps every reader in agreement by construction rather than by
+        // a duplicated line. A local clone folded only into the saved record was
+        // the first shape of this, and it left the two readers named above on
+        // the seed's list — the "console says Connected over a harness that
+        // wired nothing" failure this whole change exists to end.
+        self.manifest.tools.allow =
+            effective_tool_allow(&self.manifest.tools.allow, overlay_tool_grants.as_ref());
+
         let memory: Arc<dyn MemoryStore> = if self.memory_overlay_applied {
             self.memory
                 .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())))
@@ -2354,17 +2415,6 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         let mut roster_builder: Option<Arc<crate::harness::roster_build::RosterBuilder>> = None;
 
-        // Load the persisted record BEFORE constructing the brain so the brain's
-        // in-memory record carries the operator overlays (team, desk memberships,
-        // desk order/hierarchy, operator-created desks) rather than empty lists.
-        // The brain's `desk_lead` resolver reads `overlay_desk_order`, so seeding
-        // it from the persisted record is what makes a `/desks/{id}/order` reorder
-        // take effect on routing after the runtime is rebuilt — otherwise desk
-        // chats keep routing to the pre-reorder lead. `save` only writes
-        // company.toml + meta.json; the append-only ledger file is left untouched,
-        // so an existing ledger survives a rebuild.
-        let existing = store.load(&id).await?;
-
         // Boot lifecycle: the setup work this company starts with, put on the
         // board once and never again.
         //
@@ -2535,27 +2585,6 @@ impl RuntimeBuilder {
             }
             carried
         });
-        // Issue #1796: the namespaces an operator granted from a connect surface,
-        // carried across the rebuild under the same seed-wins rule — and needing
-        // it most of the three, because this is the only overlay that *widens*
-        // `[tools]`. `seed_allow` recovers the seed's own list from the stored
-        // (seed-plus-grants) manifest first; comparing the materialised list
-        // would report an edit on every rebuild and make the layer inert.
-        let overlay_tool_grants = existing.as_ref().and_then(|r| {
-            let held = r.overlay_tool_grants.as_ref();
-            let carried = carry_tool_grants_override(
-                &seed_allow(&r.manifest.tools, held),
-                &self.manifest.tools,
-                held,
-            );
-            if carried.is_none() && held.is_some() {
-                tracing::info!(
-                    company = %id,
-                    "[tools] the seed `[tools]` changed, so the console tool grants were cleared                      — version control wins when it speaks"
-                );
-            }
-            carried
-        });
         // The per-desk tool ceilings, carried across the rebuild under the same
         // seed-wins rule as the policy override above — see
         // `carry_desk_tool_overrides` for why a desk grant needs it even more
@@ -2608,8 +2637,11 @@ impl RuntimeBuilder {
         // instead of by a duplicated line only one CI job type-checks.
         //
         // Every other `self.manifest` reader in `build` (grants, tool provider,
-        // channels, inference, MCP, plan, policy gate, place) reads fields this
-        // merge never touches.
+        // channels, inference, MCP, plan, policy gate, place) reads fields THIS
+        // merge never touches. `[tools].allow` is now merged the same way for
+        // the same reason (issue #1796), and it does not have that property —
+        // the grants and the tool provider read it — which is why its fold runs
+        // at the top of `build` rather than here.
         self.manifest.workflows.enabled =
             merge_enabled_workflows(&self.manifest.workflows.enabled, &overlay_workflows);
         // Issue #85: carry an existing record's source-template provenance
@@ -3391,33 +3423,30 @@ impl RuntimeBuilder {
         // `overlay_policy` is moved into the record, so it can be applied to the
         // live gate after the save succeeds — see below.
         let effective_policy = effective_policy(&self.manifest.policy, overlay_policy.as_ref());
-        // Issue #1796: the console tool grants are folded into the manifest the
-        // record carries, exactly as `[workflows].enabled` is above — the one
-        // other field where a runtime decision is merged into the persisted
-        // blueprint rather than resolved beside it.
+        // Issue #1796: `self.manifest.tools.allow` already carries the console
+        // grants — folded at the top of `build`, before the first reader — so the
+        // record picks them up through the ordinary `self.manifest.clone()`
+        // below, exactly as it picks up the `[workflows].enabled` merge.
         //
-        // Folding rather than resolving is deliberate, and it is what makes the
-        // fix trustworthy: `[tools].allow` is read at some three dozen sites
+        // Folding into the source rather than resolving per reader is what makes
+        // this trustworthy: `[tools].allow` is read at some three dozen sites
         // across the roster build, the workflow capability bundle, the harness
         // tool wiring and every console status route. A parallel resolution
         // would have to reach all of them, and the single site that got missed
         // would be a company whose connect page says "Connected" over a harness
         // that wired nothing — the exact failure #1796 is about, reintroduced by
-        // its own fix. Folded here, there is one place to be right.
+        // its own fix.
         //
-        // The seed still wins when it speaks: `carry_tool_grants_override` above
-        // drops the whole overlay the moment version control edits `[tools]`,
-        // and `seed_allow` is how the *next* rebuild still sees the seed's own
-        // list through this fold.
-        let mut manifest = self.manifest.clone();
-        manifest.tools.allow =
-            effective_tool_allow(&self.manifest.tools.allow, overlay_tool_grants.as_ref());
+        // The seed still wins when it speaks: `carry_tool_grants_override` drops
+        // the whole overlay the moment version control edits `[tools]`, and
+        // `seed_allow` is how the *next* rebuild still sees the seed's own list
+        // through this fold.
         store
             .save(&CompanyRecord {
                 overlay_retired_agents,
                 overlay_agent_edits,
                 id: id.clone(),
-                manifest,
+                manifest: self.manifest.clone(),
                 ledger,
                 lifecycle,
                 overlay_agents,
@@ -7306,6 +7335,73 @@ needs_reason = true
         let after_seed_edit = runtime.store().load(&id).await.unwrap().unwrap();
         assert_eq!(after_seed_edit.manifest.tools.allow, vec!["files"]);
         assert!(after_seed_edit.overlay_tool_grants.is_none());
+    }
+
+    /// The console grant reaches the **tool provider's** grant list, which is
+    /// what `call_tool` enforces against (issue #1796).
+    ///
+    /// This is the reader the first shape of the fold missed, and missing it was
+    /// worse than not shipping the feature. `effective_grants(&self.manifest)`
+    /// runs near the top of `build`, ~800 lines ahead of where the overlays used
+    /// to load, so folding into a local clone at the save site left the provider
+    /// holding the seed's list — permanently, since a rebuild re-parses
+    /// `company.toml`. The operator would see every console surface report
+    /// "granted" while the very next tool call was refused as ungranted.
+    ///
+    /// Asserted through `effective_grants` on the runtime's own manifest rather
+    /// than by poking the provider, because that function IS the provider's
+    /// input: `build` passes its result straight to `StubToolProvider::new` /
+    /// `OpenHumanToolProvider::new`.
+    #[tokio::test]
+    async fn a_console_tool_grant_reaches_the_grant_list_the_provider_enforces() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-tool-grant-provider-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        // A catch-all company: `*` covers shell/code/web and confers none of the
+        // namespaces this layer deals in, which is the manifest shape the issue
+        // was reported against.
+        let manifest = wf_manifest("[tools]\nallow=[\"*\"]\n");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        assert!(
+            !crate::company::grants_search_explicit(&effective_grants(&manifest)),
+            "the catch-all must not confer it to begin with"
+        );
+
+        // Exactly what `PUT …/tools/grants` writes.
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_tool_grants = Some(held_grants(&["search"]));
+        record.manifest.tools.allow = record.effective_tool_allow();
+        store.save(&record).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+
+        // The record — the readers that were already right.
+        assert!(crate::company::grants_search_explicit(
+            &rebuilt.manifest.tools.allow
+        ));
+        // And the grant list the provider is constructed from, which is the one
+        // that was wrong. `build` computes this from `self.manifest`, so this
+        // fails unless the fold reached the source rather than a local clone.
+        assert!(
+            crate::company::grants_search_explicit(&effective_grants(&rebuilt.manifest)),
+            "the provider's grant list must carry the console grant: {:?}",
+            effective_grants(&rebuilt.manifest)
+        );
     }
 
     /// Issue #208: an enabled id with no surviving graph body — a seed entry

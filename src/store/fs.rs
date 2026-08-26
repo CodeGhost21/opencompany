@@ -750,16 +750,16 @@ struct Meta {
     /// keeps those loading with the manifest's `[policy]` in charge.
     #[serde(default)]
     overlay_policy: Option<crate::ports::types::PolicyOverride>,
-    /// The operator-set per-desk tool ceilings. Absent on meta files written
-    /// before desks could scope tools, and `#[serde(default)]` reads that
-    /// absence as "no desk overrides a ceiling" — which leaves the manifest in
-    /// charge, exactly as those companies ran.
     /// The operator's console-added `[tools].allow` grants (issue #1796).
     /// Absent on meta files written before a connect surface could grant a
     /// namespace, and `#[serde(default)]` reads that absence as "the manifest's
     /// `[tools]` still decides" — exactly how those companies ran.
     #[serde(default)]
     overlay_tool_grants: Option<crate::ports::types::ToolGrantsOverride>,
+    /// The operator-set per-desk tool ceilings. Absent on meta files written
+    /// before desks could scope tools, and `#[serde(default)]` reads that
+    /// absence as "no desk overrides a ceiling" — which leaves the manifest in
+    /// charge, exactly as those companies ran.
     #[serde(default)]
     overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids the operator has switched off (issue #276). Absent on

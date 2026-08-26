@@ -1921,6 +1921,23 @@ impl HarnessPool {
         // with no override at all, and does not move when a redundant override
         // is carried and later cleared. That is the shape `policy_fp` settled
         // on, for the same reason.
+        //
+        // One asymmetry with `policy_fp` worth naming, since it is not obvious
+        // from the symmetry of the two lines. The policy axis reads BOTH halves
+        // live: `overlay.policy` from the store read above, and the manifest's
+        // `[policy]`, which no runtime write touches. This axis reads the
+        // override live but takes the base from `company.manifest.tools.allow`,
+        // and that field IS runtime-mutable now — the fold makes it so. A
+        // `DELETE …/tools/grants` landing after the caller snapshotted `company`
+        // therefore moves the override half but not the base, and the withdrawal
+        // reaches the belt a cycle later than a grant would.
+        //
+        // Bounded and safe rather than clean: it delays a revocation by one
+        // cycle, never a grant, and every axis here has some version of that
+        // window. It is recorded because the obvious reading of these two lines
+        // — "the grant axis works exactly like the policy axis" — is not quite
+        // true, and the next person to touch either should know which half is
+        // live.
         let grants_fp = tool_grants_fingerprint(&crate::ports::types::effective_tool_allow(
             &company.manifest.tools.allow,
             overlay.tool_grants.as_ref(),
