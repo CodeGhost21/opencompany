@@ -391,7 +391,10 @@ mod test {
             self.inner.read_from(id, seq, limit).await
         }
 
-        fn subscribe(&self, id: &CompanyId) -> futures::stream::BoxStream<'static, EventStreamItem> {
+        fn subscribe(
+            &self,
+            id: &CompanyId,
+        ) -> futures::stream::BoxStream<'static, EventStreamItem> {
             self.inner.subscribe(id)
         }
     }
