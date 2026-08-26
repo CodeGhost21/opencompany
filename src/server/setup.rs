@@ -1177,7 +1177,11 @@ async fn probe_inference<E: EnvSource + Sync>(
         };
     }
 
-    match crate::harness::provider::probe(&decl).await {
+    // No company exists yet at this step, so there is no harness to name — the
+    // repair hint on failure falls back to the company-level phrasing (there is
+    // no company-level config to name either, but nothing here has one to
+    // offer instead).
+    match crate::harness::provider::probe(&decl, None).await {
         Ok(()) => InferenceTestDto {
             ok: true,
             base_url,

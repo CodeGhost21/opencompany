@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::app::config::EnvSource;
+use crate::company::IMPLICIT_HARNESS_ID;
 use crate::company::Inference;
 use crate::company::inference::{
     self, EnvDefault, InferenceSource, RuntimeInference, clear_runtime_config, resolve_effective,
@@ -173,7 +174,13 @@ struct SetInference {
 
 /// Loads the inference the company actually boots and runs on: the *default
 /// harness's* `[harness.inference]` when that harness declares one, falling back
-/// to the company-level `[inference]` section.
+/// to the company-level `[inference]` section. Also returns the default
+/// harness's real id, alongside the config, for callers that need to name it —
+/// [`test_config`] threads it into [`probe`](crate::harness::provider::probe)
+/// so a repair hint on a harness-owned table points at that table rather than
+/// the (possibly shadowed) company-level one, the same distinction
+/// [`TenantProvider::invoke`](crate::harness::built_in::provider::TenantProvider::invoke)
+/// already makes for live turns.
 ///
 /// This mirrors [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build),
 /// which resolves `default_harness_inference()` before the company-level
@@ -182,15 +189,17 @@ struct SetInference {
 /// otherwise it would report `managed`, reject `/inference/test` as
 /// `not_configured`, and mislabel its status after a reset, while turns run on
 /// the harness configuration the same record holds.
-async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiError> {
+async fn manifest_inference(runtime: &CompanyRuntime) -> Result<(Inference, String), ApiError> {
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     Ok(record
         .map(|r| {
-            r.manifest
+            let inference = r
+                .manifest
                 .default_harness_inference()
-                .unwrap_or_else(|| r.manifest.inference.clone())
+                .unwrap_or_else(|| r.manifest.inference.clone());
+            (inference, r.manifest.default_harness_id())
         })
-        .unwrap_or_default())
+        .unwrap_or_else(|| (Inference::default(), IMPLICIT_HARNESS_ID.to_string())))
 }
 
 /// What resolving this company's inference configuration produced.
@@ -206,7 +215,7 @@ async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiEr
 /// as [`InferenceResolution::Unreadable`] — the operator can act on neither,
 /// and [`runner_gap_for`] already folds them the same way.
 pub(crate) async fn inference_resolution(runtime: &CompanyRuntime) -> InferenceResolution {
-    let Ok(manifest) = manifest_inference(runtime).await else {
+    let Ok((manifest, _harness_id)) = manifest_inference(runtime).await else {
         return InferenceResolution::Unreadable;
     };
     match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
@@ -305,7 +314,7 @@ pub(crate) enum RunnerGap {
 ///   or a save would help — the #266 doctrine), or a company already on the
 ///   harness path.
 pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
-    let Ok(manifest) = manifest_inference(runtime).await else {
+    let Ok((manifest, _harness_id)) = manifest_inference(runtime).await else {
         return RunnerGap::NotWired;
     };
     // A resolve *error* is not the same as a clean resolve to nothing. `Err`
@@ -407,7 +416,7 @@ async fn effective_status_with(
     platform: Option<&EnvDefault>,
     can_rebuild_in_place: bool,
 ) -> Result<InferenceStatusDto, ApiError> {
-    let manifest = manifest_inference(runtime).await?;
+    let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
     let decl = resolve_effective(runtime.id(), &manifest, None, secrets)
         .await
@@ -718,7 +727,7 @@ async fn test_config(company: ScopedCompany) -> Response {
     use axum::response::IntoResponse;
 
     let runtime = company.runtime.as_ref();
-    let manifest = match manifest_inference(runtime).await {
+    let (manifest, harness_id) = match manifest_inference(runtime).await {
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
@@ -781,7 +790,13 @@ async fn test_config(company: ScopedCompany) -> Response {
                 }
                 Ok(None) => {}
             }
-            match crate::harness::provider::probe(&decl).await {
+            // The default harness's real id, whether or not it declares its own
+            // `[harness.inference]` — `model_unavailable_advice` names the same
+            // table either way (its own, or the company's as the harness's
+            // fallback), so this always passes it rather than gating on
+            // `is_default` the way `TenantProvider::invoke` deliberately does not
+            // (Codex review on #1824's #1811 follow-up).
+            match crate::harness::provider::probe(&decl, Some(harness_id.as_str())).await {
                 Ok(()) => Json(serde_json::json!({
                     "ok": true,
                     "provider": decl.provider,

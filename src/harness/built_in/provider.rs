@@ -1490,7 +1490,19 @@ impl HarnessModel for TenantProvider {
 /// A minimal live probe: one `ping` turn against the resolved config, used by
 /// the console's "Test" button. The error is scrubbed of the credential by
 /// [`send_plan`].
-pub async fn probe(decl: &InferenceDecl) -> anyhow::Result<()> {
+///
+/// `harness` is the real id of the harness whose config `decl` resolved from,
+/// when the caller has one — `None` for the first-run wizard's
+/// [`decl_for_probe`](crate::company::inference::decl_for_probe), which runs
+/// before any company (and so any harness) exists. The console "Test" route
+/// (`test_config`) always has a company and therefore a default harness id,
+/// declared-or-implicit, and passes it: a missing-model repair hint otherwise
+/// names the company's `[inference].models` even when the failing config came
+/// from that harness's own `[harness.inference]`, sending the operator to a
+/// table its request never consulted — the same gap already closed for live
+/// turns in [`TenantProvider::invoke`] (Codex review on #1824's #1811
+/// follow-up).
+pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let messages = vec![serde_json::json!({ "role": "user", "content": "ping" })];
     // The connectivity probe exposes no tools — it only checks the endpoint
@@ -1505,9 +1517,14 @@ pub async fn probe(decl: &InferenceDecl) -> anyhow::Result<()> {
         &ToolChoice::Auto,
     )
     .await?;
-    // No harness scope in play here: this is a bare-`decl` connectivity probe
-    // (the setup-time and console "Test" routes), never a scoped harness turn.
-    let payload = send_plan(&client, &plan, decl.credential(), None, Some(decl.source)).await?;
+    let payload = send_plan(
+        &client,
+        &plan,
+        decl.credential(),
+        harness,
+        Some(decl.source),
+    )
+    .await?;
     payload
         .pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
@@ -3212,6 +3229,67 @@ mod tests {
             ),
             None,
             "a 5xx is the provider's fault, not the operator's config"
+        );
+    }
+
+    /// Spawns a stub that rejects every chat completion with a
+    /// provider-flavoured "model not available" 400, the shape `probe`'s
+    /// caller (the console "Test" button) hits when an operator has typed a
+    /// model id the endpoint does not serve.
+    async fn spawn_model_unavailable_stub() -> String {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({
+                        "error": "Model 'gpt-5.9-ghost' is not available. Use GET /v1/models to \
+                                  list available models."
+                    })
+                    .to_string(),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// `probe`'s repair hint must name the harness whose table the failing
+    /// request actually read (Codex review on #1824's #1811 follow-up):
+    /// `test_config` (src/server/ops/inference.rs) resolves against the
+    /// company's default harness and now threads its real id through, the
+    /// same distinction `TenantProvider::invoke` already makes for live
+    /// turns. Before the fix `probe` hard-coded `None` for every caller, so a
+    /// company whose default harness declares its own `[harness.inference]`
+    /// got a repair hint pointing at the company-level `[inference].models`
+    /// table — one its request never consulted.
+    #[tokio::test]
+    async fn probe_names_the_harness_that_owns_the_failing_config() {
+        let base_url = spawn_model_unavailable_stub().await;
+        let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None);
+
+        let err = probe(&decl, Some("embedded"))
+            .await
+            .expect_err("the stub rejects every model");
+        assert!(
+            err.to_string().contains("harness `embedded`"),
+            "the hint must name the owning harness: {err}"
+        );
+
+        let err = probe(&decl, None)
+            .await
+            .expect_err("the stub rejects every model");
+        assert!(
+            !err.to_string().contains("harness `"),
+            "with no harness in play (the first-run wizard), the hint must not invent one: {err}"
         );
     }
 }
