@@ -263,6 +263,24 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     const selfGenerated = !idTouched || explicit === "";
     const autoId = selfGenerated ? id : "";
 
+    // Persist a plain create's self-generated id into state immediately, so
+    // a *retry* reuses this exact id instead of minting a fresh one.
+    // `explicit` starts blank on `create` (unlike `resetReplacementId`,
+    // which a reset seeds into `explicitId` the moment the dialog opens —
+    // see the `useEffect` above), so without this every retry recomputed
+    // `autoCompanyId(trimmedName)` with a brand-new random suffix. That
+    // mattered whenever a retry was actually needed: a default create whose
+    // request succeeded on the host but lost its response, where the
+    // immediate reconciliation lookup below *also* failed transiently,
+    // left the dialog open for the operator to retry — and that retry, with
+    // a different id, provisioned a second company instead of reconciling
+    // the first (issue #1828 comment 3865401532). Skipped once the operator
+    // has typed an id themselves (`explicit` non-blank): that value is
+    // already theirs to keep across a retry, same as it is for a reset.
+    if (request.kind === "create" && !explicit) {
+      setExplicitId(id);
+    }
+
     try {
       const manifest_toml = buildManifestToml({
         name: trimmedName,
