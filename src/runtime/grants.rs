@@ -103,7 +103,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::ports::generate_id;
-use crate::ports::types::{Actor, ApprovalId, CompanyId, EventSeq};
+use crate::ports::types::{
+    Actor, ApprovalId, CompanyEvent, CompanyId, EventSeq, Mention, MessageIntent,
+};
 
 /// How long an unredeemed grant stays live: 15 minutes.
 ///
@@ -996,6 +998,111 @@ pub struct BudgetPauseMarker {
     pub summary: String,
     /// Epoch-millis the marker was parked.
     pub at_millis: u64,
+    /// The ORIGINAL message's thread parent, replayed as-is on redeem (issue
+    /// #1846 review, Codex #3865812423). Forcing this to `None` — the
+    /// pre-fix `redeem_budget_pause` behaviour — turned a redeemed thread
+    /// reply into a channel-root message: `cycle_conversation` derives both
+    /// the response thread and the continuation context from this field, so
+    /// the rerun and its answer landed outside the thread the pause card
+    /// represented.
+    pub parent: Option<EventSeq>,
+    /// What the operator's composer said the ORIGINAL message was for,
+    /// replayed as-is on redeem (issue #1846 review, Codex #3865812432).
+    /// Forcing this to `None` — the pre-fix behaviour — changed the
+    /// redeemed turn's semantics: `HarnessBrain` passes this field into
+    /// `DelegationRunner::requested`, where it suppresses task creation for
+    /// chat intent and enables workflow-specific behaviour, so a redeemed
+    /// "Just chatting" message could unexpectedly open a card and a redeemed
+    /// workflow request could be treated as an ordinary one-off.
+    pub deliverable: Option<MessageIntent>,
+    /// Who the ORIGINAL message named, already resolved, replayed as-is on
+    /// redeem (issue #1846 review, Codex #3865812419). This event re-enters
+    /// `run_cycle` directly, bypassing the REST handler's own
+    /// `resolve_mentions` — forcing this to `Vec::new()` (the pre-fix
+    /// behaviour) meant `HarnessBrain` read an empty vector and fell back
+    /// from `mention_responder` to the desk lead/orchestrator, so adding
+    /// credits could resend the task to a different agent with different
+    /// tools and permissions than the operator's `@mention` had actually
+    /// asked for.
+    pub mentions: Vec<Mention>,
+}
+
+/// The parent / deliverable / mentions the operator's ORIGINAL message set,
+/// carried ambient through a cycle so a budget-pause
+/// [`park`](BudgetPauseSet::park) anywhere inside it — the top-level turn, a
+/// CEO-relay call, a delegate's own turn — can stamp the marker with the
+/// request the operator actually sent (issue #1846 review, Codex
+/// #3865812419 / #3865812423 / #3865812432).
+///
+/// Set once, around the WHOLE cycle
+/// ([`CycleRunner::run_bracketed`](crate::runtime::cycle::CycleRunner)),
+/// from whichever event in the batch is the triggering `OperatorMessage` —
+/// the same "same task, propagates through the seam" shape
+/// `delegation::CHAT_ONLY_TURN` already uses for its own ambient hint, and
+/// for the same reason: nothing on `run_locked`'s call chain down to a
+/// `park()` site spawns onto a new task, so a `tokio::task_local!` reaches
+/// every one of them without a parameter added to any function in between.
+///
+/// [`Default`] — no parent, no deliverable, no mentions — is the correct
+/// reading for every cycle that did not start from an `OperatorMessage`: a
+/// scheduler tick, a webhook, an approval follow-up. None of those has an
+/// original message to replay, and a pause during one of them redeems with
+/// exactly the defaults `redeem_budget_pause` used everywhere before this
+/// fix.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RedeemContext {
+    pub parent: Option<EventSeq>,
+    pub deliverable: Option<MessageIntent>,
+    pub mentions: Vec<Mention>,
+}
+
+impl RedeemContext {
+    /// The context to carry for one cycle's batch — the first
+    /// `OperatorMessage` in it, or [`Default`] when none is present.
+    ///
+    /// "First", not "every": `single_agent` already restricts an addressed
+    /// batch to one agent, and every caller into `run_bracketed` (the chat
+    /// route, the redeem route itself) sends exactly one `OperatorMessage`
+    /// per cycle in practice. A future caller that ever batches more than
+    /// one still gets a coherent, if approximate, answer rather than a
+    /// panic.
+    pub fn from_events(events: &[(Option<EventSeq>, CompanyEvent)]) -> Self {
+        events
+            .iter()
+            .find_map(|(_, event)| match event {
+                CompanyEvent::OperatorMessage {
+                    parent,
+                    deliverable,
+                    mentions,
+                    ..
+                } => Some(Self {
+                    parent: *parent,
+                    deliverable: *deliverable,
+                    mentions: mentions.clone(),
+                }),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+}
+
+tokio::task_local! {
+    static REDEEM_CONTEXT: RedeemContext;
+}
+
+/// Runs `fut` with [`current_redeem_context`] reading `ctx` for its
+/// duration — set once around a whole cycle by
+/// [`CycleRunner::run_bracketed`](crate::runtime::cycle::CycleRunner).
+pub async fn with_redeem_context<F: std::future::Future>(ctx: RedeemContext, fut: F) -> F::Output {
+    REDEEM_CONTEXT.scope(ctx, fut).await
+}
+
+/// The ambient [`RedeemContext`] for the cycle the caller is running inside,
+/// or [`Default`] when none was set — every path that does not run through
+/// [`with_redeem_context`] (every test, and any hypothetical future caller
+/// of [`BudgetPauseSet::park`] outside a cycle).
+pub fn current_redeem_context() -> RedeemContext {
+    REDEEM_CONTEXT.try_with(Clone::clone).unwrap_or_default()
 }
 
 /// One company's parked budget pauses, at most one per agent (issue #1846).
@@ -1012,6 +1119,11 @@ pub struct BudgetPauseSet {
 impl BudgetPauseSet {
     /// Parks a fresh marker for `agent`, replacing whatever was parked
     /// before, and returns it.
+    ///
+    /// `redeem` is the ambient [`RedeemContext`] — pass
+    /// [`current_redeem_context`] at every real call site; a bare
+    /// [`RedeemContext::default`] is only correct for a test that is not
+    /// itself running inside [`with_redeem_context`].
     pub fn park(
         &self,
         agent: impl Into<String>,
@@ -1019,6 +1131,7 @@ impl BudgetPauseSet {
         message: impl Into<String>,
         summary: impl Into<String>,
         at_millis: u64,
+        redeem: RedeemContext,
     ) -> BudgetPauseMarker {
         let agent = agent.into();
         let marker = BudgetPauseMarker {
@@ -1028,6 +1141,9 @@ impl BudgetPauseSet {
             message: message.into(),
             summary: summary.into(),
             at_millis,
+            parent: redeem.parent,
+            deliverable: redeem.deliverable,
+            mentions: redeem.mentions,
         };
         self.by_agent
             .lock()
@@ -2037,7 +2153,14 @@ mod test {
     #[test]
     fn parking_then_peeking_a_budget_pause_does_not_consume_it() {
         let set = BudgetPauseSet::default();
-        set.park("ceo", Some("desk-1".to_string()), "hi", "paused", 1_000);
+        set.park(
+            "ceo",
+            Some("desk-1".to_string()),
+            "hi",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
 
         let first = set.peek("ceo").expect("parked");
         let second = set.peek("ceo").expect("peek does not consume");
@@ -2049,7 +2172,7 @@ mod test {
     #[test]
     fn redeeming_a_budget_pause_consumes_it_exactly_once() {
         let set = BudgetPauseSet::default();
-        set.park("ceo", None, "hi", "paused", 1_000);
+        set.park("ceo", None, "hi", "paused", 1_000, RedeemContext::default());
 
         let redeemed = set.redeem("ceo").expect("a marker was parked");
         assert_eq!(redeemed.agent, "ceo");
@@ -2069,7 +2192,7 @@ mod test {
         // the SECOND caller's own `redeem` finds nothing, closing the race
         // before it ever gets to re-dispatch.
         let set = BudgetPauseSet::default();
-        let marker = set.park("ceo", None, "hi", "paused", 1_000);
+        let marker = set.park("ceo", None, "hi", "paused", 1_000, RedeemContext::default());
 
         let first = set.redeem("ceo").expect("the first reservation wins");
         assert_eq!(first.id, marker.id);
@@ -2082,7 +2205,7 @@ mod test {
     #[test]
     fn restore_if_absent_puts_a_failed_redispatchs_marker_back() {
         let set = BudgetPauseSet::default();
-        let marker = set.park("ceo", None, "hi", "paused", 1_000);
+        let marker = set.park("ceo", None, "hi", "paused", 1_000, RedeemContext::default());
 
         let reserved = set.redeem("ceo").expect("reserved for redispatch");
         assert!(set.peek("ceo").is_none(), "reserved out of the set");
@@ -2101,13 +2224,27 @@ mod test {
         // marker being restored must not delete the operator's not-yet-seen
         // fresh one out from under them.
         let set = BudgetPauseSet::default();
-        let stale = set.park("ceo", None, "first stuck message", "paused once", 1_000);
+        let stale = set.park(
+            "ceo",
+            None,
+            "first stuck message",
+            "paused once",
+            1_000,
+            RedeemContext::default(),
+        );
         let reserved = set.redeem("ceo").expect("reserved for redispatch");
         assert_eq!(reserved.id, stale.id);
 
         // The (failed) redispatch itself re-entered the cycle and paused
         // again before the restore call below runs.
-        set.park("ceo", None, "second stuck message", "paused again", 2_000);
+        set.park(
+            "ceo",
+            None,
+            "second stuck message",
+            "paused again",
+            2_000,
+            RedeemContext::default(),
+        );
 
         set.restore_if_absent(reserved);
         let still_parked = set.peek("ceo").expect("the fresher marker survives");
@@ -2117,8 +2254,22 @@ mod test {
     #[test]
     fn a_second_pause_on_the_same_agent_overwrites_the_first() {
         let set = BudgetPauseSet::default();
-        set.park("ceo", None, "first stuck message", "paused once", 1_000);
-        set.park("ceo", None, "second stuck message", "paused again", 2_000);
+        set.park(
+            "ceo",
+            None,
+            "first stuck message",
+            "paused once",
+            1_000,
+            RedeemContext::default(),
+        );
+        set.park(
+            "ceo",
+            None,
+            "second stuck message",
+            "paused again",
+            2_000,
+            RedeemContext::default(),
+        );
 
         let marker = set.redeem("ceo").expect("the latest marker");
         assert_eq!(
@@ -2131,7 +2282,14 @@ mod test {
     fn budget_pauses_are_scoped_per_company() {
         let acme = CompanyId::new("acme");
         let globex = CompanyId::new("globex");
-        budget_pauses_for(&acme).park("ceo", None, "acme's message", "paused", 1_000);
+        budget_pauses_for(&acme).park(
+            "ceo",
+            None,
+            "acme's message",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
 
         assert!(
             budget_pauses_for(&globex).peek("ceo").is_none(),
@@ -2143,10 +2301,99 @@ mod test {
     #[test]
     fn an_unrelated_agent_has_no_parked_marker() {
         let set = BudgetPauseSet::default();
-        set.park("ceo", None, "hi", "paused", 1_000);
+        set.park("ceo", None, "hi", "paused", 1_000, RedeemContext::default());
         assert!(
             set.peek("engineer").is_none(),
             "parking for one agent must not be visible under another's key"
+        );
+    }
+
+    /// Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+    /// `RedeemContext::from_events` reads the ORIGINAL operator message's
+    /// parent/deliverable/mentions out of a cycle's event batch, skipping
+    /// any non-`OperatorMessage` record ahead of it.
+    #[test]
+    fn redeem_context_reads_the_first_operator_message_in_a_batch() {
+        use crate::ports::types::MentionTarget;
+
+        let mention = Mention {
+            target: MentionTarget::Agent {
+                id: "researcher".to_string(),
+            },
+            text: "@researcher".to_string(),
+            offset: 0,
+            quiet: false,
+        };
+        let events = vec![
+            (
+                None,
+                CompanyEvent::WorkspaceChanged {
+                    node_id: "n-1".into(),
+                    change: "updated".into(),
+                },
+            ),
+            (
+                None,
+                CompanyEvent::OperatorMessage {
+                    text: "ship it".into(),
+                    by: None,
+                    chat: Some("general".into()),
+                    parent: Some(EventSeq::new(9)),
+                    deliverable: Some(MessageIntent::Chat),
+                    mentions: vec![mention.clone()],
+                    attachments: Vec::new(),
+                },
+            ),
+        ];
+
+        let ctx = RedeemContext::from_events(&events);
+        assert_eq!(ctx.parent, Some(EventSeq::new(9)));
+        assert_eq!(ctx.deliverable, Some(MessageIntent::Chat));
+        assert_eq!(ctx.mentions, vec![mention]);
+    }
+
+    #[test]
+    fn redeem_context_defaults_when_no_operator_message_is_in_the_batch() {
+        let events = vec![(
+            None,
+            CompanyEvent::WorkspaceChanged {
+                node_id: "n-1".into(),
+                change: "updated".into(),
+            },
+        )];
+        assert_eq!(
+            RedeemContext::from_events(&events),
+            RedeemContext::default(),
+            "a batch with no OperatorMessage carries nothing to replay"
+        );
+    }
+
+    /// Issue #1846 review: the ambient scope round-trips exactly the shape
+    /// `CHAT_ONLY_TURN` already proves for its own hint — set, read from
+    /// inside, and gone once the scope's future finishes.
+    #[tokio::test]
+    async fn current_redeem_context_reads_the_ambient_scope_and_defaults_outside_it() {
+        assert_eq!(
+            current_redeem_context(),
+            RedeemContext::default(),
+            "outside any scope, the ambient context is the default"
+        );
+
+        let ctx = RedeemContext {
+            parent: Some(EventSeq::new(3)),
+            deliverable: Some(MessageIntent::Workflow),
+            mentions: Vec::new(),
+        };
+        let read_back = with_redeem_context(ctx.clone(), async { current_redeem_context() }).await;
+        assert_eq!(
+            read_back, ctx,
+            "inside the scope, the ambient context is what was set"
+        );
+
+        assert_eq!(
+            current_redeem_context(),
+            RedeemContext::default(),
+            "the scope does not leak past its own future"
         );
     }
 }
