@@ -107,6 +107,13 @@ export interface InferenceMutation {
   note: string;
 }
 
+/** One model published by the OpenRouter registry. */
+export interface InferenceModel {
+  id: string;
+  name?: string;
+  contextLength?: number;
+}
+
 /** The live-probe result. */
 export interface InferenceTestResult {
   ok: boolean;
@@ -122,6 +129,14 @@ export function getInferenceStatus(
   company: string | null,
 ): Promise<InferenceStatus> {
   return client.get<InferenceStatus>(`${client.scopeFor(company)}/inference`);
+}
+
+/** The cached OpenRouter model catalog exposed by the company host. */
+export function listInferenceModels(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<InferenceModel[]> {
+  return client.get<InferenceModel[]>(`${client.scopeFor(company)}/inference/models`);
 }
 
 /** Set (or replace) the runtime provider override, optionally rotating the key. */
