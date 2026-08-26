@@ -1540,6 +1540,11 @@ impl<'a> DelegationRunner<'a> {
                     message.to_string(),
                     pause.summary.clone(),
                     now_millis(),
+                    // Issue #1846 review (Codex #3865812419/#3865812423/
+                    // #3865812432): the ambient parent/deliverable/mentions
+                    // the cycle was started with, so a redeem replays the
+                    // operator's ORIGINAL thread/intent/audience.
+                    crate::runtime::grants::current_redeem_context(),
                 );
                 tracing::info!(
                     company = %self.company,
@@ -2079,6 +2084,11 @@ impl<'a> DelegationRunner<'a> {
                 original.clone(),
                 pause.summary.clone(),
                 now_millis(),
+                // Issue #1846 review (Codex #3865812419/#3865812423/
+                // #3865812432): the ambient parent/deliverable/mentions the
+                // cycle was started with, so a redeem replays the operator's
+                // ORIGINAL thread/intent/audience.
+                crate::runtime::grants::current_redeem_context(),
             );
             tracing::info!(
                 company = %self.company,
@@ -7382,6 +7392,96 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "the marker must carry the OPERATOR's original words — a redeem re-dispatches \
              `marker.message` verbatim as a fresh operator message, so parking the nested \
              hand-off's own instruction here would silently run a different task"
+        );
+    }
+
+    /// The DELEGATION-LAYER re-park (`run_hand_off`, same call site as the
+    /// test above) also stamps the marker with the ambient `RedeemContext` a
+    /// cycle sets around it — issue #1846 review, Codex
+    /// #3865812419/#3865812423/#3865812432. Same fixture, wrapped in
+    /// `with_redeem_context` the way `CycleRunner::run_bracketed` does in
+    /// production, with a non-default parent/deliverable/mentions to prove
+    /// they land on the marker instead of being silently dropped the way
+    /// the pre-fix `redeem_budget_pause` dropped them on the OTHER side of a
+    /// redeem.
+    #[tokio::test]
+    async fn a_delegated_budget_pause_parks_the_ambient_redeem_context() {
+        use crate::ports::types::{EventSeq, Mention, MentionTarget, MessageIntent};
+
+        // A fixture over `nested_record()`'s manifest, but NOT `Fixture::nested()`
+        // itself: that helper hardcodes `CompanyId::new("acme")`, which is
+        // exactly the fixture the sibling test above also runs under, parking
+        // under the same "researcher" agent. `BudgetPauseSet` is a single
+        // registry keyed globally by company id (`budget_pauses_for`), and
+        // Rust runs tests in parallel by default — sharing that key with a
+        // concurrently-running test would let either test's `park()` overwrite
+        // the other's marker (last-write-wins, by design — see
+        // `a_second_pause_on_the_same_agent_overwrites_the_first` in
+        // `grants.rs`), making this test's assertions racy against a test it
+        // has no other relationship to. A private company id sidesteps that
+        // without touching the shared `nested_record()`/`Fixture::nested()`
+        // helpers every other test in this module also relies on.
+        let mut record = nested_record();
+        record.id = CompanyId::new("acme-delegated-redeem-context");
+        let fx = Fixture::over(record);
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::budget_paused(
+                    "Paused — researcher's turn ran out of inference budget/credits.",
+                    "researcher",
+                    "Paused — researcher's turn ran out of inference budget/credits, so it \
+                     stopped instead of failing silently.",
+                ),
+                Turn::reply("Built. Research is paused for credits."),
+            ],
+        );
+
+        let redeem = crate::runtime::grants::RedeemContext {
+            parent: Some(EventSeq::new(7)),
+            deliverable: Some(MessageIntent::Once),
+            mentions: vec![Mention {
+                target: MentionTarget::Agent {
+                    id: "engineering".to_string(),
+                },
+                text: "@engineering".to_string(),
+                offset: 0,
+                quiet: false,
+            }],
+        };
+
+        let out = crate::runtime::grants::with_redeem_context(redeem.clone(), async {
+            fx.runner(&turns)
+                .reissue_message("ship the API")
+                .handle_operator_message("chief", "ship the API", Some("general"))
+                .await
+                .expect("operator message handled")
+        })
+        .await;
+        assert!(
+            out.budget_paused.is_some(),
+            "sanity: the pause still folds through"
+        );
+
+        let marker = crate::runtime::grants::budget_pauses_for(&fx.record.id)
+            .peek("researcher")
+            .expect("a marker was parked for the paused delegate");
+        assert_eq!(
+            marker.parent, redeem.parent,
+            "the marker must carry the ambient cycle's thread parent"
+        );
+        assert_eq!(
+            marker.deliverable, redeem.deliverable,
+            "the marker must carry the ambient cycle's deliverable choice"
+        );
+        assert_eq!(
+            marker.mentions, redeem.mentions,
+            "the marker must carry the ambient cycle's resolved mentions"
         );
     }
 
