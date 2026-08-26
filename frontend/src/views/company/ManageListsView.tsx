@@ -102,48 +102,58 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-6">
-      <header className="space-y-2">
-        {/* `history.back()`, not a fixed destination (issue #1284): this
-            screen is reached from wherever a list's own switcher was open,
-            not from one canonical parent, so the way back has to be
-            wherever the operator actually came from. */}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-fit"
-          onClick={onBack}
-          data-testid="lists-back"
-        >
-          <ArrowLeft className="mr-2 size-4" />
-          Back
-        </Button>
-        <PageHeader
-          title="Manage lists"
-          className="-mx-6 -mt-6"
-          description={
-            <>
-              Every list this company tracks — its own board, plus whatever else
-              it records. Reach any of them from the switcher on its own title;
-              retire one here.
-            </>
-          }
-          actions={
-            <Button
-              size="sm"
-              onClick={() => setDeclaring(true)}
-              disabled={remaining <= 0}
-              title={
-                remaining <= 0
-                  ? "This company is at the list cap. Retire one nothing reads first."
-                  : undefined
-              }
-            >
-              <Plus className="mr-2 size-4" />
-              New list
-            </Button>
-          }
-        />
-      </header>
+      <PageHeader
+        title="Manage lists"
+        className="-mx-6 -mt-6"
+        leading={
+          /* `history.back()`, not a fixed destination (issue #1284): this
+             screen is reached from wherever a list's own switcher was open,
+             not from one canonical parent, so the way back has to be
+             wherever the operator actually came from.
+
+             Inside the header's row (`leading`) rather than above it. As a
+             preceding sibling it was the header's `-mx-6 -mt-6` bleed that
+             broke: that bleed assumes the header is the first child of the
+             `p-6` surface, and with the button in front of it the -24px top
+             margin pulled the bar over the button instead of over the
+             surface's padding. Measured in Chromium on 2026-08-26: the bar's
+             top edge sat 16px above the button's bottom edge and the `h1`
+             box overlapped the button's by 4px. `leading` is the shape
+             `PageHeader` documents for exactly this. */
+          <Button
+            variant="ghost"
+            size="sm"
+            className="-ml-2.5"
+            onClick={onBack}
+            data-testid="lists-back"
+          >
+            <ArrowLeft className="size-4" />
+            Back
+          </Button>
+        }
+        description={
+          <>
+            Every list this company tracks — its own board, plus whatever else
+            it records. Reach any of them from the switcher on its own title;
+            retire one here.
+          </>
+        }
+        actions={
+          <Button
+            size="sm"
+            onClick={() => setDeclaring(true)}
+            disabled={remaining <= 0}
+            title={
+              remaining <= 0
+                ? "This company is at the list cap. Retire one nothing reads first."
+                : undefined
+            }
+          >
+            <Plus className="mr-2 size-4" />
+            New list
+          </Button>
+        }
+      />
 
       {faults.length > 0 && (
         <Alert>
