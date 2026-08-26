@@ -2376,6 +2376,21 @@ impl HarnessBrain {
         if let Some(lead) = self.desk_lead(chat) {
             return lead;
         }
+        // The built-in `#general` channel, once no desk has claimed the key
+        // above (issue #1743). It is the company-wide line and the orchestrator
+        // answers it, which is what this host has always done — but only
+        // because nothing else matched. A teammate whose id happens to be
+        // `main` or `General` used to match on the next line and answer every
+        // unaddressed message, while `GET chat/history?desk=main` returned the
+        // folded General conversation rather than that teammate's DM: the
+        // responder and the transcript disagreed about whose conversation it
+        // was. `mint_agent_id` reserves both spellings now, but a manifest can
+        // still declare one, and a manifest is not something to overrule — so
+        // the bare key belongs to the line and the teammate keeps its DM, which
+        // the `dm:<id>` arm below still routes.
+        if crate::server::chat_history::is_general_chat(Some(chat)) {
+            return self.responder.clone();
+        }
         if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
             return agent;
         }
@@ -5971,6 +5986,117 @@ members = ["ceo", "engineer"]
         let (brain, _tasks) = brain_with_desk(dir.path());
         assert_eq!(brain.responder_for(Some("engineer")), "engineer");
         assert_eq!(brain.responder_for(Some("chief")), "chief");
+    }
+
+    // ── Issue #1743: who answers the built-in `#general` channel ──
+
+    /// An **overlay** desk that took a General spelling before those were
+    /// reserved must not answer the company-wide line.
+    ///
+    /// `create_desk` accepted `main` until issue #1743, so this is persisted
+    /// state rather than a hypothesis. Such a desk is already hidden from
+    /// `GET .../desks` and refused every mutation, but hiding a desk does not
+    /// stop it routing: `desk_lead` resolves through
+    /// `CompanyRecord::resolve_desk_id`, which used to match it, so the console
+    /// rendered `#general` and named the orchestrator as who answers while this
+    /// desk's lead answered instead. The resolver declines the key now, and the
+    /// arm below it hands the line back to the orchestrator.
+    #[test]
+    fn responder_for_does_not_let_a_hidden_overlay_desk_answer_the_general_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "main".into(),
+                name: "Front office".into(),
+                description: None,
+                members: vec!["engineer".into()],
+            })
+        });
+        for spelling in ["", "main", "Main", "general", "General"] {
+            assert_eq!(
+                brain.responder_for(Some(spelling)),
+                "chief",
+                "the orchestrator answers the company-wide line as {spelling:?}"
+            );
+        }
+        // The desk is not retired — it simply has no General key any more, and
+        // the desk it is still routes to its own lead.
+        assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+    }
+
+    /// A **teammate** whose id is a General spelling keeps its DM, and does not
+    /// take the company-wide line with it (issue #1743).
+    ///
+    /// `mint_agent_id` reserves `main` and `General`, but a manifest can still
+    /// declare one, and a manifest is not something this host overrules. Before
+    /// this, `resolve_roster_agent_id` matched the bare key and that teammate
+    /// answered every unaddressed message — while `GET chat/history?desk=main`
+    /// returned the *folded General conversation* (`is_general_chat` has folded
+    /// `""`, `main`, `General` and `general` into one since issue #65). The
+    /// responder and the transcript disagreed about whose conversation it was.
+    /// The bare key is the line; `dm:<id>` is the teammate.
+    #[test]
+    fn responder_for_gives_the_general_line_to_the_orchestrator_not_a_teammate_called_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_agents.push(OverlayAgent {
+                id: "main".into(),
+                name: "Mainard".into(),
+                role: "Analyst".into(),
+                description: None,
+                tools: Vec::new(),
+                model: None,
+                harness: None,
+            })
+        });
+        assert!(
+            brain.record().is_roster_agent("main"),
+            "the teammate really is on the roster, so the old arm would have matched"
+        );
+        assert_eq!(
+            brain.responder_for(Some("main")),
+            "chief",
+            "the bare key is the company's line, whatever a teammate is called"
+        );
+        assert_eq!(
+            brain.responder_for(Some("dm:main")),
+            "main",
+            "and the teammate keeps its own DM, addressed the way the console addresses one"
+        );
+    }
+
+    /// The grandfathered case the two tests above must not break: a
+    /// `[[group_chat]]` the **blueprint** declares under a General spelling is
+    /// the company's own General desk, and its lead still answers it.
+    #[test]
+    fn responder_for_still_routes_a_blueprint_general_desk_to_its_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let declared = toml::from_str::<CompanyManifest>(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[group_chat]]
+id = "main"
+name = "Front office"
+members = ["engineer"]
+"#,
+        )
+        .expect("valid manifest")
+        .group_chats;
+        brain.mutate_record(|r| r.manifest.group_chats.extend(declared));
+        assert_eq!(
+            brain.responder_for(Some("main")),
+            "engineer",
+            "a blueprint desk keeps the line and its lead keeps answering it"
+        );
     }
 
     // ── Issue #884 D2: an unresolvable chat key is no longer silent ──

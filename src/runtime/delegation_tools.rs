@@ -179,6 +179,14 @@ const LISTED_DESKS: usize = 12;
 /// is the set a delegation target is grounded against. Reads the same two
 /// sources [`CompanyRecord::resolve_desk_id`] searches, so "what ids exist" and
 /// "does this id resolve" cannot disagree.
+///
+/// That invariant is why the overlay walk skips a desk whose **id** is a
+/// General spelling (issue #1743): `resolve_desk_id` declines to match an
+/// overlay desk against one, so listing it here would ground the model on a
+/// target every `delegate_to_desk` call is then refused for. Only overlay
+/// desks, and only by id — a `[[group_chat]]` the blueprint declares still
+/// resolves under any spelling, and an overlay desk merely *named* `General`
+/// still resolves under its own id, so both stay listed.
 pub fn desk_ids(record: &CompanyRecord) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for chat in &record.manifest.group_chats {
@@ -187,7 +195,8 @@ pub fn desk_ids(record: &CompanyRecord) -> Vec<String> {
         }
     }
     for desk in &record.overlay_desks {
-        if !ids.contains(&desk.id) {
+        if !ids.contains(&desk.id) && !crate::server::chat_history::is_general_chat(Some(&desk.id))
+        {
             ids.push(desk.id.clone());
         }
     }
@@ -840,6 +849,80 @@ members = ["counsel"]
     #[test]
     fn desk_ids_lists_manifest_desks_in_declaration_order() {
         assert_eq!(desk_ids(&record()), ["engineering", "content", "legal"]);
+    }
+
+    /// What this function lists and what [`CompanyRecord::resolve_desk_id`]
+    /// resolves must be the same set (issue #1743).
+    ///
+    /// `create_desk` accepted the General spellings until that issue, so an
+    /// upgraded record can hold an overlay desk called `main` or `general` —
+    /// and `resolve_desk_id` now declines to match an overlay desk against one,
+    /// because such a desk would otherwise answer for the built-in `#general`
+    /// channel. Grounding the model on an id every `delegate_to_desk` call is
+    /// then refused for is a loop the model cannot get out of: the refusal
+    /// names the desk set, the desk set names the target, the target is
+    /// refused.
+    #[test]
+    fn desk_ids_omits_an_overlay_desk_no_key_can_resolve() {
+        let mut record = record();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "main".to_string(),
+            name: "Front office".to_string(),
+            description: None,
+            members: vec!["ceo".to_string()],
+        });
+        // Named `General`, but addressable under its own id — it stays.
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops".to_string(),
+            name: "General".to_string(),
+            description: None,
+            members: vec!["writer".to_string()],
+        });
+
+        assert_eq!(
+            desk_ids(&record),
+            ["engineering", "content", "legal", "ops"],
+            "the desk no key resolves is not offered as a target"
+        );
+        // The property, stated directly: every id listed resolves.
+        for id in desk_ids(&record) {
+            assert!(
+                record.resolve_desk_id(&id).is_some(),
+                "desk_ids offered {id:?}, which resolve_desk_id refuses"
+            );
+        }
+        assert!(
+            record.resolve_desk_id("main").is_none(),
+            "and the omitted one is omitted because it does not resolve"
+        );
+    }
+
+    /// A `[[group_chat]]` the **blueprint** declares under a General spelling
+    /// is grandfathered and stays listed — the rule above is about overlay
+    /// desks only, and narrowing it further would take a delegation target away
+    /// from a company whose manifest has always had one.
+    #[test]
+    fn desk_ids_keeps_a_blueprint_desk_declared_under_a_general_spelling() {
+        let mut record = record();
+        let declared: crate::CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[group_chat]]
+id = "main"
+name = "Front office"
+members = ["ceo"]
+"#,
+        )
+        .expect("valid manifest");
+        record.manifest.group_chats.extend(declared.group_chats);
+        assert!(desk_ids(&record).contains(&"main".to_string()));
+        assert_eq!(record.resolve_desk_id("main"), Some("main".to_string()));
     }
 
     #[test]

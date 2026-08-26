@@ -916,18 +916,14 @@ pub fn mentioned_agents(
                     }
                 }
             }
-            MentionTarget::Everyone => match record.resolve_desk_id(desk).filter(|id| {
-                // An **overlay** desk may not stand in for the built-in
-                // `#general` channel (issue #1743). It can only have taken one
-                // of the General spellings — as an id, or as a display name,
-                // both of which `resolve_desk_id` matches — from before those
-                // were reserved, and expanding a company-wide broadcast against
-                // whatever membership it happens to hold is precisely the
-                // narrowing this arm exists to prevent. A desk the *blueprint*
-                // declares is the company's own General desk and still wins.
-                !crate::server::chat_history::is_general_chat(Some(desk))
-                    || record.manifest.group_chats.iter().any(|c| &c.id == id)
-            }) {
+            // An **overlay** desk cannot stand in for the built-in `#general`
+            // channel here, and does not need filtering out: `resolve_desk_id`
+            // declines to match one against a General spelling at all (issue
+            // #1743), so a desk that took `general`/`main`/`General` before
+            // those were reserved cannot narrow a company-wide broadcast to its
+            // own membership. A desk the *blueprint* declares still wins, which
+            // is the grandfathering this host has always honoured.
+            MentionTarget::Everyone => match record.resolve_desk_id(desk) {
                 Some(desk_id) => {
                     for member in record.effective_desk_members(&desk_id) {
                         push(&mut out, record, responder, member);
