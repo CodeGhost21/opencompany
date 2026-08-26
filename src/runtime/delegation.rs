@@ -655,6 +655,18 @@ pub(crate) struct DelegationRunner<'a> {
     /// Empty on every path that is not a person typing into the composer, and
     /// on every message that names nobody.
     also_mentioned: Vec<String>,
+    /// The original request this drain is answering, in the requester's own
+    /// words — the operator's chat message, or the (possibly redirect-
+    /// augmented) task instruction (issue #1846 review, Codex #3864988176).
+    ///
+    /// `run_hand_off` re-parks the delegate's budget-pause marker with this
+    /// text when it is set, overwriting what `run_inner` already parked (the
+    /// model-generated hand-off instruction) — see the re-park there for why
+    /// that default is wrong for a delegated turn. `None` on every path that
+    /// does not set it, which leaves `run_inner`'s park as the answer: no
+    /// worse than before this fix, for the paths that have not been taught to
+    /// carry a re-issue text.
+    reissue_message: Option<String>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -712,6 +724,7 @@ impl<'a> DelegationRunner<'a> {
             run_sink: None,
             requested_intent: None,
             also_mentioned: Vec::new(),
+            reissue_message: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -762,6 +775,7 @@ impl<'a> DelegationRunner<'a> {
             // choice; `None` is the only honest value here.
             requested_intent: None,
             also_mentioned: Vec::new(),
+            reissue_message: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -976,6 +990,21 @@ impl<'a> DelegationRunner<'a> {
     /// sites restate an empty vector to say nothing.
     pub(crate) fn also_mentioned(mut self, agents: Vec<String>) -> Self {
         self.also_mentioned = agents;
+        self
+    }
+
+    /// Carries the original request this drain is answering, in the
+    /// requester's own words (issue #1846 review, Codex #3864988176) — the
+    /// operator's chat message, or the task instruction a dispatched card is
+    /// running.
+    ///
+    /// A builder for the same reason [`also_mentioned`](Self::also_mentioned)
+    /// is: optional context, absent on every path that has not been taught to
+    /// carry it, and threading it as a required argument would make every
+    /// existing call site (and the ~dozen test constructors) restate `None`.
+    /// See the field doc for what reads it.
+    pub(crate) fn reissue_message(mut self, text: impl Into<String>) -> Self {
+        self.reissue_message = Some(text.into());
         self
     }
 
@@ -1972,6 +2001,37 @@ impl<'a> DelegationRunner<'a> {
                 self.run_sink.clone(),
             )
             .await?;
+        // Issue #1846 review (Codex #3864988176): `run_inner`'s own park (mod.rs)
+        // parks whatever it was CALLED with as the delegate's turn message —
+        // here, `&instruction`, the model-generated hand-off brief, not the
+        // operator's own words. Redeeming that marker would re-dispatch the
+        // hand-off instruction as a brand-new human-authored `OperatorMessage`,
+        // which can name a materially different task than what the operator
+        // actually asked for.
+        //
+        // `BudgetPauseSet::park` overwrites by agent id (at most one marker per
+        // agent), so re-parking here with the correct text — when the caller
+        // gave us one via `reissue_message` — simply replaces the wrong entry
+        // rather than requiring `run_inner` to know which text is "the
+        // original" across every caller it serves.
+        if let Some(pause) = &outcome.budget_paused
+            && let Some(original) = &self.reissue_message
+        {
+            let marker = crate::runtime::grants::budget_pauses_for(self.company).park(
+                pause.agent.clone(),
+                chat_id.map(str::to_string),
+                original.clone(),
+                pause.summary.clone(),
+                now_millis(),
+            );
+            tracing::info!(
+                company = %self.company,
+                agent = %pause.agent,
+                marker_id = %marker.id,
+                "[budget-pause] re-parked the delegated pause with the original request, \
+                 replacing the hand-off instruction `run_inner` parked by default"
+            );
+        }
         let parked = self.approvals_queued().saturating_sub(approvals_before);
         // A cancel issued mid-flight discards the delegated reply —
         // nothing is relayed. Flagged as a cancellation so a caller that
@@ -7197,6 +7257,64 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         // The relay really did replace the reply — so the pause survived an
         // overwrite rather than riding along on text that happened to persist.
         assert_eq!(out.reply, "Built. Research is paused for credits.");
+    }
+
+    /// Issue #1846 review (Codex #3864988176): the marker a delegated pause
+    /// parks must carry the OPERATOR's own words, not the model-generated
+    /// hand-off instruction — `run_inner` (the harness pool, exercised only by
+    /// a real model turn) parks whatever it was CALLED with, which for a
+    /// nested hand-off is `researcher`'s instruction ("what rate limits do
+    /// competitors use?"), not "ship the API". Redeeming that wrong marker
+    /// would re-dispatch the instruction as a brand-new operator message,
+    /// silently running a different task than the one the operator asked for.
+    ///
+    /// This exercises the DELEGATION-LAYER half of the fix — the re-park in
+    /// `run_hand_off` keyed on `reissue_message` — which is exactly what
+    /// `ScriptedTurns` (a fake `RunTurn`) CAN prove, since the real park lives
+    /// one layer down in `run_inner` where only a live model turn reaches it.
+    #[tokio::test]
+    async fn a_delegated_budget_pause_parks_the_operators_words_not_the_handoff_instruction() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::budget_paused(
+                    "Paused — researcher's turn ran out of inference budget/credits.",
+                    "researcher",
+                    "Paused — researcher's turn ran out of inference budget/credits, so it \
+                     stopped instead of failing silently.",
+                ),
+                Turn::reply("Built. Research is paused for credits."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            // The production wiring in `brain.rs` sets this from the operator's
+            // own composed message before calling `handle_operator_message`.
+            .reissue_message("ship the API")
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+        assert!(
+            out.budget_paused.is_some(),
+            "sanity: the pause still folds through"
+        );
+
+        let marker = crate::runtime::grants::budget_pauses_for(&fx.record.id)
+            .peek("researcher")
+            .expect("a marker was parked for the paused delegate");
+        assert_eq!(
+            marker.message, "ship the API",
+            "the marker must carry the OPERATOR's original words — a redeem re-dispatches \
+             `marker.message` verbatim as a fresh operator message, so parking the nested \
+             hand-off's own instruction here would silently run a different task"
+        );
     }
 
     /// The negative control the test above needs: the same four-turn chain
