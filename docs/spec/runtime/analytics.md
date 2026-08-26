@@ -150,8 +150,15 @@ data dir, the bind address, `harness_in_build`) inverts the day someone changes
 an unrelated setting, silently, and points at the wrong file.
 
 An unrecognised value for either switch resolves to **silence**, never to
-reporting. A typo in a launcher must not upgrade an install into one that
-reports.
+reporting — on a hosted tenant too. Both directions of that typo matter and only
+one is obvious. A typo must not *upgrade* an install into one that reports; it
+must also not fail to *downgrade* one, which is what happened while an
+unreadable value fell through to the deployment default: an operator who meant
+`OPENCOMPANY_ANALYTICS=off` and typed `of` kept reporting, and their boot line
+said "reporting to …" rather than anything that would send them back to look.
+Silence is the answer to "I cannot tell what you asked for", and the boot line
+names the reason. A **blank** value is treated as absent rather than unreadable,
+so a launcher that exports an empty variable changes nothing.
 
 ### How to turn it off
 
@@ -160,10 +167,21 @@ and it is the first thing checked. Boot prints one line either way:
 
 ```text
 analytics: off (not a hosted tenant and no explicit opt-in)
+analytics: off (operator opted out)
+analytics: off (the OPENCOMPANY_ANALYTICS value is not recognised)
+analytics: off (reporting to https://api.mixpanel.com/track was configured, but this build was compiled without the `analytics` feature)
 analytics: reporting to https://api.mixpanel.com/track
 ```
 
 The endpoint is named; the token never is.
+
+The fourth line is the one worth reading twice. It reports what the process will
+**do**, not what was configured: a build without the `analytics` feature
+resolves to reporting and then gets a `NullTracker`, because there is no
+transport in it to hand back. Saying "reporting to …" there would be the exact
+opposite of the truth, and the `mixpanel::build` line that explains it is a
+`tracing::info!` the CLI's default `EnvFilter` swallows — which is why every
+boot line here is a `println!` in the first place.
 
 ## Where it hooks in
 
