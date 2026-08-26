@@ -1470,7 +1470,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       <PageHeader
         title="Workspace"
         count={noteCount}
-        description="Every note this company's teammates can read and write — the shared files they work from."
+        /*
+          Not "every note this company's teammates can read and write", which
+          the tree contradicts in two places: `secrets/` is the one folder the
+          agents cannot list, read, search or write (`SECRETS_REASON`, #1465),
+          and `derived/` is written by a ledger and re-derived over any edit
+          (`DERIVED_REASON`, #1222). A header that claims universal read/write
+          is worst exactly where it matters most — over a folder holding
+          credentials.
+
+          It describes the surface and points at where the rule is stated
+          rather than restating it. The per-folder rules already appear on the
+          tree row, in the move dialog and on the note itself, in one wording
+          each on purpose (see `SECRETS_LABEL`); a fourth phrasing up here is
+          how an operator comes to believe there are four rules. The
+          conditional also stays true of a workspace that has neither folder,
+          which an "…and two folders are exceptions" sentence would not.
+        */
+        description="Every note this company holds, in one shared tree. Where a folder is read-only or hidden from the agents, the tree says so."
         data-testid="workspace-header"
       />
       <div className="flex min-h-0 flex-1 overflow-hidden">
