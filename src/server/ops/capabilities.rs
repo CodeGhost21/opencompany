@@ -412,6 +412,26 @@ fn media_credential_configured() -> bool {
     }
 }
 
+/// Reads this company's cognition state off the runtime it actually holds.
+///
+/// The third input is only consulted on the one degraded path, and that is
+/// deliberate rather than incidental: `/capabilities` is a console read that
+/// gets polled, and `inference_config_readable` costs a manifest load plus a
+/// secret-store resolve. A company that is thinking pays neither, because its
+/// brain answers the question before either is needed.
+async fn cognition_for(runtime: &CompanyRuntime) -> CognitionState {
+    let path = runtime.cognition().path;
+    let harness_reachable = crate::server::ops::inference::harness_reachable(runtime);
+    // Short-circuit: with a real brain, or with no harness at all, the config
+    // read cannot change the answer — see `cognition_state`'s own ordering.
+    let config_readable = if path == crate::ports::brain::ECHO_PATH && harness_reachable {
+        crate::server::ops::inference::inference_config_readable(runtime).await
+    } else {
+        true
+    };
+    cognition_state(path, harness_reachable, config_readable)
+}
+
 /// Resolves the capability-budget status DTO for a company.
 async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDto, ApiError> {
     // Issue #1735. Read off the brain this runtime is actually holding, before
@@ -428,10 +448,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
     // `restart_pending`/`runner_gap_for` already gate on this same predicate to
     // avoid (issues #266, #514). Borrowing that function rather than re-deriving
     // it is what keeps the two surfaces from disagreeing about one company.
-    let cognition = cognition_state(
-        runtime.cognition().path,
-        crate::server::ops::inference::harness_reachable(runtime),
-    );
+    let cognition = cognition_for(runtime).await;
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     let Some(record) = record else {
         return Ok(unconfigured(OptInFlags::none(cognition)));
@@ -754,6 +771,66 @@ mod tests {
         assert_eq!(
             dto["cognition"], "unconfigured",
             "a pool is attached, so a provider really is one settings page away: {dto}"
+        );
+    }
+
+    /// A harness is attached and the config cannot be **read** — which is not
+    /// the same as nothing being configured (codex review of PR #1740).
+    ///
+    /// `ops::inference` already refuses this promise from the other side: its
+    /// `unreadable_inference_config_is_not_restartable` regression builds this
+    /// exact runtime — reachable harness over a failing `SecretStore` — and
+    /// asserts `RunnerGap::NotWired`, "not `InferenceRequired`", because saving
+    /// cannot resolve a configuration the host cannot read. Chat pointing that
+    /// same operator at Settings → Inference would make, on the same runtime,
+    /// the promise the workflow-run route declines to make.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_unreadable_inference_config_is_not_reported_as_unconfigured() {
+        use crate::ports::types::SecretValue;
+
+        struct FailingSecrets;
+        #[async_trait::async_trait]
+        impl crate::ports::SecretStore for FailingSecrets {
+            async fn get(&self, _c: &CompanyId, _key: &str) -> crate::Result<Option<SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "secret store unreachable".into(),
+                ))
+            }
+            async fn set(&self, _c: &CompanyId, _key: &str, _v: SecretValue) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(crate::harness::HarnessPool::new()))
+            .with_secrets(std::sync::Arc::new(FailingSecrets))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.cognition().path,
+            crate::ports::brain::ECHO_PATH,
+            "an unresolvable config leaves the runtime on the echo brain",
+        );
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["cognition"], "undetermined",
+            "the host cannot read the config, so it must not name a remedy: {dto}"
+        );
+        assert_ne!(
+            dto["cognition"], "unconfigured",
+            "that would promise a settings page `runner_gap_for` refuses to promise: {dto}"
         );
     }
 

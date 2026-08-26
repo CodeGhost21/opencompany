@@ -23,7 +23,7 @@ import type { Sender } from "./model";
  * the same unfounded claim this fix removes, pointed the other way.
  */
 export function echoCause(cognition: CognitionState | null | undefined): CognitionState | null {
-  return cognition === "unconfigured" || cognition === "unavailable" ? cognition : null;
+  return cognition && cognition !== "configured" ? cognition : null;
 }
 
 /**
@@ -76,11 +76,16 @@ export function echoMarkerFor(
  * that no setting will help.
  */
 function reason(author: string, cause: CognitionState): string {
-  const why =
-    cause === "unconfigured"
-      ? "The company has no model configured"
-      : "No agent harness is available on this host";
-  return `${author} did not write this. ${why}, so the offline echo brain answered instead.`;
+  switch (cause) {
+    case "unconfigured":
+      return `${author} did not write this. The company has no model configured, so the offline echo brain answered instead.`;
+    case "unavailable":
+      return `${author} did not write this. No agent harness is available on this host, so the offline echo brain answered instead.`;
+    default:
+      // `undetermined`: the host cannot read its own inference configuration,
+      // so it cannot say why. Naming a cause here would invent one.
+      return `${author} did not write this. The company is on the offline echo brain, and the host could not read its inference configuration to say why.`;
+  }
 }
 
 /**

@@ -73,6 +73,24 @@ pub enum CognitionState {
     /// `*_in_build` flags, which exist "so the flow can say 'not in this build'
     /// instead of offering a switch that does nothing".
     Unavailable,
+    /// A harness is reachable, but the host could not **read** this company's
+    /// inference configuration, so it cannot say why the company fell back to
+    /// the echo brain.
+    ///
+    /// The #266 doctrine, applied here: a config that could not be read is not
+    /// evidence that saving one would help. `ops::inference`'s `runner_gap_for`
+    /// already refuses to answer `inference_required` in exactly this state —
+    /// its `unreadable_inference_config_is_not_restartable` regression builds a
+    /// reachable harness over a failing `SecretStore` and asserts `NotWired` —
+    /// and cognition must not make the promise that route declines to make
+    /// (codex review of PR #1740).
+    ///
+    /// Distinct from [`Self::Unconfigured`] because the remedy differs, which
+    /// is the rule every state here is named by: nothing the operator saves is
+    /// known to help until the host can read its own configuration again. And
+    /// distinct from [`Self::Unavailable`], which would be a plain falsehood —
+    /// a harness *is* attached.
+    Undetermined,
 }
 
 impl CognitionState {
@@ -83,6 +101,7 @@ impl CognitionState {
             Self::Configured => "configured",
             Self::Unconfigured => "unconfigured",
             Self::Unavailable => "unavailable",
+            Self::Undetermined => "undetermined",
         }
     }
 }
@@ -112,7 +131,16 @@ impl CognitionState {
 /// the operator at Settings → Inference, which cannot move that runtime off the
 /// echo brain no matter what they save.
 ///
-/// Passed in rather than read here so the three-way matrix is testable without
+/// `config_readable` is
+/// `crate::server::ops::inference::inference_config_readable` — whether the
+/// host could read this company's inference configuration at all, as opposed to
+/// reading it and finding nothing set. The #266 doctrine turns on exactly that
+/// difference: a config that could not be read is no evidence that saving one
+/// would help, which is why `runner_gap_for` degrades a resolve error to
+/// `NotWired` rather than `InferenceRequired`. Reporting `unconfigured` there
+/// would have chat promise the remedy that route declines to promise.
+///
+/// Passed in rather than read here so the four-way matrix is testable without
 /// a runtime per arm — in particular the `unavailable` arm, which a lane that
 /// enables the feature could otherwise reach only by constructing a
 /// harness-less runtime.
@@ -123,15 +151,23 @@ impl CognitionState {
 /// reports [`CognitionState::Configured`]. Matching on the one degraded path
 /// rather than allow-listing the working ones is what keeps a brain added later
 /// from defaulting to "cannot think".
-pub fn cognition_state(path: &str, harness_reachable: bool) -> CognitionState {
+pub fn cognition_state(
+    path: &str,
+    harness_reachable: bool,
+    config_readable: bool,
+) -> CognitionState {
     if path != crate::ports::brain::ECHO_PATH {
         return CognitionState::Configured;
     }
-    if harness_reachable {
-        CognitionState::Unconfigured
-    } else {
-        CognitionState::Unavailable
+    // No harness outranks everything below it: with nothing to configure
+    // *towards*, why the config did or did not resolve changes no advice.
+    if !harness_reachable {
+        return CognitionState::Unavailable;
     }
+    if !config_readable {
+        return CognitionState::Undetermined;
+    }
+    CognitionState::Unconfigured
 }
 
 #[cfg(test)]
@@ -139,27 +175,46 @@ mod test {
     use super::*;
     use crate::ports::brain::{ECHO_PATH, HARNESS_PATH};
 
-    /// The whole matrix, both reachability settings, in one place — including
-    /// the `unavailable` arm that a lane enabling the feature could otherwise
-    /// reach only by constructing a harness-less runtime.
+    /// The whole matrix in one place — including the `unavailable` arm that a
+    /// lane enabling the feature could otherwise reach only by constructing a
+    /// harness-less runtime.
     #[test]
-    fn the_three_states_are_derived_from_the_path_and_harness_reachability() {
+    fn the_states_are_derived_from_the_path_the_harness_and_the_config() {
         assert_eq!(
-            cognition_state(HARNESS_PATH, true),
+            cognition_state(HARNESS_PATH, true, true),
             CognitionState::Configured,
         );
-        assert_eq!(cognition_state("hosted", true), CognitionState::Configured);
-        assert_eq!(cognition_state("sidecar", true), CognitionState::Configured);
-        assert_eq!(cognition_state("custom", true), CognitionState::Configured);
         assert_eq!(
-            cognition_state(ECHO_PATH, true),
-            CognitionState::Unconfigured,
-            "a harness is attached, so a provider really is one settings page away",
+            cognition_state("hosted", true, true),
+            CognitionState::Configured
         );
         assert_eq!(
-            cognition_state(ECHO_PATH, false),
+            cognition_state("sidecar", true, true),
+            CognitionState::Configured
+        );
+        assert_eq!(
+            cognition_state("custom", true, true),
+            CognitionState::Configured
+        );
+        assert_eq!(
+            cognition_state(ECHO_PATH, true, true),
+            CognitionState::Unconfigured,
+            "a harness is attached and the config reads clean: a provider really              is one settings page away",
+        );
+        assert_eq!(
+            cognition_state(ECHO_PATH, true, false),
+            CognitionState::Undetermined,
+            "the config could not be read, so nothing saved is known to help",
+        );
+        assert_eq!(
+            cognition_state(ECHO_PATH, false, true),
             CognitionState::Unavailable,
             "no harness behind this runtime: no configuration reaches a model",
+        );
+        assert_eq!(
+            cognition_state(ECHO_PATH, false, false),
+            CognitionState::Unavailable,
+            "with no harness, why the config did or did not read changes no advice",
         );
     }
 
@@ -168,11 +223,44 @@ mod test {
     /// the console renders `"You said: …"` under a teammate's name in.
     #[test]
     fn a_build_with_no_harness_never_reports_itself_configured() {
-        assert_ne!(
-            cognition_state(ECHO_PATH, false),
-            CognitionState::Configured,
+        for readable in [true, false] {
+            assert_ne!(
+                cognition_state(ECHO_PATH, false, readable),
+                CognitionState::Configured,
+            );
+            assert_ne!(
+                cognition_state(ECHO_PATH, true, readable),
+                CognitionState::Configured,
+            );
+        }
+    }
+
+    /// An unreadable config is not a missing one (codex review of PR #1740).
+    ///
+    /// `ops::inference` already refuses this promise from the other side: its
+    /// `unreadable_inference_config_is_not_restartable` regression builds a
+    /// reachable harness over a failing `SecretStore` and asserts
+    /// `RunnerGap::NotWired`, "not `InferenceRequired`", because saving cannot
+    /// resolve a configuration the host cannot read. Chat pointing that same
+    /// operator at Settings → Inference would make the promise that route
+    /// declines to make, on the same runtime, in the same breath.
+    #[test]
+    fn an_unreadable_config_is_not_sold_as_a_missing_one() {
+        assert_eq!(
+            cognition_state(ECHO_PATH, true, false),
+            CognitionState::Undetermined,
         );
-        assert_ne!(cognition_state(ECHO_PATH, true), CognitionState::Configured,);
+        assert_ne!(
+            cognition_state(ECHO_PATH, true, false),
+            CognitionState::Unconfigured,
+            "an unreadable config is no evidence that saving one would help (#266)",
+        );
+        // And it is not the harness's fault either — one is attached, so
+        // naming a rebuild would be a plain falsehood.
+        assert_ne!(
+            cognition_state(ECHO_PATH, true, false),
+            CognitionState::Unavailable,
+        );
     }
 
     /// A harness that is compiled in but never attached must not be sold to the
@@ -189,11 +277,11 @@ mod test {
     #[test]
     fn a_compiled_in_harness_that_is_not_attached_is_not_a_settings_problem() {
         assert_eq!(
-            cognition_state(ECHO_PATH, false),
+            cognition_state(ECHO_PATH, false, true),
             CognitionState::Unavailable,
         );
         assert_ne!(
-            cognition_state(ECHO_PATH, false),
+            cognition_state(ECHO_PATH, false, true),
             CognitionState::Unconfigured,
             "no attached pool: Settings → Inference is a dead end here",
         );
@@ -207,7 +295,7 @@ mod test {
     #[test]
     fn an_unknown_path_is_treated_as_cognition() {
         assert_eq!(
-            cognition_state("some-brain-added-later", false),
+            cognition_state("some-brain-added-later", false, false),
             CognitionState::Configured,
         );
     }
@@ -218,6 +306,7 @@ mod test {
             CognitionState::Configured,
             CognitionState::Unconfigured,
             CognitionState::Unavailable,
+            CognitionState::Undetermined,
         ] {
             assert_eq!(
                 serde_json::to_value(state).expect("serialize"),

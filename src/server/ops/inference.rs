@@ -192,6 +192,33 @@ async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiEr
         .unwrap_or_default())
 }
 
+/// Whether this company's inference configuration can be **read** at all.
+///
+/// `false` means the host could not load the manifest or could not resolve the
+/// config against the secret store — not that nothing is configured. The #266
+/// doctrine turns on that difference: a config we cannot read is no evidence
+/// that saving one, or restarting, would help, which is why
+/// [`runner_gap_for`] degrades an `Err` to [`RunnerGap::NotWired`] rather than
+/// telling the operator to configure inference.
+///
+/// Shared with [`crate::server::ops::capabilities`], which needs the same
+/// distinction for the chat surface (issue #1735): a company on the echo brain
+/// because its config is unreadable must not be told a settings page is the
+/// remedy, exactly as the workflow-run route must not answer
+/// `inference_required` there. One predicate, so the two cannot disagree.
+///
+/// Deliberately collapses "manifest unreadable" and "resolve failed" — the
+/// operator can act on neither, and `runner_gap_for` already folds them the
+/// same way.
+pub(crate) async fn inference_config_readable(runtime: &CompanyRuntime) -> bool {
+    let Ok(manifest) = manifest_inference(runtime).await else {
+        return false;
+    };
+    resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref())
+        .await
+        .is_ok()
+}
+
 /// The console-facing source label for a resolved source badge.
 fn source_label(source: InferenceSource) -> &'static str {
     match source {

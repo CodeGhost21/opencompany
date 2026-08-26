@@ -169,6 +169,19 @@ describe("the echo-brain placeholder marker", () => {
     expect(title).not.toMatch(/no model configured/);
   });
 
+  /** The chip names no cause either when the host could not determine one. */
+  it("says the host could not tell, when cognition is undetermined", () => {
+    render("undetermined");
+
+    expect(markers()).toHaveLength(1);
+    const title = markers()[0].getAttribute("title")!;
+    expect(title).toMatch(/did not write this/);
+    expect(title).toMatch(/could not read its inference configuration/);
+    // Neither of the two remedies is implied — the host named neither.
+    expect(title).not.toMatch(/no model configured/);
+    expect(title).not.toMatch(/No agent harness is available/);
+  });
+
   it("marks the company's line and not the operator's", () => {
     render("unconfigured");
 

@@ -1638,6 +1638,12 @@ export interface CapabilityStatusDto {
    *   configuration reaches a model. Only a different build or host wiring
    *   changes it, and the console must say so rather than offering a settings
    *   link that cannot help.
+   * * `undetermined` — a harness is reachable, but the host could not *read*
+   *   this company's inference configuration, so it cannot say why the company
+   *   fell back to the echo brain. **Name no remedy here**: an unreadable
+   *   config is no evidence that saving one would help, which is why the
+   *   workflow-run route refuses to answer `inference_required` in this same
+   *   state.
    *
    * The states are named for their **remedy**, not their mechanism: both "the
    * harness is not compiled in" and "it is, and this host never attached a
@@ -1660,7 +1666,11 @@ export interface CapabilityStatusDto {
  * Whether a company's teammates can think, and why not when they cannot
  * (issue #1735). See `CapabilityStatusDto.cognition`.
  */
-export type CognitionState = "configured" | "unconfigured" | "unavailable";
+export type CognitionState =
+  | "configured"
+  | "unconfigured"
+  | "unavailable"
+  | "undetermined";
 
 /** One day's token totals in the usage series (`GET .../usage`). */
 export interface UsagePointDto {

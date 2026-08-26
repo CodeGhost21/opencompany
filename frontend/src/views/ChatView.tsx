@@ -1710,7 +1710,7 @@ export function ChatView({
               >
                 <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                 <span className="min-w-0">
-                  {cognition === "unconfigured" ? (
+                  {cognition === "unconfigured" && (
                     <>
                       <span className="font-medium text-foreground">
                         Teammates can&apos;t think yet.
@@ -1726,7 +1726,8 @@ export function ChatView({
                       </a>
                       .
                     </>
-                  ) : (
+                  )}
+                  {cognition === "unavailable" && (
                     <>
                       <span className="font-medium text-foreground">
                         This host cannot reach a model — no agent harness is available.
@@ -1734,6 +1735,24 @@ export function ChatView({
                       The replies below come from the offline echo brain rather than the teammate
                       they appear under. No setting changes that: it takes a host built and
                       started with the harness.
+                    </>
+                  )}
+                  {/* The host is on the echo brain and cannot say why: it could
+                      not read this company's inference configuration. Names no
+                      remedy on purpose — an unreadable config is no evidence
+                      that saving one would help, which is the same #266
+                      doctrine that stops the workflow-run route answering
+                      `inference_required` in this state. A settings link here
+                      would be the switch that does nothing, one more time. */}
+                  {cognition === "undetermined" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think, and this host can&apos;t say why.
+                      </span>{" "}
+                      Its inference configuration could not be read, so the replies below come
+                      from the offline echo brain rather than the teammate they appear under.
+                      Until the host can read that configuration, saving a provider is not known
+                      to help.
                     </>
                   )}
                 </span>

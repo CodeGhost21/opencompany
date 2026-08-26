@@ -56,16 +56,21 @@ publishing the path vocabulary and letting every view restate the rule.
 
 ```rust
 // src/server/cognition.rs
-pub enum CognitionState { Configured, Unconfigured, Unavailable }
+pub enum CognitionState { Configured, Unconfigured, Unavailable, Undetermined }
 
-pub fn cognition_state(path: &str, harness_reachable: bool) -> CognitionState;
+pub fn cognition_state(
+    path: &str,
+    harness_reachable: bool,
+    config_readable: bool,
+) -> CognitionState;
 ```
 
 | state | what is true | remedy |
 |---|---|---|
 | `configured` | a path that runs a real model is live | — |
-| `unconfigured` | a harness pool is attached, but nothing resolved at boot, so the company is on the echo brain | Settings → Inference, **in-app** |
+| `unconfigured` | a harness pool is attached, the config reads clean, and nothing is set, so the company is on the echo brain | Settings → Inference, **in-app** |
 | `unavailable` | no agent harness is reachable on this host | a different build or host wiring — say so plainly |
+| `undetermined` | a harness is reachable, but the host could not *read* the config, so it cannot say why | **none that can be named** |
 
 Not a fifth `*_in_build` boolean. Cognition is two facts at once — a harness is
 reachable, *and* a model resolved at runtime — and only the second is actionable
@@ -79,13 +84,29 @@ desktop-shell bug that module exists to end. The operator can act on neither, so
 splitting them would offer a distinction they cannot use; folding either into
 `unconfigured` would offer a settings page that cannot help.
 
+`undetermined` exists for the same reason, from the other side: it is the state
+whose remedy **cannot be named**. A config the host could not read is no
+evidence that saving one would help — the #266 doctrine — which is why
+`ops::inference`'s `runner_gap_for` degrades a resolve error to
+`RunnerGap::NotWired` rather than `InferenceRequired`, and why its
+`unreadable_inference_config_is_not_restartable` regression exists. Cognition
+must not make, on the same runtime, the promise that route declines to make. The
+banner for it therefore carries no settings link and does not borrow the harness
+wording either, since a harness *is* attached.
+
+The config read is consulted only on the degraded path — a company whose brain
+is not the echo brain, or that has no harness at all, pays neither the manifest
+load nor the secret-store resolve, because neither can change the answer.
+
 That is why the second input is **harness reachability, not the Cargo feature**.
 `cfg!(feature = "openhuman")` says the harness was compiled in; it does not say
 this company's runtime was ever handed a pool. `cognition_state` therefore takes
-`ops::inference::harness_reachable` — the same predicate `restart_pending` and
-`runner_gap_for` gate their restart and configure-inference advice on (issues
-#266, #514) — so the chat banner and the Inference card cannot disagree about
-whether Settings → Inference is a remedy or a dead end for one company.
+`ops::inference::harness_reachable`, and alongside it
+`ops::inference::inference_config_readable` — the same predicates
+`restart_pending` and `runner_gap_for` gate their restart and
+configure-inference advice on (issues #266, #514) — so the chat banner and the
+Inference card cannot disagree about whether Settings → Inference is a remedy or
+a dead end for one company.
 
 Derived on every read from the brain the runtime is holding
 (`runtime.cognition().path`) plus that reachability check, so it cannot

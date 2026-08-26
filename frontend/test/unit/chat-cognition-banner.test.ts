@@ -172,6 +172,29 @@ describe("the chat cognition banner", () => {
     expect(notice!.querySelector("a")).toBeNull();
   });
 
+  /**
+   * The state with no remedy to name (codex, PR #1740).
+   *
+   * A harness is reachable, but the host could not *read* this company's
+   * inference configuration, so it cannot say why the echo brain answered. An
+   * unreadable config is no evidence that saving one would help — the same #266
+   * doctrine that stops the workflow-run route answering `inference_required`
+   * on this exact runtime — so the banner must offer no link, and must not
+   * borrow the harness copy either, because a harness *is* attached.
+   */
+  it("names no remedy when the host cannot read its own inference config", async () => {
+    await render("undetermined");
+
+    const notice = banner();
+    expect(notice).not.toBeNull();
+    expect(notice!.textContent).toContain("this host can't say why");
+    expect(notice!.textContent).toContain("could not be read");
+    // No settings link: that is the promise the host declines to make.
+    expect(notice!.querySelector("a")).toBeNull();
+    // And not the harness story, which would be a plain falsehood here.
+    expect(notice!.textContent).not.toContain("no agent harness is available");
+  });
+
   it("stays down when the company has a model", async () => {
     await render("configured");
 
