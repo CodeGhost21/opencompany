@@ -645,6 +645,55 @@ fn agent_budget_exhausted_notice(agent_id: &str, cap_usd: f64) -> String {
     )
 }
 
+/// The coarse pre-task proximity warning threshold (issue #1846): 90% of the
+/// applicable ceiling. Deliberately a fixed constant rather than a manifest
+/// setting — an operator-configurable threshold needs a new `[plan]` field,
+/// validation, and a console control, which is a bigger, separate piece of
+/// work; this closes the "no pre-task proximity primitive exists" gap the
+/// issue names with the coarsest version that still tells an operator "you're
+/// about to lose dispatch" before it happens rather than only when it does.
+const BUDGET_PROXIMITY_RATIO: f64 = 0.9;
+
+/// Whether an integer token spend has crossed the coarse proximity threshold
+/// against `cap`, without having reached it (the exhaustion check owns `>=`
+/// separately — this and that are mutually exclusive by construction at both
+/// call sites, which check `!total_exhausted`/`spent < cap` first).
+fn is_approaching_budget_ceiling(spent: u64, cap: u64) -> bool {
+    if cap == 0 {
+        return false;
+    }
+    (spent as f64) >= (cap as f64) * BUDGET_PROXIMITY_RATIO
+}
+
+/// The USD-denominated twin of [`is_approaching_budget_ceiling`], for the
+/// per-agent daily cap read (which is measured in dollars, not tokens).
+fn is_approaching_budget_ceiling_f64(spent: f64, cap: f64) -> bool {
+    if !(cap.is_finite() && cap > 0.0) {
+        return false;
+    }
+    spent >= cap * BUDGET_PROXIMITY_RATIO
+}
+
+/// The company-wide proximity warning's operator-facing text. Deliberately
+/// makes NO per-task cost claim ("this task will exceed your budget") — only
+/// the coarse, honest "you are near your limit" the meter read actually
+/// supports. Names no exact figures either: the threshold is an internal
+/// constant, not something the operator configured and would expect echoed
+/// back.
+fn budget_proximity_message() -> String {
+    "This company is nearing its token budget for the current period. Dispatch will pause \
+     automatically once the ceiling is reached."
+        .to_string()
+}
+
+/// The per-agent twin of [`budget_proximity_message`].
+fn budget_proximity_message_usd(agent_id: &str) -> String {
+    format!(
+        "{agent_id} is nearing its daily spend cap. Dispatch to this teammate will pause \
+         automatically once the cap is reached."
+    )
+}
+
 /// The classification of a single `agent.turn` attempt, for the retry wrapper.
 enum AttemptOutcome {
     /// A non-empty reply.
@@ -652,7 +701,18 @@ enum AttemptOutcome {
     /// The transient empty-response class (an empty/blank reply, or the model's
     /// "empty response" error) — retryable.
     Empty,
-    /// A hard error (budget/auth/build/etc.) — propagated loudly, never swallowed.
+    /// The turn's own inference call failed on the account being out of
+    /// budget/credits (issue #1846) — recognised via the same
+    /// `is_budget_exhausted_message` wire-shape check the delegated sub-agent
+    /// halt already keys on. **Not retryable** (retrying hits the identical
+    /// wall) and **not a `Hard` error** — it ends the turn gracefully with the
+    /// actionable summary as the reply, distinguishable from a real failure.
+    BudgetPaused {
+        /// The actionable, operator-facing halt copy.
+        summary: String,
+    },
+    /// A hard error (auth/build/non-budget provider rejection/etc.) —
+    /// propagated loudly, never swallowed.
     Hard(OpenCompanyError),
 }
 
@@ -712,6 +772,25 @@ pub struct TurnOutcome {
     /// was spent against which cap, and names the teammate so a chain of turns
     /// cannot report a number the operator has no way to attribute.
     pub halted_for_spend: Option<SpendHalt>,
+    /// The turn **paused for lack of inference budget/credits** (issue #1846),
+    /// rather than dying with a generic error.
+    ///
+    /// `Some` exactly when [`classify_turn`](CompanyAgent) recognised the
+    /// model provider's `Err` as the same budget-exhausted wire shape the
+    /// delegated sub-agent path already halts gracefully on
+    /// (`oh::inference::provider::is_budget_exhausted_message`). `None` on
+    /// every other path, including a turn that failed for an unrelated
+    /// reason — those still propagate as `Err`, never as this field.
+    ///
+    /// A **third, distinct** terminal state alongside
+    /// [`hit_iteration_cap`](Self::hit_iteration_cap) and
+    /// [`halted_for_spend`](Self::halted_for_spend): an iteration-cap pause is
+    /// resumable with "continue", an in-turn spend halt means the *company's*
+    /// own declared cap was reached mid-turn, and a budget pause means the
+    /// *account itself* is out of money — the operator's only lever is adding
+    /// credits, not continuing or raising a cap. Conflating it with either
+    /// would tell the operator the wrong next action.
+    pub budget_paused: Option<BudgetPause>,
 }
 
 /// What one in-turn spend halt cost, and whose cap it was measured against
@@ -741,6 +820,42 @@ pub struct SpendHalt {
     /// The cap it was measured against, in USD — the teammate's declared
     /// `budget_usd_daily`.
     pub cap_usd: f64,
+}
+
+/// A turn that ended because the account (or a BYO/custom provider's own
+/// account) ran out of inference budget/credits — issue #1846.
+///
+/// Before this, the top-level orchestrator's own inference call had no
+/// envelope marker to key on (that marker is written only for a *delegated*
+/// sub-agent tool result — see `classify_turn`'s doc comment on
+/// `CompanyAgent`), so a budget-exhausted 400 from the model provider fell
+/// through `classify_turn` into the generic
+/// `Hard(OpenCompanyError::Harness(_))` arm and the turn died with an opaque
+/// HTTP error instead of a graceful, actionable pause. This is the top-level
+/// analogue of the delegated path's halt
+/// (`RepeatedToolFailureMiddleware::after_tool`,
+/// `terminal_inference_halt_summary`) — same actionable copy, same "add
+/// credits and try again" framing, but for a turn with no tool/sub-agent
+/// envelope to key on.
+///
+/// **Not true resume** (issue #561: mid-turn checkpointing was declined). The
+/// turn ends cleanly here; whatever it had already done (memory writes, tool
+/// side effects) stays done. `HarnessPool` parks a durable re-issue marker
+/// (see `crate::runtime::grants`) so the operator's "Add credits" action
+/// re-dispatches the SAME original message from the top once the account is
+/// topped up — a fresh turn, not a resumed one. A re-issue can therefore
+/// repeat a non-idempotent side effect the first attempt already performed;
+/// this crate cannot guarantee exactly-once here any more than a human
+/// re-sending the same message could.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetPause {
+    /// The teammate whose turn paused.
+    pub agent: String,
+    /// The actionable, operator-facing halt copy — byte-identical in shape to
+    /// [`agent_budget_exhausted_notice`]'s pre-dispatch refusal and to the
+    /// vendored sub-agent halt's summary, so "out of budget" reads the same
+    /// way everywhere a company hits it.
+    pub summary: String,
 }
 
 impl CompanyAgent {
@@ -1003,6 +1118,15 @@ impl CompanyAgent {
             hooks.push(Arc::new(hook));
         }
 
+        // Issue #1846: set from inside the async block below (on either
+        // attempt) when `classify_turn` recognises the top-level budget-paused
+        // wire shape, and read back out after `with_stop_hooks` returns — the
+        // same "flag on a `Mutex`, set inside the turn body, read after the
+        // `.await`" idiom `spend_brake`'s `AtomicBool` uses just above,
+        // because the async block borrows rather than moves (it is `async {}`,
+        // not `async move {}`) so a plain local outlives it.
+        let budget_pause_summary: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
         // `Box::pin` at the task-local scope boundary (the nested-scope
         // stack-overflow trap). The turn body owns the retry classification and
         // reports every attempt's usage.
@@ -1027,6 +1151,19 @@ impl CompanyAgent {
                     {
                         AttemptOutcome::Reply(reply) => Ok(reply),
                         AttemptOutcome::Hard(err) => Err(err),
+                        // Issue #1846: terminal, like `Hard`, but graceful —
+                        // ends the turn with the actionable copy as an `Ok`
+                        // reply rather than propagating an `Err`, and is never
+                        // retried (retrying hits the identical wall). Recorded
+                        // into `budget_pause_summary` so the caller can build
+                        // `TurnOutcome::budget_paused` once this future
+                        // resolves — the same reason `spend_brake` exists.
+                        AttemptOutcome::BudgetPaused { summary } => {
+                            if let Ok(mut slot) = budget_pause_summary.lock() {
+                                *slot = Some(summary.clone());
+                            }
+                            Ok(crate::harness::mcp_probe::scrub(&summary, &[]))
+                        }
                         AttemptOutcome::Empty => {
                             // Retry-guard edge: skip the one-shot retry when an
                             // operator steer already pends, so a cancel/pause
@@ -1113,6 +1250,16 @@ impl CompanyAgent {
                                         GRACEFUL_EMPTY_REPLY,
                                         &[],
                                     )),
+                                    // Issue #1846: same terminal-not-retryable
+                                    // handling as the first attempt's arm above
+                                    // — this IS the retry, so there is no
+                                    // further attempt to skip.
+                                    AttemptOutcome::BudgetPaused { summary } => {
+                                        if let Ok(mut slot) = budget_pause_summary.lock() {
+                                            *slot = Some(summary.clone());
+                                        }
+                                        Ok(crate::harness::mcp_probe::scrub(&summary, &[]))
+                                    }
                                     AttemptOutcome::Hard(err) => Err(err),
                                 }
                             }
@@ -1182,6 +1329,24 @@ impl CompanyAgent {
                 "[turn] halted at the in-turn spend cap; the reply stops short of the work it was doing"
             );
         }
+        // Issue #1846: read the same way `halted_for_spend` is — the async
+        // block above only borrowed this local, so the borrow has ended by the
+        // time `with_stop_hooks` returned it.
+        let budget_paused = budget_pause_summary
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .map(|summary| BudgetPause {
+                agent: self.agent_id.clone(),
+                summary,
+            });
+        if let Some(pause) = &budget_paused {
+            tracing::info!(
+                agent = %self.agent_id,
+                "[turn] paused for lack of inference budget/credits: {}",
+                pause.summary
+            );
+        }
         let steps = steps::fold_steps(events);
 
         let reply = reply?;
@@ -1191,6 +1356,7 @@ impl CompanyAgent {
                 steps,
                 hit_iteration_cap,
                 halted_for_spend,
+                budget_paused,
             },
             usages,
         ))
@@ -1245,12 +1411,73 @@ impl CompanyAgent {
                     &err,
                 )))
             }
+            // Issue #1846: the top-level orchestrator's own inference call
+            // carries no delegated-tool envelope, so it cannot be recognised by
+            // `RepeatedToolFailureMiddleware`'s envelope-gated check — only by
+            // matching the SAME underlying wire shape directly against the
+            // error chain. Checked AFTER the wall-clock-ceiling arm so a
+            // ceiling hit (which can itself carry provider response text) is
+            // never re-read as a budget pause; checked BEFORE the generic
+            // `Hard` catch-all, which is exactly the asymmetry this issue
+            // closes — every other `Err` still falls through unchanged.
+            Err(err) if is_top_level_budget_exhausted(&err) => AttemptOutcome::BudgetPaused {
+                summary: budget_paused_summary(&self.agent_id, &err),
+            },
             Err(err) => AttemptOutcome::Hard(OpenCompanyError::Harness(format!(
                 "turn for '{}': {err}",
                 self.agent_id
             ))),
         }
     }
+}
+
+/// Whether a turn error is the top-level analogue of the delegated sub-agent
+/// budget halt (issue #1846): the model provider's response body, still
+/// present somewhere in the `anyhow` error chain (`turn` returns
+/// `anyhow::Result`, so the typed error is erased the same way
+/// [`is_transient_empty_response`] and [`is_wall_clock_ceiling`] already
+/// account for), matches the single existing budget-exhausted wire-shape
+/// classifier.
+///
+/// Deliberately reuses `oh::inference::provider::is_budget_exhausted_message`
+/// rather than forking a second copy of the phrase list — the whole point of
+/// this fix is to close the asymmetry, not add a second place for the two to
+/// drift apart. See `budget_wire_shapes_all_classify_as_budget_paused` for the
+/// drift-coupling test that fails CI if the two ever disagree.
+fn is_top_level_budget_exhausted(err: &anyhow::Error) -> bool {
+    oh::inference::provider::is_budget_exhausted_message(&format!("{err:#}"))
+}
+
+/// UTF-8-safe truncation to at most `max` chars, appending a truncation marker
+/// when cut. Mirrors the vendored `truncate_for_halt` this notice's copy is
+/// modelled on (`tinyagents`' `RepeatedToolFailureMiddleware`), so a very long
+/// provider error body cannot blow out the reply the operator sees.
+fn truncate_for_pause(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}\n… [truncated]")
+}
+
+/// The actionable, operator-facing copy for a top-level budget pause (issue
+/// #1846) — deliberately the SAME framing the delegated sub-agent halt already
+/// emits (`terminal_inference_halt_summary`'s `BudgetExhausted` arm in the
+/// vendored `tinyagents` middleware): "add credits and try again", not the
+/// harness's own error vocabulary. Pinned equal in shape by
+/// `top_level_budget_pause_copy_matches_the_delegated_halt_copy`.
+///
+/// Framed as a **turn** running out rather than a **tool step** — the
+/// top-level orchestrator call is not a tool call, so there is no `{tool}`
+/// name to name, unlike the delegated halt's "the `{tool}` step failed".
+fn budget_paused_summary(agent_id: &str, err: &anyhow::Error) -> String {
+    format!(
+        "Paused — {agent_id}'s turn ran out of inference budget/credits, so it stopped \
+         instead of failing silently. Add credits to your account (or, when using a \
+         custom/BYO provider, top up that provider's own account), then resend your message \
+         to continue. Details:\n{}",
+        truncate_for_pause(&format!("{err:#}"), 600),
+    )
 }
 
 /// Reads the just-completed turn's usage (zero when the provider reported none).
@@ -2827,6 +3054,35 @@ impl HarnessPool {
                 match meter.query(company, since).await {
                     Ok(samples) => {
                         let spent = capability_budget::tokens_in(&samples);
+                        // Issue #1846: the coarse pre-task proximity warning,
+                        // read BESIDE the exhaustion check above — same query,
+                        // same samples, no second meter read. Fail-open by
+                        // construction: this whole arm only runs when the read
+                        // already succeeded, and it makes no per-task cost
+                        // claim, only "you are near the period ceiling".
+                        // Published, never returned — a warning is
+                        // non-blocking, so the turn keeps dispatching normally
+                        // whether or not a console happens to be listening.
+                        if let Some(cap) = plan.total_budget
+                            && !plan.total_exhausted(spent)
+                            && is_approaching_budget_ceiling(spent, cap)
+                        {
+                            tracing::info!(
+                                company = %company,
+                                spent,
+                                cap,
+                                "[capability-budget] approaching the total token ceiling; publishing a non-blocking proximity warning"
+                            );
+                            crate::turn_stream::publish(
+                                company,
+                                crate::turn_stream::BudgetProximityFrame {
+                                    kind: "budget_proximity",
+                                    agent_id: None,
+                                    message: budget_proximity_message(),
+                                    at_millis: crate::ports::now_millis(),
+                                },
+                            );
+                        }
                         if plan.total_exhausted(spent) {
                             tracing::info!(
                                 company = %company,
@@ -2845,6 +3101,13 @@ impl HarnessPool {
                                 // budget notice; labelling this as a halt too
                                 // would tell the operator the same thing twice.
                                 halted_for_spend: None,
+                                // Issue #1846: this is OpenCompany's own
+                                // plan-level token ceiling refusing dispatch —
+                                // a company policy, not the provider account
+                                // being out of money. No model call ran, so
+                                // `classify_turn` never saw a wire error to
+                                // classify.
+                                budget_paused: None,
                             });
                         }
                     }
@@ -3082,6 +3345,29 @@ impl HarnessPool {
                     match meter.query(company, since).await {
                         Ok(samples) => {
                             let spent = crate::metering::usd_spent_by_agent(&samples, agent_id);
+                            // Issue #1846: same coarse proximity warning as the
+                            // total-ceiling read above, beside this per-agent
+                            // read, reusing the SAME `samples` — no second
+                            // query. Non-blocking; only fires when this
+                            // teammate is not already refused below.
+                            if spent < cap && is_approaching_budget_ceiling_f64(spent, cap) {
+                                tracing::info!(
+                                    company = %company,
+                                    agent = agent_id,
+                                    spent,
+                                    cap,
+                                    "[agent-budget] approaching the daily spend cap; publishing a non-blocking proximity warning"
+                                );
+                                crate::turn_stream::publish(
+                                    company,
+                                    crate::turn_stream::BudgetProximityFrame {
+                                        kind: "budget_proximity",
+                                        agent_id: Some(agent_id.to_string()),
+                                        message: budget_proximity_message_usd(agent_id),
+                                        at_millis: crate::ports::now_millis(),
+                                    },
+                                );
+                            }
                             if spent >= cap {
                                 tracing::info!(
                                     company = %company,
@@ -3101,6 +3387,12 @@ impl HarnessPool {
                                     // never armed, and the reply above already
                                     // names the cap it refused against.
                                     halted_for_spend: None,
+                                    // Issue #1846: same reasoning as the total
+                                    // ceiling refusal above — this is the
+                                    // teammate's manifest cap, not the provider
+                                    // account being out of credits, and no
+                                    // model call ran to classify.
+                                    budget_paused: None,
                                 });
                             }
                         }
@@ -3187,6 +3479,32 @@ impl HarnessPool {
         let (outcome, turn_costs) = agent
             .run_with_steer(&augmented, steer, stream_ctx, run_sink.clone())
             .await?;
+        // Issue #1846: park a durable re-issue marker the moment a pause is
+        // seen, mirroring the grant-reissue precedent (`crate::runtime::grants`)
+        // — mint on the event that needs a later redemption, not on whatever
+        // happens to read the outcome next. `message` (not `augmented`) is
+        // parked: the operator's own words are what gets re-sent, and
+        // retrieve→inject re-runs fresh against whatever memory looks like at
+        // redeem time rather than replaying a stale injection.
+        if let Some(pause) = &outcome.budget_paused {
+            let chat_id = match live {
+                LiveStream::On { chat_id } => chat_id.map(str::to_string),
+                LiveStream::Workflow { .. } | LiveStream::Off => None,
+            };
+            let marker = crate::runtime::grants::budget_pauses_for(company).park(
+                pause.agent.clone(),
+                chat_id,
+                message.to_string(),
+                pause.summary.clone(),
+                crate::ports::now_millis(),
+            );
+            tracing::info!(
+                company = %company,
+                agent = %pause.agent,
+                marker_id = %marker.id,
+                "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
+            );
+        }
         // Issue #242: fold this turn's spend into the attempt it belongs to.
         // Per turn, not once at the end, so a redirect re-run and a delegate's
         // turn both count — an attempt's cost is what the attempt spent. This is
@@ -3237,10 +3555,20 @@ impl HarnessPool {
         // inbound port (`CycleHostImpl::external_trigger`). If a harness turn
         // ever takes a webhook trigger, that turn must route its store half
         // through the runtime's inbound port — the cycle path shows the shape.
+        // Issue #1846: a budget-paused turn's `reply` is the actionable "add
+        // credits" halt copy, not an answer the teammate produced — the
+        // pre-flight refusals above (`total_ceiling_refusal`, the per-agent
+        // cap) already skip this writeback entirely by returning early, before
+        // ever reaching it. This turn does not return early (the model call
+        // was actually attempted and failed), so it has to be excluded here
+        // instead. Writing it back would recall "you are out of credits" as
+        // prior context in the NEXT turn, and — worse — as something this
+        // teammate is on record having said.
         if !matches!(
             steer.and_then(SteerControl::pending),
             Some(SteerAction::Cancel)
-        ) {
+        ) && outcome.budget_paused.is_none()
+        {
             deps.context
                 .put(
                     company,
@@ -6371,6 +6699,382 @@ description = "Builds the product."
         assert!(
             !err.to_string().contains("wall-clock"),
             "and gains no ceiling prose: {err}"
+        );
+    }
+
+    // --- top-level budget pause (issue #1846) --------------------------------
+
+    /// Drift-coupling: `is_top_level_budget_exhausted` must be a thin wrapper
+    /// over `oh::inference::provider::is_budget_exhausted_message`, never a
+    /// second, independently-maintained phrase list. Computes both sides for
+    /// a spread of real and synthetic bodies and asserts they never disagree,
+    /// so an edit that "helps" by hardcoding a phrase here fails CI instead of
+    /// silently drifting from the shared source (the deferred-classifier-arm
+    /// trap this repo has been bitten by before).
+    #[test]
+    fn top_level_budget_classifier_never_drifts_from_the_shared_source() {
+        for body in [
+            "hosted inference returned 400: insufficient budget for this account",
+            "hosted inference returned 402: budget exceeded for this key",
+            "anthropic API error (400 Bad Request): {\"error\":{\"code\":\"invalid_request_error\",\
+             \"message\":\"Your credit balance is too low to access the Anthropic API. Please go \
+             to Plans & Billing to upgrade or purchase credits.\",\"type\":\"invalid_request_error\"}}",
+            "hosted inference returned 402: {\"success\": false, \"error\": \"You have no \
+             remaining credits to use the LLM apis.\"}",
+            "hosted inference returned 429: quota exceeded — add credits to continue",
+            "hosted inference returned 500: internal server error",
+            "provider refused the request",
+            "request timed out after 30s connecting to the provider",
+            "",
+        ] {
+            let err = anyhow::anyhow!("{body}");
+            assert_eq!(
+                is_top_level_budget_exhausted(&err),
+                oh::inference::provider::is_budget_exhausted_message(&format!("{err:#}")),
+                "top-level classifier drifted from the shared source for: {body}"
+            );
+        }
+    }
+
+    /// The headline unit test: every known budget-exhausted wire shape
+    /// classifies `BudgetPaused`, not `Hard` — proving the asymmetry this
+    /// issue closes at the one place it was introduced. A non-budget `Err`
+    /// keeps classifying `Hard`, unchanged.
+    #[tokio::test]
+    async fn classify_turn_recognises_every_known_budget_wire_shape_as_paused_not_hard() {
+        let (agent, _deps) = scripted_agent(vec![]);
+
+        let wire_shapes = [
+            (
+                "managed backend 400 (USER_INSUFFICIENT_CREDITS-style)",
+                "hosted inference returned 400: {\"error\":\"USER_INSUFFICIENT_CREDITS: \
+                 insufficient budget for this account\"}",
+            ),
+            (
+                "Anthropic BYO 400",
+                "anthropic API error (400 Bad Request): {\"error\":{\"code\":\"invalid_request_error\",\
+                 \"message\":\"Your credit balance is too low to access the Anthropic API. Please \
+                 go to Plans & Billing to upgrade or purchase credits.\",\"type\":\"invalid_request_error\"}}",
+            ),
+            (
+                "abacus/OpenRouter-style no-remaining-credits 402",
+                "hosted inference returned 402: {\"success\": false, \"error\": \"You have no \
+                 remaining credits to use the LLM apis.\"}",
+            ),
+            (
+                "quota exceeded",
+                "hosted inference returned 429: quota exceeded — add credits to continue",
+            ),
+        ];
+
+        for (label, body) in wire_shapes {
+            let outcome =
+                agent.classify_turn(Err(anyhow::anyhow!("{body}")), Duration::from_secs(1));
+            let AttemptOutcome::BudgetPaused { summary } = outcome else {
+                panic!("{label}: must classify BudgetPaused for wire body: {body}");
+            };
+            assert!(summary.starts_with("Paused —"), "{label}: {summary}");
+            assert!(
+                summary.to_ascii_lowercase().contains("add credits"),
+                "{label}: must carry the actionable ask: {summary}"
+            );
+        }
+
+        // Non-budget Err → still Hard, byte-for-byte the pre-#1846 behaviour.
+        let other = agent.classify_turn(
+            Err(anyhow::anyhow!(
+                "hosted inference returned 500: internal server error"
+            )),
+            Duration::from_secs(1),
+        );
+        let AttemptOutcome::Hard(err) = other else {
+            panic!("a non-budget failure must still classify Hard");
+        };
+        assert!(
+            err.to_string().contains("internal server error"),
+            "an unrelated failure keeps its own text: {err}"
+        );
+    }
+
+    /// The halt copy shares the delegated sub-agent halt's ACTIONABLE framing
+    /// — "add credits" / "top up that provider's own account" / an explicit
+    /// next step for the operator — never the harness's own error vocabulary.
+    /// Byte-identity with the vendored `terminal_inference_halt_summary` is
+    /// not achievable (that function is private to `tinyagents` and phrased
+    /// per-tool, "the `{tool}` step failed", which has no analogue at the top
+    /// level), so this asserts the shared phrases survive instead of a
+    /// whole-string match. The top-level copy's own next step is "resend your
+    /// message" rather than the delegated halt's "try again" — a turn, unlike
+    /// a tool call, has no retry to invite; both say the SAME thing in the
+    /// vocabulary that fits their own layer.
+    #[test]
+    fn budget_paused_copy_shares_the_add_credits_framing_with_the_delegated_halt() {
+        let err = anyhow::anyhow!("hosted inference returned 400: insufficient budget");
+        let summary = budget_paused_summary("ceo", &err);
+        let lower = summary.to_ascii_lowercase();
+        for phrase in [
+            "add credits",
+            "top up that provider's own account",
+            "resend your message",
+        ] {
+            assert!(
+                lower.contains(phrase),
+                "missing shared framing {phrase:?}: {summary}"
+            );
+        }
+        assert!(summary.contains("ceo"), "names the teammate: {summary}");
+    }
+
+    /// The coarse proximity threshold (issue #1846): fires at/above 90% of the
+    /// cap, never below it, and never on a non-positive/non-finite cap — the
+    /// guard that keeps a company with no ceiling configured (`cap == 0` is
+    /// unreachable in practice, but the function must not divide by it) from
+    /// ever firing.
+    #[test]
+    fn budget_proximity_threshold_fires_at_ninety_percent_and_not_below() {
+        assert!(!is_approaching_budget_ceiling(89, 100), "89% is not near");
+        assert!(is_approaching_budget_ceiling(90, 100), "90% is near");
+        assert!(
+            is_approaching_budget_ceiling(100, 100),
+            "100% is near (though callers gate this out via total_exhausted first)"
+        );
+        assert!(
+            !is_approaching_budget_ceiling(50, 0),
+            "a zero cap must never divide-by-zero into true"
+        );
+
+        assert!(
+            !is_approaching_budget_ceiling_f64(4.49, 5.0),
+            "89.8% rounds down to not-near"
+        );
+        assert!(is_approaching_budget_ceiling_f64(4.5, 5.0), "90% is near");
+        assert!(
+            !is_approaching_budget_ceiling_f64(4.5, f64::NAN),
+            "a non-finite cap must never read as near"
+        );
+        assert!(
+            !is_approaching_budget_ceiling_f64(4.5, 0.0),
+            "a non-positive cap must never read as near"
+        );
+    }
+
+    /// **The regression.** The bug this issue closes: a top-level orchestrator
+    /// turn whose own inference call fails with a budget-exhausted body — no
+    /// delegated-tool envelope marker anywhere in the chain, because nothing
+    /// was delegated — must terminate `Ok(TurnOutcome { budget_paused: Some(_), .. })`
+    /// and park a re-issue marker, NOT propagate `Err(OpenCompanyError::Harness(_))`.
+    ///
+    /// Before this issue's fix, `classify_turn` had no arm between the
+    /// wall-clock-ceiling check and the generic `Hard` catch-all, so this
+    /// exact scenario fell through to `Hard(OpenCompanyError::Harness(format!("turn
+    /// for '{agent}': {err}")))` and `HarnessPool::run` returned that `Err` to
+    /// every caller — the silent mid-task break the issue is named for. This
+    /// test's premise is provable by inspection: `classify_turn`'s match arms
+    /// are ordered ceiling → budget → generic, and removing the budget arm
+    /// (i.e. reverting this diff) makes this body fall through to the generic
+    /// arm, which this test would then catch as an `Err` instead of the
+    /// expected `Ok`. The `ScriptedProvider` returns the error DIRECTLY from
+    /// `ChatModel::invoke` (no tool call, no delegation, no envelope) — the
+    /// "simple non-delegating task" the issue specifies.
+    #[tokio::test]
+    async fn a_top_level_budget_exhaustion_pauses_gracefully_and_parks_a_reissue_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-regress");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            // Scripted 10 deep, not once: whether the vendored harness retries
+            // a model error internally before ever handing `agent.turn()`'s
+            // caller an `Err` is not this crate's contract to assume — the
+            // real-world case this mirrors (an exhausted account) fails the
+            // SAME way on every retry regardless, so scripting depth instead
+            // of count-exactness is both safer and truer to the scenario.
+            provider: Arc::new(ScriptedProvider::new(vec![
+                Err(
+                    "USER_INSUFFICIENT_CREDITS: insufficient budget for this account — add \
+                     credits to continue"
+                        .to_string(),
+                );
+                10
+            ])),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            // No meter: the pre-flight budget gates (total ceiling, per-agent
+            // cap) fail OPEN with none configured, so this dispatch reaches
+            // the model call rather than being refused pre-flight — the
+            // scenario under test is the model call itself failing, not a
+            // pre-flight refusal.
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        let outcome = pool
+            .run(
+                &company,
+                "ceo",
+                "Please summarize today's standup notes.",
+                &deps,
+                None,
+            )
+            .await
+            .expect(
+                "a budget pause is a graceful stop, not an error — it must return Ok, which is \
+                 the whole regression this test proves",
+            );
+
+        let pause = outcome.budget_paused.as_ref().expect(
+            "the top-level inference call failed on a budget-exhausted body; the turn must \
+             report the pause",
+        );
+        assert_eq!(pause.agent, "ceo");
+        assert!(
+            pause.summary.contains("add credits"),
+            "the actionable ask survives to the outcome: {}",
+            pause.summary
+        );
+
+        // And a durable re-issue marker is parked, keyed on the agent, naming
+        // the ORIGINAL message — the grant-reissue precedent this issue reuses.
+        let marker = crate::runtime::grants::budget_pauses_for(&company)
+            .peek("ceo")
+            .expect("a re-issue marker must be parked for the paused agent");
+        assert_eq!(marker.agent, "ceo");
+        assert_eq!(marker.message, "Please summarize today's standup notes.");
+        assert_eq!(marker.summary, pause.summary);
+    }
+
+    /// No-regression on the delegated path: a turn that finishes normally
+    /// (the `ScriptedProvider` returns `Ok`, never an `Err`) reports no
+    /// budget pause and parks no marker — the negative control that stops a
+    /// hardcoded `Some`/an always-park bug passing every test above.
+    #[tokio::test]
+    async fn a_turn_that_finishes_normally_reports_no_budget_pause_and_parks_no_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-noregress");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(ScriptedProvider::new(vec![Ok(
+                "Standup notes: all green.".to_string()
+            )])),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        let outcome = pool
+            .run(&company, "ceo", "How did standup go?", &deps, None)
+            .await
+            .expect("a normal turn returns Ok");
+
+        assert!(
+            outcome.budget_paused.is_none(),
+            "a turn that never hit an Err must report no budget pause"
+        );
+        assert!(
+            crate::runtime::grants::budget_pauses_for(&company)
+                .peek("ceo")
+                .is_none(),
+            "and must park no re-issue marker"
         );
     }
 
