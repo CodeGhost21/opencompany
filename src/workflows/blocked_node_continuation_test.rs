@@ -1076,3 +1076,113 @@ async fn the_blocked_node_bank_survives_a_restart_before_the_detached_follow_up_
          it does the hand-simulated one in the sibling test"
     );
 }
+
+/// Issue #1825: a restart landing between a blocked node's continuation
+/// actually being spawned and its `BlockedNodeReleased` write durably landing
+/// must not cause `reconcile_stranded_blocked_nodes` to dispatch it a second
+/// time.
+///
+/// `retire_blocked_stash`'s durable clear is best-effort by design (matching
+/// the park's own stance), so a transient failure there is expected to
+/// happen occasionally. Before this fix, the only durable facts left behind
+/// by that failure — a still-armed `BlockedNodeStashed` paired with a
+/// `BlockedNodeApproved` — were *indistinguishable* from a stash that was
+/// never dispatched at all, so reconciliation would spawn the continuation
+/// again: a duplicated agent turn over the same approved call, potentially
+/// repeating token spend or an unprotected upstream side effect.
+///
+/// The failure is reproduced by hand, the same technique the sibling
+/// release-race test above uses: run the real approve-and-dispatch path
+/// once (so `spawn_blocked_node_continuation` genuinely succeeds and
+/// `record_blocked_node_dispatched` genuinely lands), then re-create by hand
+/// the exact durable state a failed `BlockedNodeReleased` write would have
+/// left behind — the stash and its approval both still present, using the
+/// **real** `workflow_id`/`input` this run stashed, so a broken guard would
+/// actually be able to re-dispatch it rather than failing for an unrelated
+/// reason (a fake workflow id would error out of `spawn_blocked_node_continuation`
+/// before ever reaching the guard this test exists to prove).
+#[tokio::test]
+async fn reconciliation_does_not_redispatch_a_node_whose_dispatch_already_landed() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // Capture the real stash contents before it is ever taken, so the
+    // hand-rebuilt stash below is dispatchable for real.
+    let original = rt
+        .blocked_nodes()
+        .peek(&turn)
+        .expect("the cold run's block is stashed");
+
+    // The real path: approve, let the real continuation actually spawn and
+    // retire the stash. This is the one dispatch the guard must not repeat.
+    resolve_and_settle(&rt, &cards[0], Verdict::Approve).await;
+    assert_eq!(
+        runner.started(),
+        2,
+        "the approval dispatched exactly one continuation"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "the real release succeeded here — this test now rebuilds by hand \
+         exactly what a *failed* release would have left behind instead"
+    );
+
+    // Re-create, by hand, the durable state a `record_blocked_node_released`
+    // write failure would leave after that real dispatch: the stash and its
+    // approval both restored (as release never ran), plus the
+    // `BlockedNodeDispatched` marker the dispatch that actually happened did
+    // manage to write.
+    rt.blocked_nodes()
+        .arm(&turn, &original.workflow_id, &original.input);
+    rt.blocked_nodes().mark_approved(&turn);
+    rt.journal()
+        .record_blocked_node_stashed(&turn, &original.workflow_id, &original.input)
+        .await
+        .expect("the durable re-stash succeeds");
+    rt.journal()
+        .record_blocked_node_approved(&turn)
+        .await
+        .expect("the durable re-approve succeeds");
+    rt.journal()
+        .record_blocked_node_dispatched(&turn)
+        .await
+        .expect("the durable dispatch marker succeeds");
+
+    assert!(
+        rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "precondition: the rebuilt stash looks exactly like the stranded case"
+    );
+    assert!(
+        rt.journal().parked_turns().iter().all(|t| t != &turn),
+        "precondition: nothing is left parked for this turn"
+    );
+
+    rt.reconcile_stranded_blocked_nodes().await;
+
+    assert_eq!(
+        runner.started(),
+        2,
+        "a turn already durably marked dispatched must not be dispatched a \
+         second time by reconciliation"
+    );
+}
