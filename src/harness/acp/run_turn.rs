@@ -162,6 +162,11 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
         // run through it — the external process bills and stops on its own
         // terms, which this side neither arms nor observes.
         halted_for_spend: None,
+        // Issue #1846: same reasoning — `classify_turn` never runs for an ACP
+        // turn, so there is no budget-exhausted wire shape to classify here.
+        // The external process's own budget handling (if any) is opaque to
+        // this side.
+        budget_paused: None,
     }
 }
 

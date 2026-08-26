@@ -2330,6 +2330,7 @@ mod tests {
             steps: Vec::new(),
             hit_iteration_cap: false,
             halted_for_spend: None,
+            budget_paused: None,
         }
     }
 
