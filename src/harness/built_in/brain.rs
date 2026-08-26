@@ -1038,15 +1038,30 @@ impl HarnessBrain {
                                 // every downstream write credits them.
                                 Some(handoff) => {
                                     responder = handoff.delegate;
+                                    let budget_paused = handoff.budget_paused;
                                     match handoff.reply {
                                         Some(reply) => {
-                                            settle(
-                                                &mut card,
-                                                TaskRunEnd::Completed,
-                                                &responder,
-                                                &reply,
-                                            );
-                                            (TaskRunEnd::Completed, reply)
+                                            // Issue #1846 review (Codex
+                                            // #3865395868): `TaskHandoff` now
+                                            // carries the delegate's own
+                                            // budget pause through from
+                                            // `DeskReply` — this is the other
+                                            // half of the asymmetry the
+                                            // top-level orchestrator's own
+                                            // dispatched call already closed
+                                            // above (`outcome.budget_paused`).
+                                            // Without it a delegate that ran
+                                            // out of credits still settled
+                                            // `Completed`, landing the pause
+                                            // notice in In Review as though it
+                                            // were a finished answer.
+                                            let end = if budget_paused.is_some() {
+                                                TaskRunEnd::Paused
+                                            } else {
+                                                TaskRunEnd::Completed
+                                            };
+                                            settle(&mut card, end, &responder, &reply);
+                                            (end, reply)
                                         }
                                         // The hand-off ran and an operator
                                         // CANCELLED it in flight, so it produced

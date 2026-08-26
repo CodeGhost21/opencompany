@@ -610,6 +610,19 @@ pub(crate) struct TaskHandoff {
     /// What the delegate produced. `None` means their run was cancelled
     /// mid-flight, and nothing else.
     pub(crate) reply: Option<String>,
+    /// The budget pause behind the delegate's run, if any (issue #1846
+    /// review, Codex #3865395868).
+    ///
+    /// [`DeskReply`] has carried this since the top-level fix this issue
+    /// added, but this struct dropped it on the way through — `reply` here
+    /// is `desk.reply`'s text with `desk.budget_paused` thrown away, so a
+    /// dispatched card whose delegate ran out of credits reached
+    /// `HarnessBrain::run_task` with no way to tell a real completion from a
+    /// pause notice standing in for one, and settled `Completed` either way.
+    /// Carried through so the caller can gate the card's terminal state on
+    /// it, the same way `direct_card` and this hand-off's own card already
+    /// do.
+    pub(crate) budget_paused: Option<crate::harness::BudgetPause>,
 }
 
 /// Drives the brain-agnostic delegation orchestration over a [`RunTurn`]: run the
@@ -1380,16 +1393,24 @@ impl<'a> DelegationRunner<'a> {
         // the delegation drain because a direct responder queues nothing — it
         // has no delegation tools — so there is no relay turn coming that could
         // change the answer this card records.
+        //
+        // Issue #1846 review (Codex #3865395873): `budget_paused` (captured
+        // above, right beside `halted_for_spend`) has to gate the terminal
+        // state here too, exactly as it already does for the top-level
+        // orchestrator's own dispatched turn (`HarnessBrain::run_task`).
+        // Without this check a responder that paused for lack of credits
+        // still settled `Completed` — the operator read the pause notice
+        // while the card moved to In Review with that notice as though it
+        // were a finished answer.
         let mut direct_card_id = None;
         if let Some(card) = direct_card.as_mut() {
-            self.settle_work_card(
-                card,
-                responder,
-                TaskRunEnd::Completed,
-                parked,
-                &operator_reply,
-            )
-            .await?;
+            let end = if budget_paused.is_some() {
+                TaskRunEnd::Paused
+            } else {
+                TaskRunEnd::Completed
+            };
+            self.settle_work_card(card, responder, end, parked, &operator_reply)
+                .await?;
             direct_card_id = Some(card.id.clone());
         }
         // A `spawn_task` opens a card silently; a `delegate_to_desk` runs the desk
@@ -1495,6 +1516,39 @@ impl<'a> DelegationRunner<'a> {
             operator_steps.extend(relay.steps);
             hit_iteration_cap |= relay.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(relay.halted_for_spend);
+            // Issue #1846 review (Codex #3865395857): when the CEO-relay call
+            // ITSELF runs out of credits, `run_inner`'s own default park (see
+            // `mod.rs`) has already parked `relay_prompt` above — the
+            // internally-generated prompt this turn was actually called
+            // with — as the redeem marker's message, not the operator's own
+            // words. Redeeming that submits the internal relay prompt as a
+            // fresh human-authored `OperatorMessage`, potentially executing a
+            // different request than the one the operator asked for.
+            //
+            // `run_hand_off` already re-parks a delegate's pause with the
+            // right text via `self.reissue_message`; this is that fix's
+            // sibling for the relay call, which carries no `reissue_message`
+            // of its own — the "original" text here is simply `message`, the
+            // parameter this whole turn started from.
+            //
+            // Read BEFORE the fold below moves `relay.budget_paused` into
+            // `budget_paused`.
+            if let Some(pause) = &relay.budget_paused {
+                let marker = crate::runtime::grants::budget_pauses_for(self.company).park(
+                    pause.agent.clone(),
+                    chat_id.map(str::to_string),
+                    message.to_string(),
+                    pause.summary.clone(),
+                    now_millis(),
+                );
+                tracing::info!(
+                    company = %self.company,
+                    agent = %pause.agent,
+                    marker_id = %marker.id,
+                    "[budget-pause] re-parked the CEO-relay's pause with the original operator \
+                     message, replacing the relay prompt `run_inner` parked by default"
+                );
+            }
             budget_paused = budget_paused.or(relay.budget_paused);
         }
         // Drained after the relay, not before it: a relay turn carries the same
@@ -1879,6 +1933,7 @@ impl<'a> DelegationRunner<'a> {
                     handoff = Some(TaskHandoff {
                         delegate: member,
                         reply: Some(desk.reply),
+                        budget_paused: desk.budget_paused,
                     });
                 }
                 // An operator cancelled their run mid-flight, so it produced
@@ -1888,6 +1943,7 @@ impl<'a> DelegationRunner<'a> {
                     handoff = Some(TaskHandoff {
                         delegate: member,
                         reply: None,
+                        budget_paused: None,
                     });
                 }
                 // Nothing produced and NOT a cancellation. `run_delegation`'s
@@ -2152,8 +2208,20 @@ impl<'a> DelegationRunner<'a> {
                  hand-off was refused and did not happen)"
             ));
         }
+        // Issue #1846 review (Codex #3865395868): this hand-off's own card
+        // (opened above by `open_hand_off_work_card`, distinct from any
+        // dispatched-card the delegation is nested inside) must settle
+        // `Paused` too when the member's turn — or a deeper delegate's,
+        // folded in above — ran out of credits, same as `direct_card` does.
+        // Otherwise a chat-created hand-off card lands in In Review with a
+        // budget-pause notice standing in for a real completed answer.
         if let Some(card) = card.as_mut() {
-            self.settle_work_card(card, &member, TaskRunEnd::Completed, parked, &reply)
+            let end = if budget_paused.is_some() {
+                TaskRunEnd::Paused
+            } else {
+                TaskRunEnd::Completed
+            };
+            self.settle_work_card(card, &member, end, parked, &reply)
                 .await?;
         }
         // Hand the teammate's answer back to RELAY through a second
@@ -7388,6 +7456,134 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .expect("the responder's pause must survive the relay overwriting the reply");
         assert_eq!(pause.agent, "chief");
         assert_eq!(out.reply, "All shipped.", "the relay did replace the text");
+    }
+
+    /// Issue #1846 review (Codex #3865395873): a responder asked DIRECTLY
+    /// (no delegation) whose own turn pauses for lack of credits must settle
+    /// its `direct_card` `Paused`, not `Completed` — the terminal-state
+    /// asymmetry `HarnessBrain::run_task` already closed for the top-level
+    /// orchestrator's own dispatched turn, mirrored here for the chat path.
+    #[tokio::test]
+    async fn a_direct_cards_own_settle_is_paused_when_the_responder_ran_out_of_credits() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::budget_paused(
+                "Paused — engineer's turn ran out of inference budget/credits.",
+                "engineer",
+                "Paused — engineer's turn ran out of inference budget/credits, so it \
+                 stopped instead of failing silently.",
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message(
+                "engineer",
+                "read the pricing repo and write modules.md",
+                Some("eng_desk"),
+            )
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].column, COLUMN_PAUSED,
+            "a pause must not read as a completed answer: {:?}",
+            cards[0]
+        );
+    }
+
+    /// Issue #1846 review (Codex #3865395868, the chat-created-hand-off half):
+    /// the hand-off's own card — opened by `open_hand_off_work_card`, tracked
+    /// separately from any card this delegation is nested inside — must also
+    /// settle `Paused` when the delegate's turn ran out of credits, not
+    /// `Completed`. Same asymmetry as the direct-card case above, on the
+    /// hand-off path instead.
+    #[tokio::test]
+    async fn a_hand_offs_own_card_settles_paused_when_the_delegate_ran_out_of_credits() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::budget_paused(
+                "Paused — engineer's turn ran out of inference budget/credits.",
+                "engineer",
+                "Paused — engineer's turn ran out of inference budget/credits, so it \
+                 stopped instead of failing silently.",
+            )],
+        );
+        let outcome = fx
+            .runner(&turns)
+            .run_delegation(
+                handoff("draft the launch plan"),
+                None,
+                MessageContext::default(),
+            )
+            .await
+            .expect("delegation runs");
+
+        let desk_reply = outcome
+            .desk_reply
+            .expect("the delegate's turn produced a reply, paused or not");
+        assert!(
+            desk_reply.budget_paused.is_some(),
+            "the pause must reach the caller through `DeskReply` — it is what \
+             `handle_task_delegations` later carries into `TaskHandoff`"
+        );
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].column, COLUMN_PAUSED,
+            "a pause must not read as a completed answer: {:?}",
+            cards[0]
+        );
+    }
+
+    /// Issue #1846 review (Codex #3865395857): when the CEO-relay call ITSELF
+    /// pauses — not the responder's own turn, and not a delegate's, both
+    /// already covered above — `run_inner`'s default park (see `mod.rs`)
+    /// parks whatever text the relay call was actually made with:
+    /// `relay_prompt`, an internally-generated prompt, not the operator's own
+    /// words. This proves the relay fold re-parks with `message` — the same
+    /// discipline `run_hand_off` already applies via `self.reissue_message`
+    /// on the hand-off path.
+    #[tokio::test]
+    async fn the_ceo_relays_own_pause_reparks_with_the_original_operator_message() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::reply("shipped"),
+                Turn::budget_paused(
+                    "Paused — chief's turn ran out of inference budget/credits.",
+                    "chief",
+                    "Paused — chief's turn ran out of inference budget/credits, so it \
+                     stopped instead of failing silently.",
+                ),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            out.budget_paused.is_some(),
+            "sanity: the relay's own pause still folds through"
+        );
+
+        let marker = crate::runtime::grants::budget_pauses_for(&fx.record.id)
+            .peek("chief")
+            .expect("a marker was parked for the paused relay call");
+        assert_eq!(
+            marker.message, "ship the API",
+            "the marker must carry the OPERATOR's original words — a redeem re-dispatches \
+             `marker.message` verbatim as a fresh operator message, so parking the internal \
+             relay prompt here would silently run a different request"
+        );
     }
 
     /// A spend halt and a budget pause on the SAME chain are both reported —
