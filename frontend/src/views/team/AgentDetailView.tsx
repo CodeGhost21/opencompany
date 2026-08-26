@@ -861,6 +861,12 @@ export function AgentDetailView({
                               // refine a version that is no longer on screen.
                               description: draft.description,
                               instructions: draft.instructions,
+                              // Identity too: both prompts are written FROM the
+                              // role, so a teammate repurposed on this form and
+                              // drafted for before Save would otherwise get a
+                              // mandate for the job it used to do.
+                              role: draft.role,
+                              name: draft.name,
                             })
                           }
                           // Fills the form draft and nothing else. The Save

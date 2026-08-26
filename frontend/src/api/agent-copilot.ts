@@ -184,7 +184,12 @@ export function draftAgentField(
   agentId: string,
   field: DraftableField,
   conversation: CopilotTurn[],
-  onScreen?: { description?: string; instructions?: string },
+  onScreen?: {
+    description?: string;
+    instructions?: string;
+    role?: string;
+    name?: string;
+  },
 ): Promise<ProfileDraft> {
   return client.post<ProfileDraft>(
     `${client.scopeFor(company)}/team/${encodeURIComponent(agentId)}/draft`,
@@ -197,6 +202,11 @@ export function draftAgentField(
       // shorter" has to mean shorter than the text they are looking at.
       description: onScreen?.description?.trim() || undefined,
       instructions: onScreen?.instructions?.trim() || undefined,
+      // The identity on screen, for the same reason and one more: both prompts
+      // are written FROM the role, so an operator who repurposes a teammate and
+      // drafts before saving would otherwise get a mandate for its old job.
+      role: onScreen?.role?.trim() || undefined,
+      name: onScreen?.name?.trim() || undefined,
     },
   );
 }

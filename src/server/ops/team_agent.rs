@@ -1268,6 +1268,19 @@ pub(super) struct DraftRequest {
     /// The persona as it stands on the operator's screen. See `description`.
     #[serde(default)]
     instructions: Option<String>,
+    /// The role as it stands on the operator's screen, when it differs from
+    /// the stored one.
+    ///
+    /// Both prompts are written *from* the role, so this is the field a stale
+    /// grounding damages most: an operator who repurposes a teammate and asks
+    /// for a mandate before saving gets one written for the job it used to do.
+    /// Carried for the same reason as the two fields above and under the same
+    /// limit — it is authored on this screen, in this form, right now.
+    #[serde(default)]
+    role: Option<String>,
+    /// The name as it stands on the operator's screen. See `role`.
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// One turn of a copilot conversation, on the wire.
@@ -1445,6 +1458,10 @@ pub(super) async fn draft_profile(
     let on_screen = InProgress {
         description: body.description,
         instructions: body.instructions,
+        // Identity is short and single-line, so it takes the one-line bound
+        // rather than a field's own; what matters is that it takes one at all.
+        role: blank_to_none(body.role.as_deref().map(clamp_description)),
+        name: blank_to_none(body.name.as_deref().map(clamp_description)),
     };
     let subject = subject_for(
         &record,
@@ -1590,12 +1607,23 @@ fn blank_to_none(value: Option<String>) -> Option<String> {
     value.filter(|text| !text.trim().is_empty())
 }
 
-/// The two authored fields as the console currently shows them, when it has
+/// The authored fields as the console currently shows them, when it has
 /// something the record does not.
+///
+/// Four rather than two. The role and the name are as edit-in-progress as the
+/// mandate and the persona — the same form holds all four — and the role is
+/// the one a stale grounding hurts most, since both prompts are written from
+/// it: a teammate repurposed on screen and drafted for before saving gets a
+/// mandate for the job it used to do.
 #[derive(Debug, Default)]
 pub(super) struct InProgress {
     pub(super) description: Option<String>,
     pub(super) instructions: Option<String>,
+    /// Already clamped and blank-normalised by the handler, unlike the two
+    /// prose fields, which are clamped per-field inside [`Self::or_stored`].
+    pub(super) role: Option<String>,
+    /// See [`Self::role`].
+    pub(super) name: Option<String>,
 }
 
 impl InProgress {
@@ -1663,8 +1691,11 @@ fn subject_for(
         company_name: record.manifest.company.name.clone(),
         company_output: record.manifest.company.output.clone(),
         agent_id: agent_id.to_string(),
-        name,
-        role,
+        // On-screen identity wins over stored identity for the same reason the
+        // prose fields do: the operator is drafting for the teammate in front
+        // of them, not the one that was saved. Already bounded by the handler.
+        name: on_screen.name.or(name),
+        role: on_screen.role.unwrap_or(role),
         description: InProgress::or_stored(
             ProfileField::Description,
             on_screen.description,
@@ -4333,6 +4364,7 @@ agent = "claude"
         let on_screen = super::InProgress {
             description: Some("A draft they took but have not saved.".to_string()),
             instructions: None,
+            ..Default::default()
         };
         let looking_at = super::subject_for(&record, "ceo", Vec::new(), on_screen)
             .expect("the ceo is on the roster");
@@ -4346,6 +4378,7 @@ agent = "claude"
         let cleared = super::InProgress {
             description: Some("   ".to_string()),
             instructions: None,
+            ..Default::default()
         };
         let fell_back = super::subject_for(&record, "ceo", Vec::new(), cleared)
             .expect("the ceo is on the roster");
@@ -4356,13 +4389,10 @@ agent = "claude"
         );
     }
 
-    /// The on-screen values arrive from the caller and nothing else has bounded
-    /// them — the request body cap is the only ceiling on the way here, and it
-    /// is measured in megabytes. Left unclamped they go into every prompt of
-    /// the conversation, and onto the bill.
-    #[test]
-    fn a_pasted_document_is_cut_to_the_field_before_it_reaches_a_prompt() {
-        let record = CompanyRecord {
+    /// [`ROSTER`] as a stored record, for the grounding tests that need one and
+    /// nothing else from a running host.
+    fn ceo_record() -> CompanyRecord {
+        CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -4380,7 +4410,43 @@ agent = "claude"
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
-        };
+        }
+    }
+
+    /// Both prompts are written FROM the role, so a stale one is the grounding
+    /// error that costs most: an operator who repurposes a teammate and asks
+    /// for a mandate before pressing Save would get one for its previous job.
+    /// The name goes with it — the same form holds both.
+    #[test]
+    fn a_teammate_repurposed_on_screen_is_drafted_for_the_new_job() {
+        let record = ceo_record();
+        let repurposed = super::subject_for(
+            &record,
+            "ceo",
+            Vec::new(),
+            super::InProgress {
+                role: Some("Head of Support".to_string()),
+                name: Some("Robin".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("the ceo is on the roster");
+        assert_eq!(repurposed.role, "Head of Support");
+        assert_eq!(repurposed.name.as_deref(), Some("Robin"));
+
+        // …and an untouched form still grounds in what was stored.
+        let unchanged = super::subject_for(&record, "ceo", Vec::new(), Default::default())
+            .expect("the ceo is on the roster");
+        assert_eq!(unchanged.role, "Chief Executive");
+    }
+
+    /// The on-screen values arrive from the caller and nothing else has bounded
+    /// them — the request body cap is the only ceiling on the way here, and it
+    /// is measured in megabytes. Left unclamped they go into every prompt of
+    /// the conversation, and onto the bill.
+    #[test]
+    fn a_pasted_document_is_cut_to_the_field_before_it_reaches_a_prompt() {
+        let record = ceo_record();
         let pasted = "x".repeat(50_000);
         let subject = super::subject_for(
             &record,
@@ -4389,6 +4455,7 @@ agent = "claude"
             super::InProgress {
                 description: Some(pasted.clone()),
                 instructions: Some(pasted),
+                ..Default::default()
             },
         )
         .expect("the ceo is on the roster");

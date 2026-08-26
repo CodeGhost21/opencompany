@@ -52,13 +52,20 @@ the rest of the roster's ids and roles so a drafted mandate does not restate a
 neighbour's. The console holds all of that already and could have sent it; it
 must not, because a grounding the caller composes is one the caller can widen.
 
-The exceptions are the fields being authored *right now*, which the console does
-send so that "make it shorter" means shorter than what is on screen rather than
-shorter than what was last saved — and, on the Add form, because the teammate
-does not exist yet and there is nowhere else to read them from. Every one of
-those is clamped **on the way in** to the bound the field itself obeys, along
-with the operator's note and the conversation. Nothing else has bounded them:
-the request body cap is the only ceiling between a pasted document and the
+The exceptions are the fields being authored *right now* — the mandate, the
+persona, the role and the name, all of them held by the one form — which the
+console does send so that "make it shorter" means shorter than what is on screen
+rather than shorter than what was last saved, and so that a teammate repurposed
+on screen is drafted for its new job rather than the one it used to do. The role
+matters most of the four: both prompts are written *from* it. On the Add form
+they ride the request for a second reason, which is that the teammate does not
+exist yet and there is nowhere else to read them from.
+
+Every one of those is clamped **on the way in** to the bound the field obeys —
+the one-line bound for identity — along with the operator's note and the
+conversation, and a value that is blank once trimmed is dropped rather than sent
+as an empty string, because "" is not an empty mandate. Nothing else has bounded
+them: the request body cap is the only ceiling between a pasted document and the
 prompt it would ride in, on every turn of the conversation and on the bill.
 Clamping costs a grounding nothing, because text past that bound could never
 have been saved into the field anyway.
