@@ -490,3 +490,55 @@ describe("the failed-run remedy matches whether a node was actually at fault", (
     ).toBeNull();
   });
 });
+
+/** A run cancelled cleanly at a node boundary: every node it started also
+ * finished, so `RunCancel`'s own contract — the active step normally
+ * completes and is journaled — held, and nothing was actually cut off. */
+function cancelledAtBoundaryRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 9,
+    cancelled: true,
+    startedNodes: ["n_3"],
+    nodes: [{ nodeId: "n_3", status: "ok", elapsedMs: 40 }],
+  });
+}
+
+/** A run cancelled while a node was genuinely mid-flight: `n_3` started but
+ * never finished, so it IS the node the stop cut off — the positive control
+ * for the "stopped where it was" sentence. */
+function cancelledMidFlightRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 10,
+    cancelled: true,
+    startedNodes: ["n_3"],
+    nodes: [],
+  });
+}
+
+describe("the cancelled-run sentence matches whether a step was actually cut off", () => {
+  it("still says a step was stopped where it was when one genuinely was mid-flight", async () => {
+    await renderHistory(cancelledMidFlightRun());
+    const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
+    expect(row?.textContent).toContain(
+      "the one still running was stopped where it was",
+    );
+  });
+
+  // Codex review on #1821 (eighth pass): the legend definition (fixed earlier
+  // this round, tested above) says the mid-flight step "normally ran to
+  // completion and was recorded" — true for `cancelledAtBoundaryRun`, whose
+  // one started node also finished. This sentence claimed the opposite for
+  // the very same run.
+  it("does not claim a step was cut off when every started node also finished", async () => {
+    await renderHistory(cancelledAtBoundaryRun());
+    const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
+    expect(row?.textContent).not.toContain("was stopped where it was");
+    expect(row?.textContent).toContain(
+      "Every step that had started completed and was recorded before the stop took effect.",
+    );
+    // The approvals sentence is unconditional and must survive either branch.
+    expect(row?.textContent).toContain(
+      "Any approvals it had already raised are still waiting for you.",
+    );
+  });
+});
