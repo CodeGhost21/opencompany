@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { WorkflowRunOutcome } from "@/api/workflows";
-import { RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
+import { RUN_STATUS_LEGEND, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 
 /**
  * Issue #1798: a run row's at-a-glance signals — the coloured status dot, the
@@ -91,6 +91,23 @@ function dryRunOkRun(): WorkflowRunOutcome {
         status: "skipped",
         reason: "dry-run",
         detail: "dry run — nothing sent",
+      },
+    ],
+  });
+}
+
+/** A run parked one approval and it is still on the Approvals page:
+ * `liveParkedApprovalCount` (`decidableApprovalCount` minus the stranded
+ * count, both 0 here) is 1, so the row's "parked" badge renders. */
+function parkedRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 7,
+    approvals: [
+      {
+        outcome: "parked",
+        approvalId: "a1",
+        nodeId: "notify_ops",
+        tool: "send_slack_message",
       },
     ],
   });
@@ -258,6 +275,31 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).not.toContain("every report reached its destination");
     // The hedge covers the report that was never attempted, not just refused.
     expect(title).toContain("didn't need to");
+  });
+});
+
+describe("the parked badge's definition is reachable without a mouse", () => {
+  // Codex review on #1821: the parked badge's definition lives only in its
+  // native `title` (a non-focusable span). The panel's ONE keyboard- and
+  // touch-reachable affordance is the header `RunStatusLegend` tooltip
+  // button, which lists only `RUN_STATUS_LEGEND` — and that array used to
+  // omit "parked", so a keyboard or touch user could see the badge but never
+  // learn what it means. Asserted against the exported array rather than the
+  // rendered tooltip popup, which portals to `document.body` and would not
+  // be reachable off `container` anyway.
+  it("lists parked in the keyboard-accessible header legend", () => {
+    expect(RUN_STATUS_LEGEND).toContain("parked");
+  });
+
+  it("still carries the definition on the badge itself, for the mouse case", async () => {
+    await renderHistory(parkedRun());
+    const badge = Array.from(container.querySelectorAll("[title]")).find(
+      (el) => el.textContent?.includes("parked"),
+    );
+    expect(badge).toBeTruthy();
+    expect(badge?.getAttribute("title")).toBe(
+      "The run filed this into the Approvals queue for you to decide.",
+    );
   });
 });
 
