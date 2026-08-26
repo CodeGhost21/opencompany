@@ -234,6 +234,22 @@ export interface ChatHistoryMessageDto {
   atMillis: number;
   mine: boolean;
   /**
+   * Whether a **person** typed this line rather than the runtime (issue #1734).
+   *
+   * `mine` answers a different question — "did *you* write it" — and is relative
+   * to the reader, so a colleague's own message is `mine: false` and arrives on
+   * the company side of the transcript beside the agent replies. Nothing here
+   * can separate the two without this field, and the obvious substitute is a
+   * trap: the offline echo brain names its own outbound channel `operator`,
+   * exactly as an operator message does, so `channel === "operator"` matches
+   * both.
+   *
+   * Optional because a host predating it omits it. `undefined` means "cannot
+   * say", and the honest rendering of that is today's behaviour — never a
+   * confident "the runtime wrote this".
+   */
+  byPerson?: boolean;
+  /**
    * The scrubbed processing steps behind a company reply, so a rehydrated
    * transcript renders the same timeline the live turn showed. Omitted when
    * empty (operator messages, tool-less replies).
@@ -1606,7 +1622,62 @@ export interface CapabilityStatusDto {
    * send the field) and must never be rendered as "absent".
    */
   mcpInBuild?: boolean;
+  /**
+   * Whether this company's teammates can actually think, and why not when they
+   * cannot (issue #1735).
+   *
+   * * `configured` — a cognition path that runs a real model is live. It says
+   *   nothing about whether that provider will *answer*; reachability is what
+   *   `POST .../inference/test` probes.
+   * * `unconfigured` — a harness pool is attached to this company's runtime,
+   *   but it resolved no inference source at boot, so it is running the offline
+   *   echo brain and replying `"You said: …"` to everything. **Fixable in the
+   *   app**, at Settings → Inference. This is the state a fresh instance starts
+   *   in.
+   * * `unavailable` — no agent harness is reachable on this host, so no
+   *   configuration reaches a model. Only a different build or host wiring
+   *   changes it, and the console must say so rather than offering a settings
+   *   link that cannot help.
+   * * `restart-required` — a provider is configured and resolves, but this
+   *   company is still on the brain its runtime was built with, so the model is
+   *   not live yet. The remedy is that restart, **not** provider selection —
+   *   telling this operator to choose a provider sends them back to the page
+   *   they just came from. Reported as `restartRequired` on the Inference card
+   *   (issue #266).
+   * * `undetermined` — a harness is reachable, but the host could not *read*
+   *   this company's inference configuration, so it cannot say why the company
+   *   fell back to the echo brain. **Name no remedy here**: an unreadable
+   *   config is no evidence that saving one would help, which is why the
+   *   workflow-run route refuses to answer `inference_required` in this same
+   *   state.
+   *
+   * The states are named for their **remedy**, not their mechanism: both "the
+   * harness is not compiled in" and "it is, and this host never attached a
+   * pool" report `unavailable`, because the operator can act on neither.
+   *
+   * The only field here that is not a build fact alone — `mediaInBuild` and its
+   * neighbours answer "was this compiled in", and cognition is that question
+   * *and* "is a harness attached" *and* "did a model resolve at boot". A fifth
+   * boolean would have collapsed them, sending an operator who needs one
+   * settings page off looking for a new binary.
+   *
+   * `undefined` is **unknown** — an older host that does not send the field —
+   * and must never be rendered as either working or broken. The chat banner
+   * stays down in that case: a host we cannot ask is not evidence of an echo.
+   */
+  cognition?: CognitionState;
 }
+
+/**
+ * Whether a company's teammates can think, and why not when they cannot
+ * (issue #1735). See `CapabilityStatusDto.cognition`.
+ */
+export type CognitionState =
+  | "configured"
+  | "unconfigured"
+  | "restart-required"
+  | "unavailable"
+  | "undetermined";
 
 /** One day's token totals in the usage series (`GET .../usage`). */
 export interface UsagePointDto {

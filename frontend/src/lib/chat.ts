@@ -38,8 +38,24 @@ export interface ChatMessage {
   /**
    * The reply's originating channel (e.g. "operator"). Threads the company
    * side by sender: a distinct channel reads as its own agent in the chat.
+   *
+   * **Not a provenance signal.** The offline echo brain names its own outbound
+   * channel `operator` too, so this cannot tell a person's message from a
+   * canned reply — read {@link byPerson} for that.
    */
   channel?: string;
+  /**
+   * A person typed this line, rather than the runtime producing it (issue
+   * #1734). Read straight off the host; never inferred here.
+   *
+   * Only set by {@link fromHistory}, because it is the only path a message
+   * somebody *else* wrote arrives on — every locally built company line is an
+   * agent reply, from this console's own POST or from an `AgentReplyEvent`.
+   *
+   * `undefined` means the host could not say, and nothing downstream may turn
+   * that into a claim in either direction.
+   */
+  byPerson?: boolean;
   /**
    * The message this one replies to. A line with a parent is a thread reply:
    * it stays out of the channel timeline and renders inside the thread panel.
@@ -337,6 +353,9 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       from,
       text: entry.text,
       at: entry.atMillis,
+      // Straight through, never derived: see the field's own note, and
+      // `MessageView::by_person` for why the host is the only layer that knows.
+      byPerson: entry.byPerson,
       // The host names the parent by its own id, which lives in the same
       // namespace as `entry.id` — so it takes the same prefix, or the reply
       // would point at a line no console id matches (issue #364).

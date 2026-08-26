@@ -3339,6 +3339,7 @@ pub async fn assert_usage_meter(usage: Arc<dyn UsageMeter>) {
         cost_usd: cost,
         kind: SampleKind::Inference,
         run_id: None,
+        model: None,
     };
 
     usage.record(&alpha, &sample(100, 0.1)).await.unwrap();
@@ -3379,6 +3380,7 @@ pub async fn assert_usage_meter(usage: Arc<dyn UsageMeter>) {
         cost_usd: 0.03,
         kind: SampleKind::PlanningCall,
         run_id: None,
+        model: None,
     };
     usage.record(&alpha, &planning).await.unwrap();
     let back = usage
@@ -3391,6 +3393,41 @@ pub async fn assert_usage_meter(usage: Arc<dyn UsageMeter>) {
     assert_eq!(back, planning);
     assert_eq!(back.agent, "company");
     assert!(back.run_id.is_none(), "a planning pass has no attempt row");
+
+    // Issue #1749: the model slug round-trips on every backend, and does so as
+    // the *stored string* rather than only as a value that happens to compare
+    // equal. `by model` is an aggregation over what came back out of the
+    // store, so a backend that dropped or mangled the field would make the
+    // whole question unanswerable while every other assertion here still
+    // passed.
+    let with_model = UsageSample {
+        at_millis: 400,
+        agent: "ceo".to_string(),
+        provider: "byok".to_string(),
+        input_tokens: 12,
+        output_tokens: 4,
+        cached_input_tokens: 0,
+        cost_usd: 0.02,
+        kind: SampleKind::Inference,
+        run_id: None,
+        model: Some(crate::metering::ModelSlug::classify(
+            "anthropic/claude-sonnet-4-6",
+        )),
+    };
+    usage.record(&alpha, &with_model).await.unwrap();
+    let back = usage
+        .query(&alpha, 400)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.at_millis == 400)
+        .expect("the sample with a model persists");
+    assert_eq!(back, with_model);
+    assert_eq!(
+        back.model.map(|m| m.as_str()),
+        Some("anthropic-sonnet"),
+        "the stored slug must survive the backend's own encoding"
+    );
 }
 
 /// Asserts the [`UsageMeter`] retention contract: samples older than the 90-day
@@ -3409,6 +3446,7 @@ pub async fn assert_usage_retention(usage: Arc<dyn UsageMeter>) {
         cost_usd: 0.1,
         kind: SampleKind::Inference,
         run_id: None,
+        model: None,
     };
 
     // A fixed base far from epoch 0 so the cutoff math stays positive.

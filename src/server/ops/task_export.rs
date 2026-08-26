@@ -639,11 +639,11 @@ fn escape(text: &str) -> String {
     out
 }
 
-/// A filesystem-safe stem derived from a card's title.
+/// A filesystem-safe stem for the downloaded file, from the card's title.
 ///
 /// Falls back to the id when a title reduces to nothing (emoji, punctuation),
 /// so the attachment always has a name.
-pub(crate) fn slug(title: &str, id: &str) -> String {
+fn slug(title: &str, id: &str) -> String {
     let mut out = String::new();
     let mut dash = false;
     for c in title.chars().take(60) {

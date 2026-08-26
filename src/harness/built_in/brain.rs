@@ -44,7 +44,6 @@ use crate::harness::run_turn::HarnessRunTurn;
 use crate::harness::{HarnessDeps, HarnessPool};
 use crate::runtime::assignee;
 use crate::runtime::delegation::{self, DelegationRunner, RunTurn};
-use crate::server::ops::task_export;
 
 /// The most operator redirects honored within a single task dispatch (issue
 /// #111). A redirect re-runs the turn in-loop with the fresh instruction
@@ -60,33 +59,6 @@ const NO_TASK_STORE: &str = "this company has no task board wired, so the card c
 /// The `error` a dispatched attempt settles with when its card is gone by the
 /// time the cycle reaches it (deleted, or never persisted).
 const CARD_VANISHED: &str = "the card was gone by the time its dispatch ran";
-
-/// The stable, readable workspace-folder name for one task's deliverables.
-///
-/// [`task_export::slug`] supplies the shared title sanitization and the full-id
-/// fallback. A suffix from the host-minted card id keeps equal titles distinct
-/// while remaining identical on every publish of the same card.
-fn task_folder_name(title: &str, id: &str) -> String {
-    let title_slug = task_export::slug(title, id);
-    if !title
-        .chars()
-        .take(60)
-        .any(|character| character.is_ascii_alphanumeric())
-    {
-        return title_slug;
-    }
-
-    let short_id: String = id
-        .chars()
-        .rev()
-        .filter(|character| character.is_ascii_hexdigit())
-        .take(8)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{title_slug}-{short_id}")
-}
 
 /// The system bubble appended when a turn paused at its tool-iteration cap
 /// (issue #926).
@@ -1958,10 +1930,14 @@ impl HarnessBrain {
             // is exactly what a pre-#552 record carries. The next publish of
             // the same source retries and heals it.
             if let Some(workspace) = self.deps.workspace.as_ref() {
-                let task_folder_name = task_folder_name(&card.title, &card.id);
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
-                    task_id: &task_folder_name,
+                    task_id: &card.id,
+                    // Issue #1687: the folder the deliverable lands in is
+                    // named for the work, not only keyed by it. The card is
+                    // right here and its title is the one string that says
+                    // what an operator is looking at.
+                    task_title: Some(card.title.as_str()),
                     source: &pending.source,
                     payload: match &pending.payload {
                         crate::harness::publish::PublishPayload::Text(text) => {
@@ -2402,26 +2378,18 @@ impl HarnessBrain {
         let Some(chat) = chat else {
             return self.responder.clone();
         };
-        if let Some(lead) = self.desk_lead(chat) {
-            return lead;
-        }
-        if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
-            return agent;
-        }
-        // Issue #982, step 3: the console's DM channel id, `dm:<teammate-id>`.
-        // Tried LAST, and for the same reason the case-folding above is safe —
-        // it can only claim a key that resolves to nothing today, so no existing
+        // The four arms — desk lead, bare roster id, then the console's
+        // `dm:<teammate-id>` key tried both ways (issue #982, step 3) — live on
+        // the brain-agnostic seam since issue #1725, so the cycle's small-talk
+        // fast path attributes its reply to the same teammate a turn would have.
+        // The DM arm stays LAST there for the reason it was last here: it can
+        // only claim a key that resolves to nothing today, so no existing
         // thread moves, and a company that really does have a desk or teammate
-        // called `dm:x` keeps it. Without it a `dm:`-keyed thread reached arm 4
-        // and the orchestrator answered a DM addressed to somebody else, which
-        // is the same misroute #884 closed for a bare key.
-        if let Some(key) = crate::runtime::assignee::dm_key(chat) {
-            if let Some(lead) = self.desk_lead(key) {
-                return lead;
-            }
-            if let Some(agent) = self.record().resolve_roster_agent_id(key) {
-                return agent;
-            }
+        // called `dm:x` keeps it.
+        if let Some(responder) =
+            crate::runtime::delegation_tools::chat_responder(&self.record(), chat)
+        {
+            return responder;
         }
         tracing::warn!(
             company = %self.record().id,
@@ -2444,23 +2412,6 @@ impl HarnessBrain {
             Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
             _ => crate::server::ops::language::DEFAULT_DESK,
         }
-    }
-
-    /// The lead member of a desk: the first member of the matching group chat
-    /// (by id, or by case-insensitive name) that is a real roster teammate.
-    /// `None` when no desk matches or none of its members are on the roster.
-    ///
-    /// Membership is the desk's **effective** roster — the manifest members
-    /// unioned with operator-added overlay members (issue #72) — resolved through
-    /// the same [`CompanyRecord::effective_desk_members`] the REST `list_desks`
-    /// handler uses, so the two cannot drift. A roster teammate is a manifest
-    /// agent or a team-overlay teammate, so an overlay-added lead is reachable on
-    /// a desk the manifest left empty.
-    fn desk_lead(&self, desk: &str) -> Option<String> {
-        // Desk-lead resolution is brain-agnostic — it reads only `CompanyRecord`
-        // — so it lives on the delegation seam (issue #176); this stays a thin
-        // wrapper for the routing callers on the brain.
-        delegation::desk_lead(&self.record(), desk)
     }
 
     /// Drains the MCP failure queue **onto the operator bubble's step timeline**
@@ -2761,6 +2712,10 @@ impl Brain for HarnessBrain {
         Cognition {
             path: crate::ports::brain::HARNESS_PATH,
             provider: "per-turn",
+            // Named per turn, beside the provider slug, for the same reason:
+            // this path meters itself and reports zero cycle usage, so a model
+            // named here would never reach a sample (issue #1749).
+            model: None,
             metering: UsageMetering::PerTurn,
         }
     }
@@ -3537,30 +3492,6 @@ description = "Runs Acme."
 
     use crate::ports::TaskStore;
 
-    #[test]
-    fn task_folder_name_uses_the_title_and_a_stable_short_id() {
-        let id = "019fad5ada20-000000000003";
-        let name = task_folder_name("Prepare Q3 Market Report", id);
-
-        assert_eq!(name, "prepare-q3-market-report-00000003");
-        assert_ne!(name, id, "the raw minted id must not be the folder name");
-        assert_eq!(
-            task_folder_name("Prepare Q3 Market Report", id),
-            name,
-            "republishes of one card must resolve to the same folder"
-        );
-        assert_ne!(
-            task_folder_name("Prepare Q3 Market Report", "019fad5ada20-000000000004"),
-            name,
-            "equal task titles must remain distinct"
-        );
-        assert_eq!(
-            task_folder_name("", id),
-            id,
-            "an empty title falls back to the full minted id"
-        );
-    }
-
     /// A two-agent record so assignee routing has somewhere to route.
     fn record_two() -> CompanyRecord {
         let manifest = toml::from_str(
@@ -4199,7 +4130,10 @@ members = ["engineer"]
                     && n.parent_id
                         .as_deref()
                         .and_then(name_of)
-                        .is_some_and(|parent| parent == "t-1")
+                        // Issue #1687: the task folder is named for the work
+                        // and keyed by the card id — `<title>.<id>`, not the
+                        // bare id — so browsing by path lands on that name.
+                        .is_some_and(|parent| parent == "ship-the-thing.t-1")
             })
             .expect("agent B finds the deliverable by browsing the shared tree");
 
@@ -5739,7 +5673,7 @@ members = ["engineer"]
             "an absent record must not empty the roster"
         );
         assert_eq!(
-            brain.desk_lead("eng_desk"),
+            delegation::desk_lead(&brain.record(), "eng_desk"),
             Some("engineer".to_string()),
             "nor cost the company its desks"
         );
@@ -6125,7 +6059,10 @@ name = "Design"
             setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "design"),
+            Some("engineer".to_string())
+        );
         assert_eq!(brain.responder_for(Some("design")), "engineer");
     }
 
@@ -6193,7 +6130,10 @@ members = ["eng1", "eng2"]
             setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "eng"),
+            Some("cto".to_string())
+        );
     }
 
     /// Regression for the builder seeding path (#133): a desk-order change written
@@ -6260,7 +6200,7 @@ members = ["eng1", "eng2"]
         let loaded = store.load(&id).await.unwrap().unwrap();
         let (brain, _tasks) = brain_over(dir.path(), loaded);
         assert_eq!(
-            brain.desk_lead("eng"),
+            delegation::desk_lead(&brain.record(), "eng"),
             Some("eng1".to_string()),
             "blueprint lead before reorder"
         );
@@ -6280,7 +6220,7 @@ members = ["eng1", "eng2"]
         let reloaded = store.load(&id).await.unwrap().unwrap();
         let (rebuilt, _tasks2) = brain_over(dir.path(), reloaded);
         assert_eq!(
-            rebuilt.desk_lead("eng"),
+            delegation::desk_lead(&rebuilt.record(), "eng"),
             Some("eng2".to_string()),
             "reorder did not take effect on routing after rebuild"
         );
