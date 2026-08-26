@@ -1,0 +1,445 @@
+//! Activation-signal derivation (issue #1843): the shared "is this company
+//! activated" answer the onboarding gate (#1844) and the week-1 nudge (#1845)
+//! both read, so neither has to re-derive the funnel or invent its own step
+//! vocabulary.
+//!
+//! Activation is three steps, each named by [`OnboardingStep`]:
+//!
+//! 1. **`NameConfirmed`** — [`CompanyRecord::name_confirmed`], written by a
+//!    future console write path (#1844's confirm-name route). This module only
+//!    reads it.
+//! 2. **`IntegrationConnected`** — the company holds at least one active
+//!    Composio connection AND its `[tools].allow` explicitly grants the
+//!    `composio` namespace (both halves of
+//!    [`grants_composio_explicit`](crate::company::grants_composio_explicit)'s
+//!    rule). A connection nobody granted the namespace for cannot be used by
+//!    any agent, so it does not count as activation on its own.
+//! 3. **`WorkflowRunSucceeded`** — at least one real (non-dry) workflow run
+//!    reached [`RunStatus::Succeeded`](crate::ports::runs::RunStatus::Succeeded).
+//!    Answered by scanning the journal for a
+//!    [`CompanyEvent::WorkflowRunFinished`] with no error and not cancelled —
+//!    a dry run never journals that event at all
+//!    (`WorkflowSpawn::spawn_admitted`, issue #542), so every entry this scan
+//!    finds is, by construction, a real run.
+//!
+//! # The latch is the source of truth once set
+//!
+//! [`CompanyRecord::activation_completed_at`] is a one-way latch: once every
+//! step has been true simultaneously, [`compute_and_latch`] stamps it and
+//! [`ActivationStatus::is_activated`] answers `true` forever after — even if a
+//! step's live signal later goes false again (a Composio connection gets
+//! disconnected). This is deliberate, not an oversight: activation is asking
+//! "did this operator ever clear onboarding", not "is onboarding state
+//! currently intact", and the two questions have different answers on
+//! purpose — the gate this feeds must not re-open for an operator who already
+//! got past it.
+//!
+//! [`compute_and_latch`] short-circuits on an existing latch before doing any
+//! IO beyond the record load, which is what keeps a poll from an activated
+//! company cheap (no Composio call, no journal scan) and is the other half of
+//! the monotonicity guarantee: nothing downstream of the latch can flip it
+//! back.
+
+use std::sync::Arc;
+
+use crate::Result;
+use crate::company::grants_composio_explicit;
+use crate::error::OpenCompanyError;
+use crate::ports::events::EventLog;
+use crate::ports::now_millis;
+use crate::ports::store::{CompanyStore, company_write_lock};
+use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq};
+
+/// The three step answers plus the terminal latch, all as of one moment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActivationStatus {
+    /// [`CompanyRecord::name_confirmed`], read verbatim.
+    pub name_confirmed: bool,
+    /// `true` only when the company both holds a live Composio connection AND
+    /// has explicitly granted the `composio` namespace — see the module docs.
+    pub integration_connected: bool,
+    /// Whether the journal shows a real (non-dry) workflow run that reached
+    /// `succeeded`.
+    pub workflow_run_succeeded: bool,
+    /// [`CompanyRecord::activation_completed_at`], read verbatim. `Some` means
+    /// the company activated at some point in the past — see
+    /// [`Self::is_activated`] for why that does not require every step to
+    /// currently read `true`.
+    pub activation_completed_at: Option<u64>,
+}
+
+impl ActivationStatus {
+    /// Whether every step is true **right now**. Not the same question as
+    /// [`Self::is_activated`] — see the module docs' latch section. Exposed
+    /// mainly for [`compute_and_latch`] to decide whether to stamp the latch;
+    /// a reader wanting "is this company activated" should call
+    /// [`Self::is_activated`] instead.
+    pub fn all_steps_complete(&self) -> bool {
+        self.name_confirmed && self.integration_connected && self.workflow_run_succeeded
+    }
+
+    /// Whether this company is activated: the latch if one is already set,
+    /// otherwise whether every step currently reads true (the moment the latch
+    /// itself would be set, for a caller computing this without persisting).
+    pub fn is_activated(&self) -> bool {
+        self.activation_completed_at.is_some() || self.all_steps_complete()
+    }
+}
+
+/// Derives the three step booleans from already-fetched inputs. Pure and
+/// synchronous on purpose: neither a live Composio connection lookup nor a
+/// journal scan belongs in a function a unit test should be able to call with
+/// a bare [`CompanyRecord`] and two booleans — see this module's own `test`
+/// submodule for the permutation coverage that buys.
+///
+/// `has_composio_connection` is the caller's own answer to "does this company
+/// hold at least one active Composio connection" (from
+/// `list_connection_states`/`list_connections_detailed` on the live path, or a
+/// fixture in a test) — fetching it is IO this function deliberately does not
+/// perform.
+pub(crate) fn derive_steps(
+    record: &CompanyRecord,
+    has_composio_connection: bool,
+    workflow_run_succeeded: bool,
+) -> ActivationStatus {
+    ActivationStatus {
+        name_confirmed: record.name_confirmed,
+        integration_connected: has_composio_connection
+            && grants_composio_explicit(&record.manifest.tools.allow),
+        workflow_run_succeeded,
+        activation_completed_at: record.activation_completed_at,
+    }
+}
+
+/// Whether the company's journal shows at least one real (non-dry) workflow
+/// run reaching `succeeded` — see the module docs for why a dry run can never
+/// answer this `true`.
+///
+/// Reads the whole journal (`EventSeq::new(0)..`, matching the fallback
+/// [`EventLog::read_before`] itself uses) rather than an indexed query,
+/// because none exists — acceptable because [`compute_and_latch`] only ever
+/// calls this while [`CompanyRecord::activation_completed_at`] is still
+/// `None`, i.e. at most once per company between "created" and "activated",
+/// never again after.
+pub(crate) async fn any_workflow_run_succeeded(
+    company: &CompanyId,
+    events: &Arc<dyn EventLog>,
+) -> Result<bool> {
+    let stored = events
+        .read_from(company, EventSeq::new(0), usize::MAX)
+        .await?;
+    Ok(stored.iter().any(|entry| {
+        matches!(
+            &entry.event,
+            CompanyEvent::WorkflowRunFinished {
+                error: None,
+                cancelled: false,
+                ..
+            }
+        )
+    }))
+}
+
+/// Loads the record, derives the current step answers, and — the moment every
+/// step is true for the first time — durably latches
+/// [`CompanyRecord::activation_completed_at`] and journals the terminal
+/// [`CompanyEvent::OnboardingCompleted`]. Short-circuits on an existing latch
+/// (see the module docs): no Composio call, no journal scan, once activated.
+///
+/// `has_composio_connection` is the caller's pre-fetched answer, exactly as
+/// [`derive_steps`] wants it — this function does no Composio IO itself, so it
+/// compiles and runs the same whether or not the `composio` Cargo feature is
+/// enabled; a caller without that feature simply always passes `false`.
+pub(crate) async fn compute_and_latch(
+    company: &CompanyId,
+    store: &Arc<dyn CompanyStore>,
+    events: &Arc<dyn EventLog>,
+    has_composio_connection: bool,
+) -> Result<ActivationStatus> {
+    let record = store
+        .load(company)
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
+
+    // The latch, once set, is the whole answer — see the module docs. Every
+    // IO below this point exists only to decide whether to *set* it, so an
+    // already-activated company skips all of it.
+    if record.activation_completed_at.is_some() {
+        return Ok(ActivationStatus {
+            name_confirmed: record.name_confirmed,
+            integration_connected: has_composio_connection
+                && grants_composio_explicit(&record.manifest.tools.allow),
+            workflow_run_succeeded: true,
+            activation_completed_at: record.activation_completed_at,
+        });
+    }
+
+    let workflow_run_succeeded = any_workflow_run_succeeded(company, events).await?;
+    let status = derive_steps(&record, has_composio_connection, workflow_run_succeeded);
+
+    if !status.all_steps_complete() {
+        return Ok(status);
+    }
+
+    // Every step just read true for the first time. Re-load and re-check under
+    // the per-company write lock before latching: two concurrent callers (two
+    // console polls racing a webhook, say) could both observe every step
+    // complete above, and without this the second would both clobber whichever
+    // other write landed between its `load` and `save` AND double-journal
+    // `OnboardingCompleted`. The lock + re-check makes the second caller's
+    // latch a no-op that returns the first caller's timestamp instead.
+    let write_lock = company_write_lock(company);
+    let _lock = write_lock.lock().await;
+    let mut record = store
+        .load(company)
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
+    if let Some(at_millis) = record.activation_completed_at {
+        return Ok(ActivationStatus {
+            activation_completed_at: Some(at_millis),
+            ..status
+        });
+    }
+
+    // The record is the source of truth ([`ActivationStatus::is_activated`]'s
+    // contract) — latch it before journaling, so the event is only ever the
+    // audit trail of a fact the record already carries.
+    let at_millis = now_millis();
+    record.activation_completed_at = Some(at_millis);
+    store.save(&record).await?;
+    drop(_lock);
+
+    // Best-effort: the latch above already landed, so a journal failure here
+    // never leaves the company un-activated — only the audit trail thinner.
+    if let Err(err) = events
+        .append(company, CompanyEvent::OnboardingCompleted { at_millis })
+        .await
+    {
+        tracing::warn!(
+            %company,
+            %err,
+            "company completed activation but the OnboardingCompleted audit event could not be journaled"
+        );
+    }
+
+    Ok(ActivationStatus {
+        activation_completed_at: Some(at_millis),
+        ..status
+    })
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::store::fs::{FsCompanyStore, FsEventLog};
+
+    /// A fresh filesystem-backed store + journal pair, rooted at a throwaway
+    /// tempdir — the same real [`CompanyStore`]/[`EventLog`] implementations
+    /// the running app uses, not a hand-rolled fake, so `read_from`/`append`
+    /// behave exactly as [`compute_and_latch`] will see them in production.
+    fn stores() -> (Arc<dyn CompanyStore>, Arc<dyn EventLog>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(dir.path()));
+        let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        (store, events, dir)
+    }
+
+    fn manifest(allow: &[&str]) -> CompanyManifest {
+        let allow_line = allow
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        toml::from_str(&format!(
+            "[company]\nname = \"Acme\"\n[tools]\nallow = [{allow_line}]\n"
+        ))
+        .expect("valid manifest")
+    }
+
+    fn record(id: &CompanyId, allow: &[&str]) -> CompanyRecord {
+        CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(allow),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        }
+    }
+
+    // --- derive_steps: every permutation of the three inputs -----------------
+
+    #[test]
+    fn no_steps_complete_when_nothing_is_true() {
+        let r = record(&CompanyId::new("acme"), &[]);
+        let status = derive_steps(&r, false, false);
+        assert!(!status.name_confirmed);
+        assert!(!status.integration_connected);
+        assert!(!status.workflow_run_succeeded);
+        assert!(!status.all_steps_complete());
+        assert!(!status.is_activated());
+    }
+
+    #[test]
+    fn name_confirmed_alone_is_not_activation() {
+        let mut r = record(&CompanyId::new("acme"), &[]);
+        r.name_confirmed = true;
+        let status = derive_steps(&r, false, false);
+        assert!(status.name_confirmed);
+        assert!(!status.all_steps_complete());
+    }
+
+    #[test]
+    fn connection_without_the_composio_grant_is_not_integration_connected() {
+        // Issue #1843's namespace-AND gate: a live connection alone must not
+        // read as "integration connected" when the company never granted the
+        // `composio` namespace — the same rule `grants_composio_explicit`
+        // enforces for the harness wiring itself.
+        let r = record(&CompanyId::new("acme"), &["*"]);
+        let status = derive_steps(&r, /* has_composio_connection */ true, false);
+        assert!(
+            !status.integration_connected,
+            "a wildcard grant must not confer `composio` — see `grants_composio_explicit`"
+        );
+    }
+
+    #[test]
+    fn grant_without_a_connection_is_not_integration_connected() {
+        let r = record(&CompanyId::new("acme"), &["composio"]);
+        let status = derive_steps(&r, /* has_composio_connection */ false, false);
+        assert!(!status.integration_connected);
+    }
+
+    #[test]
+    fn connection_and_explicit_grant_together_complete_the_step() {
+        let r = record(&CompanyId::new("acme"), &["composio"]);
+        let status = derive_steps(&r, true, false);
+        assert!(status.integration_connected);
+    }
+
+    #[test]
+    fn dotted_composio_subgrant_also_counts() {
+        let r = record(&CompanyId::new("acme"), &["composio.gmail"]);
+        let status = derive_steps(&r, true, false);
+        assert!(status.integration_connected);
+    }
+
+    #[test]
+    fn all_three_steps_true_is_activation() {
+        let mut r = record(&CompanyId::new("acme"), &["composio"]);
+        r.name_confirmed = true;
+        let status = derive_steps(&r, true, true);
+        assert!(status.all_steps_complete());
+        assert!(status.is_activated());
+    }
+
+    // --- latch monotonicity ---------------------------------------------------
+
+    #[test]
+    fn latched_company_reads_activated_even_with_every_live_step_false() {
+        // Issue #1843: a Composio connection disconnected AFTER activation must
+        // not un-activate the company. `is_activated` must answer from the
+        // latch, not by re-deriving the three steps.
+        let mut r = record(&CompanyId::new("acme"), &[]);
+        r.activation_completed_at = Some(1_700_000_000_000);
+        let status = derive_steps(&r, false, false);
+        assert!(
+            !status.all_steps_complete(),
+            "the live steps really are false"
+        );
+        assert!(
+            status.is_activated(),
+            "the latch alone must be enough — monotonicity"
+        );
+    }
+
+    // --- compute_and_latch: the async orchestration ---------------------------
+
+    #[tokio::test]
+    async fn compute_and_latch_stamps_the_record_and_journals_once_all_steps_complete() {
+        let id = CompanyId::new("acme");
+        let (store, events, _dir) = stores();
+
+        let mut r = record(&id, &["composio"]);
+        r.name_confirmed = true;
+        store.save(&r).await.unwrap();
+
+        // The workflow-run-succeeded signal comes from the journal, not the
+        // record — append a successful, non-cancelled `WorkflowRunFinished`.
+        events
+            .append(
+                &id,
+                CompanyEvent::WorkflowRunFinished {
+                    workflow_id: "digest".to_string(),
+                    scheduled: false,
+                    run_id: Some("run-1".to_string()),
+                    deliveries: Vec::new(),
+                    pending_approvals: Vec::new(),
+                    error: None,
+                    cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let status = compute_and_latch(&id, &store, &events, true).await.unwrap();
+        assert!(status.is_activated());
+        assert!(status.activation_completed_at.is_some());
+
+        let reloaded = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            reloaded.activation_completed_at.is_some(),
+            "the latch must be durably persisted, not just returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_and_latch_does_not_latch_when_a_step_is_still_missing() {
+        let id = CompanyId::new("acme");
+        let (store, events, _dir) = stores();
+        store.save(&record(&id, &["composio"])).await.unwrap();
+
+        // No workflow run journaled at all — the third step is missing.
+        let status = compute_and_latch(&id, &store, &events, true).await.unwrap();
+        assert!(!status.is_activated());
+
+        let reloaded = store.load(&id).await.unwrap().unwrap();
+        assert!(reloaded.activation_completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn compute_and_latch_short_circuits_once_latched_even_if_a_step_regresses() {
+        let id = CompanyId::new("acme");
+        let (store, events, _dir) = stores();
+
+        let mut r = record(&id, &[]); // no composio grant at all — a regression
+        r.activation_completed_at = Some(1_700_000_000_000);
+        store.save(&r).await.unwrap();
+
+        // has_composio_connection: false, and the journal is empty — every live
+        // step reads false, and yet the company must still read as activated.
+        let status = compute_and_latch(&id, &store, &events, false)
+            .await
+            .unwrap();
+        assert!(status.is_activated());
+        assert_eq!(status.activation_completed_at, Some(1_700_000_000_000));
+    }
+}

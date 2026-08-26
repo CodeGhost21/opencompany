@@ -9,6 +9,14 @@
 // alternative to inline `[[agent]]` entries, carrying a custom prompt and its
 // own briefing documents. Always compiled: it is part of parsing a company, and
 // `opencompany check` must report on it in every build.
+/// The account-activation funnel (issue #1843): whether a company has confirmed
+/// its name, connected + granted Composio, and run a real workflow to success —
+/// the shared substrate the onboarding gate and the week-1 nudge both read.
+/// Always compiled: the REST read projection is a default-build console route,
+/// and gating the derivation behind a feature its caller lacks is exactly how
+/// `create_company_workflow` (issue #168) and this module's own name-confirmed
+/// input drifted apart before.
+pub(crate) mod activation;
 pub(crate) mod agent_file;
 /// Issue #552: the seam between a task artifact and the shared workspace tree.
 /// Always compiled — the console's workspace and artifact routes reach it in
