@@ -373,8 +373,12 @@ so a row that reached the store some other way still confers nothing.
 Granting what the manifest already grants stores no override — the console must
 not claim credit for a seed grant, or a later `DELETE` would appear to revoke
 one it cannot touch. `DELETE` withdraws one namespace (`?namespace=paypal`) or
-every console grant; a manifest grant is untouchable here by construction. Both
-writes are admin-only and attributed.
+every console grant. It recomputes the list from the recovered seed
+(`seed_tool_allow`) rather than subtracting the named namespace from the folded
+one, which is what makes a manifest grant untouchable *structurally* rather than
+by a guard: a `?namespace=` naming something only the seed grants would
+otherwise strip it from the record and cost the company that tool until its next
+rebuild re-read `company.toml`. Both writes are admin-only and attributed.
 
 Unlike `[policy]`, the resolved value is **folded into the persisted manifest**
 rather than merged at each read. `[tools].allow` is consulted at some three
@@ -383,7 +387,14 @@ wiring, all five connection status routes — and a parallel resolution would ha
 to reach every one of them, with the single missed site reproducing the bug the
 fix exists to close. Folded once, there is one place to be right.
 `ToolGrantsOverride` is still stored separately, so the seed's own list stays
-recoverable (`builder::seed_allow`) and the grant stays attributed.
+recoverable (`ports::types::seed_tool_allow`) and the grant stays attributed.
+Three callers need that inverse and must agree on it: the rebuild's carry rule,
+this route's `manifestAllow`, and the **export bundle** — whose `company.toml`
+becomes the seed for the restored company, so it carries the recovered seed and
+`restore_via_ports` re-folds. Exporting the folded list instead would hand the
+next rebuild a seed that already grants the namespace, the carry rule would
+correctly clear the override, and an attributed console grant would have been
+silently promoted to a manifest grant beyond the reach of `DELETE`.
 
 A grant takes effect on the company's **next turn**: belts are wired per roster
 build, and the effective grant list is fingerprinted alongside the other

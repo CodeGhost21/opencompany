@@ -70,7 +70,7 @@ use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{
     Actor, ActorKind, CONSOLE_GRANTABLE_NAMESPACES, CompanyRecord, ToolGrantsOverride,
-    console_grantable,
+    console_grantable, effective_tool_allow, seed_tool_allow,
 };
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
@@ -123,19 +123,11 @@ impl ToolGrantsDto {
             allow: record.effective_tool_allow(),
             // The record's manifest is materialised seed-plus-grants (see the
             // fold in `runtime::builder`), so the seed's own list is recovered
-            // by removing what this route added — the same subtraction
-            // `builder::seed_allow` makes for the carry rule. Reporting the
-            // materialised list here would tell an operator version control
-            // grants something it does not, and a `DELETE` would then look like
-            // it had done nothing.
-            manifest_allow: record
-                .manifest
-                .tools
-                .allow
-                .iter()
-                .filter(|grant| !held.is_some_and(|h| h.added.contains(grant)))
-                .cloned()
-                .collect(),
+            // by removing what this route added. Reporting the materialised
+            // list here would tell an operator version control grants something
+            // it does not, and a `DELETE` would then look like it had done
+            // nothing.
+            manifest_allow: seed_tool_allow(&record.manifest.tools.allow, held),
             added: held.map(|h| h.added.clone()).unwrap_or_default(),
             grantable: CONSOLE_GRANTABLE_NAMESPACES.to_vec(),
             set_by: held.map(|h| h.set_by.id.clone()),
@@ -215,19 +207,11 @@ async fn add_grant(
     // and a later `DELETE` would then appear to revoke a seed grant it cannot
     // touch. Returning the current state is the honest answer to "make sure
     // this is granted", which is what the caller asked.
-    let seed_grants = record
-        .manifest
-        .tools
-        .allow
-        .iter()
-        .filter(|grant| {
-            !record
-                .overlay_tool_grants
-                .as_ref()
-                .is_some_and(|held| held.added.contains(grant))
-        })
-        .any(|grant| grant == &namespace);
-    if seed_grants {
+    let seed = seed_tool_allow(
+        &record.manifest.tools.allow,
+        record.overlay_tool_grants.as_ref(),
+    );
+    if seed.contains(&namespace) {
         return Ok(Json(ToolGrantsDto::build(&record)));
     }
 
@@ -281,26 +265,31 @@ async fn clear_grants(
 
     let mut record = load_record(&company).await?;
     let held = record.overlay_tool_grants.clone();
-    let removed: Vec<String> = match &query.namespace {
-        Some(namespace) => vec![namespace.trim().to_ascii_lowercase()],
-        None => held.as_ref().map(|h| h.added.clone()).unwrap_or_default(),
-    };
 
-    // Take the withdrawn namespaces back out of the folded manifest before
-    // rebuilding the overlay, or the grant would survive its own removal: the
-    // fold is what every reader consults, and `effective_tool_allow` only ever
-    // appends to what it is given.
-    record
-        .manifest
-        .tools
-        .allow
-        .retain(|grant| !removed.contains(grant));
+    // Recover version control's own list BEFORE touching anything, then rebuild
+    // the manifest from it. Subtracting the withdrawn namespaces from the folded
+    // list directly is the obvious version of this, and it is wrong: a
+    // `?namespace=` naming a namespace the SEED grants — an operator tidying up,
+    // or simply guessing — would strip a manifest grant this layer has no
+    // authority over, and the company would lose the tool until its next rebuild
+    // re-read `company.toml`. Recomputing from the seed makes that structurally
+    // impossible rather than merely guarded against: the only inputs to the new
+    // list are the seed and whatever survives in the override.
+    let seed = seed_tool_allow(&record.manifest.tools.allow, held.as_ref());
+    let requested = query
+        .namespace
+        .as_ref()
+        .map(|namespace| namespace.trim().to_ascii_lowercase());
 
     record.overlay_tool_grants = held.and_then(|mut held| {
-        held.added.retain(|grant| !removed.contains(grant));
+        match &requested {
+            Some(namespace) => held.added.retain(|grant| grant != namespace),
+            // A bare `DELETE` withdraws every console grant.
+            None => held.added.clear(),
+        }
         (!held.is_empty()).then_some(held)
     });
-    record.manifest.tools.allow = record.effective_tool_allow();
+    record.manifest.tools.allow = effective_tool_allow(&seed, record.overlay_tool_grants.as_ref());
 
     save(&company, &record).await?;
     Ok(Json(ToolGrantsDto::build(&record)))
@@ -622,6 +611,57 @@ mod tests {
             "the withdrawal must reach the list the harness reads: {:?}",
             record.manifest.tools.allow
         );
+    }
+
+    /// **A `DELETE` naming a namespace the SEED grants must change nothing.**
+    ///
+    /// The obvious implementation subtracts the requested namespace from the
+    /// folded `[tools].allow`, which quietly strips a manifest grant this layer
+    /// has no authority over — the company then loses the tool until its next
+    /// rebuild re-reads `company.toml`, and on a hosted tenant that is the next
+    /// restart. `search` is in this fixture's manifest precisely so this can be
+    /// asserted against a real seed grant rather than a hypothetical one.
+    #[tokio::test]
+    async fn withdrawing_a_seed_namespace_leaves_it_granted() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(
+            &state,
+            "DELETE",
+            "/api/v1/company/tools/grants?namespace=search",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["allow"], json!(["*", "search"]), "{body}");
+        assert_eq!(body["manifestAllow"], json!(["*", "search"]));
+
+        let store = FsCompanyStore::new(dir.path().to_path_buf());
+        let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+        assert!(
+            crate::company::grants_search_explicit(&record.manifest.tools.allow),
+            "the seed grant must survive: {:?}",
+            record.manifest.tools.allow
+        );
+    }
+
+    /// The same, with a console grant also standing: withdrawing the seed's
+    /// namespace must leave BOTH the seed grant and the unrelated console grant
+    /// exactly where they were.
+    #[tokio::test]
+    async fn withdrawing_a_seed_namespace_leaves_the_console_grants_alone() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        call(&state, "PUT", URI, Some(json!({"namespace": "chargebee"}))).await;
+        let (_, body) = call(
+            &state,
+            "DELETE",
+            "/api/v1/company/tools/grants?namespace=search",
+            None,
+        )
+        .await;
+        assert_eq!(body["allow"], json!(["*", "search", "chargebee"]), "{body}");
+        assert_eq!(body["added"], json!(["chargebee"]));
     }
 
     /// A bare `DELETE` clears every console grant and restores the manifest's

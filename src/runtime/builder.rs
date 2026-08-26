@@ -458,25 +458,16 @@ fn carry_tool_grants_override(
     (previous_seed == next_seed).then(|| held.clone())
 }
 
-/// Recovers the **seed's** `[tools].allow` from a stored record's materialised
-/// one by removing the grants the held override put there.
+/// Recovers the **seed's** `[tools]` block from a stored record's materialised
+/// one, so [`carry_tool_grants_override`] compares seed against seed.
 ///
-/// The record's `[tools].allow` is seed-plus-console-grants (see the
-/// materialisation in `ensure`), so comparing it directly against the next seed
-/// would report "version control spoke" on every rebuild of a company that has
-/// a console grant at all — and [`carry_tool_grants_override`] would then throw
-/// the grant away immediately, making the whole layer inert.
-///
-/// A namespace present in **both** the seed and the override is removed here
-/// too, so the seed looks changed and the override is dropped. That is the safe
-/// direction and the honest one: the seed now confers it on its own, so the
-/// console layer has nothing left to add.
+/// A thin `Tools`-shaped wrapper over
+/// [`seed_tool_allow`](crate::ports::types::seed_tool_allow), which is where the
+/// subtraction lives and why: three callers need version control's own answer
+/// out of a folded list, and they must agree.
 fn seed_allow(stored: &Tools, held: Option<&ToolGrantsOverride>) -> Tools {
-    let Some(held) = held else {
-        return stored.clone();
-    };
     let mut seed = stored.clone();
-    seed.allow.retain(|grant| !held.added.contains(grant));
+    seed.allow = crate::ports::types::seed_tool_allow(&stored.allow, held);
     seed
 }
 

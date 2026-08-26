@@ -3631,6 +3631,42 @@ pub(crate) fn effective_tool_allow(
     allow
 }
 
+/// Recovers the **seed's** `[tools].allow` from a materialised one by removing
+/// the grants a held override put there — the inverse of [`effective_tool_allow`].
+///
+/// A record's `[tools].allow` is seed-plus-console-grants (the fold in
+/// `runtime::builder`), so anything that needs version control's *own* answer
+/// has to subtract first. Three callers do, and they must agree:
+///
+/// - the rebuild's carry rule, which asks "did the seed change?" — comparing the
+///   materialised list would report an edit on every rebuild of a company that
+///   has a grant at all, and the override would be dropped immediately;
+/// - `GET …/tools/grants`, which reports `manifestAllow` — reporting the
+///   materialised list would tell an operator version control grants something
+///   it does not, and a `DELETE` would then look like it had done nothing;
+/// - the export bundle, whose `company.toml` **becomes the seed** for the
+///   restored company — writing the folded list there would silently promote a
+///   console grant to a seed grant, losing its attribution and putting it beyond
+///   the reach of `DELETE …/tools/grants` forever.
+///
+/// A namespace present in both the seed and the override is removed here too.
+/// For the carry rule that is deliberate and safe (the seed looks changed, the
+/// override is dropped, and the seed confers the namespace on its own anyway);
+/// the write route refuses to create that state in the first place.
+pub(crate) fn seed_tool_allow(
+    materialised_allow: &[String],
+    override_: Option<&ToolGrantsOverride>,
+) -> Vec<String> {
+    let Some(override_) = override_ else {
+        return materialised_allow.to_vec();
+    };
+    materialised_allow
+        .iter()
+        .filter(|grant| !override_.added.contains(grant))
+        .cloned()
+        .collect()
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
