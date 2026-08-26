@@ -867,11 +867,16 @@ fn task_folder_task_id(name: &str) -> Option<&str> {
 /// must not find their tree rearranged by an upgrade they did not ask for, and
 /// a rename breaks every reference anyone kept to the old name.
 ///
-/// # A note wearing the id is still refused
+/// # A note wearing the id is refused, even when a folder also matches
 ///
 /// A deliverable cannot be published beneath a note, so a match of the wrong
 /// kind is a [`Conflict`](OpenCompanyError::Conflict) rather than a guess —
-/// the same fail-closed rule [`resolve_folder`] applies to a name.
+/// the same fail-closed rule [`resolve_folder`] applies to a name. It is
+/// checked **before** any folder is chosen, not only when no folder matched:
+/// no backend enforces unique sibling names, so a legacy or imported tree can
+/// carry a note and a folder under one name, and publishing into the folder
+/// would leave the deliverable at a path `PathIndex` reads as ambiguous — a
+/// note the agent that just wrote it could not then open.
 ///
 /// # Two folders for one task: the oldest wins, deterministically
 ///
@@ -920,14 +925,14 @@ async fn resolve_task_folder(
             _ => other_kind = true,
         }
     }
-    if let Some(oldest) = folders.iter().min() {
-        return Ok((*oldest).to_string());
-    }
     if other_kind {
         return Err(OpenCompanyError::Conflict(format!(
             "`{id}` already exists as a note, not a folder, so a deliverable cannot be \
              published beneath it"
         )));
+    }
+    if let Some(oldest) = folders.iter().min() {
+        return Ok((*oldest).to_string());
     }
     let name = task_folder_name(task_id, task_title);
     resolve_folder(workspace, company, nodes, parent, &name, agent_id).await
@@ -2760,6 +2765,71 @@ mod test {
             path_of(ws, &co, &shorter).await,
             format!("{ARTIFACTS_ROOT}/cmo/login-page.login/spec.md"),
             "`login` must mint its own folder, not adopt the one `fix-login` already has"
+        );
+    }
+
+    /// A note wearing the task's id is refused even when a folder matches too.
+    ///
+    /// No backend enforces unique sibling names, so a legacy or imported tree
+    /// can carry a note and a folder under one name. Publishing into the folder
+    /// would land the deliverable at a path the agents' `PathIndex` reads as
+    /// ambiguous — a note the agent that just wrote it could not open again —
+    /// so the wrong kind is checked before any folder is chosen, not only when
+    /// no folder matched.
+    #[tokio::test]
+    async fn a_note_wearing_the_task_id_is_refused_even_beside_a_matching_folder() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_title: Some("Launch brief"),
+                ..target("launch.md", "# Launch")
+            },
+        )
+        .await
+        .expect("first publish")
+        .node_id;
+        let tree = ws.tree(&co).await.expect("tree");
+        let published = tree.iter().find(|n| n.id == first).expect("published node");
+        let task_folder = tree
+            .iter()
+            .find(|n| Some(&n.id) == published.parent_id.as_ref())
+            .expect("task folder");
+        let agent_folder = task_folder.parent_id.clone().expect("agent folder");
+
+        // The shape an import can leave behind: a note carrying the bare task
+        // id, beside the folder that actually holds the deliverables.
+        let note = WorkspaceNode {
+            id: "imported-note".to_string(),
+            name: "t-1".to_string(),
+            kind: NodeKind::File,
+            parent_id: Some(agent_folder),
+            updated_at_millis: 1,
+            created_by: origin("cmo"),
+            updated_by: origin("cmo"),
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+        ws.create(&co, &note, Some("imported"))
+            .await
+            .expect("imported note");
+
+        let refused = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_title: Some("Launch brief"),
+                ..target("timeline.md", "# Timeline")
+            },
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(OpenCompanyError::Conflict(_))),
+            "a matching note must fail the publish closed rather than be stepped over: {refused:?}"
         );
     }
 
