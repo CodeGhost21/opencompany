@@ -25,6 +25,7 @@ import {
 import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -686,6 +687,26 @@ export function AgentDetailView({
             </li>
           </ol>
         </nav>
+
+        {/*
+          The page's accessible name in the four states `Identity` does not
+          mount for (codex review, #1785). `Identity`'s `h1` is this page's
+          only heading and it renders only once the teammate has loaded, so a
+          direct `#/team/<id>` visit that was still loading — or that landed on
+          a removed teammate, an older host, or a failed read — was a page a
+          screen reader could not announce at all.
+
+          `hidden`, because the breadcrumb above already says where you are and
+          a title bar over a skeleton would be chrome about nothing. The name
+          follows the same rule the crumb does: the teammate's, as soon as
+          there is one, and "Teammate" until then.
+        */}
+        {!(load === "ready" && agent) && (
+          <PageHeader
+            title={agent ? (agent.name?.trim() || agent.role) : "Teammate"}
+            hidden
+          />
+        )}
 
         {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
 

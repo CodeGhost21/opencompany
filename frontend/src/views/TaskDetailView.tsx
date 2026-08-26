@@ -91,6 +91,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -435,6 +436,12 @@ export function TaskDetailView({
   if (notFound) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        {/*
+          `#/tasks/<deleted-id>` had no `h1` at all (codex review, #1785): this
+          pane's only heading is the card's own title, and a deleted card has
+          none. `hidden`, because the recovery message *is* the pane.
+        */}
+        <PageHeader title="Task not found" hidden />
         <p className="text-sm font-medium">This task no longer exists.</p>
         <p className="max-w-sm text-xs text-muted-foreground">
           It may have been deleted. Head back to the board to pick another card.
