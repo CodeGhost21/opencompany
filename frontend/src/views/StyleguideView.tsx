@@ -55,7 +55,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -961,7 +966,18 @@ function ComponentSection() {
             >
               Click or hover me
             </PopoverTrigger>
-            <PopoverContent>Popovers open on click, tap, and hover.</PopoverContent>
+            <PopoverContent>
+              {/* Codex review on #1821: this example's popup is the
+               * canonical Popover pattern shown in the styleguide, so it
+               * must demonstrate the accessible-name requirement it
+               * documents rather than contradict it — a bare-text popup has
+               * no PopoverTitle to supply Popover.Popup's aria-labelledby,
+               * so it opens as an unnamed dialog. */}
+              <PopoverTitle>Popover</PopoverTitle>
+              <p className="mt-1 text-muted-foreground">
+                Popovers open on click, tap, and hover.
+              </p>
+            </PopoverContent>
           </Popover>
         </CardContent>
       </Card>
