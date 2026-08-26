@@ -46,6 +46,19 @@ function failedRun(): WorkflowRunOutcome {
   return baseRun({ seq: 4, error: "graph failed to compile" });
 }
 
+/** A run blocked on a gated call that never got a card at all: `unparkable` is
+ * set and `approvalIds` is absent, the shape `WorkflowBlockedNode.approvalIds`
+ * documents as "Absent when every park failed." `isBlocked` reads `true` off
+ * `blockedNodes.length`, and nothing here promotes the run to `stranded`
+ * (that reading only folds `pendingApprovals`/`strandedApprovals` — the
+ * gate shape, not this one — see `run-verdict.md`). */
+function blockedUnparkableRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 5,
+    blockedNodes: [{ nodeId: "notify_ops", tools: ["send_slack_message"], unparkable: 1 }],
+  });
+}
+
 /** A finished run whose one output report was refused — `undeliveredCount` is 1,
  * so the row falls to the delivery block and badges "1 not delivered". */
 function undeliveredRun(): WorkflowRunOutcome {
@@ -150,6 +163,25 @@ describe("the status dot defines the run's verdict on hover", () => {
     const title = dot?.getAttribute("title") ?? "";
     expect(title).toContain("failed");
     expect(title).not.toContain("A step errored");
+  });
+
+  // Codex review on #1821: a blocked node whose gated call could not be
+  // queued for approval at all (`unparkable`, not `stranded`) never gets a
+  // card in Approvals — `BlockedNodeApprovals`/the row's own body text
+  // already say so ("could not be queued for approval at all, so you will
+  // not be asked about it"). The old wording unconditionally told the
+  // operator to "decide it in Approvals" for every blocked run, which sends
+  // this one to a queue with nothing in it.
+  it("does not unconditionally promise a card in Approvals for a blocked run", async () => {
+    await renderHistory(blockedUnparkableRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).toContain("blocked");
+    expect(title).not.toContain("decide it in Approvals");
+    // The hedge names the case that has no card, and what to do about it.
+    expect(title).toContain("nothing there to decide");
   });
 });
 
