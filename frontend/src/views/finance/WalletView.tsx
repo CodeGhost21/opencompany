@@ -12,6 +12,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { ConnectionPanel } from "@/views/finance/ConnectionPanel";
 import { paypalHealth, startsExpanded } from "@/views/finance/health";
+import { grantNamespace } from "@/components/grant-namespace";
 import {
   defaultWindow,
   latestSelectableEnd,
@@ -63,6 +64,10 @@ function fromLocalInput(value: string): string {
 export function WalletView({ client, company }: Props) {
   const [status, setStatus] = useState<PaypalStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  // Issue #1796: whether the `paypal` grant is in flight. The panel renders the
+  // control; this page owns the write and the re-read that follows it, because
+  // the panel is shared by both providers and holds neither one's status.
+  const [granting, setGranting] = useState(false);
   const [expanded, setExpanded] = useState(false);
   // A latch, not render state: set once from the first status that arrives.
   // Re-deriving the panel's openness on every status would slam it shut the
@@ -194,6 +199,20 @@ export function WalletView({ client, company }: Props) {
           expanded={expanded}
           onExpandedChange={setExpanded}
           onTest={usable ? () => testPaypal(client, company) : undefined}
+          granting={granting}
+          onGrant={() => {
+            void (async () => {
+              setGranting(true);
+              try {
+                // Re-read on success so the panel's own verdict moves off
+                // "not granted" — a button that works and leaves the warning
+                // standing reads exactly like one that did not.
+                if (await grantNamespace(client, company, "paypal")) await loadStatus();
+              } finally {
+                setGranting(false);
+              }
+            })();
+          }}
         >
           <PaypalForm
             client={client}

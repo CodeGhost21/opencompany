@@ -75,17 +75,32 @@ describe("HostingView status surfaces", () => {
     expect(at("hosting-not-in-build")).toBeNull();
   });
 
-  it("names the manifest, not the form, when the company does not grant hosting", async () => {
-    // A token stored and still nothing reaches a teammate. The remedy is
-    // `company.toml`, so saying "not connected" here would send the operator
-    // back through a form that is already correct.
+  it("names the grant, not the form, when the company does not grant hosting", async () => {
+    // A token stored and still nothing reaches a teammate, so saying "not
+    // connected" here would send the operator back through a form that is
+    // already correct.
     await show(clientWith({ ...HOSTING_OK, granted: false }));
 
-    expect(at("hosting-not-granted")?.textContent).toContain("[tools].allow");
+    expect(at("hosting-not-granted")?.textContent).toContain("hosting");
     expect(at("hosting-not-in-build")).toBeNull();
     // The token is fully configured (HOSTING_OK) and the badge must still not
     // agree with a page that just said this integration reaches nobody.
     expect(at("hosting-connected")).toBeNull();
+  });
+
+  it("offers to grant the namespace rather than dead-ending (issue #1796)", async () => {
+    // This page used to end the sentence with "it cannot be fixed from this
+    // page" — true when written, and the whole of the bug: on a hosted tenant
+    // the manifest is a read-only boot snapshot, so the operator had nowhere
+    // left to go and the integration read "Connected" forever.
+    await show(clientWith({ ...HOSTING_OK, granted: false }));
+
+    const action = at("hosting-not-granted-action");
+    expect(action).not.toBeNull();
+    expect(action?.textContent).toContain("Grant hosting");
+    expect(at("hosting-not-granted")?.textContent).not.toContain(
+      "cannot be fixed from this page",
+    );
   });
 
   it("says the host lacks the tools, and says only that", async () => {

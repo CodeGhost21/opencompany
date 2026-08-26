@@ -22,6 +22,17 @@ interface Props {
   onTest?: () => Promise<{ detail: string }>;
   /** Test-id prefix, e.g. `chargebee`. */
   testId: string;
+  /**
+   * Grants `health.grantNamespace`, when a missing grant is what is wrong
+   * (issue #1796). Omitted by a caller that has no client to grant with.
+   *
+   * A callback rather than a write here: this panel is shared by two providers
+   * and owns none of their host state, and the pages that do already know how to
+   * re-read their own status afterwards.
+   */
+  onGrant?: () => void;
+  /** Whether that grant is in flight, so the control can say so. */
+  granting?: boolean;
   /** The credential form. Rendered only while expanded. */
   children: ReactNode;
 }
@@ -50,6 +61,8 @@ export function ConnectionPanel({
   onExpandedChange,
   onTest,
   testId,
+  onGrant,
+  granting = false,
   children,
 }: Props) {
   const [testing, setTesting] = useState(false);
@@ -149,7 +162,29 @@ export function ConnectionPanel({
             data-testid={`${testId}-remedy`}
           >
             <TriangleAlert className="size-4" />
-            <AlertDescription>{health.remedy}</AlertDescription>
+            <AlertDescription className="space-y-2">
+              <span className="block">{health.remedy}</span>
+              {/* Issue #1796: the one state that used to end in "it cannot be
+                  fixed from this page" now ends in the fix. The sentence was
+                  true when it was written — nothing in the console could write
+                  `[tools].allow`, and on a hosted tenant the manifest is a
+                  read-only boot snapshot — which is what made it a product
+                  failure rather than a copy failure. */}
+              {health.grantNamespace && onGrant ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={granting}
+                  onClick={onGrant}
+                  data-testid={`${testId}-grant`}
+                >
+                  {granting ? (
+                    <Loader2 className="mr-2 size-3.5 animate-spin" />
+                  ) : null}
+                  Grant {health.grantNamespace}
+                </Button>
+              ) : null}
+            </AlertDescription>
           </Alert>
         ) : null}
 

@@ -10,6 +10,7 @@ import {
 } from "@/api/hosting";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -187,16 +188,14 @@ export function HostingView({ client, company }: Props) {
         ) : null}
 
         {status.inBuild && !status.granted ? (
-          <Alert data-testid="hosting-not-granted">
-            <TriangleAlert className="size-4" />
-            <AlertDescription>
-              This company does not grant <code>hosting</code>, so no teammate
-              will get the deployment tools even once a key is saved. Add{" "}
-              <code>hosting</code> to <code>[tools].allow</code> in the
-              company&rsquo;s manifest — a catch-all <code>*</code> deliberately
-              does not confer it, and it cannot be fixed from this page.
-            </AlertDescription>
-          </Alert>
+          <GrantNamespace
+            client={client}
+            company={company}
+            namespace="hosting"
+            explanation="No teammate will get the deployment tools even once a key is saved."
+            onGranted={load}
+            testId="hosting-not-granted"
+          />
         ) : null}
 
         <Card>

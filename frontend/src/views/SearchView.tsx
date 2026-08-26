@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { clearSearch, getSearch, saveSearch, type SearchStatus } from "@/api/search";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -211,16 +212,14 @@ export function SearchView({ client, company }: Props) {
         ) : null}
 
         {status.inBuild && !status.granted ? (
-          <Alert data-testid="search-not-granted">
-            <TriangleAlert className="size-4" />
-            <AlertDescription>
-              This company does not grant <code>search</code>, so no teammate
-              will get a search tool even once a provider is configured. Add{" "}
-              <code>search</code> to <code>[tools].allow</code> in the
-              company&rsquo;s manifest — a catch-all <code>*</code> deliberately
-              does not confer it, and it cannot be fixed from this page.
-            </AlertDescription>
-          </Alert>
+          <GrantNamespace
+            client={client}
+            company={company}
+            namespace="search"
+            explanation="No teammate will get a search tool even once a provider is configured."
+            onGranted={load}
+            testId="search-not-granted"
+          />
         ) : null}
 
         <Card>
