@@ -157,17 +157,42 @@ impl Tracker for RecordingTracker {
 /// not missing data but wrong data.
 ///
 /// So the handle is handed out first and [`install`](Self::install)ed once, the
-/// moment a runtime exists to ask. Events tracked before that are **dropped**,
-/// which at boot is a window containing nothing: the first company has not run
-/// a turn yet.
+/// moment a runtime exists to ask.
 ///
-/// `OnceLock` rather than a lock: `track` is on the turn path and must not
-/// contend, and "set exactly once, at boot" is precisely what a `OnceLock`
-/// promises.
+/// # Events tracked before that are held, not dropped
+///
+/// They used to be dropped, on the reasoning that the pre-install window
+/// contains nothing because the first company has not run a turn yet. **That
+/// reasoning is wrong**, and PR #1751's review found the counterexample:
+/// `CompanyScheduler::spawn` runs its restart catch-up (issue #241)
+/// immediately, so a company with a cron occurrence missed during downtime
+/// fires a real cycle the instant it is registered — before boot has a runtime
+/// to read cognition from. Its `turn_finished` and `turn_metered` events fell
+/// into the window, which undercounted exactly the scheduled work a restart
+/// produces.
+///
+/// Fixing the boot ordering would have fixed that one call site. Holding the
+/// events fixes the class: the mailbox poller, the workflow scheduler and
+/// anything wired here later are all covered, and none of them has to know
+/// where in `main` it sits. The buffer is bounded by [`MAX_PENDING`] because a
+/// handle that is never installed must not grow without limit — the same
+/// trade the transport's own buffer makes, and for the same reason.
+///
+/// `OnceLock` for the installed tracker, so the hot path stays lock-free:
+/// `track` reads it first and takes the mutex **only** while nothing is
+/// installed, which after boot is never. "Set exactly once, at boot" is
+/// precisely what a `OnceLock` promises.
 #[derive(Default)]
 pub struct DeferredTracker {
     inner: std::sync::OnceLock<Arc<dyn Tracker>>,
+    pending: Mutex<Vec<Event>>,
 }
+
+/// The most events held before installation before the oldest are dropped.
+///
+/// Generous for the window it covers — boot — and small enough that a handle
+/// nobody ever installs costs nothing that matters.
+const MAX_PENDING: usize = 256;
 
 impl DeferredTracker {
     /// A handle with nothing behind it yet.
@@ -175,30 +200,60 @@ impl DeferredTracker {
         Self::default()
     }
 
-    /// Installs the real tracker. Returns `false` if one was already installed,
-    /// in which case `tracker` is discarded — a second install would silently
-    /// split a process's events across two destinations.
+    /// Installs the real tracker and replays anything tracked before now, in
+    /// order. Returns `false` if one was already installed, in which case
+    /// `tracker` is discarded — a second install would silently split a
+    /// process's events across two destinations.
     pub fn install(&self, tracker: Arc<dyn Tracker>) -> bool {
-        self.inner.set(tracker).is_ok()
+        // The lock is held across the `set` **and** the drain so a `track`
+        // racing this cannot read "not installed", be descheduled past the
+        // drain, and then push onto a buffer nothing will ever read again.
+        // `track` re-checks under the same lock; see below.
+        let mut pending = self.pending.lock().expect("deferred tracker");
+        if self.inner.set(tracker).is_err() {
+            return false;
+        }
+        let inner = self.inner.get().expect("just installed");
+        for event in std::mem::take(&mut *pending) {
+            inner.track(event);
+        }
+        true
     }
 }
 
 impl std::fmt::Debug for DeferredTracker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.inner.get().is_some() {
-            "DeferredTracker(installed)"
-        } else {
-            "DeferredTracker(pending)"
-        })
+        if self.inner.get().is_some() {
+            return f.write_str("DeferredTracker(installed)");
+        }
+        // The held count, because "why did boot report nothing?" is answered by
+        // whether anything is waiting. Never the events themselves.
+        let held = self.pending.lock().map(|p| p.len()).unwrap_or(0);
+        write!(f, "DeferredTracker(pending, {held} held)")
     }
 }
 
 #[async_trait]
 impl Tracker for DeferredTracker {
     fn track(&self, event: Event) {
+        // The hot path: installed, no lock, one virtual call.
         if let Some(inner) = self.inner.get() {
             inner.track(event);
+            return;
         }
+        let mut pending = self.pending.lock().expect("deferred tracker");
+        // Re-checked under the lock, which `install` also holds while it sets
+        // and drains. Without this, an event could be pushed onto a buffer that
+        // has already been drained and never be seen again.
+        if let Some(inner) = self.inner.get() {
+            drop(pending);
+            inner.track(event);
+            return;
+        }
+        if pending.len() >= MAX_PENDING {
+            pending.remove(0);
+        }
+        pending.push(event);
     }
 
     async fn flush(&self) {

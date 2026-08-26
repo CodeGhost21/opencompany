@@ -319,32 +319,75 @@ fn the_default_build_chooses_silence_for_desktop_and_self_hosted() {
     }
 }
 
-/// The deferred handle drops what it is given before installation, and forwards
-/// everything after. The dropping half is the one worth pinning: it is a
-/// deliberate loss, not an oversight.
+/// **The deferred handle holds what it is given before installation and replays
+/// it, in order, when the real tracker arrives.**
+///
+/// It used to drop those events, on the reasoning that the pre-install window
+/// at boot contains nothing. It does not: `CompanyScheduler::spawn` runs its
+/// restart catch-up immediately, so a company with a cron occurrence missed
+/// during downtime finishes a real cycle inside that window, and its
+/// `turn_finished` and `turn_metered` went nowhere.
 #[tokio::test]
-async fn a_deferred_tracker_drops_before_install_and_forwards_after() {
-    let event = || Event::InstanceStarted {
-        companies: 1,
+async fn a_deferred_tracker_holds_before_install_and_forwards_after() {
+    let event = |companies| Event::InstanceStarted {
+        companies,
         storage: "fs",
         setup_complete: false,
     };
 
     let deferred = DeferredTracker::new();
-    deferred.track(event());
+    deferred.track(event(1));
+    deferred.track(event(2));
 
     let recorder = std::sync::Arc::new(RecordingTracker::new());
     assert!(deferred.install(recorder.clone()));
-    deferred.track(event());
+    deferred.track(event(3));
     deferred.flush().await;
 
-    assert_eq!(recorder.events().len(), 1, "only the post-install event");
+    assert_eq!(
+        recorder.events(),
+        vec![event(1), event(2), event(3)],
+        "both held events arrive, in order, ahead of the one tracked after"
+    );
     assert_eq!(recorder.flushes(), 1);
 
     // A second install is refused rather than splitting the stream in two.
     let second = std::sync::Arc::new(RecordingTracker::new());
     assert!(!deferred.install(second.clone()));
-    deferred.track(event());
+    deferred.track(event(4));
     assert!(second.events().is_empty());
-    assert_eq!(recorder.events().len(), 2);
+    assert_eq!(recorder.events().len(), 4);
+}
+
+/// The held buffer is bounded. A handle nobody ever installs — every embedder
+/// that wires no analytics — must not grow without limit, so the oldest are
+/// dropped rather than the process.
+#[tokio::test]
+async fn the_held_buffer_is_bounded() {
+    let event = |companies| Event::InstanceStarted {
+        companies,
+        storage: "fs",
+        setup_complete: false,
+    };
+
+    let deferred = DeferredTracker::new();
+    for n in 0..5_000u64 {
+        deferred.track(event(n));
+    }
+
+    let recorder = std::sync::Arc::new(RecordingTracker::new());
+    assert!(deferred.install(recorder.clone()));
+
+    let held = recorder.events();
+    assert!(
+        held.len() < 5_000,
+        "the buffer must be bounded, not unbounded: {}",
+        held.len()
+    );
+    assert!(!held.is_empty(), "and it must not be zero either");
+    assert_eq!(
+        held.last(),
+        Some(&event(4_999)),
+        "the newest survives; it is the oldest that is dropped"
+    );
 }
