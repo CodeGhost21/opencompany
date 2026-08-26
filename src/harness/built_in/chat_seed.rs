@@ -67,9 +67,11 @@ pub struct ChatSeedRequest {
 }
 
 impl ChatSeedRequest {
-    /// Projects this desk's recent history and strips the current message's
-    /// own duplicate, in one call — the two steps [`super::CompanyAgent::run_with_steer`]'s
-    /// switch branch needs, together.
+    /// Projects this desk's recent history — bounded at this turn's own
+    /// message so a concurrently-accepted later message never leaks in (see
+    /// [`build_chat_seed`]) — and strips the current message's own trailing
+    /// duplicate, in one call: the two steps
+    /// [`super::CompanyAgent::run_with_steer`]'s switch branch needs, together.
     pub async fn build(&self, company: &CompanyId, chat_id: &str) -> Vec<(String, String)> {
         let (desk_id, desk_name) = resolve_seed_desk(&self.store, company, Some(chat_id)).await;
         let mut seed = build_chat_seed(
@@ -78,6 +80,7 @@ impl ChatSeedRequest {
             &desk_id,
             &desk_name,
             CHAT_SEED_WINDOW,
+            &self.raw_message,
         )
         .await;
         strip_current_message(&mut seed, &self.raw_message);
@@ -158,6 +161,44 @@ pub async fn resolve_seed_desk(
 /// text) are skipped even when `owns` admits them — a seed needs role + text, not
 /// structural markers.
 ///
+/// An `OperatorMessage` with attachments is composed through the same
+/// [`with_attachment_refs`](crate::brain::medulla::effects::with_attachment_refs)
+/// formatter the live turn path uses, not just its raw `text` — otherwise a
+/// resumed turn's history quietly dropped every attachment a *prior* message
+/// carried, even though the current turn's own attachments always reach the
+/// model (codex review finding). This also means a seeded entry that turns out
+/// to be the current turn's own duplicate is composed identically to
+/// `ChatSeedRequest::raw_message`, so [`strip_current_message`] still matches
+/// it exactly.
+///
+/// `current_message` bounds the scan at THIS turn's own operator message
+/// (codex review finding on #1842): the chat route journals a message the
+/// instant it is accepted, before it queues on the per-company cycle lock, so
+/// two messages for the same desk accepted close together are both already in
+/// the journal by the time either turn actually reads it. Scanning from the
+/// unbounded tail let the earlier turn seed the later message as "prior
+/// history" — and because the later message's text never matches the earlier
+/// turn's `current_message`, [`strip_current_message`] cannot remove it
+/// either, so the model saw a request nobody made it plus its own current one
+/// twice over. The newest-first walk below therefore buffers every owning
+/// turn into `pending` until it matches a `("user", _)` entry whose text is a
+/// prefix-match of `current_message` (the same relationship
+/// [`strip_current_message`] uses, since an attachment makes `current_message`
+/// a superstring of the journaled text) — that match is this turn's own
+/// boundary, so `pending` (everything newer) is discarded and only the log
+/// content strictly at-or-before it is collected as history.
+///
+/// A boundary that is never matched — `current_message` empty, or a caller
+/// with no real current turn to bound against (tests, chiefly) — degrades to
+/// the unbounded-tail behaviour from before this bound existed: `pending`
+/// (capped at `window` throughout, so this costs nothing extra) becomes the
+/// answer. The bound is a tightening over that baseline, never a new way for
+/// the seed to come back emptier than it did before. The search itself is
+/// capped at a fixed raw-event budget so a boundary that is
+/// genuinely never found cannot walk the whole company history — in
+/// production the match is expected within the first page, since the message
+/// was just journaled moments before this projection runs.
+///
 /// Best-effort: a read error yields an empty seed (the caller then falls back to
 /// the OpenHuman transcript lookup) rather than failing the turn.
 pub async fn build_chat_seed(
@@ -166,16 +207,37 @@ pub async fn build_chat_seed(
     desk_id: &str,
     desk_name: &str,
     window: usize,
+    current_message: &str,
 ) -> Vec<(String, String)> {
+    /// Safety valve on the self-boundary search: past this many raw journal
+    /// events with no match, give up looking and fall back to the
+    /// unbounded-tail behaviour rather than walking the entire company
+    /// history for a boundary that may simply not exist in this desk's log.
+    const SELF_SEARCH_BUDGET: usize = EVENT_PAGE * 4;
+
     if window == 0 {
         return Vec::new();
     }
 
+    let current_message = current_message.trim();
+
     // Newest-first accumulation; reversed to chronological before returning.
+    // `pending` holds owning turns seen before the boundary above is matched;
+    // `collected` holds turns at-or-before it. Exactly one of the two ends up
+    // as the answer — see the boundary discussion above.
+    let mut pending: Vec<(String, String)> = Vec::new();
     let mut collected: Vec<(String, String)> = Vec::with_capacity(window);
+    let mut found_self = false;
+    let mut scanned_raw: usize = 0;
     let mut cursor = None;
 
-    while collected.len() < window {
+    loop {
+        if found_self && collected.len() >= window {
+            break;
+        }
+        if !found_self && scanned_raw >= SELF_SEARCH_BUDGET {
+            break;
+        }
         let page = match events.read_before(company, cursor, EVENT_PAGE).await {
             Ok(page) => page,
             Err(error) => {
@@ -191,14 +253,20 @@ pub async fn build_chat_seed(
         if page.is_empty() {
             break;
         }
+        scanned_raw += page.len();
         cursor = page.last().map(|event| event.seq);
         for stored in page {
             if !chat_history::owns(desk_id, desk_name, &stored.event) {
                 continue;
             }
             let mapped = match &stored.event {
-                CompanyEvent::OperatorMessage { text, .. } => Some(("user", text.as_str())),
-                CompanyEvent::AgentReply { text, .. } => Some(("agent", text.as_str())),
+                CompanyEvent::OperatorMessage {
+                    text, attachments, ..
+                } => Some((
+                    "user",
+                    crate::brain::medulla::effects::with_attachment_refs(text, attachments),
+                )),
+                CompanyEvent::AgentReply { text, .. } => Some(("agent", text.clone())),
                 // `owns` also admits `DeskTaskCompleted` (a structural "finished →
                 // In review" marker), but it carries no conversational body — do
                 // not seed it as a turn.
@@ -208,11 +276,33 @@ pub async fn build_chat_seed(
             if text.trim().is_empty() {
                 continue;
             }
-            collected.push((role.to_string(), text.to_string()));
+
+            if !found_self {
+                if role == "user"
+                    && !current_message.is_empty()
+                    && current_message.starts_with(text.trim())
+                {
+                    found_self = true;
+                    collected.push((role.to_string(), text));
+                } else {
+                    pending.push((role.to_string(), text));
+                    if pending.len() > window {
+                        pending.truncate(window);
+                    }
+                }
+                continue;
+            }
+
+            collected.push((role.to_string(), text));
             if collected.len() == window {
                 break;
             }
         }
+    }
+
+    if !found_self {
+        collected = pending;
+        collected.truncate(window);
     }
 
     collected.reverse();
@@ -336,6 +426,28 @@ mod tests {
         }
     }
 
+    fn operator_with_attachment(
+        seq: u64,
+        chat: Option<&str>,
+        text: &str,
+        attachment: crate::ports::types::Attachment,
+    ) -> StoredEvent {
+        StoredEvent {
+            seq: EventSeq::new(seq),
+            company: CompanyId::new("acme"),
+            event: CompanyEvent::OperatorMessage {
+                text: text.to_string(),
+                by: None,
+                chat: chat.map(str::to_string),
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: vec![attachment],
+            },
+            at_millis: seq,
+        }
+    }
+
     fn reply(seq: u64, chat_id: &str, text: &str) -> StoredEvent {
         StoredEvent {
             seq: EventSeq::new(seq),
@@ -370,14 +482,28 @@ mod tests {
         }
     }
 
+    /// `current_message` empty means "no boundary to bound against" — the
+    /// tests exercising desk ownership, folding, and window truncation below
+    /// pass `""` on purpose, so they see the unbounded-tail fallback
+    /// [`build_chat_seed`]'s doc describes and are unaffected by the
+    /// self-boundary search.
     async fn seed_of(
         log: FixedLog,
         desk_id: &str,
         desk_name: &str,
         window: usize,
+        current_message: &str,
     ) -> Vec<(String, String)> {
         let events: Arc<dyn EventLog> = Arc::new(log);
-        build_chat_seed(&events, &CompanyId::new("acme"), desk_id, desk_name, window).await
+        build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            desk_id,
+            desk_name,
+            window,
+            current_message,
+        )
+        .await
     }
 
     /// The core projection: a journal interleaving the General desk's own
@@ -400,7 +526,7 @@ mod tests {
             operator(6, Some("general"), "u2"),
         ]);
 
-        let seed = seed_of(log, "general", "general", CHAT_SEED_WINDOW).await;
+        let seed = seed_of(log, "general", "general", CHAT_SEED_WINDOW, "").await;
 
         assert_eq!(
             seed,
@@ -410,6 +536,44 @@ mod tests {
                 ("user".to_string(), "u2".to_string()),
             ],
             "only General's own operator/agent turns, chronological, correctly roled"
+        );
+    }
+
+    /// Codex review finding: a prior operator message's attachment must survive
+    /// into the seed, not just its raw text — otherwise a follow-up like
+    /// "summarize that file again" loses the file context on a resumed turn,
+    /// even though the SAME message's attachment reached the model fine the
+    /// first time it was live (via `with_attachment_refs` on the current-turn
+    /// path). The seed must go through the identical formatter.
+    #[tokio::test]
+    async fn a_prior_message_with_an_attachment_keeps_its_attachment_marker_in_the_seed() {
+        let attachment = crate::ports::types::Attachment {
+            node_id: "node-1".to_string(),
+            name: "report.pdf".to_string(),
+            mime: "application/pdf".to_string(),
+            size: 1234,
+            extracted_text: Some("QUARTERLY_REPORT_MARKER".to_string()),
+        };
+        let log = FixedLog(vec![operator_with_attachment(
+            0,
+            Some("general"),
+            "please review this",
+            attachment,
+        )]);
+
+        let seed = seed_of(log, "general", "general", CHAT_SEED_WINDOW, "").await;
+
+        assert_eq!(seed.len(), 1, "the one owning message is seeded");
+        let (role, text) = &seed[0];
+        assert_eq!(role, "user");
+        assert!(
+            text.starts_with("please review this"),
+            "the operator's own words still lead: {text:?}"
+        );
+        assert!(
+            text.contains("QUARTERLY_REPORT_MARKER"),
+            "the attachment's extracted text must reach a resumed turn's \
+             context, exactly like it reaches a live one: {text:?}"
         );
     }
 
@@ -424,7 +588,7 @@ mod tests {
             operator(2, Some("main"), "under-main"),
         ]);
 
-        let seed = seed_of(log, "main", "main", CHAT_SEED_WINDOW).await;
+        let seed = seed_of(log, "main", "main", CHAT_SEED_WINDOW, "").await;
 
         assert_eq!(
             seed,
@@ -446,7 +610,7 @@ mod tests {
             operator(2, Some("dm:bob"), "hi bob"),
         ]);
 
-        let seed = seed_of(log, "dm:alice", "dm:alice", CHAT_SEED_WINDOW).await;
+        let seed = seed_of(log, "dm:alice", "dm:alice", CHAT_SEED_WINDOW, "").await;
 
         assert_eq!(
             seed,
@@ -469,7 +633,7 @@ mod tests {
             operator(2, Some("marketing"), "OTHER"),
         ]);
 
-        let seed = seed_of(log, "eng-123", "Engineering", CHAT_SEED_WINDOW).await;
+        let seed = seed_of(log, "eng-123", "Engineering", CHAT_SEED_WINDOW, "").await;
 
         assert_eq!(
             seed,
@@ -490,7 +654,7 @@ mod tests {
         }
         let log = FixedLog(events);
 
-        let seed = seed_of(log, "general", "general", 3).await;
+        let seed = seed_of(log, "general", "general", 3, "").await;
 
         assert_eq!(
             seed,
@@ -500,6 +664,76 @@ mod tests {
                 ("user".to_string(), "m9".to_string()),
             ],
             "the three newest owning turns, in chronological order"
+        );
+    }
+
+    /// Codex review finding (P1): the chat route journals an operator message
+    /// the instant it is accepted, before it queues on the per-company cycle
+    /// lock — so two messages for the same desk accepted close together are
+    /// both already in the journal by the time either turn's seed projection
+    /// actually runs. Scanning the unbounded tail let the FIRST message's turn
+    /// seed the SECOND message too, as if it were prior history — and because
+    /// the second message's text never matches the first turn's own text,
+    /// `strip_current_message` cannot remove it either. The seed for "my
+    /// message"'s turn must stop at its own boundary: everything journaled
+    /// after it is excluded, not just everything after the log's current tail.
+    #[tokio::test]
+    async fn a_concurrently_journaled_later_message_is_excluded_from_the_seed() {
+        let log = FixedLog(vec![
+            operator(0, Some("general"), "earlier turn"),
+            reply(1, "general", "earlier reply"),
+            operator(2, Some("general"), "my message"),
+            // Accepted by the chat route microseconds later, before either
+            // turn won this desk's per-company cycle lock — same shape as two
+            // browser tabs firing at once.
+            operator(3, Some("general"), "a second, concurrent message"),
+        ]);
+
+        let seed = seed_of(log, "general", "general", CHAT_SEED_WINDOW, "my message").await;
+
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "earlier turn".to_string()),
+                ("agent".to_string(), "earlier reply".to_string()),
+                ("user".to_string(), "my message".to_string()),
+            ],
+            "the later, concurrently-journaled message must not appear as \
+             prior history for the earlier message's own turn: {seed:?}"
+        );
+    }
+
+    /// The self-boundary in [`build_chat_seed`] degrades to the unbounded-tail
+    /// behaviour when it is never matched — a message with no owning entry in
+    /// this desk's log at all — rather than silently emptying the seed. This
+    /// is the fallback path every other test in this module exercises via
+    /// `seed_of`'s `current_message: ""`; this test names it explicitly with a
+    /// non-empty, non-matching message so the fallback is proven on its own
+    /// terms rather than only incidentally through the empty-string case.
+    #[tokio::test]
+    async fn an_unmatched_boundary_falls_back_to_the_unbounded_tail() {
+        let log = FixedLog(vec![
+            operator(0, Some("general"), "u1"),
+            reply(1, "general", "a1"),
+        ]);
+
+        let seed = seed_of(
+            log,
+            "general",
+            "general",
+            CHAT_SEED_WINDOW,
+            "no journaled message matches this text",
+        )
+        .await;
+
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "u1".to_string()),
+                ("agent".to_string(), "a1".to_string()),
+            ],
+            "an unmatched boundary must not come back emptier than the \
+             unbounded scan did: {seed:?}"
         );
     }
 
@@ -514,6 +748,7 @@ mod tests {
             "general",
             "general",
             CHAT_SEED_WINDOW,
+            "",
         )
         .await;
         assert!(seed.is_empty());
