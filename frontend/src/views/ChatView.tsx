@@ -364,6 +364,12 @@ export function ChatView({
    * late. Deriving through the stamp below makes the stale value unreadable
    * rather than merely short-lived (CodeRabbit review of PR #1740).
    */
+  /**
+   * Monotonic ticket for the cognition read, so only the newest one commits.
+   * A ref rather than state: it must be readable and bumped synchronously by a
+   * read that is already in flight, and changing it must not re-render.
+   */
+  const cognitionRead = useRef(0);
   const [loadedCognition, setLoadedCognition] = useState<{
     client: OpenCompanyClient;
     company: string | null;
@@ -461,15 +467,27 @@ export function ChatView({
   useEffect(() => {
     let live = true;
     const read = async () => {
+      // Which read this is. Two can be in flight at once — the mount's and a
+      // visibility refresh's — and they are not guaranteed to settle in the
+      // order they were issued, so a slow *older* one could otherwise land last
+      // and put back the state the newer one had just corrected (codex, PR
+      // #1740). The scope stamp cannot catch that: both carry the same scope.
+      // Only the newest read may commit, in either direction, including its
+      // failure path — a stale rejection overwriting a fresh success is the
+      // same bug with the sign flipped.
+      const ticket = ++cognitionRead.current;
+      const isCurrent = () => live && ticket === cognitionRead.current;
       try {
         const capabilities = await client.capabilityStatus(company);
-        if (live) setLoadedCognition({ client, company, state: capabilities.cognition ?? null });
+        if (isCurrent()) {
+          setLoadedCognition({ client, company, state: capabilities.cognition ?? null });
+        }
       } catch (e) {
         // An older host, or one that could not answer. Nothing is claimed
         // either way, and chat renders exactly as it did before the banner
         // existed.
         console.debug("[ChatView] cognition state unavailable", e);
-        if (live) setLoadedCognition({ client, company, state: null });
+        if (isCurrent()) setLoadedCognition({ client, company, state: null });
       }
     };
     void read();
@@ -1718,6 +1736,30 @@ export function ChatView({
                       This company has no model configured, so the replies below come from the
                       offline echo brain rather than the teammate they appear under. Choose a
                       provider in{" "}
+                      <a
+                        className="font-medium text-foreground underline-offset-4 hover:underline"
+                        href={settingsHref("inference")}
+                      >
+                        Settings → Inference
+                      </a>
+                      .
+                    </>
+                  )}
+                  {/* A provider is configured and resolves; the runtime just
+                      predates it. Saying "no model configured" here sends an
+                      operator who did exactly the right thing back to redo it,
+                      which is why this is its own state. The link goes to the
+                      card that owns the restart — and stops there, because
+                      whether a restart can be performed in place is that card's
+                      fact to report (#1736), not a promise to make from here. */}
+                  {cognition === "restart-required" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think yet — the model isn&apos;t live.
+                      </span>{" "}
+                      A provider is configured, but this company&apos;s runtime was built before
+                      it was saved, so the replies below still come from the offline echo brain
+                      rather than the teammate they appear under. Finish the switch in{" "}
                       <a
                         className="font-medium text-foreground underline-offset-4 hover:underline"
                         href={settingsHref("inference")}

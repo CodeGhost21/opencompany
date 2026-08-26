@@ -195,6 +195,102 @@ describe("the chat cognition banner", () => {
     expect(notice!.textContent).not.toContain("no agent harness is available");
   });
 
+  /**
+   * A provider is saved and resolves; the runtime just predates it (codex, PR
+   * #1740). Telling this operator that no model is configured sends them back
+   * to the page they came from to redo work they did correctly.
+   */
+  it("names the restart, not another provider choice, when one is already saved", async () => {
+    await render("restart-required");
+
+    const notice = banner();
+    expect(notice).not.toBeNull();
+    expect(notice!.textContent).toContain("the model isn't live");
+    expect(notice!.textContent).toContain("A provider is configured");
+    // Not the unconfigured story, which is the whole point.
+    expect(notice!.textContent).not.toContain("has no model configured");
+    // The link goes to the card that owns the restart — but the copy stops
+    // short of promising a button, which is `canRebuildInPlace`'s to report.
+    expect(notice!.querySelector("a")!.getAttribute("href")).toBe("#/settings/inference");
+  });
+
+  /**
+   * Two cognition reads can be in flight at once — the mount's and a visibility
+   * refresh's — and nothing guarantees they settle in the order they were
+   * issued. A slow *older* read landing last would put back the state the newer
+   * one had just corrected, and the scope stamp cannot catch it because both
+   * carry the same scope (codex, PR #1740).
+   *
+   * Here the first read is held open, the tab is brought forward, the second
+   * read answers `configured` and clears the banner — and only then does the
+   * first answer `unconfigured`. The banner must stay down.
+   */
+  it("ignores a slow older read that lands after a newer one", async () => {
+    const settles: Array<(dto: CapabilityStatusDto) => void> = [];
+    const capabilityStatus = vi.fn(
+      () => new Promise<CapabilityStatusDto>((resolve) => settles.push(resolve)),
+    );
+    const named: Record<string, unknown> = {
+      capabilityStatus,
+      scopeFor: () => "/api/v1/company",
+    };
+    const client = new Proxy(named, {
+      get: (target, prop: string) => target[prop] ?? (() => Promise.resolve([])),
+    }) as unknown as OpenCompanyClient;
+
+    const scopeRef = createRef<{
+      connection: string;
+      company: string | null;
+      client: OpenCompanyClient;
+    }>() as { current: { connection: string; company: string | null; client: OpenCompanyClient } };
+    scopeRef.current = { connection: "c1", company: "acme", client };
+    await act(async () => {
+      root.render(
+        createElement(ConnectionScopeProvider, {
+          scope: { connection: "c1", company: "acme" },
+          children: createElement(ChatView, {
+            client,
+            company: "acme",
+            sub: "main",
+            onNavigate: () => {},
+            transcripts: {},
+            setTranscripts: () => {},
+            scopeRef,
+          }),
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(settles).toHaveLength(1);
+
+    // The tab comes forward; the refresh is issued while the first is still open.
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+    });
+    expect(settles).toHaveLength(2);
+
+    // The newer read answers first: somebody configured a provider.
+    await act(async () => {
+      settles[1]({ configured: false, cognition: "configured" } as CapabilityStatusDto);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(banner()).toBeNull();
+
+    // And now the stale one lands with the answer from before that change.
+    await act(async () => {
+      settles[0]({ configured: false, cognition: "unconfigured" } as CapabilityStatusDto);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(banner(), "a stale read must not resurrect the banner").toBeNull();
+  });
+
   it("stays down when the company has a model", async () => {
     await render("configured");
 

@@ -42,6 +42,7 @@ use crate::company::inference::{
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::UsageMetering;
+use crate::server::cognition::InferenceResolution;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
@@ -192,31 +193,27 @@ async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiEr
         .unwrap_or_default())
 }
 
-/// Whether this company's inference configuration can be **read** at all.
+/// What resolving this company's inference configuration produced.
 ///
-/// `false` means the host could not load the manifest or could not resolve the
-/// config against the secret store — not that nothing is configured. The #266
-/// doctrine turns on that difference: a config we cannot read is no evidence
-/// that saving one, or restarting, would help, which is why
-/// [`runner_gap_for`] degrades an `Err` to [`RunnerGap::NotWired`] rather than
-/// telling the operator to configure inference.
+/// The same three-way read [`runner_gap_for`] performs, lifted out so
+/// [`crate::server::ops::capabilities`] can classify cognition for the chat
+/// surface (issue #1735) from the identical evidence. One reader, so the two
+/// surfaces cannot tell one operator two different next steps about one
+/// company: what `restartRequired` and `inference_required` mean on the
+/// Inference card is what the chat banner says, by construction.
 ///
-/// Shared with [`crate::server::ops::capabilities`], which needs the same
-/// distinction for the chat surface (issue #1735): a company on the echo brain
-/// because its config is unreadable must not be told a settings page is the
-/// remedy, exactly as the workflow-run route must not answer
-/// `inference_required` there. One predicate, so the two cannot disagree.
-///
-/// Deliberately collapses "manifest unreadable" and "resolve failed" — the
-/// operator can act on neither, and `runner_gap_for` already folds them the
-/// same way.
-pub(crate) async fn inference_config_readable(runtime: &CompanyRuntime) -> bool {
+/// "Manifest unreadable" and "resolve failed" are deliberately folded together
+/// as [`InferenceResolution::Unreadable`] — the operator can act on neither,
+/// and [`runner_gap_for`] already folds them the same way.
+pub(crate) async fn inference_resolution(runtime: &CompanyRuntime) -> InferenceResolution {
     let Ok(manifest) = manifest_inference(runtime).await else {
-        return false;
+        return InferenceResolution::Unreadable;
     };
-    resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref())
-        .await
-        .is_ok()
+    match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
+        Ok(Some(_)) => InferenceResolution::Resolved,
+        Ok(None) => InferenceResolution::Nothing,
+        Err(_) => InferenceResolution::Unreadable,
+    }
 }
 
 /// The console-facing source label for a resolved source badge.

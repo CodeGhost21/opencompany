@@ -79,6 +79,8 @@ function reason(author: string, cause: CognitionState): string {
   switch (cause) {
     case "unconfigured":
       return `${author} did not write this. The company has no model configured, so the offline echo brain answered instead.`;
+    case "restart-required":
+      return `${author} did not write this. A provider is configured but not live yet, so the offline echo brain answered instead.`;
     case "unavailable":
       return `${author} did not write this. No agent harness is available on this host, so the offline echo brain answered instead.`;
     default:

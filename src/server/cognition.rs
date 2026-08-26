@@ -27,6 +27,28 @@
 
 use serde::Serialize;
 
+/// What resolving this company's inference configuration produced — the input
+/// [`cognition_state`] needs to tell three degraded states apart.
+///
+/// Three outcomes rather than a boolean because the operator's next step
+/// differs for each, which is the same reason
+/// [`RunnerGap`](crate::server::ops::inference::RunnerGap) exists one module
+/// over. Collapsing any two hands somebody the wrong instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceResolution {
+    /// A provider resolves **now**. On a company still holding the echo brain
+    /// that means the config was saved after its runtime was built, so a
+    /// restart is what makes it live — not another trip to provider selection.
+    Resolved,
+    /// The config was read and nothing is set. This is the only outcome for
+    /// which choosing a provider is the honest next step.
+    Nothing,
+    /// The config could not be read at all — the manifest would not load, or
+    /// the secret store did not answer. **Not the same as nothing being set**,
+    /// and the #266 doctrine is that it is no evidence a save would help.
+    Unreadable,
+}
+
 /// Whether this company's teammates can think, and why not when they cannot.
 ///
 /// **Derived, never stored.** [`cognition_state`] reads the brain the runtime is
@@ -73,6 +95,22 @@ pub enum CognitionState {
     /// `*_in_build` flags, which exist "so the flow can say 'not in this build'
     /// instead of offering a switch that does nothing".
     Unavailable,
+    /// A provider is configured and resolves, but this company is still on the
+    /// brain its runtime was built with, so the model is not live yet.
+    ///
+    /// Brain selection happens once, in `RuntimeBuilder::build`, so a company
+    /// configured after boot keeps the echo brain until its runtime is rebuilt.
+    /// The remedy is that restart — **not** provider selection, which is what
+    /// [`Self::Unconfigured`] would send this operator back to after they had
+    /// already done it correctly. `ops::inference` reports the same fact as
+    /// `restartRequired` (issue #266); this is the chat surface's half of it.
+    ///
+    /// The console names Settings → Inference as where the restart lives, and
+    /// stops there: whether a restart can be *performed* in place is a separate
+    /// fact the Inference card owns (`can_rebuild_in_place`, issue #1736), and
+    /// promising the button from here would be the switch that does nothing all
+    /// over again.
+    RestartRequired,
     /// A harness is reachable, but the host could not **read** this company's
     /// inference configuration, so it cannot say why the company fell back to
     /// the echo brain.
@@ -101,6 +139,7 @@ impl CognitionState {
             Self::Configured => "configured",
             Self::Unconfigured => "unconfigured",
             Self::Unavailable => "unavailable",
+            Self::RestartRequired => "restart-required",
             Self::Undetermined => "undetermined",
         }
     }
@@ -131,17 +170,24 @@ impl CognitionState {
 /// the operator at Settings → Inference, which cannot move that runtime off the
 /// echo brain no matter what they save.
 ///
-/// `config_readable` is
-/// `crate::server::ops::inference::inference_config_readable` — whether the
-/// host could read this company's inference configuration at all, as opposed to
-/// reading it and finding nothing set. The #266 doctrine turns on exactly that
-/// difference: a config that could not be read is no evidence that saving one
-/// would help, which is why `runner_gap_for` degrades a resolve error to
-/// `NotWired` rather than `InferenceRequired`. Reporting `unconfigured` there
-/// would have chat promise the remedy that route declines to promise.
+/// `resolution` is `crate::server::ops::inference::inference_resolution` — what
+/// resolving this company's config actually produced. All three outcomes are
+/// carried because all three mean something different to the operator, and this
+/// module has now been wrong twice by collapsing two of them (both caught on the
+/// review of PR #1740):
 ///
-/// Passed in rather than read here so the four-way matrix is testable without
-/// a runtime per arm — in particular the `unavailable` arm, which a lane that
+/// * `Unreadable` folded into `Nothing` told an operator whose secret store was
+///   down to go and configure a provider. The #266 doctrine is that a config we
+///   could not read is no evidence a save would help, which is why
+///   `runner_gap_for` degrades a resolve error to `NotWired`.
+/// * `Resolved` folded into `Nothing` told an operator who had *just* saved a
+///   provider that no model was configured, sending them back to the page they
+///   had come from. The runtime keeps its boot-time brain until it is rebuilt,
+///   so the remedy there is a restart — the same fact `ops::inference` reports
+///   as `restartRequired`.
+///
+/// Passed in rather than read here so the whole matrix is testable without a
+/// runtime per arm — in particular the `unavailable` arm, which a lane that
 /// enables the feature could otherwise reach only by constructing a
 /// harness-less runtime.
 ///
@@ -154,20 +200,21 @@ impl CognitionState {
 pub fn cognition_state(
     path: &str,
     harness_reachable: bool,
-    config_readable: bool,
+    resolution: InferenceResolution,
 ) -> CognitionState {
     if path != crate::ports::brain::ECHO_PATH {
         return CognitionState::Configured;
     }
     // No harness outranks everything below it: with nothing to configure
-    // *towards*, why the config did or did not resolve changes no advice.
+    // *towards*, what the config resolved to changes no advice.
     if !harness_reachable {
         return CognitionState::Unavailable;
     }
-    if !config_readable {
-        return CognitionState::Undetermined;
+    match resolution {
+        InferenceResolution::Unreadable => CognitionState::Undetermined,
+        InferenceResolution::Resolved => CognitionState::RestartRequired,
+        InferenceResolution::Nothing => CognitionState::Unconfigured,
     }
-    CognitionState::Unconfigured
 }
 
 #[cfg(test)]
@@ -175,47 +222,43 @@ mod test {
     use super::*;
     use crate::ports::brain::{ECHO_PATH, HARNESS_PATH};
 
+    use InferenceResolution::{Nothing, Resolved, Unreadable};
+
     /// The whole matrix in one place — including the `unavailable` arm that a
     /// lane enabling the feature could otherwise reach only by constructing a
     /// harness-less runtime.
     #[test]
-    fn the_states_are_derived_from_the_path_the_harness_and_the_config() {
+    fn the_states_are_derived_from_the_path_the_harness_and_the_resolution() {
+        for path in [HARNESS_PATH, "hosted", "sidecar", "custom"] {
+            assert_eq!(
+                cognition_state(path, true, Nothing),
+                CognitionState::Configured,
+                "{path} runs a model, whatever the config says",
+            );
+        }
         assert_eq!(
-            cognition_state(HARNESS_PATH, true, true),
-            CognitionState::Configured,
-        );
-        assert_eq!(
-            cognition_state("hosted", true, true),
-            CognitionState::Configured
-        );
-        assert_eq!(
-            cognition_state("sidecar", true, true),
-            CognitionState::Configured
-        );
-        assert_eq!(
-            cognition_state("custom", true, true),
-            CognitionState::Configured
-        );
-        assert_eq!(
-            cognition_state(ECHO_PATH, true, true),
+            cognition_state(ECHO_PATH, true, Nothing),
             CognitionState::Unconfigured,
-            "a harness is attached and the config reads clean: a provider really              is one settings page away",
+            "a harness is attached and nothing is set: a provider really is one \
+             settings page away",
         );
         assert_eq!(
-            cognition_state(ECHO_PATH, true, false),
+            cognition_state(ECHO_PATH, true, Resolved),
+            CognitionState::RestartRequired,
+            "a provider resolves, so the operator has already chosen one",
+        );
+        assert_eq!(
+            cognition_state(ECHO_PATH, true, Unreadable),
             CognitionState::Undetermined,
             "the config could not be read, so nothing saved is known to help",
         );
-        assert_eq!(
-            cognition_state(ECHO_PATH, false, true),
-            CognitionState::Unavailable,
-            "no harness behind this runtime: no configuration reaches a model",
-        );
-        assert_eq!(
-            cognition_state(ECHO_PATH, false, false),
-            CognitionState::Unavailable,
-            "with no harness, why the config did or did not read changes no advice",
-        );
+        for resolution in [Nothing, Resolved, Unreadable] {
+            assert_eq!(
+                cognition_state(ECHO_PATH, false, resolution),
+                CognitionState::Unavailable,
+                "with no harness, what the config resolved to changes no advice",
+            );
+        }
     }
 
     /// The regression this exists for: a build with no harness, sitting on the
@@ -223,44 +266,14 @@ mod test {
     /// the console renders `"You said: …"` under a teammate's name in.
     #[test]
     fn a_build_with_no_harness_never_reports_itself_configured() {
-        for readable in [true, false] {
-            assert_ne!(
-                cognition_state(ECHO_PATH, false, readable),
-                CognitionState::Configured,
-            );
-            assert_ne!(
-                cognition_state(ECHO_PATH, true, readable),
-                CognitionState::Configured,
-            );
+        for reachable in [true, false] {
+            for resolution in [Nothing, Resolved, Unreadable] {
+                assert_ne!(
+                    cognition_state(ECHO_PATH, reachable, resolution),
+                    CognitionState::Configured,
+                );
+            }
         }
-    }
-
-    /// An unreadable config is not a missing one (codex review of PR #1740).
-    ///
-    /// `ops::inference` already refuses this promise from the other side: its
-    /// `unreadable_inference_config_is_not_restartable` regression builds a
-    /// reachable harness over a failing `SecretStore` and asserts
-    /// `RunnerGap::NotWired`, "not `InferenceRequired`", because saving cannot
-    /// resolve a configuration the host cannot read. Chat pointing that same
-    /// operator at Settings → Inference would make the promise that route
-    /// declines to make, on the same runtime, in the same breath.
-    #[test]
-    fn an_unreadable_config_is_not_sold_as_a_missing_one() {
-        assert_eq!(
-            cognition_state(ECHO_PATH, true, false),
-            CognitionState::Undetermined,
-        );
-        assert_ne!(
-            cognition_state(ECHO_PATH, true, false),
-            CognitionState::Unconfigured,
-            "an unreadable config is no evidence that saving one would help (#266)",
-        );
-        // And it is not the harness's fault either — one is attached, so
-        // naming a rebuild would be a plain falsehood.
-        assert_ne!(
-            cognition_state(ECHO_PATH, true, false),
-            CognitionState::Unavailable,
-        );
     }
 
     /// A harness that is compiled in but never attached must not be sold to the
@@ -277,13 +290,65 @@ mod test {
     #[test]
     fn a_compiled_in_harness_that_is_not_attached_is_not_a_settings_problem() {
         assert_eq!(
-            cognition_state(ECHO_PATH, false, true),
+            cognition_state(ECHO_PATH, false, Nothing),
             CognitionState::Unavailable,
         );
         assert_ne!(
-            cognition_state(ECHO_PATH, false, true),
+            cognition_state(ECHO_PATH, false, Nothing),
             CognitionState::Unconfigured,
             "no attached pool: Settings → Inference is a dead end here",
+        );
+    }
+
+    /// An unreadable config is not a missing one (codex review of PR #1740).
+    ///
+    /// `ops::inference` already refuses this promise from the other side: its
+    /// `unreadable_inference_config_is_not_restartable` regression builds a
+    /// reachable harness over a failing `SecretStore` and asserts
+    /// `RunnerGap::NotWired`, "not `InferenceRequired`", because saving cannot
+    /// resolve a configuration the host cannot read. Chat pointing that same
+    /// operator at Settings → Inference would make the promise that route
+    /// declines to make, on the same runtime, in the same breath.
+    #[test]
+    fn an_unreadable_config_is_not_sold_as_a_missing_one() {
+        assert_eq!(
+            cognition_state(ECHO_PATH, true, Unreadable),
+            CognitionState::Undetermined,
+        );
+        assert_ne!(
+            cognition_state(ECHO_PATH, true, Unreadable),
+            CognitionState::Unconfigured,
+            "an unreadable config is no evidence that saving one would help (#266)",
+        );
+        // And it is not the harness's fault either — one is attached, so
+        // naming a rebuild would be a plain falsehood.
+        assert_ne!(
+            cognition_state(ECHO_PATH, true, Unreadable),
+            CognitionState::Unavailable,
+        );
+    }
+
+    /// A configured provider that is not live yet is not an unconfigured one
+    /// (codex review of PR #1740).
+    ///
+    /// The most likely way to reach the echo brain in practice, and the one
+    /// where getting it wrong is rudest: the operator followed this banner's own
+    /// link, chose a provider, saved it — and brain selection happens once, in
+    /// `RuntimeBuilder::build`, so the company keeps the echo brain until its
+    /// runtime is rebuilt. Reporting `unconfigured` sends them back to the page
+    /// they just came from to redo work they did correctly. `ops::inference`
+    /// calls this same state `restartRequired` (issue #266).
+    #[test]
+    fn a_saved_provider_awaiting_a_restart_is_not_unconfigured() {
+        assert_eq!(
+            cognition_state(ECHO_PATH, true, Resolved),
+            CognitionState::RestartRequired,
+        );
+        assert_ne!(
+            cognition_state(ECHO_PATH, true, Resolved),
+            CognitionState::Unconfigured,
+            "a provider resolves: telling them to choose one is telling them to \
+             repeat themselves",
         );
     }
 
@@ -295,7 +360,7 @@ mod test {
     #[test]
     fn an_unknown_path_is_treated_as_cognition() {
         assert_eq!(
-            cognition_state("some-brain-added-later", false, false),
+            cognition_state("some-brain-added-later", false, Unreadable),
             CognitionState::Configured,
         );
     }
@@ -306,6 +371,7 @@ mod test {
             CognitionState::Configured,
             CognitionState::Unconfigured,
             CognitionState::Unavailable,
+            CognitionState::RestartRequired,
             CognitionState::Undetermined,
         ] {
             assert_eq!(

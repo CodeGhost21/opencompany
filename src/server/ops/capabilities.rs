@@ -18,7 +18,7 @@ use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::metering::capability::{CapabilityPlan, tokens_in};
 use crate::ports::now_millis;
-use crate::server::cognition::{CognitionState, cognition_state};
+use crate::server::cognition::{CognitionState, InferenceResolution, cognition_state};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -416,20 +416,22 @@ fn media_credential_configured() -> bool {
 ///
 /// The third input is only consulted on the one degraded path, and that is
 /// deliberate rather than incidental: `/capabilities` is a console read that
-/// gets polled, and `inference_config_readable` costs a manifest load plus a
+/// gets polled, and `inference_resolution` costs a manifest load plus a
 /// secret-store resolve. A company that is thinking pays neither, because its
-/// brain answers the question before either is needed.
+/// brain answers the question before either is needed. The placeholder passed
+/// in the other arm is never read — `cognition_state` has already returned by
+/// then, and its ordering is asserted.
 async fn cognition_for(runtime: &CompanyRuntime) -> CognitionState {
     let path = runtime.cognition().path;
     let harness_reachable = crate::server::ops::inference::harness_reachable(runtime);
     // Short-circuit: with a real brain, or with no harness at all, the config
     // read cannot change the answer — see `cognition_state`'s own ordering.
-    let config_readable = if path == crate::ports::brain::ECHO_PATH && harness_reachable {
-        crate::server::ops::inference::inference_config_readable(runtime).await
+    let resolution = if path == crate::ports::brain::ECHO_PATH && harness_reachable {
+        crate::server::ops::inference::inference_resolution(runtime).await
     } else {
-        true
+        InferenceResolution::Nothing
     };
-    cognition_state(path, harness_reachable, config_readable)
+    cognition_state(path, harness_reachable, resolution)
 }
 
 /// Resolves the capability-budget status DTO for a company.
@@ -831,6 +833,51 @@ mod tests {
         assert_ne!(
             dto["cognition"], "unconfigured",
             "that would promise a settings page `runner_gap_for` refuses to promise: {dto}"
+        );
+    }
+
+    /// A provider is saved and resolves, and the company is still on the echo
+    /// brain because its runtime predates the save (codex review of PR #1740).
+    ///
+    /// The likeliest route to the echo brain in practice, and the one where
+    /// getting it wrong is rudest: the operator followed this very banner's
+    /// link, chose a provider, saved it — and `unconfigured` would send them
+    /// back to that page to redo work they did correctly. `ops::inference`
+    /// calls this same state `restartRequired` (issue #266).
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_saved_provider_awaiting_a_restart_reports_restart_required() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        // A manifest `[inference]` section resolves without a secret write, so
+        // the config is set *before* the runtime is built and the runtime still
+        // ends up on the echo brain — the same shape as a console save landing
+        // after boot, without needing to rebuild anything mid-test.
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[inference]\nprovider = \"ollama\"\n";
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        // Built with a pool but with the brain forced to echo, which is exactly
+        // what a runtime that predates the save is holding.
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(crate::harness::HarnessPool::new()))
+            .with_brain(std::sync::Arc::new(crate::brain::EchoBrain))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(runtime.cognition().path, crate::ports::brain::ECHO_PATH);
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["cognition"], "restart-required",
+            "a provider resolves, so the remedy is a restart, not another choice: {dto}"
+        );
+        assert_ne!(
+            dto["cognition"], "unconfigured",
+            "that would send the operator back to the page they just came from: {dto}"
         );
     }
 

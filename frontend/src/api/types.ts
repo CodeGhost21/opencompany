@@ -1638,6 +1638,12 @@ export interface CapabilityStatusDto {
    *   configuration reaches a model. Only a different build or host wiring
    *   changes it, and the console must say so rather than offering a settings
    *   link that cannot help.
+   * * `restart-required` — a provider is configured and resolves, but this
+   *   company is still on the brain its runtime was built with, so the model is
+   *   not live yet. The remedy is that restart, **not** provider selection —
+   *   telling this operator to choose a provider sends them back to the page
+   *   they just came from. Reported as `restartRequired` on the Inference card
+   *   (issue #266).
    * * `undetermined` — a harness is reachable, but the host could not *read*
    *   this company's inference configuration, so it cannot say why the company
    *   fell back to the echo brain. **Name no remedy here**: an unreadable
@@ -1669,6 +1675,7 @@ export interface CapabilityStatusDto {
 export type CognitionState =
   | "configured"
   | "unconfigured"
+  | "restart-required"
   | "unavailable"
   | "undetermined";
 
