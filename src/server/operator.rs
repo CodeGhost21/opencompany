@@ -2368,17 +2368,28 @@ async fn chat_and_emit(
     // way for its company to get it back — the same failure mode `905297aef`
     // fixed for the desk *list*, here on the *write* path.
     //
+    // The same grandfather clause applies to a **teammate** — a manifest or
+    // overlay agent — already named `operator`: `ChatView` addresses a DM by
+    // the teammate's bare id (issue #364), so a message meant for that person
+    // arrives here as `chat == "operator"` too, indistinguishable at this
+    // point from a send meant for the system feed. `desk_exists` alone would
+    // miss it — it only walks `group_chats` and `overlay_desks`, never the
+    // roster — so a company that named someone "Operator" before this feature
+    // shipped would find that teammate suddenly unreachable, with no console
+    // affordance to rename or migrate them out of the collision. Checking
+    // `is_roster_agent` alongside `desk_exists` is the same carve-out, applied
+    // to the other namespace `RESERVED_AGENT_IDS` reserves.
+    //
     // The load's `?` propagates a real store failure as itself, rather than
     // collapsing it into "no real desk" — that would misreport a transient
     // store error as the ordinary read-only refusal for every company, not
     // only a grandfathered one, and journal the failure nowhere.
     if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
-        let has_real_operator_desk = runtime
-            .store()
-            .load(id)
-            .await?
-            .is_some_and(|record| record.desk_exists(crate::runtime::OPERATOR_CHANNEL));
-        if !has_real_operator_desk {
+        let has_real_operator_recipient = runtime.store().load(id).await?.is_some_and(|record| {
+            record.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+                || record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL)
+        });
+        if !has_real_operator_recipient {
             return Err(ApiError(OpenCompanyError::InvalidRequest(
                 "the Operator channel is a read-only feed of workflow reports and notifications — \
                  it cannot be posted to"
@@ -5805,6 +5816,56 @@ mode = "full"
             response.status().is_success(),
             "a pre-existing desk that already owns the `operator` id must stay \
              writable, got {}",
+            response.status()
+        );
+    }
+
+    /// Issue #1757 migration, the other namespace: a **teammate**, not a desk,
+    /// already named `operator`. `ChatView` addresses a DM by the teammate's
+    /// bare id (issue #364), so a message meant for this person also arrives
+    /// here as `chat == "operator"` — the same shape as a send meant for the
+    /// system feed. `desk_exists` alone cannot tell them apart: it only walks
+    /// `group_chats` and `overlay_desks`, never the roster, so a company that
+    /// named a manifest agent "Operator" before this feature shipped would
+    /// find that teammate's DM permanently refused, with the console giving no
+    /// way to rename or migrate out of the collision (`RESERVED_AGENT_IDS` and
+    /// `mint_agent_id` only stop a *future* mint). `is_roster_agent` closes the
+    /// same gap `desk_exists` closes for desks.
+    #[tokio::test]
+    async fn a_manifest_agent_predating_the_reserved_operator_id_stays_dm_able() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // A DM addressed to the grandfathered teammate — by its bare id, the
+        // same address `ChatView` sends — must go through rather than be
+        // refused as a send to the read-only system channel.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"status update please","chat":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "a pre-existing teammate that already owns the `operator` id must \
+             stay DM-able, got {}",
             response.status()
         );
     }
