@@ -131,6 +131,23 @@ impl BlockedNodeQueue {
         }
     }
 
+    /// Reads `turn`'s stash without removing it (issue #1816, Stage 4).
+    ///
+    /// The non-destructive counterpart to [`release`](Self::release): a caller
+    /// that must inspect the stash *before* committing to retire it — because
+    /// what comes next can still fail, or can outlive the process — uses this
+    /// instead, and calls `release` only once the outcome the retirement
+    /// records is actually final. See
+    /// [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)
+    /// for the caller this exists for.
+    pub fn peek(&self, turn: &str) -> Option<StashedBlock> {
+        self.inner
+            .lock()
+            .expect("blocked node queue poisoned")
+            .get(turn)
+            .cloned()
+    }
+
     /// Takes `turn`'s stash, dropping it from the queue.
     ///
     /// Called once, by whichever caller the [`ContinuationQueue`] handed the
@@ -184,6 +201,31 @@ impl BlockedNodeQueue {
             .lock()
             .expect("blocked node queue poisoned")
             .len()
+    }
+
+    /// Every turn this queue holds a stash for whose `approved` flag is set
+    /// (issue #1816, Stage 3).
+    ///
+    /// Read once, at boot, to find a stash a restart may have stranded:
+    /// crossed against the journal's own live [`parked_turns`] (a turn with
+    /// nothing left parked there has had every decision it was blocked on
+    /// durably resolved), a turn that is both `approved` here and absent from
+    /// that set is exactly one whose last decision landed before the crash
+    /// that took [`resume_blocked_agent_node`] down with it — the release
+    /// recorded nothing wrong, it simply never ran. See
+    /// [`CompanyRuntime::reconcile_stranded_blocked_nodes`] for the caller.
+    ///
+    /// [`parked_turns`]: crate::runtime::journal::RuntimeJournal::parked_turns
+    /// [`resume_blocked_agent_node`]: crate::company::runtime::CompanyRuntime::resume_blocked_agent_node
+    /// [`CompanyRuntime::reconcile_stranded_blocked_nodes`]: crate::company::runtime::CompanyRuntime::reconcile_stranded_blocked_nodes
+    pub fn approved_turns(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("blocked node queue poisoned")
+            .iter()
+            .filter(|(_, block)| block.approved)
+            .map(|(turn, _)| turn.clone())
+            .collect()
     }
 }
 
@@ -353,5 +395,67 @@ mod test {
             q.release("workflow-node:run-2:draft").unwrap().input,
             json!({ "n": 2 })
         );
+    }
+
+    /// `peek` reads the same facts `release` would hand back, but leaves the
+    /// stash in place — the whole reason issue #1816 Stage 4 adds it beside a
+    /// destructive `release`.
+    #[test]
+    fn peek_reads_the_stash_without_taking_it() {
+        let q = BlockedNodeQueue::default();
+        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+
+        let seen = q.peek("workflow-node:run-1:draft").expect("armed");
+        assert_eq!(seen.input, json!({ "n": 1 }));
+        assert!(
+            q.is_armed("workflow-node:run-1:draft"),
+            "peek must not remove the stash — only release does"
+        );
+
+        // A second peek sees the same thing, and the eventual release still
+        // hands back the untouched facts.
+        assert_eq!(
+            q.peek("workflow-node:run-1:draft").unwrap().input,
+            json!({ "n": 1 })
+        );
+        assert_eq!(
+            q.release("workflow-node:run-1:draft").unwrap().input,
+            json!({ "n": 1 })
+        );
+    }
+
+    /// `peek` on a turn with no stash is `None`, not a panic — the same
+    /// contract `release` has for an unarmed turn.
+    #[test]
+    fn peek_on_an_unarmed_turn_is_none() {
+        let q = BlockedNodeQueue::default();
+        assert!(q.peek("workflow-node:run-9:ghost").is_none());
+    }
+
+    /// `approved_turns` names only the turns whose flag is actually set — an
+    /// armed-but-undecided stash is not in the list, and neither is a turn
+    /// this queue holds no stash for at all.
+    #[test]
+    fn approved_turns_lists_only_the_marked_ones() {
+        let q = BlockedNodeQueue::default();
+        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }));
+        q.mark_approved("workflow-node:run-1:draft");
+
+        assert_eq!(
+            q.approved_turns(),
+            vec!["workflow-node:run-1:draft".to_string()],
+            "only the marked turn is reported; the still-undecided one is not"
+        );
+    }
+
+    /// A freshly `arm`ed queue with nothing marked reports nothing approved —
+    /// boot reconciliation must not fire on a node that is merely blocked, not
+    /// yet decided.
+    #[test]
+    fn approved_turns_is_empty_with_nothing_marked() {
+        let q = BlockedNodeQueue::default();
+        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        assert!(q.approved_turns().is_empty());
     }
 }
