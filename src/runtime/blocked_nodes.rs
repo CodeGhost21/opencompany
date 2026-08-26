@@ -227,6 +227,32 @@ impl BlockedNodeQueue {
             .map(|(turn, _)| turn.clone())
             .collect()
     }
+
+    /// Every turn this queue holds a stash for, approved or not (issue #1825,
+    /// P2 follow-up).
+    ///
+    /// [`approved_turns`](Self::approved_turns) alone cannot see a stash whose
+    /// every decision landed as a denial or an expiry — one never marked
+    /// `approved` — so a boot that scanned only that list left such a stash
+    /// rehydrated by [`rearm`](Self::rearm) on every restart and never
+    /// retired: the same fact recorded live, up front, by
+    /// `resume_blocked_agent_node`'s own all-denied branch is exactly what a
+    /// crash between that resolution and the retirement it drives (or a
+    /// retirement whose durable write itself fails) loses. Read this list
+    /// instead, so [`CompanyRuntime::reconcile_stranded_blocked_nodes`] can
+    /// tell the two resolved-but-unretired shapes apart — approved (redeem
+    /// it) and unapproved (nothing to redeem, just retire it) — rather than
+    /// only ever seeing the first.
+    ///
+    /// [`CompanyRuntime::reconcile_stranded_blocked_nodes`]: crate::company::runtime::CompanyRuntime::reconcile_stranded_blocked_nodes
+    pub fn stashed_turns(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("blocked node queue poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -457,5 +483,35 @@ mod test {
         let q = BlockedNodeQueue::default();
         q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
         assert!(q.approved_turns().is_empty());
+    }
+
+    /// `stashed_turns` names every held stash regardless of its `approved`
+    /// flag — unlike `approved_turns`, an unapproved (denied/expired) turn
+    /// still appears, which is exactly what lets boot reconciliation retire
+    /// it instead of losing track of it (issue #1825, P2 follow-up).
+    #[test]
+    fn stashed_turns_lists_approved_and_unapproved_alike() {
+        let q = BlockedNodeQueue::default();
+        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }));
+        q.mark_approved("workflow-node:run-1:draft");
+
+        let mut turns = q.stashed_turns();
+        turns.sort();
+        assert_eq!(
+            turns,
+            vec![
+                "workflow-node:run-1:draft".to_string(),
+                "workflow-node:run-2:draft".to_string(),
+            ],
+            "both the approved and the still-undecided/unapproved stash are named"
+        );
+    }
+
+    /// A queue holding nothing reports no stashed turns.
+    #[test]
+    fn stashed_turns_is_empty_with_nothing_armed() {
+        let q = BlockedNodeQueue::default();
+        assert!(q.stashed_turns().is_empty());
     }
 }
