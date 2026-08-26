@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
+  clearDefaultCompany,
   getConnection,
   resetConnections,
   restoreConnections,
@@ -188,5 +189,46 @@ describe("retargetCompanyUrlParam", () => {
     retargetCompanyUrlParam("acme", null);
 
     expect(window.location.search).toBe("?company=beta");
+  });
+
+  /**
+   * Codex review on #1828 (PR comment 3865190492): the previous test proves
+   * `resolveConfig().company` is falsy after a clear, but the bootstrap in
+   * `App.tsx` never compares that value for truthiness — it feeds it
+   * straight into `addConnection`'s `findProfile(baseUrl, defaultCompany)`
+   * lookup, which matches by STRICT equality against the persisted profile's
+   * `defaultCompany`. `clearDefaultCompany` sets that to `null`; an
+   * unnormalized empty `?company=` resolves to `""`, not `null`, and
+   * `"" !== null` — so the reload that was supposed to land back on the same
+   * cleared connection instead mints a fresh, orphaned duplicate still
+   * carrying the old browser-scoped state on the original.
+   */
+  it("keeps a cleared connection's profile matching itself across a reload, not just its config falsy", () => {
+    land("?company=acme");
+    const bootConfig = resolveConfig();
+    const id = addConnection({ baseUrl: "https://acme.test", defaultCompany: bootConfig.company });
+
+    // The abandon path: archive landed, nothing replaced it — the same two
+    // calls `ConnectionConsole`'s `onClose` handler makes today.
+    clearDefaultCompany(id);
+    retargetCompanyUrlParam("acme", null);
+
+    expect(getConnection(id)?.defaultCompany).toBeNull();
+    expect(window.location.search).toBe("?company=");
+
+    // A reload: registry gone, URL + localStorage persist. Replay App.tsx's
+    // bootstrap exactly.
+    resetConnections();
+    const reloadedConfig = resolveConfig();
+
+    restoreConnections();
+    const reloadedId = addConnection({
+      baseUrl: "https://acme.test",
+      defaultCompany: reloadedConfig.company,
+    });
+
+    // The same connection is reused, not an orphaned duplicate scoped to "".
+    expect(reloadedId).toBe(id);
+    expect(getConnection(reloadedId)?.defaultCompany).toBeNull();
   });
 });
