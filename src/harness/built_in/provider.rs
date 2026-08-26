@@ -1015,7 +1015,10 @@ impl ChatModel<()> for HostedProvider {
             let text = response.text().await.unwrap_or_default();
             let error = format!("hosted inference returned {status}: {text}");
             let models_url = format!("{base_url}/models");
-            if let Some(advice) = model_unavailable_advice(status, &error, &models_url) {
+            // The hosted, TinyHumans-managed backend has no harness-scoped
+            // inference config to point to — it always resolves the company's
+            // default `[inference]`.
+            if let Some(advice) = model_unavailable_advice(status, &error, &models_url, None) {
                 return Err(TinyAgentsError::Model(advice));
             }
             return Err(TinyAgentsError::Model(error));
@@ -1187,10 +1190,24 @@ const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
 /// exist` — is never mistaken for a model error). Deliberately not an allowlist
 /// of model ids: that would rot as providers add models, so this recognises the
 /// *refusal*, not the catalogue.
+///
+/// `harness` names the *scoped, non-default* `built_in` harness this request
+/// ran as, when there is one — `None` for the company's default harness (and
+/// for every caller that has no harness concept at all, e.g. the setup-time and
+/// console "Test" probes). Every caller in this module runs a `built_in`
+/// harness, and `agent.model` only takes effect on an `acp` harness
+/// (`Manifest::validate`, `src/company/manifest.rs`) — so it is never a real
+/// lever here and this deliberately never suggests it (issue #1824 follow-up).
+/// A *named* harness with its own `[harness.inference]` resolves independently
+/// of the company mapping (`resolve_effective_scoped`,
+/// `src/company/inference.rs`), so pointing every operator at
+/// `[inference].models` sends a scoped harness's operator to a table its
+/// request never consulted; naming the harness sends them to the one that did.
 fn model_unavailable_advice(
     status: reqwest::StatusCode,
     error: &str,
     models_url: &str,
+    harness: Option<&str>,
 ) -> Option<String> {
     if !status.is_client_error() {
         return None;
@@ -1205,10 +1222,16 @@ fn model_unavailable_advice(
     {
         return None;
     }
+    let where_to_fix = match harness {
+        Some(id) => format!(
+            "update harness `{id}`'s own `[harness.inference].models` mapping (or the company's \
+             `[inference].models`, if `{id}` doesn't declare its own)"
+        ),
+        None => "update the company's `[inference].models` mapping".to_string(),
+    };
     Some(format!(
-        "the configured inference model is not available from the provider — update the agent's \
-         model, or the company's `[inference].models` mapping, to one the provider offers (list \
-         them with `GET {models_url}`). {error}"
+        "the configured inference model is not available from the provider — {where_to_fix}, to \
+         one the provider offers (list them with `GET {models_url}`). {error}"
     ))
 }
 
@@ -1223,6 +1246,7 @@ async fn send_plan(
     client: &reqwest::Client,
     plan: &RequestPlan,
     credential: &Credential,
+    harness: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let mut request = client.post(&plan.url).json(&plan.body);
     if let Some(bearer) = &plan.bearer {
@@ -1256,7 +1280,7 @@ async fn send_plan(
             .strip_suffix("/chat/completions")
             .map(|base| format!("{base}/models"))
             .unwrap_or_else(|| plan.url.clone());
-        if let Some(advice) = model_unavailable_advice(status, &error, &models_url) {
+        if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness) {
             return Err(anyhow::anyhow!("{advice}"));
         }
         return Err(anyhow::anyhow!("{error}"));
@@ -1396,7 +1420,13 @@ impl ChatModel<()> for TenantProvider {
         )
         .await
         .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
-        let payload = send_plan(&self.client, &plan, decl.credential())
+        // Named only for a *non-default* harness: the default harness's own
+        // scope still resolves to the company `[inference]` when it declares
+        // none of its own (`built_in_lane`, `src/harness/lanes.rs`), so naming
+        // it here would send an operator to a `[harness.inference.models]`
+        // table that was never consulted.
+        let harness = (!self.scope.is_default).then_some(self.scope.id.as_str());
+        let payload = send_plan(&self.client, &plan, decl.credential(), harness)
             .await
             .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
         // Classified from `plan.model` — the exact string that goes on the wire,
@@ -1447,7 +1477,9 @@ pub async fn probe(decl: &InferenceDecl) -> anyhow::Result<()> {
         &ToolChoice::Auto,
     )
     .await?;
-    let payload = send_plan(&client, &plan, decl.credential()).await?;
+    // No harness scope in play here: this is a bare-`decl` connectivity probe
+    // (the setup-time and console "Test" routes), never a scoped harness turn.
+    let payload = send_plan(&client, &plan, decl.credential(), None).await?;
     payload
         .pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
@@ -2942,7 +2974,8 @@ mod tests {
     /// Issue #1811: the managed backend's raw refusal for a model id that does
     /// not exist is rewritten into an actionable message that names the fix and
     /// keeps the provider's own words (the bad id + the list-models hint) at the
-    /// end for support.
+    /// end for support. No `harness` in play (the managed backend has no
+    /// harness-scoped config), so the fix is named as the company mapping.
     #[test]
     fn a_missing_model_400_becomes_actionable() {
         let raw = concat!(
@@ -2954,15 +2987,18 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             raw,
             "https://api.tinyhumans.ai/openai/v1/models",
+            None,
         )
         .expect("recognised as a missing model");
         assert!(
-            advice.contains("update the agent's model"),
-            "the fix is named: {advice}"
+            !advice.contains("agent's model"),
+            "a built_in harness never honours `agent.model` (`Manifest::validate`), so it must \
+             not be suggested as a fix: {advice}"
         );
         assert!(
-            advice.contains("`[inference].models`"),
-            "the other place the id can live is named: {advice}"
+            advice.contains("the company's `[inference].models` mapping"),
+            "with no harness scope, the company-level mapping is the only place to fix it: \
+             {advice}"
         );
         assert!(
             advice.contains("deepseek/deepseek-v4-pro"),
@@ -2971,6 +3007,40 @@ mod tests {
         assert!(
             advice.contains("GET https://api.tinyhumans.ai/openai/v1/models"),
             "the caller-supplied catalog endpoint is used: {advice}"
+        );
+    }
+
+    /// Codex review on #1824: a named `built_in` harness with its own
+    /// `[harness.inference]` resolves independently of the company mapping
+    /// (`resolve_effective_scoped`), so the advice must name *that* harness
+    /// rather than blanket-pointing at `[inference].models` — the earlier wording
+    /// sent its operator to a table the failing request never consulted, and
+    /// separately suggested `agent.model`, which a `built_in` harness rejects
+    /// outright. This assertion set does not compile against the pre-fix
+    /// 3-argument `model_unavailable_advice`, i.e. it fails (to build) on the
+    /// pre-fix code exactly as it must.
+    #[test]
+    fn scoped_harness_advice_names_its_own_harness() {
+        let raw = "inference returned 400 Bad Request: openai/made-up is not a valid model ID";
+        let advice = model_unavailable_advice(
+            reqwest::StatusCode::BAD_REQUEST,
+            raw,
+            "https://openrouter.ai/api/v1/models",
+            Some("research-harness"),
+        )
+        .expect("recognised as a missing model");
+        assert!(
+            advice.contains("harness `research-harness`'s own `[harness.inference].models`"),
+            "the failing harness is named, not just the company: {advice}"
+        );
+        assert!(
+            advice.contains("the company's `[inference].models`"),
+            "the company fallback (when the harness declares none of its own) is still \
+             mentioned: {advice}"
+        );
+        assert!(
+            !advice.contains("agent's model"),
+            "still never suggests the non-lever `agent.model`: {advice}"
         );
     }
 
@@ -2988,6 +3058,7 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             raw,
             "https://openrouter.ai/api/v1/models",
+            None,
         )
         .expect("recognised as a missing model");
         assert!(
@@ -3014,6 +3085,7 @@ mod tests {
                     reqwest::StatusCode::BAD_REQUEST,
                     body,
                     "https://example.com/v1/models",
+                    None,
                 )
                 .is_some(),
                 "should be recognised as a missing model: {body}"
@@ -3032,6 +3104,7 @@ mod tests {
                 reqwest::StatusCode::UNAUTHORIZED,
                 "inference returned 401 Unauthorized: invalid api key",
                 "https://example.com/v1/models",
+                None,
             ),
             None,
             "a bad key is not a missing model"
@@ -3041,6 +3114,7 @@ mod tests {
                 reqwest::StatusCode::BAD_REQUEST,
                 "inference returned 400 Bad Request: user does not exist",
                 "https://example.com/v1/models",
+                None,
             ),
             None,
             "a 4xx that never names a model is not a missing model"
@@ -3050,6 +3124,7 @@ mod tests {
                 reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 "inference returned 500: the model host crashed",
                 "https://example.com/v1/models",
+                None,
             ),
             None,
             "a 5xx is the provider's fault, not the operator's config"
