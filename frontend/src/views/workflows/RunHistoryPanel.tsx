@@ -548,6 +548,20 @@ export function RunHistoryRow({
   // itself failed or the excess was dropped past the per-turn cap. Strictly
   // worse than a parked one — there is no card to click.
   const unparkable = blocked.reduce((n, b) => n + (b.unparkable ?? 0), 0);
+  // Codex review on #1821 (twelfth pass): `unparkable` sums two outcomes
+  // (`caps/mod.rs`'s `park_gated_calls`) that are NOT the same failure —
+  // `discarded` (this run's turn asked for more gated calls than one batch
+  // may raise, so the excess was dropped before the queue ever saw it —
+  // `MAX_APPROVAL_REQUESTS_PER_TURN`) and `parkFailed` (the queue itself
+  // refused the write, or this runtime has none wired). Only `run.approvals`
+  // — never `WorkflowBlockedNode.unparkable`, which the sum above reads —
+  // keeps the two apart, via `outcome`. The closing remedy sentence below
+  // named "the approvals queue itself may have refused it" as the cause for
+  // BOTH, which is wrong for a discarded call: it was never offered to the
+  // queue at all.
+  const runApprovals = run.approvals ?? [];
+  const discardedCalls = runApprovals.filter((a) => a.outcome === "discarded").length;
+  const parkFailedCalls = runApprovals.filter((a) => a.outcome === "parkFailed").length;
   const failedNode = failedNodeOf(run);
   // Codex review on #1821 (eighth pass): `RunCancel` stops a run at the next
   // node boundary — the node already executing normally finishes and is
@@ -972,7 +986,25 @@ export function RunHistoryRow({
                 // workflow change fixes that"). "Change the policy" names a
                 // cause that is never the one in either code path; nothing
                 // about policy content is what failed here.
-                "Nothing here could be queued for approval — the approvals queue itself may have refused it, which no workflow change fixes. Run it again once that's resolved."}
+                //
+                // Codex review on #1821 (twelfth pass): this named "the
+                // approvals queue itself may have refused it" as the cause
+                // even when every unparkable call was `discarded` — dropped
+                // by the per-turn cap before the queue ever saw it, a
+                // different and distinguishable cause (`run.approvals`'
+                // `outcome`, computed above). A run with ONLY `discarded`
+                // calls (and at least one, so the classification is positive
+                // rather than absent) gets its own sentence; a run with any
+                // `discarded` alongside `parkFailed` calls names both; every
+                // other case — `parkFailed` only, or a run whose `approvals`
+                // rows predate this classification and carry neither outcome
+                // — keeps the original sentence, which is this default
+                // rather than a claim this fold cannot back.
+                discardedCalls > 0 && parkFailedCalls === 0
+                  ? "Nothing here could be queued for approval — this run's turn asked for more approvals than one batch may raise, so the excess was dropped before the queue ever saw it. Run it again — a turn that asks for fewer approvals at once will queue cleanly."
+                  : discardedCalls > 0 && parkFailedCalls > 0
+                    ? "Nothing here could be queued for approval — some were dropped because this run's turn asked for more approvals than one batch may raise, and the rest because the approvals queue itself may have refused them, which no workflow change fixes. Run it again once you've cut how many approvals one turn asks for and confirmed the queue is healthy."
+                    : "Nothing here could be queued for approval — the approvals queue itself may have refused it, which no workflow change fixes. Run it again once that's resolved."}
         </p>
         {/* Issue #1014 (PR-B): the gated tool names per blocked node and a link
             per parked card to the Approvals queue — the sentence above says

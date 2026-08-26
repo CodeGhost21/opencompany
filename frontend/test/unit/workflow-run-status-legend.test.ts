@@ -59,6 +59,33 @@ function blockedUnparkableRun(): WorkflowRunOutcome {
   });
 }
 
+/** A blocked run whose one unparkable call was `discarded` — the per-turn
+ * approval cap dropped it before the queue ever saw it (`caps/mod.rs`'s
+ * `park_gated_calls`), never refused by the queue. `blockedUnparkableRun()`
+ * above carries no `approvals` rows at all, so it cannot exercise this
+ * outcome; `run.approvals` is the only place `discarded` and `parkFailed`
+ * are told apart (issue #1821, twelfth pass). */
+function discardedOnlyBlockedRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 14,
+    blockedNodes: [{ nodeId: "notify_ops", tools: ["send_slack_message"], unparkable: 1 }],
+    approvals: [{ outcome: "discarded" }],
+  });
+}
+
+/** A blocked run whose two unparkable calls mix a `discarded` overflow and a
+ * genuine `parkFailed` — both causes are real for this run at once. */
+function mixedUnparkableBlockedRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 15,
+    blockedNodes: [{ nodeId: "notify_ops", tools: ["send_slack_message"], unparkable: 2 }],
+    approvals: [
+      { outcome: "discarded" },
+      { outcome: "parkFailed", nodeId: "notify_ops", tool: "send_slack_message" },
+    ],
+  });
+}
+
 /** A finished run whose one output report was refused — `undeliveredCount` is 1,
  * so the row falls to the delivery block and badges "1 not delivered". */
 function undeliveredRun(): WorkflowRunOutcome {
@@ -721,5 +748,31 @@ describe("the unparkable-only blocked remedy stops naming a policy cause", () =>
     const row = container.querySelector('[data-testid="workflow-run-blocked"]');
     expect(row?.textContent).not.toContain("change the policy");
     expect(row?.textContent).toContain("approvals queue itself may have refused it");
+  });
+});
+
+describe("the unparkable-only blocked remedy distinguishes a discarded overflow from a park failure", () => {
+  // Codex review on #1821 (twelfth pass): `discarded` (the per-turn approval
+  // cap dropped the excess before the queue ever saw it) and `parkFailed`
+  // (the queue itself refused the write, or none is wired) were both told as
+  // "the approvals queue itself may have refused it" — true for `parkFailed`,
+  // false for `discarded`, which the queue never saw at all. `run.approvals`'
+  // `outcome` is what lets the row tell them apart
+  // (`blockedUnparkableRun()`, used above, carries no `approvals` rows and so
+  // cannot exercise this).
+  it("names the per-turn cap, not the queue, when every unparkable call was discarded", async () => {
+    await renderHistory(discardedOnlyBlockedRun());
+    const row = container.querySelector('[data-testid="workflow-run-blocked"]');
+    expect(row?.textContent).not.toContain(
+      "approvals queue itself may have refused it",
+    );
+    expect(row?.textContent).toContain("more approvals than one batch may raise");
+  });
+
+  it("names both causes when the unparkable calls are a mix of discarded and parkFailed", async () => {
+    await renderHistory(mixedUnparkableBlockedRun());
+    const row = container.querySelector('[data-testid="workflow-run-blocked"]');
+    expect(row?.textContent).toContain("more approvals than one batch may raise");
+    expect(row?.textContent).toContain("approvals queue itself may have refused them");
   });
 });
