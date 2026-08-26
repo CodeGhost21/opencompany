@@ -88,9 +88,10 @@ export function copilotTurnText(reply: string, draft?: string): string {
 /**
  * Why there is no draft.
  *
- * Three reasons rather than one, because the operator's next move differs for
+ * Several reasons rather than one, because the operator's next move differs for
  * each — the same split the roster proposal's `RosterFallback` makes, and for
- * the same reason: a single sentence covering all three is too vague to act on.
+ * the same reason: a single sentence covering all of them is too vague to act
+ * on. Only one of these is worth retrying.
  */
 export type DraftRefusal =
   /** Nothing is wired, so no call ran. Set up a model. */
@@ -98,7 +99,9 @@ export type DraftRefusal =
   /** A model is wired and the call did not land. Retry, or check the provider. */
   | "model_unreachable"
   /** A model answered and the answer could not be used. Say more, or write it. */
-  | "unreadable";
+  | "unreadable"
+  /** The company's token ceiling for the period is spent. Nothing to retry. */
+  | "budget_exhausted";
 
 /** One copilot turn, as the host answers. */
 export interface ProfileDraft {
@@ -154,6 +157,11 @@ export function refusalNotice(reason: DraftRefusal | undefined): string {
       return "The model didn't answer in time. Try again, or check the provider in Settings → Inference.";
     case "unreadable":
       return "The model's answer couldn't be used. Try again, or add a note saying what this teammate should own.";
+    case "budget_exhausted":
+      // The one reason with nothing to retry: the ceiling is a plan setting,
+      // not a transient failure, so "try again" would be advice that cannot
+      // work. Says what to change instead.
+      return "This company has spent its token budget for the period, so the copilot can't draft until it resets — raise the ceiling in Settings, or write the field yourself.";
     default:
       // A host too old to send a reason, or one that grew a reason this console
       // does not know. Says what happened without inventing which of the three

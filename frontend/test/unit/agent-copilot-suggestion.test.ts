@@ -351,6 +351,15 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     expect(refusalNotice("unreadable")).toContain("add a note");
     expect(refusalNotice(undefined)).not.toContain("Settings → Inference");
   });
+
+  /// A spent budget is the one reason with nothing to retry — the ceiling is a
+  /// plan setting, not a provider having a bad minute, so telling the operator
+  /// to try again would be advice that cannot work.
+  it("does not offer a retry for a budget that is spent", () => {
+    const spent = refusalNotice("budget_exhausted");
+    expect(spent).toContain("token budget");
+    expect(spent).not.toContain("Try again");
+  });
 });
 
 describe("where the copilot is offered at all", () => {

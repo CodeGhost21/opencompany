@@ -1459,7 +1459,7 @@ pub(super) async fn draft_profile(
     })?;
 
     let turns = subject.conversation.len();
-    let draft = build_draft(&company, field, &subject).await;
+    let draft = build_draft(&company, &record, field, &subject).await;
     tracing::info!(
         company = %company.id(),
         agent = %agent_id,
@@ -1556,7 +1556,7 @@ pub(super) async fn draft_new_profile(
     };
 
     let turns = subject.conversation.len();
-    let draft = build_draft(&company, field, &subject).await;
+    let draft = build_draft(&company, &record, field, &subject).await;
     tracing::info!(
         company = %company.id(),
         field = field.as_str(),
@@ -1691,6 +1691,70 @@ fn siblings_of(record: &CompanyRecord, agent_id: &str) -> Vec<Sibling> {
         .collect()
 }
 
+/// Whether the tenant's plan-level token ceiling (issue #188) has already been
+/// reached, in which case no draft may run.
+///
+/// A draft is a completion the tenant pays for, and
+/// [`tokens_in`] counts [`SampleKind::AuthoringCall`](crate::ports::usage::SampleKind::AuthoringCall)
+/// toward that ceiling — so without this the ceiling is one the copilot only
+/// *contributes* to and never obeys. Drafting is operator-driven and
+/// repeatable by the same click, so a member past the cap could keep spending
+/// through this route indefinitely while every other dispatch is refused.
+///
+/// This is the same gate `run_inner`'s `total_ceiling_refusal` applies before
+/// harness dispatch, and it fails the same way it does — an unreadable meter
+/// or an absent one **warns and lets the draft through** rather than refusing.
+/// A metering outage that silently disabled a working copilot would be a worse
+/// failure than a draft or two past the line, and the per-namespace roster is
+/// fail-closed independently.
+///
+/// Takes the meter and the manifest plan rather than the [`ScopedCompany`] it
+/// is called with, so the rule can be exercised against a meter that reports a
+/// known spend — the gate is worth nothing if the only way to see it work is a
+/// live tenant that has already overspent.
+// Compiled where it can run: the drafting pass itself is behind `openhuman`,
+// and `test` so the default lane still exercises the rule.
+#[cfg(any(feature = "openhuman", test))]
+async fn total_ceiling_reached(
+    company: &crate::ports::types::CompanyId,
+    meter: &dyn crate::ports::UsageMeter,
+    manifest_plan: &crate::company::Plan,
+) -> bool {
+    use crate::metering::{CapabilityPlan, tokens_in};
+
+    let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
+        return false;
+    };
+    // No ceiling configured is the common case, and asking the meter about it
+    // would put a usage query in front of every draft for nothing.
+    if plan.total_budget.is_none() {
+        return false;
+    }
+    let since = plan.period.period_start_millis(crate::ports::now_millis());
+    match meter.query(company, since).await {
+        Ok(samples) => {
+            let spent = tokens_in(&samples);
+            if plan.total_exhausted(spent) {
+                tracing::info!(
+                    company = %company,
+                    spent,
+                    "[draft] total token ceiling reached; refusing to draft (no model call) until the period resets"
+                );
+                return true;
+            }
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                company = %company,
+                %error,
+                "[draft] total-ceiling spend query failed; not refusing the draft"
+            );
+            false
+        }
+    }
+}
+
 /// The draft itself: written by a model when one is wired, refused with a
 /// reason when none is.
 ///
@@ -1703,12 +1767,25 @@ fn siblings_of(record: &CompanyRecord, agent_id: &str) -> Vec<Sibling> {
 #[cfg(feature = "openhuman")]
 async fn build_draft(
     company: &ScopedCompany,
+    record: &CompanyRecord,
     field: ProfileField,
     subject: &ProfileSubject,
 ) -> ProfileDraft {
     let Some(drafter) = company.runtime.profile_drafter() else {
         return ProfileDraft::Refused(DraftRefusal::NoModel);
     };
+    // Checked after the drafter and before the call: a company with nothing
+    // wired has a truer answer to give than "out of budget", and a company that
+    // is out of budget must not reach the provider at all.
+    if total_ceiling_reached(
+        company.id(),
+        company.runtime.usage().as_ref(),
+        &record.manifest.plan,
+    )
+    .await
+    {
+        return ProfileDraft::Refused(DraftRefusal::BudgetExhausted);
+    }
     let provider = drafter.provider_slug();
     let (draft, usage) = drafter.draft(field, subject).await;
     // Read *after* the turn, so it names the model the turn actually ran on —
@@ -1733,6 +1810,7 @@ async fn build_draft(
 #[cfg(not(feature = "openhuman"))]
 async fn build_draft(
     _company: &ScopedCompany,
+    _record: &CompanyRecord,
     _field: ProfileField,
     _subject: &ProfileSubject,
 ) -> ProfileDraft {
@@ -4310,5 +4388,117 @@ agent = "claude"
             persona.chars().count() < 50_000,
             "a persona is cut to what a prompt can carry, not to what was pasted"
         );
+    }
+
+    /// A meter that reports one fixed spend, so the ceiling can be seen holding
+    /// rather than only described.
+    struct FixedMeter(u64);
+
+    #[async_trait::async_trait]
+    impl crate::ports::UsageMeter for FixedMeter {
+        async fn record(
+            &self,
+            _company: &CompanyId,
+            _sample: &crate::ports::usage::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since_millis: u64,
+        ) -> crate::Result<Vec<crate::ports::usage::UsageSample>> {
+            Ok(vec![crate::ports::usage::UsageSample {
+                at_millis: crate::ports::now_millis(),
+                agent: crate::metering::UNATTRIBUTED_AGENT.to_string(),
+                provider: "managed".to_string(),
+                input_tokens: self.0,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                cost_usd: 0.0,
+                kind: crate::ports::usage::SampleKind::AuthoringCall,
+                run_id: None,
+                model: None,
+            }])
+        }
+    }
+
+    /// A meter that cannot answer. The gate is deliberately **not** fail-closed
+    /// here: a metering outage that silently disabled a working copilot would
+    /// be the worse failure, and it is the same call the harness makes.
+    struct FailingMeter;
+
+    #[async_trait::async_trait]
+    impl crate::ports::UsageMeter for FailingMeter {
+        async fn record(
+            &self,
+            _company: &CompanyId,
+            _sample: &crate::ports::usage::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since_millis: u64,
+        ) -> crate::Result<Vec<crate::ports::usage::UsageSample>> {
+            Err(crate::error::OpenCompanyError::Store("no meter".into()))
+        }
+    }
+
+    fn plan_with(total_tokens: Option<u64>) -> crate::company::Plan {
+        crate::company::Plan {
+            name: Some("starter".to_string()),
+            total_tokens,
+            ..Default::default()
+        }
+    }
+
+    /// Drafting is a completion the tenant pays for, and `tokens_in` counts it
+    /// toward the plan ceiling — so a route that never *checks* that ceiling is
+    /// one the copilot only ever contributes to. It is operator-driven and
+    /// repeatable by the same click, which is the leak: every other dispatch is
+    /// refused past the cap and this one would keep spending.
+    #[tokio::test]
+    async fn a_company_past_its_token_ceiling_does_not_draft() {
+        let company = CompanyId::new("acme");
+        assert!(
+            super::total_ceiling_reached(&company, &FixedMeter(1_000), &plan_with(Some(1_000)))
+                .await,
+            "spend at the ceiling refuses, matching the harness's >= boundary"
+        );
+        assert!(
+            !super::total_ceiling_reached(&company, &FixedMeter(999), &plan_with(Some(1_000)))
+                .await,
+            "under the ceiling still drafts"
+        );
+    }
+
+    /// No ceiling configured is the common case, and it must not put a usage
+    /// query in front of every draft — nor refuse one.
+    #[tokio::test]
+    async fn a_company_with_no_ceiling_is_never_refused_for_budget() {
+        let company = CompanyId::new("acme");
+        assert!(
+            !super::total_ceiling_reached(&company, &FixedMeter(u64::MAX), &plan_with(None)).await
+        );
+        assert!(
+            !super::total_ceiling_reached(
+                &company,
+                &FixedMeter(u64::MAX),
+                &crate::company::Plan::default()
+            )
+            .await,
+            "a company with no [plan] section at all has no ceiling to reach"
+        );
+    }
+
+    /// A meter that cannot be read is not a company over its budget.
+    #[tokio::test]
+    async fn an_unreadable_meter_lets_the_draft_through() {
+        let company = CompanyId::new("acme");
+        assert!(!super::total_ceiling_reached(&company, &FailingMeter, &plan_with(Some(1))).await);
     }
 }

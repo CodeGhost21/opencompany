@@ -86,10 +86,13 @@ impl ProfileField {
 
 /// Why no draft came back.
 ///
-/// Three reasons rather than one, because **the operator's next move differs**
-/// — the same split [`FallbackReason`](crate::company::setup::FallbackReason)
+/// Several reasons rather than one, because **the operator's next move
+/// differs** — the same split [`FallbackReason`](crate::company::setup::FallbackReason)
 /// makes for the roster pass, and for the same reason: one sentence covering
-/// all three can only be vague enough to be useless.
+/// all of them can only be vague enough to be useless. "Wire up a model",
+/// "try again", "say more" and "wait for the period to reset" are four
+/// different actions, and a reader who cannot tell which one they are in has
+/// been told nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftRefusal {
     /// Nothing was reachable, so no call ran. Wire up a model.
@@ -100,6 +103,10 @@ pub enum DraftRefusal {
     /// A model answered and the answer could not be used. Say more in the hint,
     /// or write the field by hand.
     Unreadable,
+    /// The company has spent its plan-level token ceiling for the period
+    /// (issue #188), so no call ran. Nothing the operator types will change
+    /// that until the window resets or the ceiling is raised.
+    BudgetExhausted,
 }
 
 impl DraftRefusal {
@@ -109,6 +116,7 @@ impl DraftRefusal {
             Self::NoModel => "no_model",
             Self::ModelUnreachable => "model_unreachable",
             Self::Unreadable => "unreadable",
+            Self::BudgetExhausted => "budget_exhausted",
         }
     }
 }
