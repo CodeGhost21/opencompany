@@ -114,7 +114,14 @@ export function AssigneeSelect({
       client.listTeam(company).catch(() => [] as TeamMemberDto[]),
     ]).then(([desksRes, teamRes]) => {
       if (cancelled) return;
-      setDesks(desksRes);
+      // The always-present Operator channel (issue #1757) is a synthetic,
+      // read-only system feed `/desks` appends — not a manifest/overlay desk a
+      // card can be assigned to. `src/server/ops/tasks.rs` validates an
+      // assignee against the persisted company record, where this id is
+      // neither a desk nor a teammate, so offering it here would let an
+      // operator pick a row whose submit always 400s. Filtered at the one
+      // place the fetch lands, so every option list built below agrees.
+      setDesks(desksRes.filter((d) => !d.system));
       setTeam(teamRes);
       setLoaded(true);
     });
