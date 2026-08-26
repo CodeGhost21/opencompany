@@ -5,8 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { FinancesView } from "@/views/FinancesView";
 import { HostingView } from "@/views/HostingView";
 import { InvoicingView } from "@/views/finance/InvoicingView";
+import { PeopleView } from "@/views/PeopleView";
 import { SearchView } from "@/views/SearchView";
 import { WalletView } from "@/views/finance/WalletView";
 
@@ -39,14 +41,20 @@ import { WalletView } from "@/views/finance/WalletView";
 
 /** A client whose one read resolves, rejects, or never settles. */
 function clientWith(answer: unknown): OpenCompanyClient {
+  // One answer for every read these pages make. `finances` is its own client
+  // method rather than a bare `get`, so a stub with only `get` reported
+  // "client.finances is not a function" and told us nothing about headings.
+  const reply = () =>
+    answer instanceof Error
+      ? Promise.reject(answer)
+      : answer === "pending"
+        ? new Promise(() => {})
+        : Promise.resolve(answer);
   return {
     scopeFor: () => "/api/v1/companies/acme",
-    get: () =>
-      answer instanceof Error
-        ? Promise.reject(answer)
-        : answer === "pending"
-          ? new Promise(() => {})
-          : Promise.resolve(answer),
+    get: reply,
+    post: reply,
+    finances: reply,
   } as unknown as OpenCompanyClient;
 }
 
@@ -75,6 +83,20 @@ const CHARGEBEE_OK = {
   credentialConfigured: true,
 };
 
+const FINANCES_OK = {
+  balanceUsd: 0,
+  revenueUsd: 0,
+  spentUsd: 0,
+  netUsd: 0,
+  budgetUsd: null,
+  currency: "USD",
+  byCategory: [],
+  transactions: [],
+};
+
+/** People reads three things at once, so one answer has to satisfy all three. */
+const PEOPLE_OK: unknown[] = [];
+
 const SEARCH_OK = {
   provider: "managed",
   effectiveProvider: "managed",
@@ -102,10 +124,15 @@ afterEach(() => {
 });
 
 /** The page's one accessible name, or null when it has none. */
-async function nameOf(
-  view: typeof SearchView | typeof HostingView | typeof WalletView | typeof InvoicingView,
-  answer: unknown,
-): Promise<string | null> {
+type Page =
+  | typeof SearchView
+  | typeof HostingView
+  | typeof WalletView
+  | typeof InvoicingView
+  | typeof FinancesView
+  | typeof PeopleView;
+
+async function nameOf(view: Page, answer: unknown): Promise<string | null> {
   await act(async () => {
     root.render(createElement(view, { client: clientWith(answer), company: "acme" }));
   });
@@ -137,5 +164,49 @@ describe.each([
     expect(
       container.querySelector(`[data-testid="${errorTestId}"]`)?.textContent,
     ).toContain("store unreachable");
+  });
+});
+
+/**
+ * The two pages the sweep found outside the settings family.
+ *
+ * Separate `describe` because their failure shapes differ from the four above:
+ * `FinancesView` has three load states rather than two (it tells a host with no
+ * finances route apart from a read that failed), and `PeopleView`'s header
+ * changes with the reader's role, so the state worth pinning is that nothing
+ * offers `Invite` before the role is known. Once it is known the button is
+ * correct even while the member list is still arriving — verified in a browser
+ * on 2026-08-26, where `me` settles before the list and the button appears with
+ * the skeletons still on screen.
+ */
+describe.each([
+  ["Finances", FinancesView, FINANCES_OK] as const,
+  ["People", PeopleView, PEOPLE_OK] as const,
+])("%s is named in every state", (title, view, ok) => {
+  it("names the page once it has loaded", async () => {
+    expect(await nameOf(view, ok)).toBe(title);
+  });
+
+  it("names the page while the read is still in flight", async () => {
+    expect(await nameOf(view, "pending")).toBe(title);
+  });
+
+  it("names the page when the read failed", async () => {
+    expect(await nameOf(view, new Error("ledger unreachable"))).toBe(title);
+  });
+});
+
+describe("People offers no Invite before it knows the reader is an admin", () => {
+  it("has no actions in the loading state", async () => {
+    await act(async () => {
+      root.render(
+        createElement(PeopleView, { client: clientWith("pending"), company: "acme" }),
+      );
+    });
+    expect(container.querySelector("h1")?.textContent).toBe("People");
+    const invite = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Invite"),
+    );
+    expect(invite, "Invite must not be offered before the role is known").toBeUndefined();
   });
 });

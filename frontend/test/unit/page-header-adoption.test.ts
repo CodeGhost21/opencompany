@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { VIEWS as ROUTED_VIEWS, type View } from "@/lib/console-routes";
+import { NAMED_BY, type Names } from "./support/routed-views";
 
 /**
  * Every page's title comes from `PageHeader`. A view that hand-rolls an `<h1>`
@@ -170,87 +171,6 @@ describe("page headers come from PageHeader (#1763)", () => {
     expect(drawn.length).toBeGreaterThan(15);
   });
 });
-
-/**
- * Which file names each routed view, and how (codex review, #1785).
- *
- * # Why the rest of this file was not enough
- *
- * Everything above is a rule about *headings that exist*: it stops a view
- * inventing a thirteenth style. It says nothing about a view with **no**
- * heading at all, and a floor of "more than 15 files draw a `PageHeader`"
- * cannot: delete the header from `WorkspaceView` and sixteen others still
- * draw one, so the suite stays green. Verified rather than argued — with
- * `<PageHeader …/>` cut out of `WorkspaceView` entirely, this file passed
- * 4 of 4.
- *
- * That is not a hypothetical regression. It is the exact state Workspace was
- * in *before* #1763: no header, no `h1`, a page a screen reader could not
- * announce. A guard that would not have caught the defect it was written for
- * is worth exactly as much as the count it asserts.
- *
- * # The shape
- *
- * `Record<View, …>` over the router's own union, the same trick `ROUTABLE` in
- * `lib/console-routes.ts` uses: a view added to the union with no row here is
- * a **compile error**, caught by `npm run typecheck:unit`, so a new route
- * cannot be added without someone deciding what names it. `VIEWS` is then
- * iterated at runtime, so the two cannot drift apart either.
- *
- * The mapping is by hand and cannot be derived: `app-shell.tsx` renders a
- * wrapper for several of these (`CompanyView`, `SettingsSection`,
- * `TaskDetailRoute`) and the header lives one level down, which is a fact
- * about the component tree that no grep over route names can see.
- *
- * # What this still cannot see, and what covers it
- *
- * **Control flow.** Everything in this file reads source text, so a view
- * satisfies it by *containing* `<PageHeader` — not by rendering one. A file
- * with an early `return` for a loading or error state above its header passes
- * here while shipping a state with no `h1` at all, which is exactly what
- * `SearchView`, `HostingView`, `WalletView` and `InvoicingView` were doing
- * (codex review on #1785).
- *
- * That gap is closed by rendering, not by scanning:
- * `settings-page-named-in-every-state.test.ts` mounts those pages in their
- * loading and error states and asks the DOM for the `h1`. Do not extend this
- * file to try to reach it — a scan that tried to follow branches would be
- * wrong in a way nobody could see, which is the failure mode it exists to
- * prevent.
- */
-type Names =
-  /** The file that renders this view's `<PageHeader>`. */
-  | { pageHeader: string }
-  /**
-   * The file that names it some other way. Only legal for a file already in
-   * `HAND_ROLLED` above — the reason lives there, in one place, rather than
-   * being restated here and drifting.
-   */
-  | { handRolled: string };
-
-const NAMED_BY: Record<View, Names> = {
-  overview: { pageHeader: "OperatorOverview.tsx" },
-  /** Company and Team are two tabs of one page; `TeamView` draws its header. */
-  company: { pageHeader: "TeamView.tsx" },
-  team: { pageHeader: "TeamView.tsx" },
-  chat: { handRolled: "chat/ChatHeader.tsx" },
-  conversation: { pageHeader: "Conversation.tsx" },
-  inbox: { pageHeader: "InboxView.tsx" },
-  /** `#/tasks/<id>` is the card detail pane, not the board. */
-  tasks: { handRolled: "TaskDetailView.tsx" },
-  ledgers: { pageHeader: "LedgersView.tsx" },
-  workspace: { pageHeader: "WorkspaceView.tsx" },
-  approvals: { pageHeader: "ApprovalsView.tsx" },
-  workflows: { pageHeader: "WorkflowsView.tsx" },
-  observatory: { pageHeader: "observatory/ObservatoryView.tsx" },
-  pages: { pageHeader: "PagesView.tsx" },
-  finances: { pageHeader: "FinancesView.tsx" },
-  /** `SettingsSection` is the tab frame; `SettingsView` is the page. */
-  settings: { pageHeader: "SettingsView.tsx" },
-  feedback: { pageHeader: "FeedbackView.tsx" },
-  setup: { handRolled: "setup/SetupWizard.tsx" },
-  "not-found": { pageHeader: "UnknownRouteView.tsx" },
-};
 
 describe("every routed view is named by something (#1763)", () => {
   it("has a row for every view the router can reach, and no stale ones", () => {
