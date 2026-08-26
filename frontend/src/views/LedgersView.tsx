@@ -639,10 +639,27 @@ export function LedgersView({
     }
   };
 
+  /*
+    The page's name before its switcher can exist (codex review, #1785). Both
+    guards below used to return above the header, so a fresh `#/ledgers/<slug>`
+    and a console with no company selected each rendered with no `h1` at all.
+
+    A plain title rather than the real header: the loaded one *is* the list
+    switcher, and a switcher with no list to switch between is a control that
+    lies. `ledger?.title` is used when it is already known — the second guard
+    fires while the rows load, by which point the list itself has resolved —
+    and "Lists" when it is not, which is the honest name for a page that does
+    not yet know which one it is showing.
+  */
+  const loadingHeader = <PageHeader title={ledger?.title ?? "Lists"} />;
+
   if (!company) {
     return (
-      <div className="p-6 text-sm text-muted-foreground">
-        Pick a company to see its lists.
+      <div className="flex h-full min-h-0 flex-col">
+        {loadingHeader}
+        <div className="p-6 text-sm text-muted-foreground">
+          Pick a company to see its lists.
+        </div>
       </div>
     );
   }
@@ -653,9 +670,12 @@ export function LedgersView({
   // did rather than a flash of "not found" before the list catches up.
   if ((ledgersLoading && !ledger) || (reading && !read)) {
     return (
-      <div className="space-y-3 p-6">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-40 w-full" />
+      <div className="flex h-full min-h-0 flex-col">
+        {loadingHeader}
+        <div className="space-y-3 p-6">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-40 w-full" />
+        </div>
       </div>
     );
   }

@@ -76,9 +76,33 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
   }, []);
 
   if (!company) {
+    /*
+      Named even here (codex review, #1785): this return used to run above the
+      header, so the page had no `h1` at all. No `actions` — "New list" needs a
+      company to declare one in — but the Back control stays, because
+      `history.back()` is the one thing that still works from this state.
+    */
     return (
-      <div className="p-6 text-sm text-muted-foreground">
-        Pick a company to manage its lists.
+      <div className="flex h-full min-h-0 flex-col gap-4 p-6">
+        <PageHeader
+          title="Manage lists"
+          className="-mx-6 -mt-6"
+          leading={
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2.5"
+              onClick={onBack}
+              data-testid="lists-back"
+            >
+              <ArrowLeft className="size-4" />
+              Back
+            </Button>
+          }
+        />
+        <p className="text-sm text-muted-foreground">
+          Pick a company to manage its lists.
+        </p>
       </div>
     );
   }

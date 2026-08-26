@@ -172,12 +172,54 @@ export function PeopleView({ client, company }: Props) {
     }
   }
 
+  /*
+    One header for all three states, hoisted above the loading return (codex
+    review, #1785): the skeleton used to run first, so a fresh
+    `#/settings/people` exposed nothing but anonymous skeletons to a screen
+    reader — no page name at all.
+
+    Every prop keys off `isAdmin`, which is derived from `me` and is false
+    until that read lands — so the header is driven by *what is known*, not by
+    `loading`. `Invite` therefore appears the moment the role is known, which
+    may be while the member list is still arriving (the two reads are one
+    `Promise.all`, but `me` can settle first): offering it then is correct, and
+    it is never offered before the role is known, which is the part that
+    matters.
+
+    The width is the one thing `loading` does decide. It stays `4xl` while the
+    skeletons show so the common path — an admin who came here to manage
+    access — has no reflow when the rows arrive; a non-admin sees the column
+    narrow once, at the same moment the content replaces the skeletons.
+  */
+  const header = (
+    <PageHeader
+      title="People"
+      width={loading || isAdmin ? "4xl" : "3xl"}
+      description={
+        isAdmin
+          ? "The humans who can sign in. Access is invite-only."
+          : "The humans who can sign in to this company."
+      }
+      actions={
+        isAdmin ? (
+          <Button size="sm" variant="outline" onClick={() => setInviteOpen(true)}>
+            <UserPlus className="mr-1.5 size-4" />
+            Invite
+          </Button>
+        ) : null
+      }
+    />
+  );
+
   if (loading) {
     return (
-      <div className="space-y-3 px-4 py-6">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-24 w-full" />
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="mx-auto w-full max-w-4xl space-y-3 px-4 py-6">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-24 w-full" />
+          <Skeleton className="h-24 w-full" />
+        </div>
       </div>
     );
   }
@@ -185,11 +227,7 @@ export function PeopleView({ client, company }: Props) {
   if (!isAdmin) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <PageHeader
-          title="People"
-          width="3xl"
-          description="The humans who can sign in to this company."
-        />
+        {header}
         <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 overflow-y-auto px-4 py-6">
         <Alert>
           <ShieldCheck className="size-4" />
@@ -205,17 +243,7 @@ export function PeopleView({ client, company }: Props) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <PageHeader
-        title="People"
-        width="4xl"
-        description="The humans who can sign in. Access is invite-only."
-        actions={
-          <Button size="sm" variant="outline" onClick={() => setInviteOpen(true)}>
-            <UserPlus className="mr-1.5 size-4" />
-            Invite
-          </Button>
-        }
-      />
+      {header}
       <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
       {error ? (
