@@ -96,11 +96,17 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
 };
 
 /** The statuses worth a standing key, in the order the legend lists them: the
- * ones an operator hits without a definition anywhere else on the row. */
-const RUN_STATUS_LEGEND: readonly string[] = [
+ * ones an operator hits without a definition anywhere else on the row.
+ *
+ * Exported so a unit test can assert membership directly against the source
+ * of truth the header legend renders from, rather than opening the tooltip
+ * portal (which mounts to `document.body`, not the render container) to read
+ * it back out of the DOM. */
+export const RUN_STATUS_LEGEND: readonly string[] = [
   "blocked",
   "stranded",
   "not delivered",
+  "parked",
   "stopped",
   "failed",
 ];
