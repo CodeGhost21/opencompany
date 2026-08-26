@@ -118,6 +118,30 @@ export function KnowledgeGraphFullscreen({
    */
   const paddleTop = hasDetail ? 'top-1/2 max-[820px]:top-[17%]' : 'top-1/2';
   /**
+   * The desk selector's half of the same rule the legend follows (review of
+   * #1752).
+   *
+   * With a card open at or below 820px the paddles leave mid-height and rise
+   * into the band above the sheet, which is where the selector already sits.
+   * They are `z-40` over its `z-20`, so an overlap is not merely untidy: the
+   * paddle covers the first desk chip and wins its clicks. Measured at 700x400
+   * the Previous-desk paddle spans y 28..108 against the selector's 33..83.
+   *
+   * Moving it down is the obvious answer and the wrong one: how far down
+   * depends on how many lines the chips wrap to, which depends on the company.
+   * So the selector steps out of the paddle's COLUMN instead — 40px wide at
+   * this breakpoint, 32px below 640px — which holds at any height and any
+   * number of desks. The band's rule, once the sheet is open, is that the outer
+   * columns belong to the paddles and every other overlay keeps out of them;
+   * the legend already follows it.
+   *
+   * `left-5` here is unconditional rather than a `sm:` variant, so unlike the
+   * legend's case these overrides are not outranked.
+   */
+  const deskSelectorClearOfPaddles = hasDetail
+    ? 'max-[820px]:left-16 max-[639px]:left-12'
+    : '';
+  /**
    * How the legend gets out of the detail panel's way (issue #1664).
    *
    * It did not, until now: at `z-10` under a `z-30` panel, both anchored to the
@@ -260,7 +284,7 @@ export function KnowledgeGraphFullscreen({
         {!coreOpen && !emptyState && (
           <div
             data-testid="kg-desk-selector"
-            className="absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur"
+            className={`absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur transition-[left] duration-200 ease-standard ${deskSelectorClearOfPaddles}`}
           >
             <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
               {/* Names the group rather than instructing. "Pick a desk" was

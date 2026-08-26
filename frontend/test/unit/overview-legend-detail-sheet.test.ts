@@ -59,6 +59,12 @@ function sheet(): HTMLElement {
   return el as HTMLElement;
 }
 
+function deskSelector(): HTMLElement {
+  const el = host.querySelector('[data-testid="kg-desk-selector"]');
+  expect(el, "the shell must render the desk selector").not.toBeNull();
+  return el as HTMLElement;
+}
+
 function paddle(direction: "Previous" | "Next"): HTMLElement {
   const el = host.querySelector(`[aria-label="${direction} desk"]`);
   expect(el).not.toBeNull();
@@ -146,6 +152,30 @@ describe("the graph legend and the detail panel (#1664)", () => {
     render(true);
     expect(sheet().className).not.toContain("vh]");
     expect(paddle("Next").className).not.toContain("vh]");
+  });
+
+  it("steps the desk selector out of the paddles' column while a card is open", () => {
+    // Review of PR #1752. With a card open at or below 820px the paddles leave
+    // mid-height and rise into the band the selector already occupies, and they
+    // are `z-40` over its `z-20` — so an overlap covers the first desk chip and
+    // takes its clicks. Measured at 700x400 the Previous-desk paddle spanned
+    // y 28..108 against the selector's 33..83, and at 700x600 y 45..125 against
+    // the same 33..83.
+    //
+    // Column, not vertical offset: how far down the paddle would have to go
+    // depends on how many lines the chips wrap to, which depends on the
+    // company. The same rule the legend follows.
+    render(true);
+    expect(deskSelector().className).toContain("max-[820px]:left-16");
+    expect(deskSelector().className).toContain("max-[639px]:left-12");
+  });
+
+  it("gives the desk selector the whole corner back when the card closes", () => {
+    // With no panel the paddles are at mid-height and nowhere near it.
+    render(true);
+    render(false);
+    expect(deskSelector().className).not.toContain("max-[820px]:left-16");
+    expect(deskSelector().className).toContain("left-5");
   });
 
   it("keeps the paddles out of the strip the legend now takes", () => {

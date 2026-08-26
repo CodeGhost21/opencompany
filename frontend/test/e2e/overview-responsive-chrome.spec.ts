@@ -102,6 +102,8 @@ const WITH_DETAIL = [
   { width: 390, height: 844, panel: "sheet" },
   { width: 700, height: 400, panel: "sheet" },
   { width: 800, height: 420, panel: "sheet" },
+  { width: 700, height: 500, panel: "sheet" },
+  { width: 700, height: 600, panel: "sheet" },
   { width: 700, height: 800, panel: "sheet" },
   { width: 819, height: 800, panel: "sheet" },
   { width: 900, height: 800, panel: "rail" },
@@ -147,6 +149,23 @@ for (const viewport of WITH_DETAIL) {
         ["Next desk", await page.getByRole("button", { name: "Next desk", exact: true }).boundingBox()],
         ["the desk selector", await page.getByTestId("kg-desk-selector").boundingBox()],
       ];
+      // …and the paddles must not sit on the desk selector either. They are
+      // `z-40` over its `z-20`, so an overlap covers the first desk chip and
+      // takes its clicks — the paddle wins the hit test.
+      const deskSelector = await page.getByTestId("kg-desk-selector").boundingBox();
+      if (deskSelector) {
+        for (const name of ["Previous desk", "Next desk"]) {
+          const paddle = await page.getByRole("button", { name, exact: true }).boundingBox();
+          if (!paddle) continue;
+          const px = Math.min(paddle.x + paddle.width, deskSelector.x + deskSelector.width) - Math.max(paddle.x, deskSelector.x);
+          const py = Math.min(paddle.y + paddle.height, deskSelector.y + deskSelector.height) - Math.max(paddle.y, deskSelector.y);
+          expect(
+            px <= 0 || py <= 0,
+            `${name} ${JSON.stringify(paddle)} overlaps the desk selector ${JSON.stringify(deskSelector)}`,
+          ).toBe(true);
+        }
+      }
+
       for (const [name, other] of chrome) {
         if (!other) continue;
         const ox = Math.min(legendBox.x + legendBox.width, other.x + other.width) - Math.max(legendBox.x, other.x);
