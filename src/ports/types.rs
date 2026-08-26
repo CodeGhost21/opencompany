@@ -3637,10 +3637,11 @@ impl OverlayBlob {
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
 /// free the roster leaves them: the always-present operator channel, the two
-/// workspace system roots, and the author the runtime speaks under.
+/// workspace system roots, the author the runtime speaks under, and the
+/// pseudo-author a workflow report is journaled under.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the four moves this list with it instead of quietly
+/// rename of any of the five moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
 ///
@@ -3651,11 +3652,20 @@ impl OverlayBlob {
 /// `agent_slug("System")` produces it — which is what separates it from
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
-pub const RESERVED_AGENT_IDS: [&str; 4] = [
+///
+/// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::WORKFLOW_REPLY_AUTHOR) is the same
+/// shape as `SYSTEM_AUTHOR`: an ordinary, mintable slug that a delivered
+/// workflow report is journaled under so the console can tell it apart from an
+/// agent's own reply. Left off this list, a teammate named "Workflow" could take
+/// the literal id, after which `senderOf` resolves every subsequent report to
+/// that teammate's name and avatar instead of the workflow — the same
+/// misattribution `SYSTEM_AUTHOR`'s entry exists to prevent, one seam over.
+pub const RESERVED_AGENT_IDS: [&str; 5] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
+    crate::runtime::WORKFLOW_REPLY_AUTHOR,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -6417,7 +6427,27 @@ mod test {
         assert_eq!(record.mint_agent_id("System"), "system_2");
         assert_eq!(
             RESERVED_AGENT_IDS,
-            ["operator", "agents", "desks", "system"]
+            ["operator", "agents", "desks", "system", "workflow"]
+        );
+    }
+
+    /// A workflow report's pseudo-author is the same kind of trap
+    /// `SYSTEM_AUTHOR` guards against: an ordinary, mintable slug that
+    /// `senderOf` also reads by value. Before this reservation, a teammate
+    /// named "Workflow" took the bare `workflow` id and every subsequent
+    /// report resolved to *them* instead of the workflow.
+    #[test]
+    fn mint_agent_id_never_returns_the_workflow_report_author() {
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        assert_eq!(
+            agent_slug("Workflow"),
+            crate::runtime::WORKFLOW_REPLY_AUTHOR,
+            "the guard is needed precisely because this is a legal slug"
+        );
+        assert_ne!(
+            record.mint_agent_id("Workflow"),
+            crate::runtime::WORKFLOW_REPLY_AUTHOR,
+            "a teammate must never be minted onto the id workflow reports are journaled under"
         );
     }
 

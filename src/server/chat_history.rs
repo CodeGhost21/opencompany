@@ -711,12 +711,20 @@ impl AttributionAudit {
 /// false positive, and would make the audit's number drift upward on a company
 /// doing nothing wrong.
 ///
+/// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::WORKFLOW_REPLY_AUTHOR) is the same
+/// case as `SYSTEM_AUTHOR`: a delivered workflow report is journaled under it
+/// on purpose, not a destination that leaked into the author field, so it must
+/// not inflate the count either — and now that the id is reserved
+/// ([`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)), no roster
+/// entry will ever shadow it.
+///
 /// This is the single predicate the audit and any presentation of its result
 /// must share; two copies would let the count and the rendering disagree about
 /// which rows are unknown.
 pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
     agent_id == crate::ports::CONFINED_AGENT_ID
         || agent_id == crate::ports::SYSTEM_AUTHOR
+        || agent_id == crate::runtime::WORKFLOW_REPLY_AUTHOR
         || record.resolve_roster_agent_id(agent_id).is_some()
 }
 
@@ -1851,6 +1859,34 @@ mod test {
             assert!(is_known_author(crate::ports::CONFINED_AGENT_ID, &record));
             assert!(is_known_author("engineer", &record));
             assert!(!is_known_author("operator", &record));
+        }
+
+        /// A delivered workflow report is journaled under
+        /// [`crate::runtime::WORKFLOW_REPLY_AUTHOR`] on purpose — it is the
+        /// workflow speaking, not a teammate's own reply. Counting it would
+        /// flag every delivered report on a company with no roster match for
+        /// "workflow" as damaged, and — worse — a teammate who *did* mint that
+        /// id would have every report silently misattributed to them by
+        /// `senderOf` before this reservation existed.
+        #[test]
+        fn a_workflow_report_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::runtime::WORKFLOW_REPLY_AUTHOR)
+                    .is_none(),
+                "workflow reports resolve through the extra arm, not the roster"
+            );
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, crate::runtime::WORKFLOW_REPLY_AUTHOR),
+                    reply(2, "engineer"),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
         }
 
         #[test]
