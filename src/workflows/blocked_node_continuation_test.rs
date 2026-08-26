@@ -313,6 +313,105 @@ async fn approving_a_blocked_agent_node_call_continues_the_run() {
     );
 }
 
+/// Issue #1816 (Stage 2) — the headline durability regression. A process/host
+/// replacement **between park and approve** (the ~90-min staging cron pod-roll)
+/// drops the in-memory `BlockedNodeQueue`. On Stage 1 the approval then dead-ends
+/// on "re-run the workflow", because nothing rehydrated the run. With the durable
+/// stash record beneath the queue, the boot builder re-arms it from the journal
+/// and the approval re-dispatches the run exactly as if no restart happened.
+///
+/// The restart is simulated the way the boot path works: the in-memory stash is
+/// dropped, then the queue is re-armed from `journal.blocked_stashes()` — the
+/// exact call `RuntimeBuilder` makes at boot. Deleting that single re-arm makes
+/// this test red (`runs_started` stays 1), which is the Stage-1 / `main`
+/// behaviour it locks against.
+#[tokio::test]
+async fn a_restart_between_park_and_approve_still_continues_the_run() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1, "the cold run parks exactly one card");
+    assert_eq!(runner.started(), 1, "only the cold run has started");
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // The park wrote the continuation facts to the DURABLE journal, not only the
+    // in-memory queue — the workflow id and the run's own trigger input.
+    let stashes = rt.journal().blocked_stashes();
+    let stash = stashes
+        .iter()
+        .find(|(t, ..)| t == &turn)
+        .expect("the block's continuation facts are on the journal, survivable across a restart");
+    assert_eq!(
+        stash.1, "solo",
+        "the stash carries the workflow id to re-load"
+    );
+    assert_eq!(
+        stash.2,
+        json!({ "request": "the thing" }),
+        "the stash carries the paused run's own trigger input, replayed unchanged"
+    );
+
+    // Simulate the process/host replacement: the in-memory queue is gone.
+    let lost = rt.blocked_nodes().release(&turn);
+    assert!(
+        lost.is_some(),
+        "precondition: the block was in the in-memory queue before the drop"
+    );
+    assert_eq!(
+        rt.blocked_nodes().waiting(),
+        0,
+        "the in-memory stash is now gone, as it would be after a restart"
+    );
+
+    // Boot rehydrate — byte-for-byte the call `RuntimeBuilder` makes from the
+    // journal's still-live stashes. THIS is the line whose removal reproduces the
+    // Stage-1 dead-end.
+    rt.blocked_nodes().rearm(rt.journal().blocked_stashes());
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "the durable record re-armed the queue after the restart"
+    );
+
+    // The operator approves after the restart. The rehydrated stash lets the run
+    // re-dispatch instead of stranding on "re-run the workflow".
+    resolve_and_settle(&rt, &cards[0], Verdict::Approve).await;
+
+    assert_eq!(
+        runner.started(),
+        2,
+        "an approval after a restart re-dispatches the run from the durable stash"
+    );
+    assert_eq!(
+        all_blocked_cards(&rt),
+        0,
+        "the continuation redeemed the grant and did not re-park"
+    );
+
+    // The release retired the durable record, so a later boot will not rehydrate
+    // a block this decision already continued.
+    assert!(
+        rt.journal()
+            .blocked_stashes()
+            .iter()
+            .all(|(t, ..)| t != &turn),
+        "the resolved block's durable stash is retired on release"
+    );
+}
+
 /// A refused block starts no continuation — the run stays stopped, which is the
 /// correct outcome for a denial.
 #[tokio::test]
