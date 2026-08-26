@@ -6,10 +6,16 @@
 // same reading — see that file's header.
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { Info } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { observatoryHref } from "@/views/observatory/hash";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   fetchRunArtifacts,
@@ -51,6 +57,96 @@ const DELIVERY_TONE: Record<DeliveryStatus, string> = {
   failed: "border-status-failed/40 bg-status-failed-soft",
 };
 
+/**
+ * Plain-English definitions for the run statuses this panel surfaces (issue
+ * #1798).
+ *
+ * A run row spells its terminal state in prose, but its at-a-glance signals —
+ * the coloured status dot, the "not delivered" badge, the "parked" badge — are
+ * a private vocabulary an operator cannot act on if they cannot read it. These
+ * one-liners give each its meaning, and they are the ONE source the dot's hover
+ * title, the badge titles and the header legend all read, so the three can
+ * never drift.
+ *
+ * The wording follows the semantics these terms are actually computed from, not
+ * a guess: `not delivered` from {@link isUndelivered}/{@link undeliveredCount}
+ * in `run-health.ts` (a report that will not reach its destination without a
+ * change), `stranded` from {@link isStranded} (paused for an approval no
+ * decision can still move), `blocked` from {@link isBlocked} (a step waiting on
+ * an approval), `stopped` from a cancelled run, `parked` from
+ * {@link liveParkedApprovalCount}. Keyed by the labels {@link runTone} returns
+ * (see `VERDICT_TONE` in `run-health.ts`) so a dot can be looked up directly.
+ */
+const RUN_STATUS_DEFINITIONS: Record<string, string> = {
+  running: "Still working through its steps — nothing here is final yet.",
+  ok: "Finished, and every report reached its destination.",
+  failed:
+    "A step errored and the run stopped. Review the error, correct the workflow, and run it again.",
+  stopped:
+    "An operator stopped this run before it finished; the step that was mid-flight was dropped where it was.",
+  blocked:
+    "A step is waiting on your approval before the run can go on — decide it in Approvals.",
+  stranded:
+    "The run paused for an approval, but nothing is waiting on you any more and no decision left can move it. Run it again if you still need it.",
+  "not delivered":
+    "The step ran, but its report never reached its destination and won't without a change.",
+  "awaiting approval":
+    "The run is parked on an approval and needs your decision in Approvals.",
+  parked: "The run filed this into the Approvals queue for you to decide.",
+};
+
+/** The statuses worth a standing key, in the order the legend lists them: the
+ * ones an operator hits without a definition anywhere else on the row. */
+const RUN_STATUS_LEGEND: readonly string[] = [
+  "blocked",
+  "stranded",
+  "not delivered",
+  "stopped",
+  "failed",
+];
+
+/** The status hover title for the run dot: its verdict word, plus the one-line
+ * definition when there is one. Falls back to the bare word for a verdict this
+ * map does not name (a host could grow an eighth — see `verdictOf`). */
+function statusDotTitle(label: string): string {
+  const def = RUN_STATUS_DEFINITIONS[label];
+  return def ? `${label} — ${def}` : label;
+}
+
+/** The discoverable half of issue #1798: an info affordance in the panel header
+ * whose tooltip is a short key to the run statuses. The per-badge hover titles
+ * answer "what is THIS one"; this answers "what are all of them" for an
+ * operator who does not know a badge is hoverable. Reuses the app's tooltip
+ * primitive, so it themes and positions like every other tooltip in the
+ * console. */
+function RunStatusLegend() {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            aria-label="What these run statuses mean"
+            data-testid="workflow-run-legend"
+            className="inline-flex items-center text-muted-foreground hover:text-foreground"
+          />
+        }
+      >
+        <Info className="size-3.5" aria-hidden="true" />
+      </TooltipTrigger>
+      <TooltipContent className="flex max-w-xs flex-col items-start gap-1 text-left">
+        <span className="font-medium">What these statuses mean</span>
+        {RUN_STATUS_LEGEND.map((term) => (
+          <span key={term} className="block">
+            <span className="font-medium">{term}</span> —{" "}
+            {RUN_STATUS_DEFINITIONS[term]}
+          </span>
+        ))}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 /** The delivery block of the run drawer: one line per attempt to route an
  * output node's report. This is the ONLY place an operator learns a report
  * didn't leave the building — a delivery failure never fails the run. */
@@ -80,6 +176,7 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
           <Badge
             variant="outline"
             className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft"
+            title={RUN_STATUS_DEFINITIONS["not delivered"]}
           >
             {undelivered} not delivered
           </Badge>
@@ -266,6 +363,7 @@ export function RunHistoryPanel({
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
           <span className="text-sm font-medium">Run history</span>
           <Badge variant="secondary">{runs.length}</Badge>
+          <RunStatusLegend />
           {workflowName && (
             <span className="max-w-full truncate text-xs text-muted-foreground">
               {workflowName}
@@ -434,7 +532,15 @@ export function RunHistoryRow({
       data-testid="workflow-run-row"
     >
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <span className={`size-1.5 rounded-full ${tone.dot}`} />
+        {/* Issue #1798: the run's verdict is otherwise a colour with no word.
+            Its hover title names the state and defines it — the same one-liner
+            the header legend lists — so the dot stops being a signal only a
+            reader who already knows the palette can act on. */}
+        <span
+          className={`size-1.5 rounded-full ${tone.dot}`}
+          data-testid="workflow-run-status-dot"
+          title={statusDotTitle(tone.label)}
+        />
         {run.scheduled && (
           <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal">
             scheduled
@@ -482,6 +588,7 @@ export function RunHistoryRow({
             variant="outline"
             className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft"
             data-testid="workflow-run-parked"
+            title={RUN_STATUS_DEFINITIONS.parked}
           >
             parked {parked} approval{parked === 1 ? "" : "s"}
           </Badge>
