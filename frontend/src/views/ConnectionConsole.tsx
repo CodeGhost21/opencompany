@@ -187,9 +187,19 @@ export function ConnectionConsole({
   }, [client, defaultCompany, forceLogin, bootEpoch]);
 
   const switchCompany = useCallback(
-    async (id: string, companies: CompanyStatus[]) => {
+    async (id: string, companies: CompanyStatus[], knownStatus?: CompanyStatus) => {
       try {
-        const status = await client.status(id);
+        // A caller that just provisioned or reconciled `id` already holds a
+        // fresh `CompanyStatus` for it — `onCompanyCreated` below is the one
+        // today. Re-fetching it here was a second, redundant `client.status`
+        // call: on a reset the old company is already archived by this
+        // point, so a transient failure on this second lookup alone dropped
+        // the phase to a connection error despite the create having fully
+        // succeeded, and could undo a successful ambiguous-provision
+        // reconciliation (`create-company-dialog.tsx`) by failing its own
+        // second lookup right after (codex review on #1828, PR comment
+        // 3864628314).
+        const status = knownStatus ?? (await client.status(id));
         if (phase.kind === "console" && phase.company !== id) {
           clearEntityHash();
         }
@@ -241,7 +251,10 @@ export function ConnectionConsole({
       // see `retargetCompanyUrlParam` for why a stale param there still
       // orphans the retargeted profile on the next reload.
       if (archived) retargetCompanyUrlParam(archived, status.id);
-      void switchCompany(status.id, next);
+      // Enter the new company with the status this call already has —
+      // `switchCompany`'s own `knownStatus` short-circuit skips a redundant
+      // second `client.status` fetch (PR comment 3864628314).
+      void switchCompany(status.id, next, status);
     },
     [connectionId, createRequest, knownCompanies, switchCompany],
   );
