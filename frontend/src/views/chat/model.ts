@@ -2,6 +2,7 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
+import { isBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
 import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
@@ -36,6 +37,47 @@ export function deskFromDto(d: DeskDto): Desk {
  * steps into Tasks, Settings, or any other view and comes back.
  */
 export type Transcripts = Record<string, ChatMessage[]>;
+
+/**
+ * The message id of the MOST RECENT budget-pause notice per agent,
+ * COMPANY-WIDE — not scoped to one channel (issue #1846 review, Codex
+ * #3865395879).
+ *
+ * The backend keeps at most one parked marker per agent, full stop: a pause
+ * in channel A followed by a pause for the SAME agent in channel B overwrites
+ * A's marker with B's, regardless of which channel either happened in. This
+ * used to be computed from a single channel's `items` inside `MessageTimeline`
+ * — correct for the channel that is actually open, but wrong for any OTHER
+ * channel holding an older notice for an agent who has since paused again
+ * elsewhere: reopening that channel, its own last notice still reads as the
+ * newest ONE IT has seen, so the "Add credits & resend" button stayed
+ * enabled — and clicking it silently redeemed the newer, different-channel
+ * marker and resent that unrelated message under the stale card.
+ *
+ * Folding over every channel in `transcripts` (which `AppShell` keeps live
+ * for the whole company over SSE, not merely the currently open one) is what
+ * actually matches the backend's one-marker-per-agent truth. Sorted by each
+ * message's own `at` timestamp rather than by scan order, because iterating
+ * one channel's array to completion before moving to the next would NOT
+ * yield cross-channel chronological order on its own.
+ */
+export function latestBudgetPauseMessageIdByAgent(transcripts: Transcripts): Map<string, string> {
+  const latest = new Map<string, { messageId: string; at: number }>();
+  for (const messages of Object.values(transcripts)) {
+    for (const message of messages) {
+      if (!isBudgetPauseNotice(message.text)) continue;
+      const agentId = parseBudgetPauseAgent(message.text);
+      if (agentId == null) continue;
+      const seen = latest.get(agentId);
+      if (seen == null || message.at >= seen.at) {
+        latest.set(agentId, { messageId: message.id, at: message.at });
+      }
+    }
+  }
+  const out = new Map<string, string>();
+  for (const [agentId, { messageId }] of latest) out.set(agentId, messageId);
+  return out;
+}
 
 /**
  * How far a channel's persisted history has got, per channel.

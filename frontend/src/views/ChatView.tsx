@@ -88,6 +88,7 @@ import {
   clearTaskCardEverywhere,
   directMessageChannels,
   directMessageForId,
+  latestBudgetPauseMessageIdByAgent,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -1026,6 +1027,14 @@ export function ChatView({
     [entries, channelApprovals, settledApprovals, decidedApprovals],
   );
 
+  // Company-wide, not scoped to the open channel — see the function's own
+  // doc for why a per-channel version silently redeemed the wrong marker
+  // (issue #1846 review, Codex #3865395879).
+  const budgetPauseMessageIdByAgent = useMemo(
+    () => latestBudgetPauseMessageIdByAgent(transcripts),
+    [transcripts],
+  );
+
   // An open thread only makes sense while its parent is on screen; switching
   // channels closes it rather than leaving a panel pointing at nothing.
   useEffect(() => {
@@ -1906,6 +1915,7 @@ export function ChatView({
               onDecideApproval={onDecideApproval}
               onRedeemBudgetPause={(agentId) => void redeemBudgetPause(agentId)}
               redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+              latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
             />
             {budgetProximity && (
               <p

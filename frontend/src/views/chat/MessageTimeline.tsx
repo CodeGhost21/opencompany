@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
 import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { isBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
 import { MessageRow } from "./MessageRow";
@@ -95,6 +94,17 @@ interface Props {
   /** The Add-Credits CTA (issue #1846). Passed straight through to `MessageRow`. */
   onRedeemBudgetPause?: (agentId: string) => void;
   redeemingBudgetPauseAgent?: string | null;
+  /**
+   * The message id of the MOST RECENT budget-pause notice per agent,
+   * COMPANY-WIDE (issue #1846 review, Codex #3865395879).
+   *
+   * Computed by the caller from every channel's transcript, not just this
+   * one — the backend parks at most one marker per agent regardless of which
+   * channel the pause happened in, so this has to match that scope. Passed
+   * straight through to `MessageRow`, the same way `redeemingBudgetPauseAgent`
+   * is.
+   */
+  latestBudgetPauseMessageIdByAgent?: Map<string, string>;
 }
 
 /**
@@ -150,32 +160,10 @@ export function MessageTimeline({
   cognition,
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
+  latestBudgetPauseMessageIdByAgent,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
-  /**
-   * The message id of the MOST RECENT budget-pause notice per agent (issue
-   * #1846 review, Codex #3864988184).
-   *
-   * The console's backend parks at most one marker per agent (a fresh pause
-   * overwrites the last), so "Add credits & resend" on any OTHER, earlier
-   * notice for that agent would redeem a marker belonging to a different,
-   * newer pause than the one the operator is looking at — reissuing the
-   * wrong message under the guise of the card they clicked. `items` is
-   * chronological (bottom-anchored, oldest first), so a plain left-to-right
-   * fold naturally leaves the latest occurrence per agent in the map.
-   */
-  const latestBudgetPauseMessageIdByAgent = useMemo(() => {
-    const latest = new Map<string, string>();
-    for (const item of items) {
-      if (item.kind !== "message") continue;
-      const { text, id } = item.entry.message;
-      if (!isBudgetPauseNotice(text)) continue;
-      const agentId = parseBudgetPauseAgent(text);
-      if (agentId != null) latest.set(agentId, id);
-    }
-    return latest;
-  }, [items]);
   // Rows that arrived locally — a message sent before hydration landed — are
   // still worth showing while the rest of the history is in flight. It is only
   // the *claim of emptiness* that has to wait.

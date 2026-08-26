@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { ChatMessage } from "@/lib/chat";
+import { latestBudgetPauseMessageIdByAgent, type Transcripts } from "@/views/chat/model";
+
 const toasts = vi.hoisted(() => ({
   base: vi.fn(),
   success: vi.fn(),
@@ -115,6 +118,65 @@ describe("isBudgetPauseNoticeSuperseded", () => {
   it("is never superseded when the notice text carried no agent id", () => {
     const latest = new Map([["ceo", "msg-2"]]);
     expect(isBudgetPauseNoticeSuperseded(null, "msg-1", latest)).toBe(false);
+  });
+});
+
+describe("latestBudgetPauseMessageIdByAgent", () => {
+  // Issue #1846 review (Codex #3865395879): the map `isBudgetPauseNoticeSuperseded`
+  // reads has to be computed COMPANY-WIDE — every channel's transcript, not
+  // just the one that happens to be open — because the backend keeps at most
+  // one marker per agent regardless of which channel a pause happened in.
+  function notice(agentId: string): string {
+    return `${BUDGET_PAUSE_NOTICE_PREFIX} Paused — ${agentId}'s turn ran out of inference budget/credits.`;
+  }
+
+  function msg(id: string, text: string, at: number): ChatMessage {
+    return { id, from: "company", text, at };
+  }
+
+  it("a later pause in a DIFFERENT channel supersedes an earlier notice in this one", () => {
+    const transcripts: Transcripts = {
+      "channel-a": [msg("msg-1", notice("ceo"), 1_000)],
+      "channel-b": [msg("msg-2", notice("ceo"), 2_000)],
+    };
+    const latest = latestBudgetPauseMessageIdByAgent(transcripts);
+    expect(latest.get("ceo")).toBe("msg-2");
+    // Channel A's own notice, read in isolation, would look current — only
+    // scanning every channel reveals it has been superseded.
+    expect(isBudgetPauseNoticeSuperseded("ceo", "msg-1", latest)).toBe(true);
+  });
+
+  it("sorts by each message's own timestamp, not by which channel is scanned first", () => {
+    // A naive fold over `Object.values(transcripts)` in insertion order would
+    // visit "channel-b" before "channel-a" here — but B's message is the
+    // OLDER one by wall clock, so A's must still win.
+    const transcripts: Transcripts = {
+      "channel-b": [msg("msg-old", notice("ceo"), 1_000)],
+      "channel-a": [msg("msg-new", notice("ceo"), 5_000)],
+    };
+    const latest = latestBudgetPauseMessageIdByAgent(transcripts);
+    expect(latest.get("ceo")).toBe("msg-new");
+  });
+
+  it("tracks each agent independently across channels", () => {
+    const transcripts: Transcripts = {
+      "channel-a": [
+        msg("msg-1", notice("ceo"), 1_000),
+        msg("msg-2", notice("growth_lead"), 1_500),
+      ],
+      "channel-b": [msg("msg-3", notice("growth_lead"), 3_000)],
+    };
+    const latest = latestBudgetPauseMessageIdByAgent(transcripts);
+    expect(latest.get("ceo")).toBe("msg-1");
+    expect(latest.get("growth_lead")).toBe("msg-3");
+  });
+
+  it("ignores non-notice messages and channels with no pauses", () => {
+    const transcripts: Transcripts = {
+      "channel-a": [msg("msg-1", "just chatting", 1_000)],
+      "channel-b": [],
+    };
+    expect(latestBudgetPauseMessageIdByAgent(transcripts).size).toBe(0);
   });
 });
 
