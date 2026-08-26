@@ -697,16 +697,21 @@ export function AgentDetailView({
           screen reader could not announce at all.
 
           `hidden`, because the breadcrumb above already says where you are and
-          a title bar over a skeleton would be chrome about nothing. The name
-          follows the same rule the crumb does: the teammate's, as soon as
-          there is one, and "Teammate" until then.
+          a title bar over a skeleton would be chrome about nothing.
+
+          The name is gated on `load === "ready"` and not merely on `agent`
+          being set (coderabbit review). `boot()` moves `load` to `"loading"`
+          on an `agentId` change but keeps the previous `agent` until the new
+          request settles, so keying off `agent` alone announced the teammate
+          you just navigated *away from* as the name of the page you navigated
+          *to* — a wrong name, which is worse than a generic one. The crumb has
+          the same shape and can afford it: it is visible text next to the
+          controls, changing in place, rather than the one string a screen
+          reader announces on arrival.
         */}
-        {!(load === "ready" && agent) && (
-          <PageHeader
-            title={agent ? (agent.name?.trim() || agent.role) : "Teammate"}
-            hidden
-          />
-        )}
+        {load !== "ready" || !agent ? (
+          <PageHeader title="Teammate" hidden />
+        ) : null}
 
         {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
 
