@@ -2003,6 +2003,23 @@ impl CompanyRuntime {
         .await
         {
             Ok(()) => {
+                // Issue #1825: bank that the dispatch happened BEFORE retiring
+                // the stash below, whose own durable write is best-effort. If
+                // that write fails, `blocked_stashes` and
+                // `blocked_node_approvals` both survive a restart looking
+                // exactly as they would if this spawn had never run at all —
+                // this record is the fact that lets
+                // `reconcile_stranded_blocked_nodes` tell the difference and
+                // not re-spawn a continuation that already executed.
+                if let Err(error) = self.journal.record_blocked_node_dispatched(turn).await {
+                    tracing::warn!(
+                        company = %self.id,
+                        %turn,
+                        %error,
+                        "[approval] a blocked node's dispatch could not be durably banked; a \
+                         restart before its release is recorded may now re-dispatch this run"
+                    );
+                }
                 // Only now — spawn has actually taken hold — is the stash
                 // truly spent. Retiring it here rather than up front is what
                 // lets a crash mid-spawn rehydrate the very stash it needs to
@@ -2053,7 +2070,11 @@ impl CompanyRuntime {
                 %turn,
                 %error,
                 "[approval] a blocked node's durable stash could not be retired; a boot may \
-                 rehydrate an already-resolved block, which no resolve will re-release"
+                 rehydrate an already-resolved block. `reconcile_stranded_blocked_nodes` won't \
+                 re-dispatch it a second time when this call reached the spawn (issue #1825's \
+                 `BlockedNodeDispatched` survives this write's failure), but for the \
+                 all-denied/no-stash callers this remains a genuinely stale record: harmless, \
+                 not re-released, just left sitting in the journal until a future replay"
             );
         }
     }
@@ -2081,13 +2102,48 @@ impl CompanyRuntime {
     /// journal is exactly that stranded case, resumed the same way a live
     /// release would resume it, with an empty batch — its decision is already
     /// durable in the event log and owes nothing further there.
+    ///
+    /// Excludes turns already durably marked `BlockedNodeDispatched` (issue
+    /// #1825): that pair of facts — approved, nothing left parked — also
+    /// describes a stash that *was* already resumed once, if the
+    /// `resume_blocked_agent_node` call that did it got as far as spawning
+    /// the continuation but then lost its `BlockedNodeReleased` write to a
+    /// transient failure. Without the dispatched check this function cannot
+    /// tell that case apart from a genuine strand and would re-dispatch a
+    /// continuation that already ran.
     pub(crate) async fn reconcile_stranded_blocked_nodes(&self) {
         let still_parked: std::collections::HashSet<String> =
             self.journal.parked_turns().into_iter().collect();
+        // Issue #1825: a turn already durably marked dispatched has already
+        // been resumed once — it is not stranded, it is a `BlockedNodeStashed`
+        // + `BlockedNodeApproved` pair whose paired `BlockedNodeReleased`
+        // write failed after the spawn it retires had already succeeded.
+        // Re-dispatching it here would spawn the same continuation a second
+        // time. See `BlockedNodeDispatched`'s doc comment for the full window
+        // this closes.
+        let already_dispatched: std::collections::HashSet<String> =
+            self.journal.blocked_node_dispatched().into_iter().collect();
         for turn in self.blocked_nodes.approved_turns() {
             if still_parked.contains(&turn) {
                 // Still waiting on a sibling decision — not stranded, just
                 // mid-turn; the eventual last decision will release it.
+                continue;
+            }
+            if already_dispatched.contains(&turn) {
+                tracing::warn!(
+                    company = %self.id,
+                    %turn,
+                    "[approval] a blocked node's continuation was already dispatched before a \
+                     restart, but its retirement never durably landed; skipping a second \
+                     dispatch and retrying the retirement instead"
+                );
+                // Best-effort retry of the write that failed last time — a
+                // second attempt on a fresh boot has every chance of a
+                // transient failure (disk pressure, a mid-roll host) having
+                // cleared. If it fails again, this boot's warning fires once
+                // more next restart, which is a stale-record annoyance, not a
+                // repeat of the double-dispatch this branch exists to avoid.
+                self.retire_blocked_stash(&turn).await;
                 continue;
             }
             let placeholder = ApprovalId::new(format!("boot-reconcile:{turn}"));
