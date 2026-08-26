@@ -194,25 +194,35 @@ export function buildChannels(
   desks: Desk[] = defaultDesks(),
   transcripts: Transcripts = {},
 ): ChannelSection[] {
+  // A desk that answers to a General spelling owns the company-wide line, and
+  // the built-in channel steps aside for it rather than doubling it.
+  //
+  // This is the host's own rule, not a console one: `is_general_channel`
+  // (`src/server/operator.rs`) is guarded on `!record.desk_exists(desk_id)`, so
+  // a blueprint that declares `[[group_chat]] id = "general"` — or `"main"` —
+  // keeps its desk, its lead, its writes, and `responder_for` routes messages
+  // addressed there to that lead. A rail that showed a second, lead-less
+  // `#general` beside it, or hid the desk and named the orchestrator as who
+  // answers, would state something the host does not do. `channelIdForThread`
+  // below already scans the desks before folding the General spellings, for
+  // exactly this reason.
+  //
+  // Desk *creation* refuses every General spelling, so such a desk can only
+  // come from a blueprint — and `defaultDesks()` no longer fabricates one, so
+  // "a desk claims it" is now a fact about the company rather than about which
+  // fallback set the console happened to be holding.
+  const claimed = desks.some((d) => isGeneralChannel(d.id));
   const channels: Channel[] = [
-    generalChannel(members),
-    // The static fallback set carries its own `main` row for the company-wide
-    // line; the derived one above replaces it rather than sitting beside it.
-    // A **host** desk that answers to a General spelling is deliberately not
-    // filtered — the host reserves those ids for new desks, so one can only
-    // reach here from a blueprint that authored it, and that is a real desk
-    // with a real lead which it would be wrong to hide.
-    ...desks
-      .filter((d) => d.id !== MAIN_THREAD_ID)
-      .map((d) => ({
-        id: d.id,
-        name: d.channel,
-        voice: d.name,
-        kind: "channel" as const,
-        purpose: d.blurb,
-        tone: d.tone,
-        memberIds: d.members,
-      })),
+    ...(claimed ? [] : [generalChannel(members)]),
+    ...desks.map((d) => ({
+      id: d.id,
+      name: d.channel,
+      voice: d.name,
+      kind: "channel" as const,
+      purpose: d.blurb,
+      tone: d.tone,
+      memberIds: d.members,
+    })),
   ];
 
   const dms = directMessageChannels(members)

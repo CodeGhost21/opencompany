@@ -38,7 +38,7 @@ import {
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
-import { defaultDesks, isGeneralChannel, type Desk } from "@/lib/desks";
+import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
 import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
@@ -996,6 +996,24 @@ export function ChatView({
   // `member.id` is, so a DM addresses that teammate the same way a desk
   // addresses its lead. It is also the id every live turn frame carries.
   const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
+  /**
+   * Whether the active channel is a **host desk** — the thing every desk
+   * affordance below is derived from.
+   *
+   * Asked of the desk list, not of the id's spelling. The built-in `#general`
+   * (issue #1743) is the one channel carrying `memberIds` that is not a desk,
+   * and it is in no desk list, so this excludes it for the reason it should be
+   * excluded rather than by matching its name. A blueprint that declares
+   * `[[group_chat]] id = "general"` is the case an id test gets wrong: the host
+   * grandfathers it (`is_general_channel` is guarded on `!desk_exists`), so it
+   * is a real desk with a real lead that the org chart holds — and spelling
+   * alone would have hidden both.
+   *
+   * `desks` is `null` until `/desks` answers, and the fallback desks carry no
+   * `memberIds`, so neither offers an affordance either way.
+   */
+  const activeIsDesk =
+    active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
   /**
    * The turn this channel is waiting on, if any (issue #983).
@@ -1695,9 +1713,7 @@ export function ChatView({
                 // its `memberIds` are the roster in roster order, not a desk
                 // hierarchy, so `[0]` is whoever happens to be listed first.
                 // Badging them "lead" would state a rank nothing confers.
-                active.kind === "channel" && !isGeneralChannel(active.id)
-                  ? active.memberIds?.[0]
-                  : undefined
+                activeIsDesk ? active.memberIds?.[0] : undefined
               }
               loading={loadingTeam}
               fromHost={fromHost}
@@ -1727,6 +1743,12 @@ export function ChatView({
                * offer a control that will be refused, so there is no link and
                * no disabled one either — absence is the honest state.
                *
+               * Decided by {@link activeIsDesk} — whether the desk list holds
+               * this id — rather than by the id's spelling. A blueprint that
+               * declares `[[group_chat]] id = "general"` keeps a real desk with
+               * a real lead, which the host lists and the org chart holds; an
+               * id test would have hidden that desk's lead and its link.
+               *
                * A desk's channel id **is** its desk id (`deskFromDto`), so
                * there is no mapping to keep in step. Written to the hash rather
                * than routed through a callback, as `ArtifactsTab`'s "Open in
@@ -1734,7 +1756,7 @@ export function ChatView({
                * only hands chat a chat-scoped navigate.
                */
               onManageDesk={
-                active.kind === "channel" && active.memberIds && !isGeneralChannel(active.id)
+                activeIsDesk && active.memberIds
                   ? () => {
                       window.location.hash = `/company/${active.id}`;
                     }

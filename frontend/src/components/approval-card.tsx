@@ -42,7 +42,8 @@ import {
   type ApprovalSummary,
   type GrantScope,
 } from "@/api/types";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { MAIN_THREAD_ID } from "@/lib/chat";
+import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -547,6 +548,23 @@ export function approvalThreadLink(
 
   const desk = desks.find((candidate) => candidate.id === approval.thread);
   if (desk) return { channelId, label: `#${desk.channel}` };
+
+  // The built-in `#general` channel (issue #1743), which is deliberately in no
+  // desk list — so the scan above can never name it, and an approval raised on
+  // the company's main line resolved to a channel and then failed to find a
+  // label, leaving "Origin unavailable" on the one channel every company has.
+  // After the desk scan, deliberately: a blueprint desk that authored one of
+  // the General ids keeps its own name, exactly as `channelIdForThread` keeps
+  // it its own thread.
+  //
+  // Guarded on a non-empty desk list because that is how this file already
+  // encodes "the topology is unknown": a failed `/desks` read resolves to `[]`
+  // (an empty *response* falls back to `defaultDesks()`), and a failed read
+  // must not be guessed at — `ChatView` surfaces the error and renders no rail,
+  // so a link into it would land nowhere.
+  if (channelId === MAIN_THREAD_ID && desks.length > 0) {
+    return { channelId, label: `#${GENERAL_CHANNEL}` };
+  }
 
   const member = members.find((candidate) => candidate.id === approval.thread);
   return member ? { channelId: dmChannelId(member), label: member.name } : null;

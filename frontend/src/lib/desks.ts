@@ -55,15 +55,24 @@ export interface Desk {
   overlayMembers?: string[];
 }
 
-/** The main line plus a few focused desks. */
+/**
+ * A few focused desks, for a host that exposes none of its own.
+ *
+ * **No `#general` row.** It used to carry one — `id: "main"` — back when the
+ * company-wide line existed only here. Since issue #1743 the rail projects
+ * `#general` from the roster instead ({@link buildChannels}), so a row here
+ * would be a second one sitting beside it.
+ *
+ * Removing it is not just de-duplication. While it existed, `isGeneralChannel`
+ * was true of a row in this fabricated set *and* of a desk a blueprint really
+ * declared, and nothing downstream could tell the two apart — which is exactly
+ * how a `[[group_chat]] id = "general"` came out as two channels folding onto
+ * one transcript, and a `[[group_chat]] id = "main"` came out hidden while the
+ * host still routed to its lead. Console-side desk fabrication being
+ * indistinguishable from a real desk is the same shape as issue #370.
+ */
 export function defaultDesks(): Desk[] {
   return [
-    {
-      id: MAIN_THREAD_ID,
-      channel: GENERAL_CHANNEL,
-      name: "Your company",
-      blurb: "The main line — ask for anything",
-    },
     {
       id: "strategy",
       channel: "strategy",

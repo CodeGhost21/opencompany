@@ -1087,9 +1087,21 @@ export function AppShell({
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         setChatChannelByThread(channelMap(fallbackDesks, []));
-        setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
+        // Exactly what the success path above does, and for the same reason:
+        // the landing channel is `#general`, always. This used to read
+        // `fallbackDesks[0]?.id`, which agreed only by accident — the fallback
+        // set's first row happened to be a fabricated `main` desk. That row is
+        // gone (it made a console-invented desk indistinguishable from a
+        // blueprint one), so the rule is named here rather than inferred from
+        // whichever desk sorts first.
+        setFirstDeskChannelId(MAIN_THREAD_ID);
         const threadIds = defaultThreads().map((t) => t.id);
-        const channels = fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id }));
+        const channels = [
+          // `#general` is in no desk list, here as above — without naming it,
+          // the one channel every company has would not rehydrate on reload.
+          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
+          ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+        ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         rehydrateAll();
         disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);

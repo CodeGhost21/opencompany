@@ -70,6 +70,50 @@ describe("the built-in #general channel", () => {
     expect(rail[0].memberIds).toEqual(["ceo", "eng"]);
   });
 
+  it("steps aside for a blueprint desk that authored the id `general`", () => {
+    // The host grandfathers this: `is_general_channel` is guarded on
+    // `!record.desk_exists`, so such a desk keeps its lead and its writes and
+    // `responder_for` routes to that lead. Adding the built-in one beside it
+    // put two `#general` rows in the rail folding onto one transcript — the
+    // host's `is_general_chat` treats `main` and `general` as one conversation
+    // — while a send could pick either responder.
+    const authored: Desk[] = [
+      { id: "general", channel: "general", name: "Ops lead", blurb: "The line", members: ["ceo"] },
+      ...DESKS,
+    ];
+    const rail = channels(ROSTER, authored);
+    expect(rail.filter((c) => isGeneralChannel(c.id))).toHaveLength(1);
+    expect(rail.map((c) => c.id)).toEqual(["general", "engineering", "growth"]);
+    // And it is the real desk that survived: its lead, its blurb, its members.
+    expect(rail[0].voice).toBe("Ops lead");
+    expect(rail[0].memberIds).toEqual(["ceo"]);
+  });
+
+  it("keeps a blueprint desk that authored the id `main` instead of hiding it", () => {
+    // The reverse failure: this desk was filtered out of the rail, so the
+    // built-in channel took the slot and named the orchestrator as who answers
+    // — while the host still routed `main` to this desk's lead, because
+    // `responder_for` checks desks first. The UI both hid a real desk and
+    // misstated the responder.
+    const authored: Desk[] = [
+      { id: "main", channel: "general", name: "Front office", blurb: "The line", members: ["eng"] },
+      ...DESKS,
+    ];
+    const rail = channels(ROSTER, authored);
+    expect(rail.filter((c) => isGeneralChannel(c.id))).toHaveLength(1);
+    expect(rail.map((c) => c.id)).toEqual(["main", "engineering", "growth"]);
+    expect(rail[0].voice).toBe("Front office");
+    expect(rail[0].memberIds).toEqual(["eng"]);
+    // Not the derived channel's claim about who picks up an unmentioned message.
+    expect(rail[0].purpose).toBe("The line");
+  });
+
+  it("has no fabricated general desk left in the fallback set to be confused for one", () => {
+    // The rule above is "a desk claims the line". That is only a fact about the
+    // company if the console has stopped inventing such a desk itself.
+    expect(defaultDesks().some((d) => isGeneralChannel(d.id))).toBe(false);
+  });
+
   it("is present on a company with no desks at all", () => {
     expect(channels(ROSTER, [])[0].name).toBe(GENERAL_CHANNEL);
   });
@@ -174,21 +218,28 @@ describe("ChatView offers no desk affordance on the built-in channel", () => {
   // Prettier happens to choose for it.
   const source = chatView.replace(/\s+/g, " ");
 
+  it("decides by the desk list, not by the id's spelling", () => {
+    // Both affordances hang off this one predicate. Asking the desk list is
+    // what makes the built-in channel excluded for the right reason — and what
+    // keeps a blueprint desk that authored a General id from being hidden with
+    // it, since the host grandfathers that desk and the org chart holds it.
+    expect(source).toContain(
+      'const activeIsDesk = active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);',
+    );
+  });
+
   it("does not badge anyone its lead", () => {
     // `memberIds[0]` is the roster's first row here, not a hierarchy.
-    expect(source).toContain(
-      'active.kind === "channel" && !isGeneralChannel(active.id) ? active.memberIds?.[0]',
-    );
+    expect(source).toContain("activeIsDesk ? active.memberIds?.[0] : undefined }");
   });
 
   it("does not offer the org-chart link that would open on a desk that does not exist", () => {
-    expect(source).toContain(
-      'active.kind === "channel" && active.memberIds && !isGeneralChannel(active.id)',
-    );
+    expect(source).toContain("onManageDesk={ activeIsDesk && active.memberIds");
   });
 
-  it("imports the predicate from the one place that defines it", () => {
-    expect(source).toContain('import { defaultDesks, isGeneralChannel, type Desk } from "@/lib/desks";');
+  it("no longer needs the id predicate at all", () => {
+    expect(source).toContain('import { defaultDesks, type Desk } from "@/lib/desks";');
+    expect(source).not.toContain("isGeneralChannel(active.id)");
   });
 });
 
