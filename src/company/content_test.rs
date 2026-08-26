@@ -536,6 +536,7 @@ fn a_deskless_teammate_minted_with_no_scope_never_inherits_billing() {
         "agentic_marketing_agency",
         "agentic_accounting_firm",
         "agentic_venture_studio",
+        "agentic_software_company",
     ] {
         let manifest = load_company(company);
         // The state that makes the escalation reachable: a minter scoped only by
@@ -893,6 +894,82 @@ fn a_marketing_biller_can_be_named_from_the_console() {
     assert!(
         grants_chargebee_explicit(&grants),
         "the console override naming the biller must survive the desk layer; \
+         effective grants: {grants:?}"
+    );
+}
+
+/// The software company ships the billing ceiling and nobody holding it.
+///
+/// The template had no `chargebee` at all until #1854, which made the
+/// capability unreachable rather than withheld: `[tools].allow` has no runtime
+/// write path, so a company booted from this bundle could store a Chargebee key
+/// and have it reach no teammate, with nothing in the console able to fix it.
+///
+/// Granting it needed every agent to state a belt first. All nine omitted their
+/// `tools` line, and an omitted line inherits the WHOLE company grant — so the
+/// one-line version of this change would have handed billing to the QA engineer
+/// and the docs writer rather than to nobody. This pins both halves: the
+/// ceiling exists, and no shipped teammate resolves to holding it.
+#[test]
+fn the_software_company_ships_billing_that_reaches_nobody_yet() {
+    let manifest = load_company("agentic_software_company");
+
+    assert!(
+        grants_chargebee_explicit(&manifest.tools.allow),
+        "the ceiling must exist, or an operator has no way to name a biller: {:?}",
+        manifest.tools.allow
+    );
+
+    // The exclusion must not live on a desk: desk ceilings are manifest-only,
+    // so an exclusion there could never be widened from the console — which
+    // would make the ceiling above decorative.
+    for chat in &manifest.group_chats {
+        assert!(
+            chat.tools.is_empty(),
+            "{}: the `chargebee` exclusion must not live on the desk ceiling              (an unwidenable layer); found {:?}",
+            chat.id,
+            chat.tools
+        );
+    }
+
+    for agent in &manifest.agents {
+        let desk_refs: Vec<&[String]> = manifest
+            .group_chats
+            .iter()
+            .filter(|chat| chat.members.contains(&agent.id))
+            .map(|chat| chat.tools.as_slice())
+            .collect();
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        assert!(
+            !grants_chargebee_explicit(&grants),
+            "{}: a shipped teammate must not hold billing tools; effective              grants: {grants:?}",
+            agent.id
+        );
+    }
+
+    // …and naming one from the console reaches the tools, which is the whole
+    // point of the ceiling being there.
+    let support = manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == "customer_support")
+        .expect("customer_support is on this roster");
+    let mut named = support.tools.clone();
+    named.push("chargebee".to_string());
+    let desk_refs: Vec<&[String]> = manifest
+        .group_chats
+        .iter()
+        .filter(|chat| {
+            chat.members
+                .iter()
+                .any(|member| member == "customer_support")
+        })
+        .map(|chat| chat.tools.as_slice())
+        .collect();
+    let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &named);
+    assert!(
+        grants_chargebee_explicit(&grants),
+        "an operator naming the biller from the console must reach billing; \
          effective grants: {grants:?}"
     );
 }
