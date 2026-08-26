@@ -287,78 +287,13 @@ policy decision rather than a form field.
 
 ### Drafting a mandate or a persona
 
-`POST …/team/{agentId}/draft` runs one turn of a conversation about one of two
-fields — `description` (the mandate on the roster card) or `instructions` (the
-persona appended to the teammate's system prompt). `POST …/team/draft` does the
-same for a teammate the operator is still filling in on the Add form, which has
-no id yet; it takes the `role` being typed (blank is a `400`) and the other
-authored fields alongside.
-
-The body carries `messages`: the conversation so far, oldest first, each
-`{role: "operator" | "copilot", text}`. Empty means the opening turn — "draft
-something, I have not said anything yet" — which is deliberate: an operator
-staring at a blank persona box wants a starting point to react to, and making
-them type first asks for the thing they opened the copilot because they could
-not write.
-
-The answer is `{reply, text?}`. `reply` is what the copilot says — what it
-changed, or what it needs to know. `text` is the **whole** field as it now
-stands, never a diff. `text` is absent on a turn that asked a question instead
-of drafting, which is not a failure: `source` is still `"model"`, and letting a
-turn ask is what makes this a conversation rather than a hint box.
-
-**The console owns the transcript; the host stores nothing.** That is the whole
-of "in-session" — no journal to rehydrate, no thread id to collide with a desk,
-and nothing to clean up when the form closes. It is bounded host-side all the
-same (the last 16 turns, 2,000 characters each, blanks and turns with an
-unreadable `role` dropped silently), because a transcript the caller composes is
-one the caller can grow without limit. A dropped turn is not a `400`: the
-transcript is context, not the request, and losing the operator's actual
-question over one malformed old message would be the worse failure.
-
-**Neither route writes.** No record is touched, no draft is stored, and no lock
-is taken — the response is text, and it becomes a teammate's persona only if the
-operator takes it and then saves through `PATCH …/team/{agentId}` like any edit
-they typed themselves.
-
-That is the whole reason a model is allowed near these two fields. First-run
-setup deliberately keeps the design pass **out** of a teammate's standing
-instructions ([company-setup/overview.md](company-setup/overview.md)): the pass
-names a work *shape* from a closed enum and the host owns every word, because
-there the text would reach a system prompt with nobody having read it, through a
-member-open route. Here two deliberate human actions stand in between. If either
-is ever removed, this route has to be reconsidered with it.
-
-Grounding is assembled host-side from the company record — this teammate, and
-the rest of the roster's ids and roles so a drafted mandate does not restate a
-neighbour's. The console holds all of that already and could have sent it; it
-must not, because a grounding the caller composes is one the caller can widen.
-The only caller-supplied text is the operator's optional note, which is framed to
-the model as data rather than as instructions.
-
-The answer is clamped to the field's own bound before it is returned —
-`MAX_DESCRIPTION` for a mandate (a card has one line), the persona prompt budget
-for instructions — so the console is not the only thing holding the limit.
-Drafting is metered as a `SampleKind::AuthoringCall` charged to the **company**,
-never to the teammate being described: it ran no turn, and billing it would
-otherwise eat that teammate's daily cap.
-
-Refusals are deliberately not errors. An unknown id is `404` and an unknown
-field is `400`, but "no model is wired", "the provider did not answer" and "the
-answer could not be read" all come back `200` with `source: "unavailable"` and a
-distinct `reason` (`no_model` / `model_unreachable` / `unreadable`), because each
-implies a different next move for the operator and none of them is a failure of
-the request.
-
-`unreadable` is narrower than it looks. An answer that is not in the format
-asked for is read as a **reply carrying no draft** rather than refused: the
-format exists because a draft has to be extracted exactly, and a conversational
-reply does not. Only an answer with nothing in it at all is `unreadable`. That
-distinction is not theoretical — asked something vague, a model answers with a
-plain-prose question about half the time, and refusing those told the operator
-their copilot was broken at the exact moment it was doing the right thing. There is no curated fallback text, unlike the roster proposal:
-"what does this particular teammate own" has no canned answer, and inventing one
-would put words in the company's mouth.
+`POST …/team/{agentId}/draft` and `POST …/team/draft` run one turn of a
+conversation about a teammate's `description` or `instructions`. **Neither
+writes**: the answer is text beside the field, and it becomes a persona only
+through the ordinary `PATCH` a Save performs. The conversation shape, the
+host-side grounding, the four refusal reasons and the argument for why the
+first-run design pass's rule still stands are in
+[api-team-drafting.md](api-team-drafting.md).
 
 `DELETE …/team/{agentId}` removes a teammate. An overlay teammate is deleted
 outright — the record is the only thing that declares it. A **manifest**
