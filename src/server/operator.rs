@@ -208,9 +208,24 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
             // where workflow-run reports and the owner/no-mailbox fallback land,
             // journaled on the `operator` chat line the durable delivery adapter
             // writes to. Listed last, after the real desks.
+            //
+            // Migration note: `operator` was not a reserved id before this issue
+            // — `create_desk` and manifest validation only started refusing it
+            // here (see the guards in this file and in `company/manifest.rs`).
+            // Neither guard runs on a load, by design (`from_stored_toml` never
+            // re-validates a stored manifest), so a company provisioned earlier
+            // can still have a real manifest or overlay desk that already owns
+            // that id. Synthesizing the system desk on top of it would produce
+            // two `operator` entries in this list and shadow a real, populated
+            // desk with a duplicate the console cannot tell apart — grandfather
+            // that desk instead: skip the synthetic entry so the pre-existing
+            // desk stays the one and only `operator` id. `chat_and_emit` carries
+            // the matching carve-out so it stays writable.
+            let synthetic_operator_desk =
+                (!record.desk_exists(crate::runtime::OPERATOR_CHANNEL)).then(operator_system_desk);
             manifest_desks
                 .chain(overlay_desks)
-                .chain(std::iter::once(operator_system_desk()))
+                .chain(synthetic_operator_desk)
                 .collect()
         })
         // Even a company that failed to load still surfaces the Operator channel,
@@ -2339,12 +2354,31 @@ async fn chat_and_emit(
     // send addressed to it rather than journaling an `OperatorMessage` under the
     // `operator` line (which would both make it writable and mix chatter into the
     // report feed). The frontend hides its send box; this is the safety net.
+    //
+    // Migration carve-out: `operator` was not reserved before this issue, so a
+    // company provisioned earlier can already have a real manifest or overlay
+    // desk using that id (`from_stored_toml` deliberately never re-validates a
+    // stored manifest, so the guard in `company/manifest.rs` never sees it, and
+    // an overlay desk created before `create_desk`'s guard existed persists
+    // as-is). This check does not know the sender's company by itself — a
+    // desk id is company-scoped — so it re-loads the record to ask whether a
+    // real desk already owns it before treating the send as addressed to the
+    // synthetic system channel. Without this, a pre-existing desk quietly
+    // becomes permanently unwritable the moment this feature ships, with no
+    // way for its company to get it back — the same failure mode `905297aef`
+    // fixed for the desk *list*, here on the *write* path.
     if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(
-            "the Operator channel is a read-only feed of workflow reports and notifications — \
-             it cannot be posted to"
-                .to_string(),
-        )));
+        let has_real_operator_desk = matches!(
+            runtime.store().load(id).await,
+            Ok(Some(record)) if record.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+        );
+        if !has_real_operator_desk {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "the Operator channel is a read-only feed of workflow reports and notifications — \
+                 it cannot be posted to"
+                    .to_string(),
+            )));
+        }
     }
     // Issue #364: a thread reply names its parent by id. Rejected here rather
     // than dropped, so a console sending a malformed parent learns that its
@@ -5701,6 +5735,72 @@ mode = "full"
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8_lossy(&bytes).to_lowercase();
         assert!(body.contains("read-only"), "{body}");
+    }
+
+    /// Issue #1757 migration: `operator` was not a reserved id before this
+    /// issue, and a stored manifest is never re-validated on load
+    /// (`CompanyManifest::from_stored_toml` skips validation on purpose, so
+    /// tightening a rule never strands an already-running company) — so a
+    /// company provisioned earlier can already have a real `[[group_chat]]`
+    /// using that id. Built directly with `toml::from_str` (bypassing
+    /// `into_validated`, the same way a stored manifest reaches
+    /// `CompanyRuntime` without going through it) to stand in for exactly
+    /// that: data that predates the guard. Without the carve-outs in
+    /// `list_desks` and `chat_and_emit`, this desk would be shadowed by a
+    /// synthetic, read-only duplicate under the same id the moment this
+    /// feature shipped, and every send to it would be refused. This proves
+    /// it is grandfathered instead: listed once, not flagged `system`, and
+    /// still writable.
+    #[tokio::test]
+    async fn a_manifest_desk_predating_the_reserved_operator_id_stays_writable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Ops Room\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        assert_eq!(desks.len(), 1, "no duplicate synthetic entry: {desks:?}");
+        assert_eq!(desks[0]["id"], "operator");
+        assert_eq!(
+            desks[0]["name"], "Ops Room",
+            "the real desk's own name, not the synthetic channel's: {desks:?}"
+        );
+        assert!(
+            desks[0].get("system").is_none(),
+            "grandfathered desk is a real desk (system defaults false and is \
+             omitted), not the system channel: {desks:?}"
+        );
+
+        // A send addressed to it must go through — this is the pre-existing
+        // desk's own line, not the (absent) synthetic system channel.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"ship the landing page","chat":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "a pre-existing desk that already owns the `operator` id must stay \
+             writable, got {}",
+            response.status()
+        );
     }
 
     /// Issue #65: the console's default thread addresses sends with
