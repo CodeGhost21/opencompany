@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { VIEWS, type View } from "@/lib/console-routes";
+import { FINANCE_PAGES } from "@/views/finance/FinanceSection";
 import { SETTINGS_PAGES } from "@/views/settings-pages";
-import { NAMED_BY, SETTINGS_NAMED_BY, type Leaf } from "./support/routed-views";
+import { FINANCE_NAMED_BY, NAMED_BY, SETTINGS_NAMED_BY, type Leaf } from "./support/routed-views";
 
 /**
  * A routed view's header is the first thing it can render — in every state
@@ -80,6 +81,7 @@ const GUARDED_COMPONENTS: string[] = [
     list.map((leaf) => ("pageHeader" in leaf ? leaf.pageHeader : leaf.handRolled)),
   ),
   ...Object.values(SETTINGS_NAMED_BY),
+  ...Object.values(FINANCE_NAMED_BY),
 ].map((file) => file.slice(file.lastIndexOf("/") + 1).replace(/\.tsx$/, ""));
 
 /**
@@ -281,6 +283,24 @@ describe("every state of a routed view renders a heading (#1785)", () => {
       offenders,
       `A settings page has a state that renders no page header. ` +
         `Same fix as the routed views above.\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("has no finance page returning JSX without a heading in it", () => {
+    // The second section like Settings. `#/finances/wallet` is bookmarkable
+    // and `wallet` is not a `View`, so the routed-view sweep cannot see it.
+    const offenders = FINANCE_PAGES.flatMap(({ id }) => {
+      const file = FINANCE_NAMED_BY[id];
+      const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
+      return returnsWithoutHeader(source).map(
+        (r) => `finances/${id} (${file}:${r.line}) returns with no heading in it: ${r.text}`,
+      );
+    });
+
+    expect(
+      offenders,
+      `A finance page has a state that renders no page header. Same fix as the ` +
+        `routed views above.\n${offenders.join("\n")}`,
     ).toEqual([]);
   });
 

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { VIEWS as ROUTED_VIEWS, type View } from "@/lib/console-routes";
-import { NAMED_BY, type Leaf } from "./support/routed-views";
+import { FINANCE_NAMED_BY, NAMED_BY, SETTINGS_NAMED_BY, type Leaf } from "./support/routed-views";
 
 /**
  * Every page's title comes from `PageHeader`. A view that hand-rolls an `<h1>`
@@ -230,6 +230,20 @@ describe("every routed view is named by something (#1763)", () => {
       .map(([view, leaf]) => `${view} names ${leaf.handRolled} as hand-rolled, but it has no HAND_ROLLED row`);
 
     expect(undocumented, undocumented.join("\n")).toEqual([]);
+  });
+
+  it("has every section page rendering a PageHeader too", () => {
+    // Settings and Finance are one routed view each over ten and three
+    // bookmarkable addresses. A `Record` keyed on their own tables means a new
+    // page with no row is a compile error; this is the runtime half.
+    const offenders = [
+      ...Object.entries(SETTINGS_NAMED_BY).map(([id, f]) => [`settings/${id}`, f] as const),
+      ...Object.entries(FINANCE_NAMED_BY).map(([id, f]) => [`finances/${id}`, f] as const),
+    ]
+      .filter(([, file]) => !(SOURCES.get(file) ?? "").includes("<PageHeader"))
+      .map(([page, file]) => `${page} is named by ${file}, which renders no <PageHeader>`);
+
+    expect(offenders, offenders.join("\n")).toEqual([]);
   });
 
   it("has a leaf for every route, and none of them empty", () => {

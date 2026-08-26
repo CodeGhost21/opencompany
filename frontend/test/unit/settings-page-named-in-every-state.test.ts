@@ -45,17 +45,17 @@ function clientWith(answer: unknown): OpenCompanyClient {
   // One answer for every read these pages make. `finances` is its own client
   // method rather than a bare `get`, so a stub with only `get` reported
   // "client.finances is not a function" and told us nothing about headings.
-  const reply = () =>
+  const reply = (url?: string) =>
     answer instanceof Error
       ? Promise.reject(answer)
       : answer === "pending"
         ? new Promise(() => {})
-        : Promise.resolve(answer);
+        : Promise.resolve(typeof answer === "function" ? answer(url ?? "") : answer);
   return {
     scopeFor: () => "/api/v1/companies/acme",
-    get: reply,
-    post: reply,
-    finances: reply,
+    get: (url?: string) => reply(url),
+    post: (url?: string) => reply(url),
+    finances: () => reply(),
   } as unknown as OpenCompanyClient;
 }
 
@@ -95,8 +95,16 @@ const FINANCES_OK = {
   transactions: [],
 };
 
-/** People reads three things at once, so one answer has to satisfy all three. */
-const PEOPLE_OK: unknown[] = [];
+/**
+ * People makes three reads with different shapes, so its fixture answers by
+ * URL. It has to be an *admin*, or the view takes its members-only branch and
+ * the loaded case has nothing to assert on — which is precisely what the
+ * ready-state assertion caught when this fixture was a bare `[]`.
+ */
+const PEOPLE_OK = (url: string): unknown =>
+  url.endsWith("/auth/me")
+    ? { id: "u1", email: "admin@example.test", role: "admin" }
+    : [];
 
 const SEARCH_OK = {
   provider: "managed",
@@ -143,28 +151,38 @@ async function nameOf(view: Page, answer: unknown): Promise<string | null> {
 }
 
 describe.each([
-  ["Search", SearchView, SEARCH_OK, "search-load-error"] as const,
-  ["Hosting", HostingView, HOSTING_OK, "hosting-load-error"] as const,
-  ["Wallet", WalletView, PAYPAL_OK, "wallet-status-error"] as const,
-  ["Invoicing", InvoicingView, CHARGEBEE_OK, "invoicing-status-error"] as const,
-])("%s is named in every state", (title, view, ok, errorTestId) => {
-  it("names the page once it has loaded", async () => {
-    // The control. Without this the two below could pass against a page that
-    // renders a heading and nothing else.
+  ["Search", SearchView, SEARCH_OK, "search-load-error", "search-view"] as const,
+  ["Hosting", HostingView, HOSTING_OK, "hosting-load-error", "hosting-view"] as const,
+  ["Wallet", WalletView, PAYPAL_OK, "wallet-status-error", "wallet-view"] as const,
+  ["Invoicing", InvoicingView, CHARGEBEE_OK, "invoicing-status-error", "invoicing-view"] as const,
+])("%s is named in every state", (title, view, ok, errorTestId, readyTestId) => {
+  /*
+    Every state now renders the same title, which is the fix — and which
+    hollowed out an assertion on the title alone: an invalid fixture, or a
+    "success" that actually errored, would render the error branch and still
+    say "Search" (coderabbit review). So each case pins the *state* as well as
+    the name, using the testid that exists only on the loaded return.
+  */
+  const at = (testid: string) => container.querySelector(`[data-testid="${testid}"]`);
+
+  it("names the page once it has loaded, and is really loaded", async () => {
     expect(await nameOf(view, ok)).toBe(title);
+    expect(at(readyTestId), "the loaded fixture must reach the loaded branch").not.toBeNull();
+    expect(at(errorTestId), "and must not be quietly erroring").toBeNull();
   });
 
   it("names the page while the read is still in flight", async () => {
     expect(await nameOf(view, "pending")).toBe(title);
+    expect(at(readyTestId)).toBeNull();
+    expect(at(errorTestId)).toBeNull();
   });
 
   it("names the page when the read failed, which is a state it never leaves", async () => {
     expect(await nameOf(view, new Error("store unreachable"))).toBe(title);
     // And the failure is still reported — a header that swallowed the alert
     // would pass the assertion above and be worse than the defect.
-    expect(
-      container.querySelector(`[data-testid="${errorTestId}"]`)?.textContent,
-    ).toContain("store unreachable");
+    expect(at(errorTestId)?.textContent).toContain("store unreachable");
+    expect(at(readyTestId)).toBeNull();
   });
 });
 
@@ -181,19 +199,27 @@ describe.each([
  * the skeletons still on screen.
  */
 describe.each([
-  ["Finances", FinancesView, FINANCES_OK] as const,
-  ["People", PeopleView, PEOPLE_OK] as const,
-])("%s is named in every state", (title, view, ok) => {
-  it("names the page once it has loaded", async () => {
+  // Neither has a loaded-only testid, so the ready signal is content only the
+  // loaded branch renders: Finances' KPI labels, People's members section.
+  ["Finances", FinancesView, FINANCES_OK, "Wallet balance"] as const,
+  ["People", PeopleView, PEOPLE_OK, "Members"] as const,
+])("%s is named in every state", (title, view, ok, readySignal) => {
+  it("names the page once it has loaded, and is really loaded", async () => {
     expect(await nameOf(view, ok)).toBe(title);
+    expect(
+      container.textContent,
+      "the loaded fixture must reach the loaded branch",
+    ).toContain(readySignal);
   });
 
   it("names the page while the read is still in flight", async () => {
     expect(await nameOf(view, "pending")).toBe(title);
+    expect(container.textContent).not.toContain(readySignal);
   });
 
   it("names the page when the read failed", async () => {
     expect(await nameOf(view, new Error("ledger unreachable"))).toBe(title);
+    expect(container.textContent).not.toContain(readySignal);
   });
 });
 

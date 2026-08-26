@@ -7,6 +7,7 @@
  */
 
 import type { View } from "@/lib/console-routes";
+import type { FinancePage } from "@/views/finance/FinanceSection";
 import type { SettingsPage } from "@/views/settings-pages";
 
 /**
@@ -131,12 +132,21 @@ export const NAMED_BY: Record<View, Names> = {
    * show. As `handRolled` the guard asked nothing of it.
    */
   tasks: [{ pageHeader: "TaskDetailView.tsx" }],
-  ledgers: [{ pageHeader: "LedgersView.tsx" }],
+  /**
+   * `#/ledgers/manage` is its own screen — `app-shell.tsx` checks
+   * `MANAGE_SEGMENT` before `LedgersView` ever mounts — so the route renders
+   * two different components and both need holding to a heading.
+   */
+  ledgers: [
+    { pageHeader: "LedgersView.tsx" },
+    { pageHeader: "company/ManageListsView.tsx" },
+  ],
   workspace: [{ pageHeader: "WorkspaceView.tsx" }],
   approvals: [{ pageHeader: "ApprovalsView.tsx" }],
   workflows: [{ pageHeader: "WorkflowsView.tsx" }],
   observatory: [{ pageHeader: "observatory/ObservatoryView.tsx" }],
   pages: [{ pageHeader: "PagesView.tsx" }],
+  /** See `FINANCE_NAMED_BY`: `#/finances/<page>` is a three-page section. */
   finances: [{ pageHeader: "FinancesView.tsx" }],
   /** `SettingsSection` is the tab frame; `SettingsView` is the page. */
   settings: [{ pageHeader: "SettingsView.tsx" }],
@@ -173,4 +183,30 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   skills: "SkillsView.tsx",
   brain: "MemoryView.tsx",
   usage: "UsageView.tsx",
+};
+
+/**
+ * Finance is the second section like Settings: one routed view whose `sub`
+ * segment picks one of three pages, each drawing its own `PageHeader`
+ * (`finance/FinanceSection.tsx:91`). `#/finances/wallet` is a bookmarkable
+ * address and `wallet` is not a `View`, so the routed-view sweep cannot see it
+ * — the same blind spot `#/settings/people` had, found the same way (codex
+ * review, #1785).
+ *
+ * `Record<FinancePage, …>` over `FINANCE_PAGES`, so a fourth finance page with
+ * no row is a compile error.
+ *
+ * These two and `company` are the complete set of sub-dispatching routes. The
+ * check was a grep over `src/views/**` for `sub ===`, `if (sub)` and
+ * `resolve*Page`: it finds `CompanyView` (three leaves, enumerated above),
+ * `TeamView` (`AgentDetailView`, enumerated), `app-shell`'s `MANAGE_SEGMENT`
+ * split under `ledgers` (enumerated), `SettingsSection`, and this. `ChatView`
+ * and `LedgersView` also read `sub`, but to select a channel or a list *within
+ * themselves* rather than to render a different component, so they contribute
+ * no leaf.
+ */
+export const FINANCE_NAMED_BY: Record<FinancePage, string> = {
+  overview: "FinancesView.tsx",
+  invoicing: "finance/InvoicingView.tsx",
+  wallet: "finance/WalletView.tsx",
 };
