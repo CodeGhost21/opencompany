@@ -873,11 +873,20 @@ export function AgentDetailView({
                           // below is still what writes, which is what makes a
                           // drafted persona no different from a typed one.
                           onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
-                          disabled={saving || cognition === "echo"}
+                          // A blank role is refused here for the reason the
+                          // Add form refuses it: both briefs are written FROM
+                          // the role. The wire drops a blank one rather than
+                          // sending it, so the host would fall back to the
+                          // STORED role and draft for the job this teammate is
+                          // being moved off — the one thing the operator is
+                          // mid-way through changing.
+                          disabled={saving || cognition === "echo" || !draft.role.trim()}
                           disabledNotice={
                             cognition === "echo"
                               ? "No model is configured, so the copilot can't draft yet."
-                              : undefined
+                              : !draft.role.trim()
+                                ? "Give this teammate a role first — the copilot drafts from it."
+                                : undefined
                           }
                         />
                       ) : null

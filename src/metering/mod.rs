@@ -83,7 +83,9 @@ pub use oauth::{
     MCP_PROVIDER_PREFIX, UNKNOWN_PROVIDER, mcp_provider, oauth_call_sample, record_oauth_call,
 };
 pub use planning::{planning_sample, record_planning_usage};
-pub use profile_draft::{profile_draft_sample, record_profile_draft_usage};
+pub use profile_draft::{
+    DraftBudget, profile_draft_sample, record_profile_draft_usage, reserve_draft,
+};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };

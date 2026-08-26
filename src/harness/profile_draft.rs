@@ -77,6 +77,15 @@ const MAX_OUTPUT_TOKENS: u32 = 400;
 const MAX_PERSONA_TOKENS: u32 = 2_500;
 
 /// What one field's turn is allowed: how long to wait, and how much to produce.
+/// The most a turn on this field may produce.
+///
+/// Public because the budget reservation promises exactly this number before
+/// dispatch — reserving the ceiling rather than an estimate is what makes the
+/// promise an upper bound on what the call can cost.
+pub fn output_ceiling(field: ProfileField) -> u32 {
+    budget_for(field).1
+}
+
 fn budget_for(field: ProfileField) -> (Duration, u32) {
     match field {
         ProfileField::Description => (DRAFT_TIMEOUT, MAX_OUTPUT_TOKENS),

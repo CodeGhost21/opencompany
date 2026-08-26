@@ -1765,34 +1765,43 @@ fn siblings_of(record: &CompanyRecord, agent_id: &str) -> Vec<Sibling> {
 // Compiled where it can run: the drafting pass itself is behind `openhuman`,
 // and `test` so the default lane still exercises the rule.
 #[cfg(any(feature = "openhuman", test))]
-async fn total_ceiling_reached(
+async fn reserve_draft_budget(
     company: &crate::ports::types::CompanyId,
     meter: &dyn crate::ports::UsageMeter,
     manifest_plan: &crate::company::Plan,
-) -> bool {
+    tokens: u32,
+) -> Option<Option<crate::metering::DraftBudget>> {
     use crate::metering::{CapabilityPlan, tokens_in};
 
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
-        return false;
+        return Some(None);
     };
     // No ceiling configured is the common case, and asking the meter about it
-    // would put a usage query in front of every draft for nothing.
+    // would put a usage query in front of every draft for nothing — nor is
+    // there anything to promise against.
     if plan.total_budget.is_none() {
-        return false;
+        return Some(None);
     }
     let since = plan.period.period_start_millis(crate::ports::now_millis());
     match meter.query(company, since).await {
         Ok(samples) => {
             let spent = tokens_in(&samples);
-            if plan.total_exhausted(spent) {
-                tracing::info!(
-                    company = %company,
-                    spent,
-                    "[draft] total token ceiling reached; refusing to draft (no model call) until the period resets"
-                );
-                return true;
+            // The check and the promise happen together, under the reservation
+            // map's own lock. Reading the meter here and deciding there would
+            // leave the same gap this exists to close: the meter can only
+            // report finished work, and two drafts a click apart are both
+            // unfinished.
+            match crate::metering::reserve_draft(company, u64::from(tokens), spent, &plan) {
+                Some(budget) => Some(Some(budget)),
+                None => {
+                    tracing::info!(
+                        company = %company,
+                        spent,
+                        "[draft] total token ceiling reached; refusing to draft (no model call) until the period resets"
+                    );
+                    None
+                }
             }
-            false
         }
         Err(error) => {
             tracing::warn!(
@@ -1800,7 +1809,7 @@ async fn total_ceiling_reached(
                 %error,
                 "[draft] total-ceiling spend query failed; not refusing the draft"
             );
-            false
+            Some(None)
         }
     }
 }
@@ -1827,15 +1836,20 @@ async fn build_draft(
     // Checked after the drafter and before the call: a company with nothing
     // wired has a truer answer to give than "out of budget", and a company that
     // is out of budget must not reach the provider at all.
-    if total_ceiling_reached(
+    //
+    // The promise is held across the call and dropped with `_budget` when this
+    // function returns, on every path — including the ones that never reached a
+    // provider.
+    let Some(_budget) = reserve_draft_budget(
         company.id(),
         company.runtime.usage().as_ref(),
         &record.manifest.plan,
+        crate::harness::profile_draft::output_ceiling(field),
     )
     .await
-    {
+    else {
         return ProfileDraft::Refused(DraftRefusal::BudgetExhausted);
-    }
+    };
     let provider = drafter.provider_slug();
     let (draft, usage) = drafter.draft(field, subject).await;
     // Read *after* the turn, so it names the model the turn actually ran on —
@@ -4564,16 +4578,56 @@ agent = "claude"
     /// refused past the cap and this one would keep spending.
     #[tokio::test]
     async fn a_company_past_its_token_ceiling_does_not_draft() {
-        let company = CompanyId::new("acme");
+        let at = CompanyId::new("acme-at-ceiling");
         assert!(
-            super::total_ceiling_reached(&company, &FixedMeter(1_000), &plan_with(Some(1_000)))
-                .await,
+            super::reserve_draft_budget(&at, &FixedMeter(1_000), &plan_with(Some(1_000)), 400)
+                .await
+                .is_none(),
             "spend at the ceiling refuses, matching the harness's >= boundary"
         );
+        let under = CompanyId::new("acme-under-ceiling");
         assert!(
-            !super::total_ceiling_reached(&company, &FixedMeter(999), &plan_with(Some(1_000)))
-                .await,
+            super::reserve_draft_budget(&under, &FixedMeter(999), &plan_with(Some(1_000)), 400)
+                .await
+                .is_some(),
             "under the ceiling still drafts"
+        );
+    }
+
+    /// The reason the check hands back a promise instead of a boolean.
+    ///
+    /// The meter can only report work that has FINISHED. The mandate copilot
+    /// and the persona copilot are separately openable, so two drafts a click
+    /// apart both read the same pre-call total, both find room, and both spend
+    /// — landing a tenant past a ceiling that refused everything else. The
+    /// first draft's promise is what the second one has to see.
+    #[tokio::test]
+    async fn two_drafts_at_once_cannot_both_spend_the_last_of_the_budget() {
+        let company = CompanyId::new("acme-concurrent");
+        let plan = plan_with(Some(1_000));
+        // 900 spent, 100 left, and each draft may produce up to 400. The first
+        // fits; the second must not, even though the meter still says 900
+        // because the first has not finished.
+        let first = super::reserve_draft_budget(&company, &FixedMeter(900), &plan, 400)
+            .await
+            .expect("the ceiling is not reached yet")
+            .expect("a ceiling is configured, so a promise is held");
+
+        assert!(
+            super::reserve_draft_budget(&company, &FixedMeter(900), &plan, 400)
+                .await
+                .is_none(),
+            "the second draft sees the first one's promise, not just the meter"
+        );
+
+        // …and the budget comes back when the first draft finishes, on every
+        // path, because the promise is released by `Drop` rather than by hand.
+        drop(first);
+        assert!(
+            super::reserve_draft_budget(&company, &FixedMeter(900), &plan, 400)
+                .await
+                .is_some(),
+            "a finished draft releases what it promised"
         );
     }
 
@@ -4583,15 +4637,19 @@ agent = "claude"
     async fn a_company_with_no_ceiling_is_never_refused_for_budget() {
         let company = CompanyId::new("acme");
         assert!(
-            !super::total_ceiling_reached(&company, &FixedMeter(u64::MAX), &plan_with(None)).await
+            super::reserve_draft_budget(&company, &FixedMeter(u64::MAX), &plan_with(None), 400)
+                .await
+                .is_some()
         );
         assert!(
-            !super::total_ceiling_reached(
+            super::reserve_draft_budget(
                 &company,
                 &FixedMeter(u64::MAX),
-                &crate::company::Plan::default()
+                &crate::company::Plan::default(),
+                400
             )
-            .await,
+            .await
+            .is_some(),
             "a company with no [plan] section at all has no ceiling to reach"
         );
     }
@@ -4600,6 +4658,11 @@ agent = "claude"
     #[tokio::test]
     async fn an_unreadable_meter_lets_the_draft_through() {
         let company = CompanyId::new("acme");
-        assert!(!super::total_ceiling_reached(&company, &FailingMeter, &plan_with(Some(1))).await);
+        assert!(
+            super::reserve_draft_budget(&company, &FailingMeter, &plan_with(Some(1)), 400)
+                .await
+                .is_some(),
+            "an unreadable meter warns and lets the draft through"
+        );
     }
 }

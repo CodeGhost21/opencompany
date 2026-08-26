@@ -345,6 +345,26 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     expect(container.textContent).toContain("No model is configured");
   });
 
+  /// Both forms refuse to draft from a blank role, and for the same reason:
+  /// the briefs are written FROM it. The wire drops a blank role rather than
+  /// sending it, so without this gate the host falls back to the STORED role
+  /// and drafts for the job the operator is mid-way through moving off.
+  it("will not draft while the role is blank", () => {
+    render(
+      createElement(FieldCopilot, {
+        field: "description",
+        onTurn: async () => ({ field: "description" as const, source: "model" as const }),
+        onAccept: () => {},
+        disabled: true,
+        disabledNotice: "Give this teammate a role first — the copilot drafts from it.",
+      }),
+    );
+
+    const open = testid("agent-copilot-open-description") as HTMLButtonElement | null;
+    expect(open?.disabled).toBe(true);
+    expect(container.textContent).toContain("Give this teammate a role first");
+  });
+
   it("names a different next move for each reason", () => {
     expect(refusalNotice("no_model")).toContain("Settings → Inference");
     expect(refusalNotice("model_unreachable")).toContain("Try again");
