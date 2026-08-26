@@ -316,8 +316,21 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // 3865401532 and 3865689239). Skipped once the operator has typed an id
     // themselves (`explicit` non-blank): that value is already theirs to
     // keep across a retry.
+    //
+    // `idTouched` is reset alongside it. Reaching this branch on a reset
+    // means the operator cleared the Advanced field back to blank — which
+    // already set `idTouched` true — but the value being cached here is one
+    // WE just generated, not one they typed. Leaving `idTouched` true would
+    // make the *next* submit's `selfGenerated` computation above read this
+    // cached, self-generated id as operator-typed, since by then `explicit`
+    // is this same nonblank value: `autoId` would go empty and a retry that
+    // lands on `company_exists` — this exact request having succeeded with
+    // only its reply lost — would skip the reconciliation lookup that is
+    // scoped to self-generated ids for exactly this id (issue #1828 comment
+    // 3865803917).
     if (!explicit) {
       setExplicitId(id);
+      setIdTouched(false);
     }
 
     try {

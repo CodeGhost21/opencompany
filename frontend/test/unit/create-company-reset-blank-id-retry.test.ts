@@ -156,4 +156,69 @@ describe("a reset retried after clearing the Advanced id back to blank", () => {
 
     expect(secondId).toBe(firstId);
   });
+
+  /**
+   * Codex review on #1828, PR comment 3865803917: reusing the same id on
+   * retry (the test above) is necessary but not sufficient. The blank-reset
+   * fix persists the self-generated replacement id into `explicitId` state,
+   * but the operator's earlier clearing of the field already set
+   * `idTouched` true — and nothing reset it back when the fallback id was
+   * cached. On the *next* submit, `explicitId` now holds that cached,
+   * nonblank, self-generated value, so `selfGenerated` reads `idTouched` and
+   * (without the fix) wrongly concludes the id is operator-typed, zeroing
+   * `autoId`. That disables the reconciliation lookup exactly when it's
+   * needed most: a retry that lands on `company_exists` because the FIRST
+   * attempt actually landed on the host and only its reply was lost. Without
+   * reconciliation the operator sees a bare refusal instead of being carried
+   * into the company that already exists under the id they never even
+   * typed.
+   */
+  it("reconciles a retry that lands on company_exists using the cached self-generated id", async () => {
+    const provisionCompany = vi.fn<(body: ProvisionBody) => Promise<CompanyStatus>>();
+    // First attempt: ambiguous network failure, and the immediate
+    // reconciliation lookup also comes up empty — the dialog reports
+    // failure and stays open, caching the self-generated id it sent.
+    provisionCompany.mockImplementationOnce(() =>
+      Promise.reject(new ApiError(0, "network_error", "network error", true)),
+    );
+    // Retry, same id: the host recognizes it as already provisioned — this
+    // is THIS request's own first attempt having landed, not a genuine
+    // collision with someone else's company.
+    provisionCompany.mockImplementationOnce(() =>
+      Promise.reject(new ApiError(409, "company_exists", "company already exists", true)),
+    );
+
+    const reconciled = { id: "acme-reconciled", lifecycle: "running" } as unknown as CompanyStatus;
+    let statusCalls = 0;
+    const status = vi.fn((_company?: string | null) => {
+      statusCalls += 1;
+      // Call 1: the reconciliation lookup right after the first (network_error)
+      // attempt — genuinely not there yet.
+      if (statusCalls === 1) {
+        return Promise.reject(new ApiError(404, "company_not_found", "company not found", true));
+      }
+      // Call 2: the reconciliation lookup after the retry's company_exists —
+      // the company is there under the id this client itself generated.
+      return Promise.resolve(reconciled);
+    });
+
+    await open(stubClient({ provisionCompany, status }));
+    await clearAdvancedId();
+    await fillAdminEmail();
+
+    await submit();
+    const firstId = provisionCompany.mock.calls[0]![0].id;
+    expect(document.querySelector('[data-testid="create-company-error"]')).toBeTruthy();
+
+    await submit();
+    expect(provisionCompany).toHaveBeenCalledTimes(2);
+    expect(provisionCompany.mock.calls[1]![0].id).toBe(firstId);
+
+    // The reconciliation lookup must have fired for the SAME cached id —
+    // proving the retry still recognised it as self-generated rather than
+    // treating it as an operator-typed id (which reconciliation must never
+    // look up).
+    expect(status).toHaveBeenLastCalledWith(firstId);
+    expect(onCreated).toHaveBeenCalledWith(reconciled);
+  });
 });
