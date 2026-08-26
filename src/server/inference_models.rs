@@ -95,7 +95,17 @@ pub(crate) async fn discover_models(
     bearer: Option<&str>,
 ) -> Result<Vec<InferenceModel>, String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let mut request = reqwest::Client::new().get(&url);
+    // Bounded here, not left to each caller: reqwest's async client has no
+    // default timeout, so an endpoint that accepts the connection but never
+    // responds would otherwise hold this open indefinitely. `setup.rs`'s
+    // local/custom probe calls this directly (no wrapping timeout of its
+    // own), while `openrouter_models` below also wraps its call in
+    // `tokio::time::timeout` for a friendlier, registry-specific message.
+    let client = reqwest::Client::builder()
+        .timeout(MODEL_CATALOG_TIMEOUT)
+        .build()
+        .map_err(|error| format!("failed to build the model-discovery client: {error}"))?;
+    let mut request = client.get(&url);
     if let Some(bearer) = bearer.filter(|bearer| !bearer.trim().is_empty()) {
         request = request.bearer_auth(bearer);
     }
