@@ -4778,6 +4778,70 @@ mod tests {
         );
     }
 
+    /// **Issue #1818, end to end at the gate.** The live evidence from the
+    /// issue: an agent's `composio_execute` to fetch GitHub issues was blocked
+    /// under `opencompany-approval` — *"leaves the company or spends money"* —
+    /// for what is a read.
+    ///
+    /// `GITHUB_ISSUES_LIST_FOR_REPO` is Composio's own spelling of the
+    /// operation the curated catalogue calls `GITHUB_LIST_REPOSITORY_ISSUES`.
+    /// The catalogue miss used to make it a `Send`, which parks under both
+    /// `supervised` and `auto` and — being `PerCall` — could not be unblocked
+    /// by granting standing either, so the desk stopped for good.
+    ///
+    /// Both unattended tiers are asserted, not just `auto`: the symptom in the
+    /// issue is a park, and a park is what `supervised` does too. `readonly` is
+    /// asserted from the other side — it is the one tier whose promise is that
+    /// the desk reaches into nobody's account, and a drifted slug is no reason
+    /// to break it.
+    #[tokio::test]
+    #[cfg(feature = "openhuman")]
+    async fn a_drifted_composio_read_no_longer_parks_as_spend() {
+        let drifted = || serde_json::json!({ "tool": "GITHUB_ISSUES_LIST_FOR_REPO" });
+        for mode in ["supervised", "auto"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            assert_eq!(
+                p.check(&request("composio_execute", drifted())).await,
+                ToolPolicyDecision::Allow,
+                "under `{mode}` a GitHub issue read must run, not park behind a card \
+                 that says it spends money"
+            );
+        }
+        // The card never says spend, whatever tier is asking.
+        assert_eq!(
+            classify_group("composio_execute", &drifted()),
+            EffectGroup::Other,
+        );
+        // …and the two boundaries the fix does not move. `readonly` still
+        // refuses: this reaches a third party's account with the company's
+        // credential, which is exactly what that tier promises not to do.
+        let ro = policy("readonly", &[], None).with_agent("ops");
+        assert!(matches!(
+            ro.check(&request("composio_execute", drifted())).await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        // And an inferred read is not mintable: a verb is evidence, and a
+        // standing grant outlives the call it was cut from.
+        assert!(!grantable("composio_execute", &drifted()));
+        // The control, in the same tiers: a send that merely misses the
+        // catalogue is still a send. `GITHUB_INVENT_A_NEW_VERB` names no verb
+        // this layer knows, so nothing about #1818 rescues it.
+        for mode in ["supervised", "auto"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "composio_execute",
+                        serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "under `{mode}` an action nobody has classified must still park"
+            );
+        }
+    }
+
     /// The grantability answer and the parking answer are read from one
     /// declaration, so an effect the policy projects and the effect the mint
     /// path inspects can never disagree — for every tool, and for both shapes
