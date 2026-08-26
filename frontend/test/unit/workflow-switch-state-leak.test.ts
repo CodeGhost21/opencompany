@@ -134,6 +134,12 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 function makeClient(script: {
   /** Held-open answer to `POST …/fix-from-run`, if the test drives one. */
   fix?: Promise<WorkflowFixFromRun>;
+  /**
+   * Held-open answers to SUCCESSIVE `POST …/fix-from-run` calls, in order —
+   * what a retry of the same run needs, since the two requests have to be
+   * settled independently and out of order.
+   */
+  fixes?: Promise<WorkflowFixFromRun>[];
   /** Workflow ids whose graph read rejects, so nothing can clear state for us. */
   graphFails?: string[];
   /** Rejection for `DELETE …/workflows/{id}`, if the test drives one. */
@@ -169,7 +175,10 @@ function makeClient(script: {
       return null;
     },
     post: async (path: string) => {
-      if (path.includes("/fix-from-run") && script.fix) return script.fix;
+      if (path.includes("/fix-from-run")) {
+        if (script.fixes?.length) return script.fixes.shift()!;
+        if (script.fix) return script.fix;
+      }
       return {};
     },
     del: async () => {
@@ -297,6 +306,54 @@ describe("WorkflowsView leaves per-workflow state behind on a switch", () => {
     // run, about a failure of workflow A's.
     expect(inView("workflow-run-fix-not-automatable")).toBeNull();
     expect(container.textContent).not.toContain("the trigger is misconfigured.");
+  });
+
+  it("rejects a fix from before a switch even after the operator comes back", async () => {
+    // The round trip the identity guard cannot see (review of PR #1744).
+    //
+    // Switching away is what re-enables Fix — that is this PR's own cleanup —
+    // so returning to the same workflow and retrying the same failed run is a
+    // path the fix opens rather than a contrived one. Both requests then name
+    // the same workflow, the same company and the same `seq`, and the FIRST to
+    // land is the stale one.
+    const stale = deferred<WorkflowFixFromRun>();
+    const retry = deferred<WorkflowFixFromRun>();
+    const client = makeClient({ fixes: [stale.promise, retry.promise] });
+
+    await show(client, "acme", WF_A);
+    await openHistory();
+    await click(fixButton());
+    expect(fixButton()?.disabled).toBe(true);
+
+    // Away and back — the switch to B empties the spinner slot, which is what
+    // lets the operator press Fix on the very same row again.
+    await show(client, "acme", WF_B);
+    await show(client, "acme", WF_A);
+    expect(fixButton()?.disabled).toBe(false);
+    await click(fixButton());
+    expect(fixButton()?.textContent).toContain("Fixing…");
+
+    // The abandoned first request answers.
+    await act(async () => {
+      stale.resolve({
+        automatable: false,
+        reason: "a verdict from before the operator switched away.",
+      });
+    });
+
+    // Pre-fix: that verdict renders under the run the operator is still
+    // waiting on, and its `finally` clears the retry's spinner — the button
+    // re-enables while a request nobody can see is still running.
+    expect(container.textContent).not.toContain("a verdict from before the operator switched away.");
+    expect(fixButton()?.textContent).toContain("Fixing…");
+    expect(fixButton()?.disabled).toBe(true);
+
+    // The retry is still the one that owns the row.
+    await act(async () => {
+      retry.resolve({ automatable: false, reason: "the trigger is misconfigured." });
+    });
+    expect(container.textContent).toContain("the trigger is misconfigured.");
+    expect(fixButton()?.disabled).toBe(false);
   });
 
   it("does not carry a version-conflict banner onto the next workflow", async () => {

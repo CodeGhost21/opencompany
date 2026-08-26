@@ -340,6 +340,23 @@ export function WorkflowsView({
   // pattern as selectedIdRef: captured in the toast closure, checked after await.
   const companyRef = useRef<string | null>(company);
   companyRef.current = company;
+  // Issue #1704 (review): how many times the selection has been torn down.
+  //
+  // The two refs above answer "where are we now", which is not the same question
+  // as "did we leave and come back". On A → B → A the identity checks match
+  // again, and that round trip is reachable: the switch to B clears
+  // `fixingRunSeq`, which re-enables Fix, so the operator can retry the SAME
+  // failed run while the first request is still in flight. The first reply would
+  // then pass an identity-only guard, overwrite the retry's verdict, and clear
+  // the spinner out from under a request that is still running.
+  //
+  // Bumped by the cleanup effect below — after commit, so it is not moved by a
+  // render React discards — and captured by `handleFixWithCopilot` when the
+  // request starts. It is checked ALONGSIDE the identity refs rather than
+  // instead of them: those are assigned during render, so between a commit and
+  // the passive effect that bumps this counter they are the only two that have
+  // noticed the switch.
+  const selectionGenRef = useRef(0);
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
@@ -1739,6 +1756,10 @@ export function WorkflowsView({
   const handleFixWithCopilot = useCallback(
     async (run: WorkflowRunOutcome) => {
       if (!run.runId) return;
+      // Issue #1704 (review): the selection this request belongs to. Any switch
+      // away invalidates it permanently, including one the operator switches
+      // back from.
+      const startedAtGen = selectionGenRef.current;
       setFixingRunSeq(run.seq);
       setFixReason(null);
       try {
@@ -1759,7 +1780,11 @@ export function WorkflowsView({
         // still in flight, so the clear runs FIRST and the assignment below
         // would put the reason straight back, keyed by a `seq` that now names
         // an unrelated run. The guard is what makes the clear stick.
-        if (selectedIdRef.current !== run.workflowId || companyRef.current !== company) {
+        if (
+          selectionGenRef.current !== startedAtGen ||
+          selectedIdRef.current !== run.workflowId ||
+          companyRef.current !== company
+        ) {
           toast.message(
             "Selection changed while the copilot was working — reopen Fix on that run to review its correction.",
           );
@@ -1795,7 +1820,16 @@ export function WorkflowsView({
         // after a switch `run.seq` can name a DIFFERENT workflow's run whose
         // fix is genuinely running. The switch has already emptied this slot,
         // so there is nothing here left for this request to clear anyway.
-        if (selectedIdRef.current === run.workflowId && companyRef.current === company) {
+        //
+        // Issue #1704 (review): and the generation, because after A → B → A the
+        // slot can be full again — with the operator's RETRY of this very run,
+        // whose `seq` is identical. Clearing on identity alone would switch that
+        // still-running row's spinner off and re-enable every Fix button.
+        if (
+          selectionGenRef.current === startedAtGen &&
+          selectedIdRef.current === run.workflowId &&
+          companyRef.current === company
+        ) {
           setFixingRunSeq((current) => (current === run.seq ? null : current));
         }
       }
@@ -1978,6 +2012,10 @@ export function WorkflowsView({
   // `result` too, but making it explicit here keeps both switch axes honest even
   // if the graph load is skipped or in flight.
   useEffect(() => {
+    // Issue #1704 (review): every reply still in flight belongs to the selection
+    // being torn down here, and stays invalid even if the operator comes back to
+    // it. See `selectionGenRef` for what identity alone cannot tell apart.
+    selectionGenRef.current += 1;
     setOptimistic(null);
     setOverlayRun(null);
     setActiveRunId(null);
