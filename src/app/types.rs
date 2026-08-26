@@ -507,6 +507,7 @@ pub struct AppState {
     /// the pre-#290 behaviour: the inference status still reports
     /// `restartRequired` and the console still says so, which is the honest
     /// answer when a rebuild is genuinely unavailable.
+    rebuilder: Option<Arc<dyn crate::runtime::RuntimeRebuilder>>,
     /// Where this host reports product analytics, if anywhere (issue #1739).
     ///
     /// Held here because it is a **process-wide** decision — one deployment
@@ -517,7 +518,6 @@ pub struct AppState {
     /// reports nothing, which is what every test, every desktop build and every
     /// self-hosted install gets.
     analytics: Arc<dyn crate::analytics::Tracker>,
-    rebuilder: Option<Arc<dyn crate::runtime::RuntimeRebuilder>>,
     /// Builds the engine for a `transport = "local"` `acp` harness (issue
     /// #1245). `None` — every test host, and any embedder that does not wire
     /// one — leaves every such harness `unavailable`. Only the desktop shell
