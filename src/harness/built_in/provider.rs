@@ -1015,9 +1015,11 @@ impl ChatModel<()> for HostedProvider {
                 self.config.credential.invalidate();
             }
             let text = response.text().await.unwrap_or_default();
-            return Err(TinyAgentsError::Model(format!(
-                "hosted inference returned {status}: {text}"
-            )));
+            let error = format!("hosted inference returned {status}: {text}");
+            if let Some(advice) = model_unavailable_advice(status, &error) {
+                return Err(TinyAgentsError::Model(advice));
+            }
+            return Err(TinyAgentsError::Model(error));
         }
 
         // Published only now, once *this* request has come back 2xx, and
@@ -1147,6 +1149,58 @@ pub async fn request_plan(
     })
 }
 
+/// Substrings that mark a provider 4xx as "you asked for a model that isn't
+/// there", matched case-insensitively. The wording is the provider's and
+/// varies: the managed backend says `Model '<id>' is not available`, an
+/// OpenAI-compatible BYOK endpoint says `The model '<id>' does not exist`, and
+/// OpenRouter says `<id> is not a valid model ID`.
+const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
+    "is not available",
+    "not a valid model",
+    "model not found",
+    "unknown model",
+    "invalid model",
+    "does not exist",
+];
+
+/// Rewrites a provider "unknown/unavailable model" refusal into an
+/// operator-actionable message, or `None` for any other error (issue #1811).
+///
+/// A configured model id is company/operator data — not a repo default — so the
+/// only fix is to change it. Raw, it reaches the operator as an unactionable
+/// `inference returned 400 Bad Request: {"error":"Model '<id>' is not
+/// available. Use GET /openai/v1/models to list available models."}` and the
+/// task merely reads *Failed*. This says what to do and keeps the provider's own
+/// words (which carry the bad id and the list-models hint) at the end for
+/// support.
+///
+/// Gated two ways to stay quiet on everything else: a 4xx only (a 5xx is the
+/// provider's fault and must not be reframed as a misconfiguration), and the
+/// body must name a `model` (so a 4xx about something else — `user does not
+/// exist` — is never mistaken for a model error). Deliberately not an allowlist
+/// of model ids: that would rot as providers add models, so this recognises the
+/// *refusal*, not the catalogue.
+fn model_unavailable_advice(status: reqwest::StatusCode, error: &str) -> Option<String> {
+    if !status.is_client_error() {
+        return None;
+    }
+    let haystack = error.to_ascii_lowercase();
+    if !haystack.contains("model") {
+        return None;
+    }
+    if !MODEL_UNAVAILABLE_SIGNATURES
+        .iter()
+        .any(|signature| haystack.contains(signature))
+    {
+        return None;
+    }
+    Some(format!(
+        "the configured inference model is not available from the provider — update the agent's \
+         model, or the company's `[inference].models` mapping, to one the provider offers (list \
+         them with `GET /openai/v1/models`). {error}"
+    ))
+}
+
 /// Issues a prepared [`RequestPlan`] against `client`, returning the raw JSON
 /// payload. Every error string is scrubbed of the bearer, so a credential can
 /// never leak into a log line or an operator-visible message.
@@ -1180,10 +1234,11 @@ async fn send_plan(
             credential.invalidate();
         }
         let text = response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "inference returned {status}: {}",
-            scrub(text)
-        ));
+        let error = format!("inference returned {status}: {}", scrub(text));
+        if let Some(advice) = model_unavailable_advice(status, &error) {
+            return Err(anyhow::anyhow!("{advice}"));
+        }
+        return Err(anyhow::anyhow!("{error}"));
     }
     response
         .json()
@@ -2860,6 +2915,85 @@ mod tests {
             calls.load(Ordering::SeqCst),
             2,
             "both turns reached the stub"
+        );
+    }
+
+    /// Issue #1811: the managed backend's raw refusal for a model id that does
+    /// not exist is rewritten into an actionable message that names the fix and
+    /// keeps the provider's own words (the bad id + the list-models hint) at the
+    /// end for support.
+    #[test]
+    fn a_missing_model_400_becomes_actionable() {
+        let raw = concat!(
+            "inference returned 400 Bad Request: ",
+            r#"{"error":"Model 'deepseek/deepseek-v4-pro' is not available. "#,
+            r#"Use GET /openai/v1/models to list available models.","errorCode":"BAD_REQUEST"}"#,
+        );
+        let advice = model_unavailable_advice(reqwest::StatusCode::BAD_REQUEST, raw)
+            .expect("recognised as a missing model");
+        assert!(
+            advice.contains("update the agent's model"),
+            "the fix is named: {advice}"
+        );
+        assert!(
+            advice.contains("`[inference].models`"),
+            "the other place the id can live is named: {advice}"
+        );
+        assert!(
+            advice.contains("deepseek/deepseek-v4-pro"),
+            "the offending id survives for support: {advice}"
+        );
+        assert!(
+            advice.contains("GET /openai/v1/models"),
+            "the provider's list-models hint survives: {advice}"
+        );
+    }
+
+    /// The BYOK / OpenAI-compatible and OpenRouter phrasings for the same class
+    /// are all recognised — the signature set is the provider's wording, not a
+    /// catalogue of model ids.
+    #[test]
+    fn other_provider_phrasings_are_recognised() {
+        for body in [
+            "inference returned 404 Not Found: The model `gpt-9` does not exist",
+            "inference returned 400 Bad Request: openai/made-up is not a valid model ID",
+        ] {
+            assert!(
+                model_unavailable_advice(reqwest::StatusCode::BAD_REQUEST, body).is_some(),
+                "should be recognised as a missing model: {body}"
+            );
+        }
+    }
+
+    /// A valid model that fails for another reason must pass through untouched:
+    /// a 401 (bad key), a 4xx about something other than a model, and any 5xx
+    /// (the provider's own fault — reframing it as a config error would send the
+    /// operator to change a model that is fine).
+    #[test]
+    fn unrelated_failures_are_left_alone() {
+        assert_eq!(
+            model_unavailable_advice(
+                reqwest::StatusCode::UNAUTHORIZED,
+                "inference returned 401 Unauthorized: invalid api key",
+            ),
+            None,
+            "a bad key is not a missing model"
+        );
+        assert_eq!(
+            model_unavailable_advice(
+                reqwest::StatusCode::BAD_REQUEST,
+                "inference returned 400 Bad Request: user does not exist",
+            ),
+            None,
+            "a 4xx that never names a model is not a missing model"
+        );
+        assert_eq!(
+            model_unavailable_advice(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "inference returned 500: the model host crashed",
+            ),
+            None,
+            "a 5xx is the provider's fault, not the operator's config"
         );
     }
 }
