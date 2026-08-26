@@ -173,7 +173,14 @@ analytics: off (reporting to https://api.mixpanel.com/track was configured, but 
 analytics: reporting to https://api.mixpanel.com/track
 ```
 
-The endpoint is named; the token never is.
+The endpoint is named; the token never is — and the endpoint is named
+**sanitized**. `OPENCOMPANY_ANALYTICS_ENDPOINT` exists so a deployment can front
+Mixpanel with its own proxy, and an authenticated proxy carries its key in the
+two places a URL can hold one: userinfo (`https://user:pass@host/track`) and the
+query string (`?key=…`). Both are stripped before the line is printed, leaving
+scheme, host and path, and the line says `(credentials redacted)` when it
+shortened anything — a silently truncated URL is its own hour of confusion. The
+`ProjectToken` redaction does not cover this; it guards a different string.
 
 The fourth line is the one worth reading twice. It reports what the process will
 **do**, not what was configured: a build without the `analytics` feature
@@ -190,6 +197,7 @@ boot line here is a `println!` in the first place.
 | `turn_finished` | `runtime::cycle::CycleRunner::run_bracketed` | The cycle's whole span, including the wait on the per-company serial lock — which is the part an operator experiences as "nothing is happening". |
 | `turn_metered` | `analytics::meter::TrackingUsageMeter`, a decorator over the `UsageMeter` port | Every `metering::record_*` path ends there, on every build. The harness cost hook is richer but `openhuman`-gated, and the cycle-level path deliberately reports zero tokens on that build so spend is not double-counted — so an event at either one is blind on the other half of the fleet. |
 | `instance_started` | `analytics::boot::install` | After companies register **and after the port is bound**: the company count and the cognition path are not known before the first, and a host that never took its address never started in any sense worth counting. |
+| cognition relabel | `Tracker::observe_cognition`, from `server::provision` and `runtime::rebuild` | Boot's answer stops being true in two ways. A hosted host provisioned into an empty registry had no runtime to read and recorded `custom`/`unknown`; and a company that configures inference for the first time is rebuilt in place (issue #290), which moves it from `echo` to `harness`. Most recent observation wins — every company on a host shares its brain mode, so this is one process-wide fact. Events already sent are not revised. |
 | flush | `src/bin/opencompany.rs`, after the bound host stops serving | The server has already drained, so a last-moment turn's event still leaves. |
 
 Failure is silent by construction: `Tracker::track` is synchronous and
