@@ -45,7 +45,7 @@ use tinyagents::{Result as TaResult, TinyAgentsError};
 use crate::app::config::EnvSource;
 use crate::company::Inference;
 use crate::company::credentials::{Credential, TinyhumansTokenSource};
-use crate::company::inference::{self, EnvDefault, InferenceDecl};
+use crate::company::inference::{self, EnvDefault, InferenceDecl, InferenceSource};
 use crate::ports::SecretStore;
 use crate::ports::types::CompanyId;
 
@@ -1018,7 +1018,8 @@ impl ChatModel<()> for HostedProvider {
             // The hosted, TinyHumans-managed backend has no harness-scoped
             // inference config to point to — it always resolves the company's
             // default `[inference]`.
-            if let Some(advice) = model_unavailable_advice(status, &error, &models_url, None) {
+            if let Some(advice) = model_unavailable_advice(status, &error, &models_url, None, None)
+            {
                 return Err(TinyAgentsError::Model(advice));
             }
             return Err(TinyAgentsError::Model(error));
@@ -1191,23 +1192,32 @@ const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
 /// of model ids: that would rot as providers add models, so this recognises the
 /// *refusal*, not the catalogue.
 ///
-/// `harness` names the *scoped, non-default* `built_in` harness this request
-/// ran as, when there is one — `None` for the company's default harness (and
-/// for every caller that has no harness concept at all, e.g. the setup-time and
-/// console "Test" probes). Every caller in this module runs a `built_in`
-/// harness, and `agent.model` only takes effect on an `acp` harness
-/// (`Manifest::validate`, `src/company/manifest.rs`) — so it is never a real
-/// lever here and this deliberately never suggests it (issue #1824 follow-up).
-/// A *named* harness with its own `[harness.inference]` resolves independently
-/// of the company mapping (`resolve_effective_scoped`,
-/// `src/company/inference.rs`), so pointing every operator at
-/// `[inference].models` sends a scoped harness's operator to a table its
-/// request never consulted; naming the harness sends them to the one that did.
+/// `harness` names the `built_in` harness this request ran as, when the
+/// caller has one — `None` only for a caller with no harness concept at all
+/// (e.g. the managed [`HostedProvider`]). Every caller with a harness passes
+/// its *real*, declared-or-implicit id (`HarnessScope::id`) regardless of
+/// whether that harness is the company's default: the default harness's own
+/// `[harness.inference]` beats the company mapping exactly like a named
+/// harness's does (`default_harness_inference`, `src/company/manifest.rs`),
+/// so suppressing the name whenever a harness happened to be the default sent
+/// its operator to a table its request never consulted (Codex review on
+/// #1824's #1811 follow-up). `agent.model` only takes effect on an `acp`
+/// harness (`Manifest::validate`, `src/company/manifest.rs`) — never a real
+/// lever for any caller in this module — so this deliberately never suggests
+/// it.
+///
+/// `source` is the resolved [`InferenceDecl::source`] for this request, when
+/// known. A console-saved runtime override (`InferenceSource::Runtime`)
+/// outranks *both* manifest tables (`resolve_effective_scoped`'s precedence),
+/// so naming a `[harness.inference].models` or `[inference].models` mapping
+/// while a runtime override is active sends the operator to edit a table that
+/// is shadowed and will not change the outcome (Codex review on #1824).
 fn model_unavailable_advice(
     status: reqwest::StatusCode,
     error: &str,
     models_url: &str,
     harness: Option<&str>,
+    source: Option<InferenceSource>,
 ) -> Option<String> {
     if !status.is_client_error() {
         return None;
@@ -1222,12 +1232,21 @@ fn model_unavailable_advice(
     {
         return None;
     }
-    let where_to_fix = match harness {
-        Some(id) => format!(
+    let where_to_fix = match (source, harness) {
+        (Some(InferenceSource::Runtime), Some(id)) => format!(
+            "update harness `{id}`'s saved runtime inference override (Settings → Inference) — \
+             it takes precedence over any `[harness.inference].models` or `[inference].models` \
+             mapping"
+        ),
+        (Some(InferenceSource::Runtime), None) => "update the saved runtime inference override \
+             (Settings → Inference) — it takes precedence over the company's `[inference].models` \
+             mapping"
+            .to_string(),
+        (_, Some(id)) => format!(
             "update harness `{id}`'s own `[harness.inference].models` mapping (or the company's \
              `[inference].models`, if `{id}` doesn't declare its own)"
         ),
-        None => "update the company's `[inference].models` mapping".to_string(),
+        (_, None) => "update the company's `[inference].models` mapping".to_string(),
     };
     Some(format!(
         "the configured inference model is not available from the provider — {where_to_fix}, to \
@@ -1247,6 +1266,7 @@ async fn send_plan(
     plan: &RequestPlan,
     credential: &Credential,
     harness: Option<&str>,
+    source: Option<InferenceSource>,
 ) -> anyhow::Result<serde_json::Value> {
     let mut request = client.post(&plan.url).json(&plan.body);
     if let Some(bearer) = &plan.bearer {
@@ -1280,7 +1300,8 @@ async fn send_plan(
             .strip_suffix("/chat/completions")
             .map(|base| format!("{base}/models"))
             .unwrap_or_else(|| plan.url.clone());
-        if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness) {
+        if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness, source)
+        {
             return Err(anyhow::anyhow!("{advice}"));
         }
         return Err(anyhow::anyhow!("{error}"));
@@ -1420,15 +1441,22 @@ impl ChatModel<()> for TenantProvider {
         )
         .await
         .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
-        // Named only for a *non-default* harness: the default harness's own
-        // scope still resolves to the company `[inference]` when it declares
-        // none of its own (`built_in_lane`, `src/harness/lanes.rs`), so naming
-        // it here would send an operator to a `[harness.inference.models]`
-        // table that was never consulted.
-        let harness = (!self.scope.is_default).then_some(self.scope.id.as_str());
-        let payload = send_plan(&self.client, &plan, decl.credential(), harness)
-            .await
-            .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
+        // Always this harness's real id — `self.scope.id` is meaningful
+        // whether or not this is the company's *default* harness (the
+        // default's own `[harness.inference]` beats the company mapping the
+        // same way a named harness's does; `is_default` only routes which
+        // secret keys get read, and must not also gate whether the advice
+        // names the harness — see `model_unavailable_advice`'s doc).
+        let harness = Some(self.scope.id.as_str());
+        let payload = send_plan(
+            &self.client,
+            &plan,
+            decl.credential(),
+            harness,
+            Some(decl.source),
+        )
+        .await
+        .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
         // Classified from `plan.model` — the exact string that goes on the wire,
         // *after* the tenant `[inference].models` table has been applied — so
         // the sample names what actually ran rather than the tier that was
@@ -1479,7 +1507,7 @@ pub async fn probe(decl: &InferenceDecl) -> anyhow::Result<()> {
     .await?;
     // No harness scope in play here: this is a bare-`decl` connectivity probe
     // (the setup-time and console "Test" routes), never a scoped harness turn.
-    let payload = send_plan(&client, &plan, decl.credential(), None).await?;
+    let payload = send_plan(&client, &plan, decl.credential(), None, Some(decl.source)).await?;
     payload
         .pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
@@ -2988,6 +3016,7 @@ mod tests {
             raw,
             "https://api.tinyhumans.ai/openai/v1/models",
             None,
+            None,
         )
         .expect("recognised as a missing model");
         assert!(
@@ -3027,6 +3056,7 @@ mod tests {
             raw,
             "https://openrouter.ai/api/v1/models",
             Some("research-harness"),
+            Some(InferenceSource::Manifest),
         )
         .expect("recognised as a missing model");
         assert!(
@@ -3044,6 +3074,55 @@ mod tests {
         );
     }
 
+    /// Codex review on #1824 (round 2): a saved console runtime override
+    /// outranks *both* manifest tables (`resolve_effective_scoped`'s
+    /// precedence — runtime > manifest > env-default), so while one is active
+    /// the earlier wording sent the operator to edit a `[harness.inference]` /
+    /// `[inference]` table that is shadowed and would not change the outcome.
+    /// This assertion set does not compile against the pre-fix 4-argument
+    /// `model_unavailable_advice` (no `source` parameter), i.e. it fails to
+    /// build on the pre-fix code exactly as it must.
+    #[test]
+    fn runtime_override_advice_names_the_override_not_the_shadowed_manifest() {
+        let raw = "inference returned 400 Bad Request: openai/made-up is not a valid model ID";
+
+        let scoped = model_unavailable_advice(
+            reqwest::StatusCode::BAD_REQUEST,
+            raw,
+            "https://openrouter.ai/api/v1/models",
+            Some("research-harness"),
+            Some(InferenceSource::Runtime),
+        )
+        .expect("recognised as a missing model");
+        assert!(
+            scoped.contains("harness `research-harness`'s saved runtime inference override"),
+            "the active override is named, not a shadowed manifest table: {scoped}"
+        );
+        assert!(
+            !scoped.contains("update harness `research-harness`'s own `[harness.inference]"),
+            "the manifest-table phrasing (the non-Runtime branch) must not be the suggested fix \
+             while an override shadows it: {scoped}"
+        );
+
+        let default = model_unavailable_advice(
+            reqwest::StatusCode::BAD_REQUEST,
+            raw,
+            "https://openrouter.ai/api/v1/models",
+            None,
+            Some(InferenceSource::Runtime),
+        )
+        .expect("recognised as a missing model");
+        assert!(
+            default.contains("update the saved runtime inference override"),
+            "the company-scoped override is named: {default}"
+        );
+        assert!(
+            !default.contains("update the company's `[inference].models` mapping"),
+            "the manifest-table phrasing (the non-Runtime branch) must not be the suggested fix \
+             while an override shadows it: {default}"
+        );
+    }
+
     /// Issue #1811 follow-up (Codex review on #1824): a direct OpenRouter,
     /// Ollama, or arbitrary `openai_compatible` BYOK endpoint must get *its own*
     /// catalog URL in the advice, not the TinyHumans-managed `/openai/v1/models`
@@ -3058,6 +3137,7 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             raw,
             "https://openrouter.ai/api/v1/models",
+            None,
             None,
         )
         .expect("recognised as a missing model");
@@ -3086,6 +3166,7 @@ mod tests {
                     body,
                     "https://example.com/v1/models",
                     None,
+                    None,
                 )
                 .is_some(),
                 "should be recognised as a missing model: {body}"
@@ -3105,6 +3186,7 @@ mod tests {
                 "inference returned 401 Unauthorized: invalid api key",
                 "https://example.com/v1/models",
                 None,
+                None,
             ),
             None,
             "a bad key is not a missing model"
@@ -3115,6 +3197,7 @@ mod tests {
                 "inference returned 400 Bad Request: user does not exist",
                 "https://example.com/v1/models",
                 None,
+                None,
             ),
             None,
             "a 4xx that never names a model is not a missing model"
@@ -3124,6 +3207,7 @@ mod tests {
                 reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 "inference returned 500: the model host crashed",
                 "https://example.com/v1/models",
+                None,
                 None,
             ),
             None,
