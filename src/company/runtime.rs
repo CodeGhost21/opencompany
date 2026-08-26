@@ -1458,6 +1458,70 @@ impl CompanyRuntime {
         Ok(())
     }
 
+    /// Refuses a write addressed to the read-only Operator system channel,
+    /// unless a real desk or roster teammate already owns that literal id
+    /// (the migration carve-out below).
+    ///
+    /// Issue #1757: the Operator channel is a **read-only** aggregation
+    /// surface — a "what happened" feed of workflow reports, not a
+    /// conversation. Every ingress that journals an `OperatorMessage` under a
+    /// caller-chosen chat id has to run this same check before appending
+    /// anything, or "read-only" is only true for whichever ingress remembered
+    /// to ask. Per the PR #1781 review (Codex P1): the ACP `session/prompt`
+    /// route used to journal straight past the REST route's inline version of
+    /// this guard, because it never called `chat_and_emit` at all — it
+    /// appends to `self.events()` directly. `ensure_accepting` above is the
+    /// model this follows: a check the write route runs on *itself*,
+    /// immediately before it appends, so a second ingress into the same
+    /// journal cannot forget it either.
+    ///
+    /// Migration carve-out: `operator` was not reserved before issue #1757,
+    /// so a company provisioned earlier can already have a real manifest or
+    /// overlay desk (`from_stored_toml` deliberately never re-validates a
+    /// stored manifest) or roster teammate (`ChatView` addresses a DM by bare
+    /// id, issue #364) already using that id. `desk_exists` alone would miss
+    /// the teammate case — it only walks `group_chats` and `overlay_desks`,
+    /// never the roster — so `is_roster_agent` is checked alongside it, the
+    /// same carve-out applied to the other namespace `RESERVED_AGENT_IDS`
+    /// reserves.
+    ///
+    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` is refused unconditionally: it
+    /// is the id `list_desks` hands the synthetic system desk when a roster
+    /// teammate is the one grandfathered onto `operator` (see
+    /// `CompanyRecord::operator_feed_channel`), and it is unmintable by any
+    /// real desk or agent id (see the constant's doc) — there is no
+    /// grandfather case to carve out for it the way there is for the literal
+    /// `operator` above.
+    ///
+    /// The store load's `?` propagates a real store failure as itself, rather
+    /// than collapsing it into "no real desk" — that would misreport a
+    /// transient store error as the ordinary read-only refusal, for every
+    /// company, and journal the failure nowhere.
+    pub(crate) async fn ensure_desk_writable(&self, desk: &str) -> Result<()> {
+        if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
+            return Err(OpenCompanyError::InvalidRequest(
+                "the Operator channel is a read-only feed of workflow reports and notifications \
+                 — it cannot be posted to"
+                    .to_string(),
+            ));
+        }
+        if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
+            let has_real_operator_recipient =
+                self.store().load(&self.id).await?.is_some_and(|record| {
+                    record.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+                        || record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL)
+                });
+            if !has_real_operator_recipient {
+                return Err(OpenCompanyError::InvalidRequest(
+                    "the Operator channel is a read-only feed of workflow reports and \
+                     notifications — it cannot be posted to"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Runs one cycle over a batch of events, returning what happened.
     pub async fn run_cycle(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
         self.ensure_accepting()?;
