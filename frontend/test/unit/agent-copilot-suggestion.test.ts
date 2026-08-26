@@ -79,7 +79,7 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     render(
       createElement(FieldCopilot, {
         field: "instructions",
-        onTurn: async (conversation: CopilotTurn[]) => {
+        onTurn: async (conversation: CopilotTurn[]): Promise<ProfileDraft> => {
           asked.push(conversation);
           return { field: "instructions", reply: "Here's a first pass.", text: FIRST, source: "model" };
         },
@@ -101,7 +101,7 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     render(
       createElement(FieldCopilot, {
         field: "instructions",
-        onTurn: async (conversation: CopilotTurn[]) => {
+        onTurn: async (conversation: CopilotTurn[]): Promise<ProfileDraft> => {
           asked.push(conversation);
           return { field: "instructions", reply: "Here's a first pass.", text: FIRST, source: "model" };
         },
@@ -129,7 +129,7 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     render(
       createElement(FieldCopilot, {
         field: "instructions",
-        onTurn: async (conversation: CopilotTurn[]) => {
+        onTurn: async (conversation: CopilotTurn[]): Promise<ProfileDraft> => {
           asked.push(conversation);
           call += 1;
           return {
@@ -137,7 +137,7 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
             reply: call === 1 ? "Here's a first pass." : "Split it into two sentences.",
             text: call === 1 ? FIRST : SECOND,
             source: "model",
-          } as ProfileDraft;
+          };
         },
         onAccept: () => {},
       }),
