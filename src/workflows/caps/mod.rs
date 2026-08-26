@@ -1061,14 +1061,34 @@ impl HarnessAgentRunner {
         let refusals = self.deps.pending_publishes.drain_refusals();
         let mut seen: Vec<String> = Vec::new();
         for source in refusals {
-            // The tool was built before runs had a card-less artifact target,
-            // so it may still have returned its historical refusal. The
-            // post-turn workspace capture below is authoritative: if that file
-            // was materialized, do not also tell the operator it is stranded.
-            if captured.iter().any(|path| path == &source) {
+            if seen.iter().any(|s| s == &source) {
                 continue;
             }
-            if seen.iter().any(|s| s == &source) {
+            // The tool was built before runs had a card-less artifact target,
+            // so it may still have returned its historical refusal — telling
+            // the model mid-turn that the file was not published. The
+            // post-turn workspace capture below can catch that same file
+            // anyway, which would otherwise leave the node's own turn reply
+            // ("I could not publish this") unreconciled against a run
+            // inspector that shows the file delivered. Say both are true
+            // rather than silently dropping one: the tool's refusal was real
+            // at call time, and the capture is what actually landed it.
+            if captured.iter().any(|path| path == &source) {
+                tracing::info!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    path = %source,
+                    "workflow agent node: a publish the tool refused was captured anyway by \
+                     the post-turn workspace scan; reconciling the notice"
+                );
+                self.notices.push(format!(
+                    "A step in this workflow was told \"{source}\" could not be published — a \
+                     workflow run had no destination for that tool call — but the file was \
+                     captured from that teammate's sandbox after the turn and is available as a \
+                     run artifact."
+                ));
+                seen.push(source);
                 continue;
             }
             tracing::warn!(
@@ -2571,6 +2591,73 @@ mod tests {
             .scoped(runner.park_gated_calls(Some("work"), &node_turn))
             .await;
         (notices.take(), queue)
+    }
+
+    /// PR #1775 review: a publish the tool refused mid-turn, but which the
+    /// post-turn workspace capture materialized anyway, must not be silently
+    /// dropped from the run's notices. The node's own turn reply already told
+    /// the operator delivery failed (the tool's response, at call time); going
+    /// silent here would leave that unreconciled against a run inspector that
+    /// shows the file delivered.
+    #[tokio::test]
+    async fn a_captured_publish_reconciles_its_earlier_refusal_notice() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1775-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let pending_publishes = deps.pending_publishes.clone();
+        let notices = RunNotices::default();
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1775"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1775"));
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1775".to_string(),
+            None,
+            notices.clone(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim.clone(),
+        );
+
+        // The tool's refusal, staged inside this run's scope exactly as the
+        // live `publish_artifact` call would have.
+        publish_refusal_claim
+            .scoped(async { pending_publishes.push_refusal("specs/plan.md".to_string()) })
+            .await;
+
+        // The post-turn drain, told that the workspace scan captured that
+        // same file anyway.
+        publish_refusal_claim
+            .scoped(async {
+                runner.drain_publish_refusals(&["specs/plan.md".to_string()]);
+            })
+            .await;
+
+        let recorded = notices.take();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "the refusal must be reconciled with a notice, not silenced: {recorded:?}"
+        );
+        assert!(
+            recorded[0].contains("specs/plan.md"),
+            "the notice must name the file: {recorded:?}"
+        );
+        assert!(
+            recorded[0].contains("captured"),
+            "the notice must say the file landed anyway, not just that it was refused: \
+             {recorded:?}"
+        );
     }
 
     #[test]
