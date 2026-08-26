@@ -29,12 +29,21 @@ name: Deploy tenant image to staging
 on:
   push:
     branches: [main]
+    # Every path the image is actually built from. A file that reaches the
+    # image but is absent here merges to main and changes nothing in staging
+    # until some unrelated selected path happens to move — so the rule for
+    # adding one is simply: is it `COPY`ed by the Dockerfile, or read by
+    # something that is?
     paths:
       - 'src/**'
       - 'frontend/**'
       - 'companies/**'
+      - 'skills/**' # COPYed into the runtime image (Dockerfile) as the shared library
+      - 'docker/**' # entrypoint.sh, which is COPYed and is the container's ENTRYPOINT
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'build.rs' # embeds the bundles and the globals, and stamps the build commit
+      - 'rust-toolchain.toml' # COPYed into the builder; it picks the compiler
       - 'Dockerfile'
       - '.dockerignore'
       - 'vendor/**'
