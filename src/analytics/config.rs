@@ -225,11 +225,12 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
 /// would ever see said the endpoint was the problem.
 ///
 /// Hand-rolled rather than parsed with a URL crate on purpose. [`resolve`] is
-/// pure and is compiled and tested in the **default** build, where no URL
-/// parser is linked — `url` arrives only with `reqwest`, and only under the
-/// `analytics` feature. Adding a dependency so that the un-gated decision could
-/// validate a string would put a parser in every build to serve the one that
-/// cannot send anything anyway.
+/// un-gated: it compiles and is tested in every feature combination, including
+/// those with no `reqwest` in the graph at all. `url` is not a dependency of
+/// this crate — it arrives transitively through `reqwest`, which is optional —
+/// so reaching for `Url::parse` here would mean declaring a new direct
+/// dependency, unconditionally, in every build, to validate one string for the
+/// one build that can actually send anything.
 ///
 /// It is deliberately *permissive*: it rejects the shapes `reqwest` provably
 /// cannot use and passes everything else, so the failure mode of being wrong is
