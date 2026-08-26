@@ -71,15 +71,35 @@ echo "$RELEASE_WORKFLOW ships: $expected"
 # script kept `acp` and `composio`, and this script would report success. That is
 # #1738 again with the roles reversed, and it is the one drift no comparison here
 # could see. Symmetric with the `tauri dev` check further down.
-release_invocations="$(
-  grep -vE '^[[:space:]]*#' "$RELEASE_WORKFLOW" \
-    | grep -nE 'tauri build|--features' | grep -E 'tauri build|--features' || true
+# The command itself, not "some line in this file". Assembled by following
+# backslash continuations from the `tauri build` line, because the invocation is
+# wrapped across three of them and the features live on the last.
+#
+# Grepping the whole file was the first attempt and it was hollow: it collected
+# every line mentioning `tauri build` OR `--features` and passed if ANY of them
+# named the variable. Deleting the flag from the real build while any unrelated
+# line still mentioned `DESKTOP_RELEASE_FEATURES` — an `echo`, a comment that
+# survived the filter — left this green while the DMG reverted to the default
+# set. The check has to bind the variable to the command that ships.
+release_build="$(
+  awk '
+    /tauri build/ { collecting = 1 }
+    collecting     { command = command " " $0 }
+    collecting && !/\\[[:space:]]*$/ { print command; exit }
+  ' "$RELEASE_WORKFLOW"
 )"
-if ! printf '%s' "$release_invocations" | grep -q 'DESKTOP_RELEASE_FEATURES'; then
+if [ -z "$release_build" ]; then
+  echo "assert-desktop-features: no 'tauri build' command found in $RELEASE_WORKFLOW." >&2
+  echo "  Either the release stopped packaging with the Tauri CLI, or this" >&2
+  echo "  script's pattern is stale. Both need a human." >&2
+  exit 1
+fi
+if ! printf '%s' "$release_build" | grep -q 'DESKTOP_RELEASE_FEATURES'; then
   echo "assert-desktop-features: $RELEASE_WORKFLOW declares DESKTOP_RELEASE_FEATURES" >&2
-  echo "  but its 'tauri build' never passes it, so the shipped DMG would carry" >&2
+  echo "  but its 'tauri build' does not pass it, so the shipped DMG would carry" >&2
   echo "  the default feature set while every other call site carries the release" >&2
-  echo "  one. Restore '--features \"\$DESKTOP_RELEASE_FEATURES\"' on the build." >&2
+  echo "  one. The command found was:" >&2
+  printf '    %s\n' "$release_build" >&2
   exit 1
 fi
 
@@ -137,14 +157,25 @@ done <<< "$ci_lines"
 #
 # So the invariant is different in kind: it must DERIVE rather than duplicate,
 # and what it derives must reach cargo.
-dev_reads_workflow=0
-grep -q 'DESKTOP_RELEASE_FEATURES' "$DEV_SCRIPT" \
-  && grep -q 'release-desktop-macos.yml' "$DEV_SCRIPT" \
-  && dev_reads_workflow=1
-if [ "$dev_reads_workflow" -eq 1 ]; then
+# EXECUTABLE lines only. The first version grepped the whole file, and this
+# script's own subject documents itself at length — `desktop-dev.sh` explains the
+# derivation in a comment block naming both `DESKTOP_RELEASE_FEATURES` and the
+# workflow. So deleting the `sed` that actually extracts the value left the
+# comments behind, and the comments alone satisfied the check: green, while every
+# dev build ran with no features at all. A check a comment can satisfy is a
+# check about documentation, not behaviour.
+dev_code="$(grep -vE '^[[:space:]]*#' "$DEV_SCRIPT")"
+dev_names_workflow=0
+dev_extracts_key=0
+printf '%s' "$dev_code" | grep -q 'release-desktop-macos.yml' && dev_names_workflow=1
+# The extraction itself: executable code that pulls the key out of something.
+printf '%s' "$dev_code" | grep -qE '(sed|awk|grep|rg)[^|]*DESKTOP_RELEASE_FEATURES' && dev_extracts_key=1
+if [ "$dev_names_workflow" -eq 1 ] && [ "$dev_extracts_key" -eq 1 ]; then
   echo "  ok  $DEV_SCRIPT derives the features from $RELEASE_WORKFLOW"
 else
-  echo "  BAD $DEV_SCRIPT no longer reads DESKTOP_RELEASE_FEATURES from the release workflow" >&2
+  echo "  BAD $DEV_SCRIPT no longer extracts DESKTOP_RELEASE_FEATURES from the release workflow in code" >&2
+  [ "$dev_names_workflow" -eq 1 ] || echo "        (no executable line names release-desktop-macos.yml)" >&2
+  [ "$dev_extracts_key" -eq 1 ] || echo "        (no executable line extracts DESKTOP_RELEASE_FEATURES)" >&2
   status=1
 fi
 
