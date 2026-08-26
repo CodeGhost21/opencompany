@@ -26,7 +26,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { useHosts } from "@/connections/HostsContext";
-import { adoptSession, probe, useConnection } from "@/connections/registry";
+import { adoptSession, probe, retargetDefaultCompany, useConnection } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { withHostParam } from "@/hooks/use-host-route";
 import { Login } from "@/views/Login";
@@ -227,9 +227,13 @@ export function ConnectionConsole({
         ...knownCompanies.filter((c) => c.id !== status.id && c.id !== archived),
         status,
       ];
+      // Retarget an explicit-company connection's boot default, or the next
+      // reload asks for the id this reset just archived. A no-op for a
+      // connection that was never company-scoped.
+      retargetDefaultCompany(connectionId, status.id);
       void switchCompany(status.id, next);
     },
-    [createRequest, knownCompanies, switchCompany],
+    [connectionId, createRequest, knownCompanies, switchCompany],
   );
 
   const createDialog = (

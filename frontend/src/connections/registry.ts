@@ -697,6 +697,34 @@ export function adoptSession(id: ConnectionId, session: string): void {
   adoptCredential(id, { kind: "session", value: session });
 }
 
+/**
+ * Points an explicit-company connection at a different company (issue #1807).
+ *
+ * `defaultCompany` is what `ConnectionConsole`'s boot effect reads on every
+ * mount — a `?company=` link or a single-company profile takes the "explicit
+ * company wins" path straight to `client.status(defaultCompany)` rather than
+ * listing. A reset provisions the replacement into the *current* session
+ * directly (`switchCompany`), which leaves this untouched: the next reload
+ * would still ask for the just-archived id, `client.status` would answer
+ * `company_not_found`, and the operator would land on a connection error
+ * instead of back in their own console.
+ *
+ * Re-seats like {@link editConnection}, so the rebuilt client and the
+ * persisted profile agree with the roster immediately, not just after the
+ * next probe.
+ *
+ * A no-op for a connection that was never company-scoped (`defaultCompany`
+ * already `null`) — a multi-company connection has nothing to retarget, and
+ * forcing one narrows it to a single company it was never addressed as.
+ */
+export function retargetDefaultCompany(id: ConnectionId, company: string): void {
+  const existing = getConnection(id);
+  if (!existing || existing.defaultCompany === null || existing.defaultCompany === company) {
+    return;
+  }
+  reseat(id, { ...existing, defaultCompany: company });
+}
+
 /** What "modify a host" may change about one. See {@link editConnection}. */
 export interface HostEdit {
   /** What this connection is called in the switcher. Blank keeps the old name. */
