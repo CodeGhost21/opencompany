@@ -1,6 +1,12 @@
 // Issue #1776: the copilot that drafts a teammate's mandate or persona — in
 // conversation, and never into the field until you say so.
 //
+// It opens on an empty composer and waits. An earlier version fired a draft the
+// moment it opened — the reasoning being that a blank box wants something to
+// react to — and that was wrong in practice: it spends a call, and the
+// operator's first seconds, on a guess made before they have said the one thing
+// they opened the copilot to say.
+//
 // ## Why this is a chat and not a Draft button
 //
 // It shipped as one shot: a note box, a Draft button, one answer. Using it made
@@ -43,10 +49,22 @@ const FIELD_NOUN: Record<DraftableField, string> = {
   instructions: "instructions",
 };
 
-/** The composer's placeholder, per field. */
+/**
+ * The composer's placeholder.
+ *
+ * Two per field, because the first message and the ones after it are different
+ * questions: the first says what the teammate IS, and the rest correct what
+ * came back. One placeholder covering both asked for a correction to something
+ * that did not exist yet.
+ */
+const FIRST_PLACEHOLDER: Record<DraftableField, string> = {
+  description: "What does this teammate own? e.g. “paid social and the ad budget, not the newsletter”",
+  instructions: "How should this teammate work? e.g. “never launch without sign-off; report ROAS weekly”",
+};
+
 const REPLY_PLACEHOLDER: Record<DraftableField, string> = {
-  description: "Tell it what to change — e.g. “they own paid social, not the newsletter”",
-  instructions: "Tell it what to change — e.g. “add that they never launch without sign-off”",
+  description: "Tell it what to change — e.g. “shorter, and drop the newsletter”",
+  instructions: "Tell it what to change — e.g. “add the rollback check”",
 };
 
 export function FieldCopilot({
@@ -163,14 +181,13 @@ export function FieldCopilot({
           size="sm"
           className="h-7 px-2 text-2xs text-muted-foreground"
           disabled={disabled}
-          onClick={() => {
-            setOpen(true);
-            // Opens with a first version rather than an empty chat. Someone who
-            // opened the copilot on a blank persona box wants something to react
-            // to — asking them to describe it first is asking for the very thing
-            // they could not write.
-            void run();
-          }}
+          // Opens the composer and asks for nothing. It used to fire an
+          // opening draft on this click, on the theory that a blank box wants
+          // something to react to — which turned out to be the wrong trade:
+          // it spends a model call, and seconds, on a guess made before the
+          // operator has said the one thing they opened the copilot to say.
+          // They type first now.
+          onClick={() => setOpen(true)}
           data-testid={`agent-copilot-open-${field}`}
         >
           <Sparkles className="mr-1 size-3.5" />
@@ -206,6 +223,11 @@ export function FieldCopilot({
         className="max-h-80 space-y-2 overflow-y-auto"
         data-testid={`agent-copilot-transcript-${field}`}
       >
+        {turns.length === 0 && !busy && (
+          <p className="text-2xs text-muted-foreground" data-testid={`agent-copilot-empty-${field}`}>
+            Say what this teammate should own, and it will draft it. Then tell it what to change.
+          </p>
+        )}
         {turns.map((turn, i) =>
           turn.role === "operator" ? (
             <p
@@ -289,7 +311,9 @@ export function FieldCopilot({
               if (input.trim()) void run(input.trim());
             }
           }}
-          placeholder={REPLY_PLACEHOLDER[field]}
+          placeholder={
+            turns.length === 0 ? FIRST_PLACEHOLDER[field] : REPLY_PLACEHOLDER[field]
+          }
           disabled={busy}
           data-testid={`agent-copilot-input-${field}`}
         />

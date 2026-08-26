@@ -71,10 +71,31 @@ afterEach(() => {
 });
 
 describe("the teammate copilot converses; the operator keeps or discards", () => {
-  /// Opening drafts immediately rather than showing an empty chat. Someone who
-  /// opened the copilot on a blank persona box wants something to react to —
-  /// asking them to describe it first asks for the thing they could not write.
-  it("opens with a first draft, beside the field and not in it", async () => {
+  /// Opening asks for nothing. An earlier version drafted on this click, which
+  /// spent a model call — and the operator's first seconds — on a guess made
+  /// before they had said the one thing they opened the copilot to say.
+  it("opens on an empty composer and asks for nothing", async () => {
+    const asked: CopilotTurn[][] = [];
+    render(
+      createElement(FieldCopilot, {
+        field: "instructions",
+        onTurn: async (conversation: CopilotTurn[]) => {
+          asked.push(conversation);
+          return { field: "instructions", reply: "Here's a first pass.", text: FIRST, source: "model" };
+        },
+        onAccept: () => {},
+      }),
+    );
+
+    click("agent-copilot-open-instructions");
+    await settle();
+
+    expect(asked).toEqual([]);
+    expect(testid("agent-copilot-suggestion-instructions")).toBeNull();
+    expect(testid("agent-copilot-empty-instructions")).not.toBeNull();
+  });
+
+  it("drafts from what the operator asked for, beside the field and not in it", async () => {
     const accepted: string[] = [];
     const asked: CopilotTurn[][] = [];
     render(
@@ -89,9 +110,11 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     );
 
     click("agent-copilot-open-instructions");
+    say("instructions", "they own release sign-off");
+    click("agent-copilot-send-instructions");
     await settle();
 
-    expect(asked).toEqual([[]]);
+    expect(asked).toEqual([[{ role: "operator", text: "they own release sign-off" }]]);
     expect(testid("agent-copilot-suggestion-instructions")?.textContent).toContain(FIRST);
     expect(container.textContent).toContain("Here's a first pass.");
     expect(accepted).toEqual([]);
@@ -121,6 +144,8 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     );
 
     click("agent-copilot-open-instructions");
+    say("instructions", "they own release sign-off");
+    click("agent-copilot-send-instructions");
     await settle();
     say("instructions", "shorter sentences");
     click("agent-copilot-send-instructions");
@@ -128,13 +153,15 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
 
     expect(asked).toHaveLength(2);
     const second = asked[1];
-    expect(second).toHaveLength(2);
-    expect(second[0].role).toBe("copilot");
-    // Its reply AND its draft — iterating on a description of a draft is not
-    // iterating on the draft.
-    expect(second[0].text).toContain("Here's a first pass.");
-    expect(second[0].text).toContain(FIRST);
-    expect(second[1]).toEqual({ role: "operator", text: "shorter sentences" });
+    // What the operator asked for, what came back, and the correction — in
+    // order. The copilot's turn carries its reply AND its draft: iterating on a
+    // description of a draft is not iterating on the draft.
+    expect(second).toHaveLength(3);
+    expect(second[0]).toEqual({ role: "operator", text: "they own release sign-off" });
+    expect(second[1].role).toBe("copilot");
+    expect(second[1].text).toContain("Here's a first pass.");
+    expect(second[1].text).toContain(FIRST);
+    expect(second[2]).toEqual({ role: "operator", text: "shorter sentences" });
 
     // Every drafted turn keeps its card, so an operator can go back to a
     // version they preferred rather than asking for it again. The newest is the
@@ -163,6 +190,8 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     );
 
     click("agent-copilot-open-instructions");
+    say("instructions", "they own release sign-off");
+    click("agent-copilot-send-instructions");
     await settle();
     expect(accepted).toEqual([]);
 
@@ -189,6 +218,8 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     );
 
     click("agent-copilot-open-description");
+    say("description", "they handle dispatch");
+    click("agent-copilot-send-description");
     await settle();
 
     expect(container.textContent).toContain("Do they own returns as well");
@@ -214,6 +245,8 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
     );
 
     click("agent-copilot-open-description");
+    say("description", "they handle dispatch");
+    click("agent-copilot-send-description");
     await settle();
 
     expect(testid("agent-copilot-notice-description")?.textContent).toContain(
