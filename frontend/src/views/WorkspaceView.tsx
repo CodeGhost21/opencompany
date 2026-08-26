@@ -103,6 +103,7 @@ import {
   breadcrumbOf,
   childrenOf,
   clearLegacyLocal,
+  countNotes,
   declineLegacyImport,
   DERIVED_LABEL,
   DERIVED_REASON,
@@ -1446,7 +1447,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
    * character typed, to recompute a number that only changes when the tree
    * does.
    */
-  const noteCount = useMemo(() => nodes.filter((n) => n.kind === "file").length, [nodes]);
+  const noteCount = useMemo(() => countNotes(nodes), [nodes]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
