@@ -1910,7 +1910,7 @@ export function ChatView({
             {budgetProximity && (
               <p
                 role="status"
-                className="flex shrink-0 items-center gap-1.5 border-t border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200"
+                className="flex shrink-0 items-center gap-1.5 border-t border-status-blocked/30 bg-status-blocked-soft px-3 py-1.5 text-xs text-status-blocked-text"
               >
                 <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                 <span className="min-w-0 flex-1">{budgetProximity.message}</span>
@@ -1918,7 +1918,7 @@ export function ChatView({
                   <button
                     type="button"
                     onClick={onDismissBudgetProximity}
-                    className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-amber-500/15"
+                    className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-status-blocked-soft"
                   >
                     Dismiss
                   </button>

@@ -328,13 +328,13 @@ function SystemPill({
     const redeeming = agentId != null && redeemingBudgetPauseAgent === agentId;
     return (
       <div className="flex justify-center px-4 py-1.5">
-        <div className="flex max-w-lg flex-col gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-900 dark:text-amber-200">
+        <div className="flex max-w-lg flex-col gap-1.5 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3.5 py-2.5 text-xs text-status-blocked-text">
           <p className="leading-5">{message.text}</p>
           {agentId != null && onRedeemBudgetPause && (
             <Button
               size="sm"
               variant="outline"
-              className="w-fit border-amber-500/40 bg-transparent text-xs hover:bg-amber-500/15"
+              className="w-fit border-status-blocked/40 bg-transparent text-xs hover:bg-status-blocked-soft"
               disabled={redeeming}
               onClick={() => onRedeemBudgetPause(agentId)}
             >
