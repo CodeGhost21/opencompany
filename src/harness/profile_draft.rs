@@ -318,24 +318,36 @@ fn system_prompt(field: ProfileField) -> String {
         ),
         ProfileField::Instructions => format!(
             "{shared}\
-             The field is its STANDING INSTRUCTIONS: how this teammate works. This text is \
-             appended to the teammate's system prompt and is read on EVERY turn it takes, so \
-             every sentence has to earn the weight it costs.\n\n\
-             What makes a good one:\n\
-             - A short paragraph, or a few short lines. Direction, not a job description — the \
-             role and the mandate already say what they do, and repeating them here buys \
-             nothing.\n\
-             - Write what would change a turn: what to start from, what to check before acting, \
-             what to report and when, what to refuse or escalate. \"Confirm the budget before \
-             launching a campaign; report ROAS weekly and flag anything under 2x\" is direction. \
-             \"Be helpful and professional\" is not.\n\
-             - Address the teammate directly, in the imperative.\n\
-             - Do not invent tools, connected accounts, integrations, schedules the company has \
-             not mentioned, or people to report to. Do not grant this teammate authority — what \
-             it may do is decided elsewhere, and instructions claiming otherwise would be a \
-             promise the company does not keep.\n\
-             - Do not restate the safety or identity rules the company already gives every \
-             teammate.\
+             The field is its STANDING INSTRUCTIONS: how this teammate works. This is the \
+             teammate's operating manual, not a summary of it — the standing direction someone \
+             would write by hand for a colleague they trust with the job.\n\n\
+             Write as much as the job genuinely needs. Sections with headings, a vocabulary you \
+             define and then use, worked examples of a good answer and a bad one, the failure \
+             modes to watch for — all of that belongs here when it earns its place. Do not keep \
+             it short for the sake of it.\n\n\
+             What earns its place:\n\
+             - Direction, not a job description. The role and the mandate already say what they \
+             do; repeating that here buys nothing.\n\
+             - Anything that would change a turn: what to start from, what to check before \
+             acting, what to report and when, what to refuse or escalate, how to decide when two \
+             rules pull against each other. \"Confirm the budget before launching a campaign; \
+             report ROAS weekly and flag anything under 2x\" is direction. \"Be helpful and \
+             professional\" is not.\n\
+             - Cut any line where you cannot say how it changes what this teammate actually \
+             does. Length is free; filler is not, because this text is read on every turn and \
+             every weak line dilutes the strong ones around it.\n\
+             - Address the teammate directly, in the imperative.\n\n\
+             What does not belong:\n\
+             - Invented tools, connected accounts, integrations, or schedules the company has \
+             not mentioned. You may name a teammate from the roster below and say when to go to \
+             them; never invent a person or a reporting line.\n\
+             - Granted authority. What this teammate may do is decided elsewhere, and \
+             instructions claiming otherwise are a promise the company does not keep.\n\
+             - Invented process furniture: ticket systems, review workflows, ceremonies or \
+             artifacts the company has not mentioned. A vocabulary YOU define for judging work \
+             is different and is welcome — inventing the tools that work arrives in is not.\n\
+             - The rules it already has. It is told who it is, which company it works for, its \
+             role, its mandate, and how to behave safely. Start after that.\
              {protocol}"
         ),
     }
@@ -880,7 +892,25 @@ mod test {
 
         let persona = system_prompt(ProfileField::Instructions);
         assert!(persona.contains("STANDING INSTRUCTIONS"), "{persona}");
-        assert!(persona.contains("EVERY turn"), "{persona}");
+        // A persona has no length bound of its own — unlike the mandate above,
+        // which is a line on a card. It used to say "a short paragraph, or a
+        // few short lines", and that is the sentence that kept it thin.
+        assert!(
+            persona.contains("as much as the job genuinely needs"),
+            "{persona}"
+        );
+        assert!(!persona.contains("a few short lines"), "{persona}");
+        // The rules that make it usable: structure is welcome, filler is not,
+        // and it may lean on the roster it was given rather than inventing one.
+        assert!(persona.contains("Sections with headings"), "{persona}");
+        assert!(
+            persona.contains("Length is free; filler is not"),
+            "{persona}"
+        );
+        assert!(
+            persona.contains("name a teammate from the roster"),
+            "{persona}"
+        );
     }
 
     /// Both briefs refuse to hand the teammate reach it does not have, and both
@@ -889,7 +919,15 @@ mod test {
     fn both_briefs_hold_the_same_rules() {
         for field in [ProfileField::Description, ProfileField::Instructions] {
             let prompt = system_prompt(field);
-            assert!(prompt.contains("Do not invent tools"), "{prompt}");
+            // Both briefs forbid inventing the reach a teammate does not have.
+            // Asserted on the rule rather than one brief's phrasing of it: the
+            // persona lists it under "what does not belong", the mandate as a
+            // "do not", and a test tied to either wording breaks on an edit
+            // that changed nothing that matters.
+            assert!(
+                prompt.contains("tools, connected accounts, integrations"),
+                "{prompt}"
+            );
             assert!(prompt.contains("SAFETY"), "{prompt}");
             // The rules that make iteration work: rewrite the whole field, and
             // change only what was asked about.
