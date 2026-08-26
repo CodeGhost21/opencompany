@@ -31,6 +31,18 @@ export interface AgentFieldSpec {
    * asks for more room. Ignored for a `line` field.
    */
   rows?: number;
+  /**
+   * Whether a save is refused while this field is blank — the rule
+   * [`draftIsValid`] enforces, stated on the field itself so the form can SHOW
+   * it (issue #1776).
+   *
+   * It went unsaid for too long, and the cost was specific. A manifest
+   * teammate carries no name of its own (it is addressed by its role, and every
+   * card renders `name || role`), so the edit form opens with Role filled, Name
+   * blank, and Save already dead — with nothing on screen saying which field is
+   * responsible. The requirement is right; being invisible was not.
+   */
+  required?: boolean;
 }
 
 /**
@@ -43,8 +55,14 @@ export interface AgentFieldSpec {
  * of that contract.
  */
 export const AGENT_FIELDS: AgentFieldSpec[] = [
-  { key: "name", label: "Name", placeholder: "e.g. Nova", kind: "line" },
-  { key: "role", label: "Role", placeholder: "e.g. Growth Marketer", kind: "line" },
+  { key: "name", label: "Name", placeholder: "e.g. Nova", kind: "line", required: true },
+  {
+    key: "role",
+    label: "Role",
+    placeholder: "e.g. Growth Marketer",
+    kind: "line",
+    required: true,
+  },
   {
     key: "description",
     label: "What they do",
@@ -139,10 +157,48 @@ export function agentEdits(detail: AgentDetailDto, draft: AgentDraft): EditAgent
 
 /** Whether a draft could be saved at all: name and role are required. */
 export function draftIsValid(detail: AgentDetailDto, draft: AgentDraft): boolean {
-  return AGENT_FIELDS.every(
-    (field) =>
-      field.kind !== "line" || !isEditable(detail, field.key) || draft[field.key].trim() !== "",
+  return missingRequired(draft, (key) => isEditable(detail, key)).length === 0;
+}
+
+/**
+ * The required fields this draft leaves blank, in form order (issue #1776).
+ *
+ * The same predicate [`draftIsValid`] answers as a boolean, but naming the
+ * fields instead of hiding them behind one — so a form can mark the offending
+ * box and say why its Save is dead, rather than leaving an operator to guess.
+ * A blank Name on a manifest teammate is the case that made this necessary: the
+ * only visible symptom was a disabled button.
+ *
+ * `editable` decides whether a field counts. A field this host will not accept
+ * cannot block a save it is not part of — the pre-#1530 behaviour, when
+ * `name` was overlay-only and a manifest teammate's blank one was simply not
+ * this form's business.
+ */
+export function missingRequired(
+  draft: AgentDraft,
+  editable: (key: AgentFieldKey) => boolean = () => true,
+): AgentFieldSpec[] {
+  return AGENT_FIELDS.filter(
+    (field) => field.required && editable(field.key) && draft[field.key].trim() === "",
   );
+}
+
+/**
+ * Whether a blank required field should be shown as an ERROR yet, rather than
+ * merely marked required.
+ *
+ * The distinction is about whether the operator has been asked for anything
+ * yet. An edit form opens on an existing teammate — Role already filled — so a
+ * blank Name is a real gap the moment it appears, and highlighting it is the
+ * answer to "why is Save dead?". A fresh Add form is blank everywhere, and
+ * painting every box red before a single keystroke is nagging, not help.
+ *
+ * One rule covers both without either surface tracking "touched": highlight
+ * once the form holds *something*. The edit form always does; the Add form
+ * starts quiet and lights up the moment the operator types anything.
+ */
+export function draftHasContent(draft: AgentDraft): boolean {
+  return AGENT_FIELDS.some((field) => draft[field.key].trim() !== "");
 }
 
 /**
