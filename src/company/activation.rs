@@ -49,6 +49,7 @@ use crate::ports::events::EventLog;
 use crate::ports::now_millis;
 use crate::ports::store::{CompanyStore, company_write_lock};
 use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq};
+use crate::ports::workflow_verdict::{RunVerdictFacts, WorkflowRunVerdict};
 
 /// The three step answers plus the terminal latch, all as of one moment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +116,28 @@ pub(crate) fn derive_steps(
 /// run reaching `succeeded` — see the module docs for why a dry run can never
 /// answer this `true`.
 ///
+/// "Succeeded" means [`WorkflowRunVerdict::Ok`], not merely `error: None,
+/// cancelled: false`: a run that paused for approval or blocked on a human
+/// carries neither an error nor a cancellation, but
+/// [`record_run_finished`](crate::runtime::record_run_finished) still journals
+/// it with `error: None, cancelled: false` — the same shape as a run that
+/// actually finished. Checking only those two fields let a run parked on
+/// `pending_approvals`/`blocked_nodes` (verdict `AwaitingApproval` or
+/// `Blocked`) complete this activation step and permanently latch it,
+/// alongside the other two, before anything had actually run to completion.
+/// Routing through the shared verdict ladder is what the console's Steps
+/// panel and every other run reader already use to draw this exact line — see
+/// [`crate::ports::workflow_verdict`]'s module docs for why a bespoke
+/// derivation here would be a second, driftable transcription of the same
+/// rule.
+///
+/// `stranded_approvals` is passed as `0`: a journal replay has no live
+/// approval queue to reconcile pending approvals against, which is the
+/// documented degrade [`RunVerdictFacts::stranded_approvals`] describes for
+/// exactly this kind of caller. That can only under-count `Stranded` in favor
+/// of `AwaitingApproval` — both outrank `Ok` — so it never turns a
+/// not-yet-succeeded run into a succeeded one.
+///
 /// Reads the whole journal (`EventSeq::new(0)..`, matching the fallback
 /// [`EventLog::read_before`] itself uses) rather than an indexed query,
 /// because none exists — acceptable because [`compute_and_latch`] only ever
@@ -129,14 +152,26 @@ pub(crate) async fn any_workflow_run_succeeded(
         .read_from(company, EventSeq::new(0), usize::MAX)
         .await?;
     Ok(stored.iter().any(|entry| {
-        matches!(
-            &entry.event,
-            CompanyEvent::WorkflowRunFinished {
-                error: None,
-                cancelled: false,
-                ..
-            }
-        )
+        let CompanyEvent::WorkflowRunFinished {
+            deliveries,
+            pending_approvals,
+            error,
+            cancelled,
+            blocked_nodes,
+            ..
+        } = &entry.event
+        else {
+            return false;
+        };
+        WorkflowRunVerdict::of(RunVerdictFacts {
+            running: false,
+            error: error.as_deref(),
+            cancelled: *cancelled,
+            blocked_nodes: blocked_nodes.len(),
+            deliveries,
+            pending_approvals: pending_approvals.len(),
+            stranded_approvals: 0,
+        }) == WorkflowRunVerdict::Ok
     }))
 }
 
@@ -416,6 +451,79 @@ mod test {
             reloaded.activation_completed_at.is_some(),
             "the latch must be durably persisted, not just returned"
         );
+    }
+
+    // --- any_workflow_run_succeeded: verdict, not just error/cancelled ------
+
+    /// The exact regression this guards (issue #1850 review): a run that
+    /// blocked on a human carries `error: None, cancelled: false` — the same
+    /// shape as a run that actually finished — so checking only those two
+    /// fields let a blocked run complete this activation step. Routing
+    /// through [`WorkflowRunVerdict::of`] instead reads `blocked_nodes` and
+    /// scores it `Blocked`, not `Ok`.
+    #[tokio::test]
+    async fn a_blocked_run_does_not_count_as_succeeded() {
+        let id = CompanyId::new("acme");
+        let (_store, events, _dir) = stores();
+
+        events
+            .append(
+                &id,
+                CompanyEvent::WorkflowRunFinished {
+                    workflow_id: "digest".to_string(),
+                    scheduled: false,
+                    run_id: Some("run-1".to_string()),
+                    deliveries: Vec::new(),
+                    pending_approvals: Vec::new(),
+                    error: None,
+                    cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                        node_id: "fetch_invoice".to_string(),
+                        tools: vec!["gmail".to_string()],
+                        approval_ids: Vec::new(),
+                        unparkable: 0,
+                        stranded: 0,
+                    }],
+                    approvals: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!any_workflow_run_succeeded(&id, &events).await.unwrap());
+    }
+
+    /// Same shape, the other trigger: a run parked on an approval gate
+    /// (`pending_approvals` non-empty, no blocked node) is `AwaitingApproval`,
+    /// not `Ok`.
+    #[tokio::test]
+    async fn a_run_awaiting_approval_does_not_count_as_succeeded() {
+        let id = CompanyId::new("acme");
+        let (_store, events, _dir) = stores();
+
+        events
+            .append(
+                &id,
+                CompanyEvent::WorkflowRunFinished {
+                    workflow_id: "digest".to_string(),
+                    scheduled: false,
+                    run_id: Some("run-1".to_string()),
+                    deliveries: Vec::new(),
+                    pending_approvals: vec!["publish".to_string()],
+                    error: None,
+                    cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!any_workflow_run_succeeded(&id, &events).await.unwrap());
     }
 
     #[tokio::test]
