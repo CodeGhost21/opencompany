@@ -1856,9 +1856,14 @@ impl CompanyRuntime {
     /// * **all denied or expired** — spawn nothing. The block is final; there is
     ///   nothing to continue, exactly as `resume_run` starts no run for a wholly
     ///   refused batch.
-    /// * **approved but the stash is gone** — a restart lost it (the parked
-    ///   tool-call card carries no lineage to rehydrate from), so the run cannot
-    ///   be located. The operator is told to re-run rather than left waiting.
+    /// * **approved but the stash is gone** — the last-resort branch. Since
+    ///   issue #1816 a restart no longer lands here: the workflow id and trigger
+    ///   input are stashed durably at park time and the boot builder re-arms the
+    ///   [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)
+    ///   from them, so `release` above finds the run. This branch remains only for
+    ///   the genuine no-lineage case (a park whose durable stash write also
+    ///   failed, or one written before #1816): the operator is told to re-run
+    ///   rather than left waiting.
     async fn resume_blocked_agent_node(
         &self,
         approval_id: &ApprovalId,
@@ -1886,8 +1891,23 @@ impl CompanyRuntime {
             }
         }
         // Drop the stash whatever the verdict — a refused block has nothing to
-        // continue, and a spawned one has consumed it.
+        // continue, and a spawned one has consumed it. Both halves go: the
+        // in-memory fast path here and (issue #1816) the durable journal record
+        // beneath it, so a later boot does not rehydrate a block this decision
+        // already retired. Best-effort on the durable clear, matching the park's
+        // own stance — the in-memory drop is what this cycle acts on, and a lost
+        // release record at worst rehydrates a stash whose approvals are already
+        // resolved, which no resolve event will ever release again.
         let stashed = self.blocked_nodes.release(turn);
+        if let Err(error) = self.journal.record_blocked_node_released(turn).await {
+            tracing::warn!(
+                company = %self.id,
+                %turn,
+                %error,
+                "[approval] a blocked node's durable stash could not be retired; a boot may \
+                 rehydrate an already-resolved block, which no resolve will re-release"
+            );
+        }
         if !approved {
             tracing::info!(
                 company = %self.id,
