@@ -86,8 +86,17 @@ interface Props {
   client: OpenCompanyClient;
   /** The open request, or `null` when the dialog is closed. */
   request: CreateCompanyRequest | null;
-  /** Close the dialog (operator cancelled, or it finished). */
-  onClose: () => void;
+  /**
+   * Close the dialog (operator cancelled, or it finished).
+   *
+   * `archived` is true when a reset's archive leg already landed before the
+   * dialog closed — cancelled after the archive, or after a create failure
+   * the operator gave up retrying. The parent must refresh whatever roster
+   * or company it is showing in that case: the company the picker or console
+   * still displays is the one this reset just removed, and nothing else
+   * tells it that (codex review on #1828, PR comment 3863028405).
+   */
+  onClose: (archived: boolean) => void;
   /**
    * A company was provisioned. The parent switches the console into it; on a
    * reset the old company has already been archived by the time this fires.
@@ -296,7 +305,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // writes its warning into a hidden dialog, and a late success still calls
     // `onCreated`, navigating the operator into a company they thought they
     // had cancelled out of.
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose(archived)}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
@@ -394,7 +403,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={busy}>
+          <Button variant="outline" onClick={() => onClose(archived)} disabled={busy}>
             Cancel
           </Button>
           <Button

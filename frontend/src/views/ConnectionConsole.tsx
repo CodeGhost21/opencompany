@@ -250,7 +250,18 @@ export function ConnectionConsole({
     <CreateCompanyDialog
       client={client}
       request={createRequest}
-      onClose={() => setCreateRequest(null)}
+      onClose={(archivedDuringReset) => {
+        setCreateRequest(null);
+        // A reset's archive leg landed before the operator backed out of the
+        // rest of it (cancelled, or gave up retrying a failed create). The
+        // picker's roster and the console's shell both still show the
+        // company this just removed, and `useCompany` does not self-correct
+        // on a later poll failure — refresh via the same roster read
+        // `backToPicker` already uses so the picker drops the archived card
+        // and the console leaves a shell that can no longer be trusted
+        // (codex review on #1828, PR comment 3863028405).
+        if (archivedDuringReset) backToPicker();
+      }}
       onCreated={onCompanyCreated}
     />
   );
