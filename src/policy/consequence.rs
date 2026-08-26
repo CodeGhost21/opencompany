@@ -1012,10 +1012,11 @@ pub fn denial_reason(tool: &str) -> Option<&'static str> {
 /// was deciding whether a company could read its own GitHub issues.
 ///
 /// A miss now falls to [`composio_slug_reads_by_verb`], which asks what the
-/// slug's own verb says. `..._LIST_...`, `..._GET_...`, `..._FETCH_...`,
-/// `..._SEARCH_...` are reads and classify as [`Reach::ExternalRead`] —
-/// `readonly` still denies them, `supervised` and `auto` run them. Everything
-/// else is a send, exactly as before.
+/// slug's own verb says: a read verb present and no mutating verb anywhere.
+/// `..._LIST_...`, `..._GET_...`, `..._FETCH_...`, `..._SEARCH_...` are reads
+/// and classify as [`Reach::ExternalRead`] — `readonly` still denies them,
+/// `supervised` and `auto` run them. Everything else, including a compound like
+/// `..._GET_AND_UPDATE_...`, is a send exactly as before.
 ///
 /// This is deliberately **not** upstream's `classify_unknown`, whose fallback
 /// arm returns `Read` for any slug carrying no *write* verb — that hands the
@@ -2126,44 +2127,61 @@ fn catalogue_absent_warning() {
 /// `GMAIL_SEND_EMAIL` — and that verb is the most reliable thing about a name
 /// nobody has classified.
 ///
-/// # Positive evidence, and the first verb wins
+/// # The rule
 ///
-/// Segments are matched **whole**, left to right, and the first one that is a
-/// verb this module knows decides. Whole-segment matching is what keeps
-/// `GITHUB_LIST_STARGAZERS` a read (`STARGAZERS` is not `STAR`) and
-/// `GMAIL_LIST_DRAFTS` a read (`DRAFTS` is not `DRAFT`); first-verb-wins is
-/// what keeps `GMAIL_GET_DRAFT` one, since the verb is `GET` and `DRAFT` is
-/// what it gets. A slug with no verb in either list — `GITHUB_INVENT_A_NEW_VERB`
-/// — is **not** a read: this asks for evidence and takes its absence as a send,
+/// A read needs a read verb present and **no** mutating verb anywhere. Segments
+/// are matched whole, which is what keeps `GITHUB_LIST_STARGAZERS` a read —
+/// `STARGAZERS` is not `STAR` — and `GMAIL_LIST_DRAFTS` a read, since `DRAFTS`
+/// is not `DRAFT`. A slug with no verb in either list, `GITHUB_INVENT_A_NEW_VERB`,
+/// is **not** a read: this asks for evidence and takes its absence as a send,
 /// which is the whole difference from upstream's `classify_unknown`.
 ///
-/// # One rule that ignores position
+/// # Why a mutating verb vetoes wherever it appears
 ///
-/// A destructive segment anywhere makes it a send whatever came first, so a
-/// hypothetical `..._GET_AND_DELETE_...` cannot ride in on its opening verb.
-/// Nothing in the catalogue needs this; it is here because first-verb-wins is
-/// the kind of rule a compound slug is built to defeat, and the cost of the
-/// belt is one `any`.
+/// An earlier draft let the first verb decide, so `..._GET_DRAFT` could keep the
+/// read verdict with `DRAFT` read as the noun it is. That is the nicer answer
+/// for that slug and the wrong rule: it also hands the read verdict to
+/// `..._GET_AND_UPDATE_...` and `..._FIND_OR_CREATE_...`, which mutate. Every
+/// narrower exemption tried — "a mutating word is allowed in the object slot
+/// immediately after the read verb" — was defeated by a real catalogue entry:
+/// `GOOGLESHEETS_FIND_REPLACE` is a curated **write** with exactly that shape,
+/// and it is a find-and-replace with the conjunction elided. A noun and an
+/// elided second verb are not distinguishable from the name, so the rule takes
+/// the side that over-gates.
+///
+/// The price is paid by slugs like `GMAIL_GET_DRAFT` — and it is not really
+/// paid at all: that one is *curated*, so it is answered by the catalogue and
+/// never reaches this function. What arrives here is only what nobody has
+/// classified.
 ///
 /// # Why over-gating is the safe direction
 ///
-/// Every verdict this returns `false` for is the behaviour before #1818 —
-/// a park an operator can approve. Every verdict it returns `true` for runs
-/// unattended, so the lists are asymmetric on purpose: the read verbs are few
+/// Every verdict this returns `false` for is the behaviour before #1818 — a
+/// park an operator can approve. Every verdict it returns `true` for runs
+/// unattended. So the lists are asymmetric on purpose: the read verbs are few
 /// and unambiguous, the mutating list is generous, and anything unrecognised
 /// falls to the cautious side.
+///
+/// [`the_fallback_never_calls_a_curated_write_a_read`] is what holds the
+/// vocabulary honest: it runs this over all ~680 hand-classified actions in the
+/// vendored catalogue and fails if a single `Write` or `Admin` slips through.
+/// `ANSWER` and `REPLACE` are in the list below because that test found them.
+///
+/// [`the_fallback_never_calls_a_curated_write_a_read`]: tests::the_fallback_never_calls_a_curated_write_a_read
 fn composio_slug_reads_by_verb(slug: &str) -> bool {
     /// Verbs that positively say an action only reads.
     const READS: &[&str] = &[
         "COUNT", "DESCRIBE", "FETCH", "FIND", "GET", "LIST", "LOOKUP", "QUERY", "READ", "RETRIEVE",
-        "SEARCH", "VIEW",
+        "VIEW", "SEARCH",
     ];
-    /// Verbs that say it mutates, spends, or reaches a counterparty. Generous
-    /// on purpose: a false entry here only over-gates.
+    /// Verbs that say it mutates, spends, destroys, or reaches a counterparty.
+    /// Generous on purpose: a wrong entry here only over-gates, and a missing
+    /// one runs a write unattended.
     const MUTATES: &[&str] = &[
         "ACCEPT",
         "ACTIVATE",
         "ADD",
+        "ANSWER",
         "APPEND",
         "APPROVE",
         "ARCHIVE",
@@ -2178,7 +2196,9 @@ fn composio_slug_reads_by_verb(slug: &str) -> bool {
         "CREATE",
         "DEACTIVATE",
         "DECLINE",
+        "DELETE",
         "DEPLOY",
+        "DESTROY",
         "DISABLE",
         "DISMISS",
         "DISPATCH",
@@ -2207,15 +2227,19 @@ fn composio_slug_reads_by_verb(slug: &str) -> bool {
         "PIN",
         "POST",
         "PUBLISH",
+        "PURGE",
         "PUT",
         "REACT",
         "REFUND",
         "REJECT",
+        "REMOVE",
         "RENAME",
         "REOPEN",
+        "REPLACE",
         "REPLY",
         "RESET",
         "RESTORE",
+        "REVOKE",
         "RUN",
         "SEND",
         "SET",
@@ -2226,6 +2250,7 @@ fn composio_slug_reads_by_verb(slug: &str) -> bool {
         "SUBMIT",
         "SUBSCRIBE",
         "TRANSFER",
+        "TRASH",
         "TRIGGER",
         "UNARCHIVE",
         "UNFOLLOW",
@@ -2237,22 +2262,19 @@ fn composio_slug_reads_by_verb(slug: &str) -> bool {
         "UPDATE",
         "UPLOAD",
         "UPSERT",
+        "WIPE",
         "WRITE",
-    ];
-    /// Segments that make an action a send wherever they appear, not just
-    /// when they come first.
-    const DESTROYS: &[&str] = &[
-        "DELETE", "DESTROY", "PURGE", "REMOVE", "REVOKE", "TRASH", "WIPE",
     ];
 
     let upper = slug.trim().to_ascii_uppercase();
-    let segments = || upper.split('_').filter(|segment| !segment.is_empty());
-    if segments().any(|segment| DESTROYS.contains(&segment)) {
-        return false;
+    let mut reads = false;
+    for segment in upper.split('_').filter(|segment| !segment.is_empty()) {
+        if MUTATES.contains(&segment) {
+            return false;
+        }
+        reads |= READS.contains(&segment);
     }
-    segments()
-        .find(|segment| READS.contains(segment) || MUTATES.contains(segment))
-        .is_some_and(|verb| READS.contains(&verb))
+    reads
 }
 
 /// A tool with no declaration.
@@ -3092,8 +3114,6 @@ mod tests {
             // object, not the verb. A `contains` rule would send both.
             "GITHUB_LIST_STARGAZERS",
             "GMAIL_LIST_DRAFTS",
-            // First verb wins: `DRAFT` is what `GET` gets.
-            "GMAIL_GET_DRAFT",
         ] {
             assert!(
                 composio_slug_reads_by_verb(slug),
@@ -3113,9 +3133,20 @@ mod tests {
             "NOTAREALTOOLKIT_DO_SOMETHING",
             "",
             "_",
-            // A destructive segment sends it whatever verb came first.
+            // The compound shapes a first-verb-wins rule would let through: a
+            // read verb opens each one and a mutation follows it.
+            "GITHUB_GET_AND_UPDATE_ISSUE",
+            "GMAIL_FIND_OR_CREATE_CONTACT",
             "GMAIL_GET_AND_DELETE_THREAD",
             "GITHUB_LIST_AND_REMOVE_LABELS",
+            // The same shape without the conjunction, which is why the object
+            // slot gets no exemption. This one is real: a curated **write**.
+            "GOOGLESHEETS_FIND_REPLACE",
+            "TELEGRAM_ANSWER_CALLBACK_QUERY",
+            // Curated, so the fallback never sees it — but if it did, the
+            // noun `DRAFT` is indistinguishable from an elided second verb and
+            // the rule takes the over-gating side.
+            "GMAIL_GET_DRAFT",
         ] {
             assert!(
                 !composio_slug_reads_by_verb(slug),
@@ -3265,6 +3296,80 @@ mod tests {
             )
             .group,
             EffectGroup::Send
+        );
+    }
+
+    /// **The safety property of the #1818 fallback, over the whole catalogue.**
+    ///
+    /// The fallback only ever fires on slugs the catalogue *cannot* place, so
+    /// there is no direct corpus of them to test against. The curated catalogue
+    /// is the next best thing and it is a strong one: ~680 actions a person
+    /// hand-classified as `Read` / `Write` / `Admin`. Running the verb rule
+    /// over them measures exactly what it would do on the uncurated slugs of
+    /// the same shape.
+    ///
+    /// The two directions are **not** symmetric, so they are asserted
+    /// differently:
+    ///
+    /// * A `Write` or `Admin` the rule calls a read would run unattended.
+    ///   That is the bug this test exists to prevent, and it is asserted at
+    ///   zero. It found two real vocabulary gaps when it was written —
+    ///   `TELEGRAM_ANSWER_CALLBACK_QUERY` (a write, whose `QUERY` is a noun)
+    ///   and `GOOGLESHEETS_FIND_REPLACE` (a write, a find-and-replace with the
+    ///   conjunction elided) — which is why `ANSWER` and `REPLACE` are in
+    ///   `MUTATES`.
+    /// * A `Read` the rule calls a send merely parks, which is the pre-#1818
+    ///   behaviour. So that side gets a floor rather than a zero: the point is
+    ///   to notice a rule that has stopped rescuing anything, not to chase the
+    ///   last slug.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn the_fallback_never_calls_a_curated_write_a_read() {
+        use openhuman_core::openhuman::memory::sync::composio::providers::{
+            ToolScope, agent_ready_toolkits, catalog_for_toolkit,
+        };
+
+        let entries: Vec<_> = agent_ready_toolkits()
+            .into_iter()
+            .filter_map(catalog_for_toolkit)
+            .flatten()
+            .collect();
+        assert!(
+            entries.len() > 400,
+            "the vendored catalogue should be hundreds of actions, found {} — this test \
+             is only worth anything if it walks a real corpus",
+            entries.len()
+        );
+
+        let leaked: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.scope != ToolScope::Read)
+            .filter(|entry| composio_slug_reads_by_verb(entry.slug))
+            .map(|entry| entry.slug)
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "the verb fallback would run these curated writes unattended: {leaked:?}. \
+             Each one names a verb `MUTATES` is missing — add it there rather than \
+             narrowing the rule."
+        );
+
+        // The other direction: a floor, because over-gating is only a park.
+        let reads: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.scope == ToolScope::Read)
+            .map(|entry| entry.slug)
+            .collect();
+        let rescued = reads
+            .iter()
+            .filter(|slug| composio_slug_reads_by_verb(slug))
+            .count();
+        assert!(
+            rescued * 100 >= reads.len() * 85,
+            "the verb rule recognises only {rescued} of {} curated reads. It has stopped \
+             rescuing the drifted reads #1818 is about — a read verb was dropped, or a \
+             `MUTATES` entry is matching a noun.",
+            reads.len()
         );
     }
 
