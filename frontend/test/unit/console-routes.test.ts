@@ -138,6 +138,7 @@ describe("resolving an address", () => {
     ["#/oauth", "settings", "oauth"],
     ["#/mcp", "settings", "mcp"],
     ["#/people", "settings", "people"],
+    ["#/work", "ledgers", "tasks"],
     ["#/settings/not-a-page", "settings", "general"],
   ])("rewrites retired %s onto its replacement", async (hash, view, sub) => {
     rewrite = REWRITE_RETIRED;
