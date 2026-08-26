@@ -1055,6 +1055,35 @@ impl BudgetPauseSet {
             .remove(agent)
     }
 
+    /// Consumes the parked marker for `agent`, but only when it is still the
+    /// SAME marker named by `id` (issue #1846 review, Codex #3864988181).
+    ///
+    /// The redeem route cannot call plain [`redeem`](Self::redeem) up front:
+    /// that consumes the marker before the re-dispatch it names has actually
+    /// run, and a re-dispatch failure (the event store hiccups, the request
+    /// is cancelled) then loses the marker for good — a retry sees nothing
+    /// parked and 404s, even though no successful redispatch ever happened.
+    /// The route instead [`peek`](Self::peek)s, re-dispatches, and only then
+    /// calls this to consume — so a failed re-dispatch leaves the marker
+    /// parked for the retry to find.
+    ///
+    /// The `id` check is what makes that safe rather than merely later: the
+    /// re-dispatch re-enters the SAME cycle path an ordinary message takes,
+    /// which can itself pause again on the same agent before this call runs.
+    /// A plain `redeem(agent)` here would remove THAT fresh marker — the
+    /// operator's payload for the pause that just happened, never yet shown
+    /// to them — while believing it was cleaning up the one it re-dispatched.
+    /// Matching on `id` (minted fresh by every [`park`](Self::park), per its
+    /// own doc) ensures this only ever removes the marker it was told to.
+    pub fn redeem_matching(&self, agent: &str, id: &str) -> Option<BudgetPauseMarker> {
+        let mut by_agent = self.by_agent.lock().expect("budget-pause set poisoned");
+        if by_agent.get(agent).is_some_and(|marker| marker.id == id) {
+            by_agent.remove(agent)
+        } else {
+            None
+        }
+    }
+
     /// Every currently-parked marker, agent-sorted for a stable listing.
     pub fn list(&self) -> Vec<BudgetPauseMarker> {
         let mut out: Vec<_> = self
@@ -2020,6 +2049,42 @@ mod test {
             "single-use: a second redeem finds nothing"
         );
         assert!(set.peek("ceo").is_none());
+    }
+
+    #[test]
+    fn redeem_matching_consumes_only_when_the_id_still_matches() {
+        // Issue #1846 review (Codex #3864988181): the redeem route peeks
+        // before re-dispatching so a failed re-dispatch leaves the marker
+        // parked for a retry — this pins the consuming half it then calls.
+        let set = BudgetPauseSet::default();
+        let marker = set.park("ceo", None, "hi", "paused", 1_000);
+
+        let consumed = set
+            .redeem_matching("ceo", &marker.id)
+            .expect("the id matches what was parked");
+        assert_eq!(consumed.id, marker.id);
+        assert!(
+            set.peek("ceo").is_none(),
+            "the matching marker was consumed"
+        );
+    }
+
+    #[test]
+    fn redeem_matching_leaves_a_fresher_marker_untouched() {
+        // The re-dispatch a redeem triggers can itself re-pause the same
+        // agent before the caller gets back here (see `redeem_matching`'s own
+        // doc). A stale id must not delete the operator's not-yet-seen fresh
+        // marker out from under them.
+        let set = BudgetPauseSet::default();
+        let stale = set.park("ceo", None, "first stuck message", "paused once", 1_000);
+        set.park("ceo", None, "second stuck message", "paused again", 2_000);
+
+        assert!(
+            set.redeem_matching("ceo", &stale.id).is_none(),
+            "the id no longer matches what is currently parked"
+        );
+        let still_parked = set.peek("ceo").expect("the fresher marker survives");
+        assert_eq!(still_parked.message, "second stuck message");
     }
 
     #[test]

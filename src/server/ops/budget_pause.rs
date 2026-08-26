@@ -79,10 +79,22 @@ async fn get_budget_pause(
 }
 
 /// `POST {scope}/agents/{agent_id}/budget-pause/redeem` — the Add-Credits CTA.
-/// Consumes the marker (single-use, like a
-/// [`GrantedCall`](crate::runtime::grants::GrantedCall) redemption) and
-/// re-dispatches the original message through the same cycle path an ordinary
-/// operator send takes, addressed to the same chat the pause happened on.
+/// Re-dispatches the original message through the same cycle path an
+/// ordinary operator send takes, addressed to the same chat the pause
+/// happened on, and only THEN consumes the marker (single-use, like a
+/// [`GrantedCall`](crate::runtime::grants::GrantedCall) redemption).
+///
+/// Deliberately not "consume, then re-dispatch" (issue #1846 review, Codex
+/// #3864988181): the marker is [`peek`](crate::runtime::grants::BudgetPauseSet::peek)ed
+/// rather than redeemed up front, so a re-dispatch that fails — the event
+/// store hiccups, the request is cancelled mid-flight — leaves the marker
+/// parked for a retry to find, instead of the CTA silently losing its saved
+/// re-issue payload to a `404` on the very next click. The consuming half is
+/// [`redeem_matching`](crate::runtime::grants::BudgetPauseSet::redeem_matching),
+/// keyed on the marker's own `id`: the re-dispatch can itself pause again on
+/// the same agent before this call runs, and matching the id (rather than a
+/// plain `redeem(agent)`) is what keeps that fresh marker from being deleted
+/// out from under the operator before they ever see it.
 ///
 /// 404 when nothing is parked for this agent — the operator's own "add
 /// credits" action beat them to it, the process restarted since the pause
@@ -94,7 +106,7 @@ async fn redeem_budget_pause(
     Path(AgentPath { agent_id }): Path<AgentPath>,
 ) -> Result<Json<BudgetPauseDto>, ApiError> {
     let marker = budget_pauses_for(company.id())
-        .redeem(&agent_id)
+        .peek(&agent_id)
         .ok_or_else(|| {
             tracing::info!(
                 company = %company.id(),
@@ -108,7 +120,7 @@ async fn redeem_budget_pause(
         company = %company.id(),
         agent = %agent_id,
         marker_id = %marker.id,
-        "[budget-pause] redeemed; re-dispatching the original message from the top"
+        "[budget-pause] redeeming; re-dispatching the original message from the top"
     );
     let event = CompanyEvent::OperatorMessage {
         text: marker.message.clone(),
@@ -119,7 +131,24 @@ async fn redeem_budget_pause(
         mentions: Vec::new(),
         attachments: Vec::new(),
     };
+    // Propagated with `?` BEFORE the marker is consumed: a failure here must
+    // leave the marker parked, not throw away the operator's saved payload
+    // over a redispatch that never happened.
     company.runtime.run_cycle(vec![event]).await?;
+
+    let consumed = budget_pauses_for(company.id()).redeem_matching(&agent_id, &marker.id);
+    if consumed.is_none() {
+        // The re-dispatch itself re-paused this agent before we got here —
+        // see `redeem_matching`'s doc. That fresh marker is a different pause
+        // the operator has not seen yet, and must be left parked rather than
+        // removed.
+        tracing::info!(
+            company = %company.id(),
+            agent = %agent_id,
+            marker_id = %marker.id,
+            "[budget-pause] redispatch succeeded but re-paused the agent before this marker could be consumed; leaving the fresh marker parked"
+        );
+    }
 
     Ok(Json(BudgetPauseDto::from(marker)))
 }
