@@ -177,6 +177,35 @@ export function wasAlreadyArchived(err: unknown): boolean {
 }
 
 /**
+ * Whether a failed provision is worth reconciling against the host before
+ * reporting it as a failure.
+ *
+ * `network_error` is ambiguous the same way {@link wasAlreadyArchived}
+ * describes for the archive leg: `ApiClient.request` throws it whether the
+ * request never reached the host, or it reached the host, provisioned the
+ * company, and only the *reply* was lost in transit. `company_exists` looks
+ * like a definitive refusal, but a retry of the exact same request lands on
+ * it too — the host is naming the id it, itself, just created a moment
+ * earlier. Left unreconciled, the operator sees "couldn't create" (or,
+ * worse on a reset, "archived X, but couldn't create the new company") for a
+ * company that in fact exists, with no way back into it from this dialog
+ * (codex review on #1828, PR comment 3863028397).
+ *
+ * The caller reconciles by looking the id up with `client.status`, and MUST
+ * only do that for an id this client generated itself
+ * ({@link resetReplacementId}'s random suffix can't collide with a
+ * pre-existing company) — reconciling an operator-typed id the same way
+ * would risk switching the console into an unrelated company that happened
+ * to already sit at that id, mistaking a genuine collision for its own
+ * request.
+ */
+export function wasAmbiguousProvisionOutcome(err: unknown): boolean {
+  return (
+    err instanceof ApiError && (err.code === "network_error" || err.code === "company_exists")
+  );
+}
+
+/**
  * Whether `candidateId`, typed as a reset's replacement id, would collide
  * with `archivedId` once the host's shared-single-DB tenant namespacing
  * (`AppConfig::namespaced_company_id`, `runtime/types.rs`) is applied.

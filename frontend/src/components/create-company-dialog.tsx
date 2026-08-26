@@ -30,6 +30,7 @@ import {
   describeProvisionError,
   resetReplacementId,
   wasAlreadyArchived,
+  wasAmbiguousProvisionOutcome,
 } from "@/lib/company-manifest";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -106,6 +107,16 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
   // *create* does not archive a second time (the id is already gone) and the
   // error copy can say the old company is already retired.
   const [archived, setArchived] = useState(false);
+  // Whether the operator has directly edited the id field since the dialog
+  // opened, as opposed to it merely holding the value `resetReplacementId`
+  // pre-filled it with. Distinct from "is `explicitId` non-blank": a reset's
+  // id field is *always* non-blank on open (see below), so blankness alone
+  // cannot tell "the operator typed this" from "this is our own generated
+  // default" — which `submit` needs to know before it may safely reconcile
+  // an ambiguous provision response by looking the id up (an operator-typed
+  // id could belong to someone else's company; a value we generated
+  // ourselves cannot).
+  const [idTouched, setIdTouched] = useState(false);
 
   const isReset = request?.kind === "reset";
 
@@ -129,6 +140,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     setBusy(false);
     setError(null);
     setArchived(false);
+    setIdTouched(false);
   }, [request]);
 
   if (!request) return null;
@@ -203,6 +215,23 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
       }
     }
 
+    const explicit = explicitId.trim();
+    // A reset always sends an explicit id, even if the operator cleared the
+    // Advanced field back to empty: falling through to the unset-id default
+    // would have the host re-derive the archived company's own id from the
+    // (possibly untouched) name field above. See `resetReplacementId`.
+    const id = explicit || (request.kind === "reset" ? resetReplacementId(request.company) : "");
+    // Whether `id` is one this client generated itself, rather than one the
+    // operator typed — declared outside the try below so the catch block can
+    // see it. Two cases count as ours: the field still holds exactly what
+    // `resetReplacementId` seeded it with on open (`!idTouched`), or the
+    // operator cleared it back to blank, which — per the fallback above —
+    // still lands on a freshly generated id, never the unset-id default.
+    // Anything else the operator has typed in is theirs; reconciling that by
+    // looking it up could resolve to an unrelated, pre-existing company.
+    const selfGenerated = request.kind === "reset" && (!idTouched || explicit === "");
+    const autoId = selfGenerated ? id : "";
+
     try {
       const manifest_toml = buildManifestToml({
         name: trimmedName,
@@ -212,17 +241,29 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
         policyMode: policyMode !== DEFAULT_POLICY_MODE ? policyMode : undefined,
       });
       const body: { manifest_toml: string; id?: string } = { manifest_toml };
-      // A reset always sends an explicit id, even if the operator cleared the
-      // Advanced field back to empty: falling through to the unset-id default
-      // would have the host re-derive the archived company's own id from the
-      // (possibly untouched) name field above. See `resetReplacementId`.
-      const id =
-        explicitId.trim() ||
-        (request.kind === "reset" ? resetReplacementId(request.company) : "");
       if (id) body.id = id;
       const status = await client.provisionCompany(body);
       onCreated(status);
     } catch (err) {
+      // A dropped connection — or a retry that lands on the id this client
+      // itself just asked for — is ambiguous by construction: the host may
+      // have provisioned the company and only the reply, or the collision
+      // check, makes it look like nothing happened. Reconcile with a status
+      // lookup before reporting failure. Scoped to `autoId`, never an
+      // operator-typed one: `resetReplacementId`'s random suffix can't
+      // collide with a pre-existing company, so a hit there can only be this
+      // request landing — an operator-typed id could genuinely belong to an
+      // unrelated company, and switching the console into that would be
+      // worse than the misleading error it replaces (codex review on #1828,
+      // PR comment 3863028397).
+      if (autoId && wasAmbiguousProvisionOutcome(err)) {
+        try {
+          onCreated(await client.status(autoId));
+          return;
+        } catch {
+          // Genuinely not there — fall through to the ordinary error path.
+        }
+      }
       const reason = describeProvisionError(err);
       // The dangerous half-state: the old company is archived but its
       // replacement did not land. Never swallow it — name both facts so the
@@ -335,7 +376,10 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
                 <Input
                   id="create-company-id"
                   value={explicitId}
-                  onChange={(e) => setExplicitId(e.target.value)}
+                  onChange={(e) => {
+                    setExplicitId(e.target.value);
+                    setIdTouched(true);
+                  }}
                   placeholder={
                     isReset
                       ? "auto-generated, distinct from the archived id"
