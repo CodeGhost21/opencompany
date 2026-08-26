@@ -803,16 +803,21 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
     // Reasoning-model fallback: a reasoning-only turn returns `content: null`
     // with the visible text under `reasoning` / `reasoning_content` (string or
     // array-of-parts). Recover it so the turn is not lost to a hard error —
-    // but only when the model actually finished. A `length` or
-    // `content_filter` finish reason means the chain of thought itself was
-    // cut off mid-stream, so promoting it here would hand downstream
-    // consumers a truncated/filtered partial as if it were the final answer.
-    // Fall through to the empty-response error below instead.
-    let truncated_or_filtered = matches!(
+    // but only when the model actually finished. Any finish reason other than
+    // a true completion (`length` truncation, `content_filter`, `failed` —
+    // the documented HTTP-200-empty-response silent failure, see
+    // docs/spec/runtime/providers.md — or any other/unknown value) means the
+    // chain of thought itself may be unfinished, so promoting it here would
+    // hand downstream consumers a partial or incorrect thought as if it were
+    // the final answer. Allow-list the known-good completions instead of
+    // blocklisting the failures we happened to think of, so an unrecognized
+    // failure reason fails closed. Fall through to the empty-response error
+    // below otherwise.
+    let genuinely_finished = matches!(
         finish_reason.as_deref(),
-        Some("length") | Some("content_filter")
+        Some("stop") | Some("tool_calls") | Some("function_call")
     );
-    if content.is_empty() && tool_calls.is_empty() && !truncated_or_filtered {
+    if content.is_empty() && tool_calls.is_empty() && genuinely_finished {
         content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
         if content.is_empty() {
             content = extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
@@ -1986,6 +1991,84 @@ mod tests {
         assert!(
             msg.contains("content_filter"),
             "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// `finish_reason: "failed"` is the documented HTTP-200-empty-response
+    /// silent provider failure (see docs/spec/runtime/providers.md — observed
+    /// on an oversized request, empty message, zero usage). The pre-fix guard
+    /// blocklisted only `length`/`content_filter`, so a reasoning-only turn
+    /// carrying `failed` still fell through and promoted whatever partial
+    /// reasoning the provider emitted before failing — handing downstream
+    /// consumers an unfinished thought as if it were the answer (Codex
+    /// follow-up review on #1779, comment 3860281502). Must error instead.
+    #[test]
+    fn failed_finish_reason_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "failed",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The answer is"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("failed reasoning-only turn must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Any other non-success finish reason — including ones this module does
+    /// not name explicitly — must fail closed rather than be assumed safe to
+    /// promote. The guard is an allow-list of known-good completions
+    /// (`stop`/`tool_calls`/`function_call`), not a blocklist of known
+    /// failures, so an unrecognized value never silently promotes reasoning.
+    #[test]
+    fn unrecognized_finish_reason_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "error",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Working through it"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("unrecognized finish_reason must not promote reasoning to an answer");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("error"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A missing `finish_reason` altogether is unproven, not proven-complete —
+    /// the allow-list requires an explicit good status, so this must also fail
+    /// closed rather than assume the omission means success.
+    #[test]
+    fn missing_finish_reason_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Working through it"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("missing finish_reason must not promote reasoning to an answer");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("finish_reason"),
+            "no finish_reason detail should be appended when none was present, got: {msg}"
         );
     }
 
