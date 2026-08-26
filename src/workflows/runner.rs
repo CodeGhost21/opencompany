@@ -6256,6 +6256,183 @@ to = "done"
         );
     }
 
+    // --- #1825 (P1, found by chatgpt-codex-connector): arm every blocked
+    // node before awaiting journal I/O ----------------------------------
+
+    /// A [`JournalStore`] whose `append_journal` parks the caller mid-await the
+    /// first time a line matches `match_substr`, after signalling `reached` —
+    /// so a test can inspect state from a second task while the first is
+    /// genuinely suspended inside the write, not merely about to make it.
+    /// [`release`](Self::release) lets the parked append through; every append
+    /// after that — including a second match — passes straight through so
+    /// nothing deadlocks the loop under test.
+    struct GatedJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        match_substr: &'static str,
+        armed: std::sync::atomic::AtomicBool,
+        reached: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl GatedJournalStore {
+        fn new(match_substr: &'static str) -> Self {
+            Self {
+                inner: Default::default(),
+                match_substr,
+                armed: std::sync::atomic::AtomicBool::new(true),
+                reached: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::ports::JournalStore for GatedJournalStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::Durability,
+        ) -> Result<()> {
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+                && line.contains(self.match_substr)
+            {
+                self.reached.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// Deps whose `DeliveryParking` journals over a caller-supplied store,
+    /// otherwise wired exactly like [`deps_with_parking`] — a real gate, a
+    /// fresh [`BlockedNodeQueue`], no continuations/gates state this test
+    /// needs.
+    fn deps_with_parking_over(
+        dir: &std::path::Path,
+        store: Arc<dyn crate::ports::JournalStore>,
+    ) -> super::super::delivery::WorkflowDeliveryDeps {
+        let policy = toml::from_str("mode = \"full\"\n").expect("valid [policy] block");
+        let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
+        let journal = Arc::new(crate::runtime::journal::RuntimeJournal::with_store(
+            store,
+            record().id,
+        ));
+        super::super::delivery::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
+            users: Arc::new(crate::store::FsOps::new(dir)),
+            bootstrap_admin: None,
+            channels: Vec::new(),
+            parking: Some(super::super::delivery::DeliveryParking {
+                approvals: gate,
+                journal,
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
+            }),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
+        }
+    }
+
+    /// A run that settles **two** blocked nodes in one call must arm both of
+    /// their in-memory stashes before either's durable mirror is awaited.
+    ///
+    /// # The race this closes
+    ///
+    /// `stash_blocked_agent_nodes` used to interleave the synchronous `arm()`
+    /// with an awaited `record_blocked_node_stashed()` call, one node at a
+    /// time. Both nodes' approval cards are already parked and clickable from
+    /// agent execution by the time this function starts — so while the first
+    /// node's durable write is suspended, its stash is armed but the second
+    /// node's is not yet, even though its card is just as clickable. A single-
+    /// node test cannot see this: the window only opens *between* nodes, so it
+    /// takes two blocked nodes in one settle, with the first node's write
+    /// gated open, to observe the second node's stash mid-window.
+    ///
+    /// This freezes the store mid-append on the *first* matching line (the
+    /// first node's `BlockedNodeStashed` write) and, while still frozen, reads
+    /// the second node's stash straight off the queue the real resolve path
+    /// reads at decide time — the same `peek` a landing decision would use to
+    /// find what to release. Fixed: both stashes are already armed by the time
+    /// the first append is even attempted, so this succeeds while frozen. On
+    /// the old interleaved loop this fails while frozen — the second node's
+    /// arm has not run yet — which is exactly the failure mode: a decision
+    /// landing on the second node in this window finds no stash, consumes the
+    /// approval anyway, and the loop's own later arm then writes a stash with
+    /// no decision left to release it, permanently stranding the run.
+    #[tokio::test]
+    async fn every_blocked_node_is_armed_before_the_first_journal_write_is_awaited() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatedJournalStore::new("BlockedNodeStashed"));
+        let deps = deps_with_parking_over(dir.path(), store.clone());
+        let parking = deps.parking.clone().expect("wired above");
+
+        let blocked = vec![
+            crate::ports::WorkflowBlockedNode {
+                node_id: "first".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-first".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+            crate::ports::WorkflowBlockedNode {
+                node_id: "second".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-second".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+        ];
+
+        let run_id = "run-1".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let second_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+
+        let handle = tokio::spawn(async move {
+            stash_blocked_agent_nodes(Some(&deps), "wf-1", &run_id, &trigger_input, &blocked).await;
+        });
+
+        // Blocks until the store is genuinely suspended inside the first
+        // node's durable write — not merely about to make it.
+        store.reached.notified().await;
+
+        // While that write is still frozen: the second node's card is exactly
+        // as parked and clickable as the first's, so the resolve path must
+        // already be able to find its stash here.
+        assert!(
+            parking.blocked_nodes.peek(&second_turn).is_some(),
+            "the second blocked node's stash must be armed before the first \
+             node's durable journal write is even attempted, not after it \
+             returns — a decision landing in this window must have something \
+             to release"
+        );
+
+        store.release.notify_one();
+        handle
+            .await
+            .expect("stash_blocked_agent_nodes does not panic");
+
+        // Both nodes are armed once the settle finishes, and the durable
+        // mirror caught up for both too.
+        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "first");
+        assert!(parking.blocked_nodes.peek(&first_turn).is_some());
+        assert!(parking.blocked_nodes.peek(&second_turn).is_some());
+    }
+
     // ---- merging harness transcripts into the run-output snapshot ----------
 
     mod transcript_merge {
