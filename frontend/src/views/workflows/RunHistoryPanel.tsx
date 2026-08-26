@@ -707,7 +707,16 @@ export function RunHistoryRow({
                 : `This run failed: ${errorMessage}`}
             </p>
             <p className="mt-1 text-2xs text-muted-foreground">
-              Review the error details, then correct the workflow and run it again.
+              {failedNode
+                ? "Review the error details, then correct the workflow and run it again."
+                : // Codex review on #1821 (eighth pass): `failedNode` is null in
+                  // exactly the cases the legend definition above already hedges
+                  // on — a host restart, a capability that failed to build, or a
+                  // graph that would not compile — none of which a workflow edit
+                  // fixes. This sentence still said "correct the workflow"
+                  // unconditionally, contradicting the definition two rounds ago
+                  // fixed to say the opposite for this same run.
+                  "Review the error details — nothing in the graph got the chance to run, so this may be a host or capability problem rather than the workflow. Run it again once you've ruled that out."}
             </p>
             <details className="mt-1">
               <summary className="cursor-pointer text-2xs text-muted-foreground">
@@ -720,8 +729,14 @@ export function RunHistoryRow({
           </div>
           {/* Issue #840 (PR-3): correction is an action, not part of the
               destructive error framing. Keeping it outside gives the neutral
-              control its ordinary token treatment. */}
-          {onFixWithCopilot && run.runId && (
+              control its ordinary token treatment.
+
+              `failedNode` gates it too (Codex review on #1821, eighth pass):
+              the copilot re-wires the WORKFLOW, so offering it for a run that
+              never traced to a step — a host restart, a failed capability
+              build, an uncompilable graph — offers to fix something the run
+              gave no evidence was broken. */}
+          {onFixWithCopilot && run.runId && failedNode && (
             <div className="mt-1.5">
               <Button
                 size="sm"
