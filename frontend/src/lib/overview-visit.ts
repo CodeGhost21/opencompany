@@ -85,7 +85,7 @@ const openedThisLoad = new Map<string, number | null>();
  * React may double-invoke a render or discard one, and neither can move the
  * boundary.
  *
- * It writes NOTHING. #1700 was a lazy `useState` read and a `useEffect` write
+ * It records NO VISIT. #1700 was a lazy `useState` read and a `useEffect` write
  * with no memory between them, so each mount read what the previous mount had
  * just written; the map above is what fixes that, and it fixes it from the read
  * side alone. Keeping the write here as well would have made a render that
@@ -93,6 +93,14 @@ const openedThisLoad = new Map<string, number | null>();
  * of the error boundary — durable: the next page load would compare against an
  * Overview nobody ever saw. `commitOverviewVisit` is the other half, and it
  * runs from an effect, because only a mount that commits is a visit.
+ *
+ * One caveat, stated rather than left to be found: `keyFor` goes through
+ * `scopedKeyAdoptingLegacy`, which copies a pre-scoping value across to the
+ * scoped key the first time it sees one. So this is not literally free of
+ * storage writes — but the only thing it can write is a boundary that was
+ * already stored, under a name that already meant the same thing. An abandoned
+ * render can move that migration earlier; it cannot invent a visit, which is
+ * what the timestamp write could and now cannot.
  */
 export function openOverviewVisit(scope: LocalScope): number | null {
   const key = keyFor(scope);
