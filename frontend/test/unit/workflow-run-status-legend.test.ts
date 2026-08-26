@@ -171,6 +171,20 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).toContain("stopped this run");
   });
 
+  // Codex review on #1821 (fifth pass): `title` is a mouse-hover affordance.
+  // The dot was a non-focusable, unlabelled span, so a keyboard, touch or
+  // screen-reader user had nothing that named THIS row's verdict — the header
+  // legend defines the terms but never says which one applies here. `role="img"`
+  // plus `aria-label` puts the same one-liner in the accessibility tree.
+  it("gives the dot an accessible name matching its hover title", async () => {
+    await renderHistory(stoppedRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    expect(dot?.getAttribute("role")).toBe("img");
+    expect(dot?.getAttribute("aria-label")).toBe(dot?.getAttribute("title"));
+  });
+
   // Codex review on #1821: `RunCancel` (`src/ports/workflow_runner.rs`) stops
   // a run at the next node boundary — the node already executing normally
   // finishes and is journaled. Only a node wedged past the hard-abort grace
