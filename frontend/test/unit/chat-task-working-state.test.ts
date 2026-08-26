@@ -99,6 +99,17 @@ describe("background task working semantics", () => {
     expect(isTaskWorking(undefined)).toBe(false);
   });
 
+  it("does not keep a card Working once it is back in To-do (#1768)", () => {
+    // A planning failure, a cancel, or a revision all return a card to
+    // `pending` with no stage (Task.stage is "absent on a pending or done
+    // card" — frontend/src/api/tasks.ts). That is a stopped state, the same
+    // as review/done/paused, and must not read as still working just
+    // because it isn't in the terminal set.
+    expect(isTaskWorking({ column: "pending" })).toBe(false);
+    // ...unless the in-flight read still owns it (board-read race).
+    expect(isTaskWorking({ column: "pending", startedAt: NOW - 60_000 })).toBe(true);
+  });
+
   it("reports whole elapsed minutes without allowing a negative clock", () => {
     expect(taskElapsedLabel(NOW - 5 * 60_000, NOW)).toBe("5 min elapsed, still working");
     expect(taskElapsedLabel(NOW + 30_000, NOW)).toBe("0 min elapsed, still working");

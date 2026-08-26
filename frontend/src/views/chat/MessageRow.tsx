@@ -5,6 +5,7 @@ import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-pro
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
+import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { timeAgo } from "@/lib/language";
 import { MessageAttachments } from "./MessageAttachments";
@@ -43,17 +44,19 @@ interface Props {
   now?: number;
 }
 
-const TERMINAL_TASK_COLUMNS = new Set(["in_review", "done", "paused"]);
-
 /**
  * Whether a card-linked reply still represents background work (#1758).
  *
- * An in-flight row wins over a briefly stale terminal board column. Otherwise
- * the board is authoritative: review, done and paused are all stopped states.
+ * An in-flight row wins over a briefly stale board read. Otherwise the board
+ * is authoritative, and {@link IN_FLIGHT_COLUMNS} is the one place that says
+ * which stages are actually active (`board-columns.ts`) — reused rather than
+ * re-derived here so a card back in `pending` (a planning failure, a cancel,
+ * or a revision) reads as stopped, the same as review, done or paused, rather
+ * than defaulting to "working" for anything that isn't a known terminal word.
  */
 export function isTaskWorking(status: TaskStatus | undefined): boolean {
   if (!status) return false;
-  return status.startedAt !== undefined || !TERMINAL_TASK_COLUMNS.has(status.column);
+  return status.startedAt !== undefined || IN_FLIGHT_COLUMNS.includes(status.column);
 }
 
 /** The requested stable elapsed sentence, or nothing without a run clock. */
