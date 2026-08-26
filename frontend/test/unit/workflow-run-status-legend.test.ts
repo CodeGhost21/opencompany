@@ -514,12 +514,24 @@ describe("the failed-run remedy matches whether a node was actually at fault", (
 
   // Codex review on #1821 (eighth pass): the copilot re-wires the workflow, so
   // offering it here dangles the same wrong remedy as the sentence above for a
-  // run with no evidence the workflow was ever at fault.
-  it("does not offer Fix with copilot when no node was at fault", async () => {
+  // run with no evidence the workflow was ever at fault. Gated the button on
+  // `failedNode`.
+  //
+  // Codex review on #1821 (twelfth pass): that premise doesn't hold —
+  // `failedNode` is null in the SAME "finish row missing" case as the test
+  // above, not only in the genuine no-node-ran case, and the backend endpoint
+  // this button drives never required a node id (`resolve_fix_error` in
+  // `workflows.rs` only needs `run.error`; the request this callback sends
+  // carries no node id at all). The copilot itself reads the error text and
+  // replies `NotAutomatable` when it genuinely cannot help — the frontend
+  // gating pre-empted that classification with a guess a lost per-node
+  // record could falsify. The button now shows whenever there is a run to
+  // fix from; this test proves the flip against the exact pre-fix
+  // expectation.
+  it("offers Fix with copilot even when no node is named — the backend classifies automatable-or-not", async () => {
     // `runId` set explicitly: `failedRun()` omits it, and the button's OTHER
     // guard (`run.runId`) would then hide it for a reason unrelated to this
-    // test — this run must satisfy every other guard so `failedNode` is the
-    // only thing left that can be under test.
+    // test.
     await act(async () => {
       root.render(
         createElement(RunHistoryPanel, {
@@ -535,7 +547,7 @@ describe("the failed-run remedy matches whether a node was actually at fault", (
     });
     expect(
       container.querySelector('[data-testid="workflow-run-fix-with-copilot"]'),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 });
 

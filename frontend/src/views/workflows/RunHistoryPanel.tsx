@@ -807,12 +807,32 @@ export function RunHistoryRow({
               destructive error framing. Keeping it outside gives the neutral
               control its ordinary token treatment.
 
-              `failedNode` gates it too (Codex review on #1821, eighth pass):
+              `failedNode` gated it too (Codex review on #1821, eighth pass):
               the copilot re-wires the WORKFLOW, so offering it for a run that
               never traced to a step — a host restart, a failed capability
               build, an uncompilable graph — offers to fix something the run
-              gave no evidence was broken. */}
-          {onFixWithCopilot && run.runId && failedNode && (
+              gave no evidence was broken.
+
+              Codex review on #1821 (twelfth pass): that premise doesn't hold.
+              `failedNode` comes from `failedNodeOf(run)`, which finds nothing
+              when the failing node's own `WorkflowNodeFinished` never
+              journaled (best-effort append, `runner.rs`) — the exact case the
+              tenth/eleventh-pass fixes above already established `nodes`
+              being empty does not prove nothing ran. The backend endpoint
+              this button drives (`fix_from_run` → `resolve_fix_error`) never
+              required a `failed_node_id` either: it only needs `run.error`
+              non-empty (guaranteed here, inside the `run.error ?` branch) and
+              works from the error text alone when no node is named — the
+              request this callback sends doesn't even carry a node id. The
+              copilot itself is the one that reads the error text and decides
+              automatable-or-not (`fix_evidence_prompt` in
+              `workflow_build.rs` tells it plainly: "If the failure cannot be
+              fixed by re-wiring the graph … say so"), surfaced back here as
+              `fixReason` when it declines. That is the explicit,
+              failure-text-grounded classification the button's gate should
+              defer to — not a frontend guess off a best-effort per-node
+              record that can go missing for a node that genuinely failed. */}
+          {onFixWithCopilot && run.runId && (
             <div className="mt-1.5">
               <Button
                 size="sm"
