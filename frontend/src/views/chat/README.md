@@ -67,6 +67,24 @@ The host enforces the same thing from its side rather than trusting this:
 `409` and a sentence, and a desk cannot be created with an id that would shadow
 the channel. See `docs/spec/runtime/api.md`.
 
+**Unless a blueprint already declared one.** The host grandfathers a company
+whose manifest names a `[[group_chat]]` with a General id — `is_general_channel`
+is guarded on `!record.desk_exists`, so that desk keeps its lead, its writes and
+its routing, and `responder_for` answers there as it always did. `buildChannels`
+follows the same rule: the built-in channel is added **only when no desk claims
+a General spelling**, and no desk is ever filtered out of the rail. The two
+affordances above are decided by whether the desk list holds the active id
+(`activeIsDesk`), not by how the id is spelled, so a grandfathered desk keeps
+its lead badge and its org-chart link while `#general` proper still has neither.
+
+This is also why `defaultDesks()` no longer carries a `main` row. While it did,
+a console-invented desk and a blueprint-declared one were indistinguishable
+here, and the rail got the grandfathered case wrong in both directions at once:
+a manifest `id = "general"` rendered as two channels folding onto one
+transcript, and a manifest `id = "main"` was hidden while the host still routed
+to its lead. Console-side desk fabrication reading as a real desk is the same
+shape as issue #370.
+
 **Its membership is derived on every render** — the roster this view already
 holds, in roster order. Nothing records who is in `#general`, so a teammate
 added a minute ago is in it with no write anywhere and the two cannot drift.
@@ -186,8 +204,12 @@ makes the split coherent rather than arbitrary.
 The link is offered only for a **host-backed desk channel**. A DM is not a desk,
 a fallback desk names one the host does not have, and `#general` is not a desk
 at all (#1743) — the chart would open on nothing in all three cases, so none of
-them gets a link. There is no admin gate, because the chart has none either
-(its controls are gated by provenance).
+them gets a link. The test is `activeIsDesk`: whether the desk list holds the
+active id. Asked of the list rather than of the id's spelling, so a blueprint
+desk grandfathered under a General id — which the host does list and the chart
+does hold — keeps its link instead of losing it to a name match. There is no
+admin gate, because the chart has none either (its controls are gated by
+provenance).
 
 The channel rail stays flat, and #485 settled that too: it already is the org
 chart's desk level, since no desk can name a parent desk. See
