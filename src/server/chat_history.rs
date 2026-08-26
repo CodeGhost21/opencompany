@@ -714,7 +714,7 @@ impl AttributionAudit {
 /// bound; in practice that notice is rare enough not to move it.
 /// Whether a stored `agent_id` names an author we can actually resolve.
 ///
-/// The roster, **plus two ids that are truthful authors without being teammates**.
+/// The roster, **plus three ids that are truthful authors without being teammates**.
 ///
 /// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) (issue #966) is the runtime
 /// speaking for itself — an approval-overflow notice, the `"Acknowledged."`
@@ -738,6 +738,12 @@ impl AttributionAudit {
 /// so neither a minted slug nor a manifest-declared one can equal it (see the
 /// constant's doc).
 ///
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// is the same case again, one level narrower: it is `WORKFLOW_REPLY_AUTHOR`'s
+/// own admin-only sibling, journaled when an `owner` report has no mailbox to
+/// reach (issue #1781 review, Codex P2) — a legitimate report, deliberately
+/// unmintable for the same reason, and it must not inflate the count either.
+///
 /// This is the single predicate the audit and any presentation of its result
 /// must share; two copies would let the count and the rendering disagree about
 /// which rows are unknown.
@@ -745,6 +751,7 @@ pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
     agent_id == crate::ports::CONFINED_AGENT_ID
         || agent_id == crate::ports::SYSTEM_AUTHOR
         || agent_id == crate::runtime::WORKFLOW_REPLY_AUTHOR
+        || agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
         || record.resolve_roster_agent_id(agent_id).is_some()
 }
 
@@ -977,11 +984,20 @@ async fn drop_dead_cards(
 /// not. Keep that potentially full journal walk out of [`history_for_desk`],
 /// so bounded transcript readers stop as soon as their requested window is
 /// complete.
+///
+/// `is_admin` excludes an owner-fallback report the same way
+/// [`history_for_desk`]'s `is_admin` param excludes it from `items` (issue
+/// #1781 review, Codex P2): without this, a non-admin querying a GraphQL desk
+/// that holds one — notably a grandfathered real desk at the literal
+/// `operator` id — got a `total` counting a row `items` had already hidden,
+/// which both breaks `Page.total`'s item-count contract and reveals that a
+/// hidden admin report exists.
 pub async fn history_total_for_desk(
     runtime: &CompanyRuntime,
     desk_id: &str,
     desk_name: &str,
     before_seq: Option<u64>,
+    is_admin: bool,
 ) -> Result<i32, OpenCompanyError> {
     const EVENT_PAGE: usize = 512;
 
@@ -999,9 +1015,15 @@ pub async fn history_total_for_desk(
             if before_seq.is_some_and(|before| event.seq.value() >= before) {
                 return Ok(total);
             }
-            if owns(desk_id, desk_name, &event.event) {
-                total = total.saturating_add(1);
+            if !owns(desk_id, desk_name, &event.event) {
+                continue;
             }
+            // Same admin-only exclusion `MessageView::project` applies to
+            // `history_for_desk`'s rows (see `is_admin_only_event`'s doc).
+            if !is_admin && is_admin_only_event(&event.event) {
+                continue;
+            }
+            total = total.saturating_add(1);
         }
         let Some(last) = page.last() else {
             break;
@@ -1012,6 +1034,20 @@ pub async fn history_total_for_desk(
         }
     }
     Ok(total)
+}
+
+/// Whether `event` is the owner-fallback report — admin-only on both
+/// [`history_for_desk`] (via [`MessageView::project`]'s `admin_only` field,
+/// which applies the identical `agent_id == OWNER_FALLBACK_REPORT_AUTHOR`
+/// check inline) and [`history_total_for_desk`]'s count (issue #1781 review,
+/// Codex P2), so the two projections of the same journal cannot disagree
+/// about which rows a non-admin is shown.
+fn is_admin_only_event(event: &CompanyEvent) -> bool {
+    matches!(
+        event,
+        CompanyEvent::AgentReply { agent_id, .. }
+            if agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+    )
 }
 
 #[cfg(test)]
@@ -1924,6 +1960,32 @@ mod test {
             assert_eq!(audit.affected, 0);
         }
 
+        /// Issue #1781 review, Codex P2: an owner-fallback report is journaled
+        /// under [`crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR`] on purpose —
+        /// same reservation as `WORKFLOW_REPLY_AUTHOR`, one arm narrower — so it
+        /// must not inflate the audit either. Before this arm existed, every
+        /// legitimate no-mailbox fallback counted as damaged attribution.
+        #[test]
+        fn an_owner_fallback_report_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+                    .is_none(),
+                "owner-fallback reports resolve through the extra arm, not the roster"
+            );
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR),
+                    reply(2, "engineer"),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
         /// Review on PR #1781 (Codex P2): a company that named an overlay
         /// teammate "Workflow" before this reservation existed would have
         /// minted the bare id `workflow` — the id `WORKFLOW_REPLY_AUTHOR`
@@ -2412,5 +2474,79 @@ mod dead_card_test {
              back short: {as_member:?}"
         );
         assert_eq!(as_member[0].text, "visible report");
+    }
+
+    /// Issue #1781 review (Codex P2): `history_total_for_desk` must agree with
+    /// `history_for_desk` about which rows a non-admin can see. Pre-fix, this
+    /// count had no `is_admin` param at all — a non-admin querying a desk
+    /// holding an owner-fallback row (e.g. a grandfathered real desk at the
+    /// literal `operator` id) got a `total` one higher than `items.len()`
+    /// could ever be, breaking `Page.total`'s item-count contract and
+    /// revealing that a hidden admin report exists.
+    #[tokio::test]
+    async fn total_excludes_the_owner_fallback_row_for_a_non_admin_but_counts_it_for_an_admin() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only owner report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "ordinary workflow report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+
+        let as_member = history_total_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            None,
+            false,
+        )
+        .await
+        .expect("total");
+        assert_eq!(
+            as_member, 1,
+            "a non-admin's total must match what history_for_desk would ever show them"
+        );
+
+        let as_admin = history_total_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            None,
+            true,
+        )
+        .await
+        .expect("total");
+        assert_eq!(as_admin, 2, "an admin's total must count both rows");
     }
 }

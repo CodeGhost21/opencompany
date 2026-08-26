@@ -581,6 +581,7 @@ impl ChatGql {
             &self.desk.id,
             &self.desk.name,
             before_seq,
+            is_admin,
         )
         .await?;
         Ok(Page {
