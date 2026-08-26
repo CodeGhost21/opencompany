@@ -68,15 +68,9 @@ export function defaultThreads(): Thread[] {
   ];
 }
 
-/**
- * Build the chat list from the company's real desks (issue #53): the main line
- * (the orchestrator) first, then one thread per desk keyed by its id. Falls back
- * to {@link defaultThreads} when the company defines no desks (or the fetch
- * failed and returned an empty list), so the console always renders something.
- */
-export function threadsFromDesks(desks: DeskDto[]): Thread[] {
-  if (desks.length === 0) return defaultThreads();
-  const deskThreads: Thread[] = desks.map((desk, i) => ({
+/** One `Thread` for a single `/desks` entry, desk or system channel alike. */
+function deskThread(desk: DeskDto, i: number): Thread {
+  return {
     id: desk.id,
     contact: {
       name: desk.name,
@@ -86,8 +80,36 @@ export function threadsFromDesks(desks: DeskDto[]): Thread[] {
     blurb: desk.description ?? "A desk of your company",
     messages: [],
     readOnly: desk.system,
-  }));
-  return [mainThread(), ...deskThreads];
+  };
+}
+
+/**
+ * Build the chat list from the company's real desks (issue #53): the main line
+ * (the orchestrator) first, then one thread per desk keyed by its id. Falls back
+ * to {@link defaultThreads} when the company defines no *real* desks — the fetch
+ * failed and returned an empty list, or every entry is a system channel — so the
+ * console always renders something.
+ *
+ * The fallback is keyed on non-system desk count, the same distinction
+ * {@link resolveDesks} (`views/chat/model.ts`) makes for the Chat route, and for
+ * the same reason: the always-present Operator system channel (issue #1757)
+ * means a desk-less company's `/desks` answer is never actually `[]`, so the
+ * plain `desks.length === 0` this function used to check never fired for a
+ * desk-less company — the legacy `#/conversation` route this function backs
+ * lost its main/strategy/creative/front-desk lines (and everything journaled
+ * under them) the moment Operator shipped, while the Chat route kept them.
+ * Any system desks the host did send are still threaded in either way, so
+ * falling back never drops that feed — the same rule `782772aad` already
+ * applied to `readOnly` here; twice missing the same host behavior on this
+ * route is why the fallback belongs beside it rather than only in `resolveDesks`.
+ */
+export function threadsFromDesks(desks: DeskDto[]): Thread[] {
+  const real = desks.filter((d) => !d.system);
+  if (real.length === 0) {
+    const system = desks.filter((d) => d.system).map(deskThread);
+    return [...defaultThreads(), ...system];
+  }
+  return [mainThread(), ...desks.map(deskThread)];
 }
 
 /**
