@@ -2043,9 +2043,12 @@ impl CompanyRuntime {
                 // Issue #1825: `spawn_blocked_node_continuation` itself banks
                 // `BlockedNodeDispatched` now, between admitting the run and
                 // launching its detached task — see that function's doc for
-                // why the marker moved off this side of the call. By the time
-                // `Ok(())` reaches here the dispatch is already durable (or
-                // the write already failed and warned); nothing left to do on
+                // why the marker moved off this side of the call. `Ok(())`
+                // only reaches here once that write has actually landed (a
+                // P1 follow-up made a failed write abort the launch and
+                // propagate instead of warning and proceeding unmarked — see
+                // that call site), so by the time this arm runs the dispatch
+                // is durable *and* the launch happened; nothing left to do on
                 // that front. Only now — spawn has actually taken hold — is
                 // the stash truly spent. Retiring it here rather than up
                 // front is what lets a crash mid-spawn rehydrate the very
@@ -2111,7 +2114,13 @@ impl CompanyRuntime {
     /// [`OpenCompanyError::Store`] and [`OpenCompanyError::StoreIo`] are the
     /// other case the finding names — `spawn_blocked_node_continuation`'s
     /// `store().load(...)` for overlay workflows can fail on a host hiccup
-    /// with nothing wrong with the approval or the graph it names.
+    /// with nothing wrong with the approval or the graph it names. A P1
+    /// follow-up added a second source of the same two variants: a failed
+    /// `record_blocked_node_dispatched` write now aborts the launch instead
+    /// of warning and proceeding unmarked, so that failure reaches here too
+    /// — `begin` already admitted (and this arm's guard already dropped,
+    /// freeing the slot) but nothing launched, which is exactly the shape
+    /// this function exists to keep retryable.
     ///
     /// Every other variant reaching this call site — `CompanyNotFound` (the
     /// graph was deleted) or `InvalidRequest` (no workflow runner wired) — is
