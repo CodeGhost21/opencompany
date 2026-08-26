@@ -7,7 +7,7 @@
 // the whole app to a login screen. With N connections that is the wrong shape:
 // one host being down has to redden one row and leave the others working.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { OpenCompanyClient } from "@/api/client";
@@ -89,6 +89,24 @@ export function ConnectionConsole({
   // (every other connection's stream died with it).
   const [bootEpoch, setBootEpoch] = useState(0);
   const connection = useConnection(connectionId);
+  // A `CompanyStatus` this component already resolved for a company id,
+  // carried across the reseat-driven reboot below rather than re-fetched.
+  //
+  // `onCompanyCreated` calls `retargetDefaultCompany` on an explicit-company
+  // connection, which `reseat`s it — a brand new client and a new
+  // `defaultCompany` — and `App` passes both straight through as this
+  // component's props. That prop change re-enters the boot effect, and since
+  // `defaultCompany` is now set it takes the "explicit company wins" branch
+  // straight into a *second* `client.status(id)` call for the company
+  // `switchCompany` already entered with a known-good status a moment
+  // earlier (`onCompanyCreated`'s own `knownStatus` argument, PR comment
+  // 3864628314 — that fix stopped `switchCompany` from re-fetching; this
+  // stops the reboot the reseat itself causes from doing the same fetch a
+  // second time, independently). Left unguarded, a transient failure on this
+  // reboot lookup — nothing needed it — replaced a fully succeeded
+  // create/reset with the generic connection-error screen (issue #1828
+  // comment 3865401542).
+  const knownStatusRef = useRef<{ company: string; status: CompanyStatus } | null>(null);
   // Read unconditionally, though only the `error` phase uses it: a hook cannot
   // hide inside a switch arm. What it decides is what a failure is allowed to
   // say — see the `error` case below.
@@ -145,6 +163,16 @@ export function ConnectionConsole({
 
       // Explicit company wins: go straight to its console.
       if (defaultCompany) {
+        // This rerun may exist only because `reseat` changed `client`/
+        // `defaultCompany` identity out from under an already-correct
+        // console, not because anything needs rebooting — see the
+        // `knownStatusRef` comment above. Consume it once and skip the
+        // fetch entirely; the phase `switchCompany` already set stands.
+        const known = knownStatusRef.current;
+        if (known && known.company === defaultCompany) {
+          knownStatusRef.current = null;
+          return;
+        }
         try {
           const status = await client.status(defaultCompany);
           set({
@@ -256,6 +284,12 @@ export function ConnectionConsole({
         ...knownCompanies.filter((c) => c.id !== status.id && c.id !== archived),
         status,
       ];
+      // Recorded before `retargetDefaultCompany` below, whose `reseat` is
+      // what triggers the boot effect's reboot this unblocks — see
+      // `knownStatusRef`. Harmless to set even when the retarget below is a
+      // no-op (a connection that was never company-scoped): nothing reseats,
+      // so the boot effect never reruns and never consults it.
+      knownStatusRef.current = { company: status.id, status };
       // Retarget an explicit-company connection's boot default, or the next
       // reload asks for the id this create/reset just left. A no-op for a
       // connection that was never company-scoped.
