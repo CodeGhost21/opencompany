@@ -37,9 +37,14 @@ DEV_SCRIPT=scripts/desktop-dev.sh
 # `=`, and a reordering is not a drift. Normalise before comparing so this
 # script fails on the thing that matters — a feature present in one place and
 # absent from another — rather than on a rewrite of the same set.
+# Empty input must come back empty, not abort: a call site passing NO features is
+# the failure this script is for, and `check` renders it `<none>`. `sed '/^$/d'`
+# rather than `grep -v '^$'` because grep exits 1 when it emits nothing, which
+# under `set -e -o pipefail` killed the script mid-run — it exited 1 without ever
+# naming the offending call site, which is the one thing a reader needs.
 normalise() {
   printf '%s' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -v '^$' | LC_ALL=C sort -u | paste -sd, -
+    | LC_ALL=C sort -u | sed '/^$/d' | paste -sd, -
 }
 
 expected_raw="$(
@@ -75,38 +80,66 @@ check() {
   fi
 }
 
-# `ci.yml`'s Desktop lane: every `--features` on a `--manifest-path
-# src-tauri/Cargo.toml` command. Both the clippy and the test step must carry
-# it — a lane that lints the shipped set but tests the default one is the same
-# hole in half.
-ci_lines="$(grep -n -- '--manifest-path src-tauri/Cargo.toml' "$CI_WORKFLOW" | grep -- '--features' || true)"
+# `ci.yml`'s Desktop lane: every cargo command run against the desktop manifest.
+# Both the clippy and the test step must carry the features — a lane that lints
+# the shipped set but tests the default one is the same hole in half.
+#
+# Selected by the CARGO COMMAND, never by the presence of `--features`. Filtering
+# on the flag was a hole big enough to drive the original bug through: a step
+# that dropped `--features` would not match, would therefore not be checked, and
+# the script would report the remaining step as "ok" and exit 0. The one thing
+# this exists to catch — a call site compiling the default set — was the one
+# thing it skipped.
+ci_lines="$(grep -nE 'cargo (clippy|test|check|build)[^|]*--manifest-path src-tauri/Cargo.toml' "$CI_WORKFLOW" || true)"
 if [ -z "$ci_lines" ]; then
-  echo "assert-desktop-features: no '--features' on any src-tauri cargo command in $CI_WORKFLOW." >&2
-  echo "  The Desktop lane would be compiling a feature set the release does not" >&2
-  echo "  ship, which is exactly what this script exists to catch." >&2
+  echo "assert-desktop-features: no cargo command against src-tauri/Cargo.toml in $CI_WORKFLOW." >&2
+  echo "  Either the Desktop lane stopped compiling the shell, or this script's" >&2
+  echo "  pattern is stale. Both need a human." >&2
   exit 1
 fi
 while IFS= read -r entry; do
   line="${entry%%:*}"
+  # No match leaves this empty, which `check` reports as `<none>` rather than
+  # skipping. That is the point of selecting by command above.
   value="$(printf '%s' "${entry#*:}" | sed -n 's/.*--features[= ]\{1,\}\([^ ]*\).*/\1/p')"
   check "$CI_WORKFLOW:$line" "$value"
 done <<< "$ci_lines"
 
-# The dev script's own copy. Read from its assignment rather than from the
-# `tauri dev` line, so the value is checked once and the command that consumes
-# it is free to spell the flag however the CLI wants.
+# The dev script's own copy of the string.
 dev_value="$(
   sed -n 's/^DESKTOP_RELEASE_FEATURES=\(.*\)$/\1/p' "$DEV_SCRIPT" \
     | head -1 | sed 's/^"//; s/"$//'
 )"
 check "$DEV_SCRIPT" "$dev_value"
 
-# A `tauri dev` that never reads the variable would pass every check above while
-# still launching the default build — the original bug, with a decorative
-# constant added. Assert the value is actually used.
-if ! grep -q 'tauri dev --features "\${DESKTOP_RELEASE_FEATURES}"' "$DEV_SCRIPT"; then
-  echo "  BAD $DEV_SCRIPT -> defines DESKTOP_RELEASE_FEATURES but no 'tauri dev' passes it" >&2
+# ...and every place that actually launches the shell must pass it. A constant
+# nothing reads would satisfy the check above while `tauri dev` still built the
+# default set — the original bug with a decorative variable added.
+#
+# EVERY branch, not any. `desktop-dev.sh` picks between a path-qualified CLI and
+# a `cargo tauri` fallback, so a `grep -q` for one spelling passes while the
+# other launches bare. The first version of this check looked for the literal
+# `tauri dev --features`, which matches ONLY the `cargo tauri dev` fallback —
+# `"${TAURI_CLI}" dev` does not contain that string — so the primary branch,
+# the one that actually runs on any checkout with the console installed, was
+# never verified at all.
+#
+# Comment lines are stripped first: this file's own prose names these
+# invocations, and so does the dev script's.
+dev_invocations="$(grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '(\$\{TAURI_CLI\}"?|cargo tauri)[[:space:]]+dev([[:space:]]|$)' || true)"
+if [ -z "$dev_invocations" ]; then
+  echo "  BAD $DEV_SCRIPT -> no 'tauri dev' invocation found; this check asserts nothing" >&2
   status=1
+else
+  while IFS= read -r invocation; do
+    text="${invocation#*:}"
+    if printf '%s' "$text" | grep -q '\${DESKTOP_RELEASE_FEATURES}'; then
+      echo "  ok  $DEV_SCRIPT launches with the features:$(printf '%s' "$text" | sed 's/^[[:space:]]*/ /')"
+    else
+      echo "  BAD $DEV_SCRIPT launches WITHOUT the features:$(printf '%s' "$text" | sed 's/^[[:space:]]*/ /')" >&2
+      status=1
+    fi
+  done <<< "$dev_invocations"
 fi
 
 if [ "$status" -ne 0 ]; then
