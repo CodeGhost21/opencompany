@@ -2083,11 +2083,23 @@ export function AppShell({
    * are: the SSE subscription lives here, and the banner must outlive a
    * channel switch (the warning is about the company, not one conversation).
    * `null` once dismissed or once a fresh dispatch has not re-raised it.
+   *
+   * "Outlive a channel switch" stops at the company boundary, though — see
+   * the reset effect right below, the same shape `workflowRunEvents` and
+   * `openTurns` already use for their own company-scoped state.
    */
   const [budgetProximity, setBudgetProximity] = useState<{
     message: string;
     atMillis: number;
   } | null>(null);
+  // Issue #1846 review (Codex #3864988188): company-scoped, and reset on
+  // company change for the same reason `workflowRunEvents`/`openTurns` are
+  // (see their own reset effects above) — this state has no company id on
+  // it, so switching without clearing left company A's warning rendered
+  // under company B until B dismissed it or emitted its own.
+  useEffect(() => {
+    setBudgetProximity((prev) => (prev === null ? prev : null));
+  }, [client, company]);
   /**
    * The company's people, id → label.
    *
