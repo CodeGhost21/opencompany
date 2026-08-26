@@ -85,6 +85,7 @@ use crate::company::profile_draft::{
     CopilotTurn, DraftRefusal, ProfileDraft, ProfileField, ProfileSubject, Sibling, TurnRole,
     clamp_conversation,
 };
+use crate::company::setup::clamp_description;
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{AgentOverride, CompanyRecord};
@@ -1528,10 +1529,24 @@ pub(super) async fn draft_new_profile(
         // can be told which teammate it is about, and "the one being added" is
         // what an empty id means here.
         agent_id: String::new(),
-        name: body.name,
-        role: role.to_string(),
-        description: body.description,
-        instructions: body.instructions,
+        // Every one of these four arrives from the caller, and on this route
+        // nothing else has bounded them: the teammate does not exist, so there
+        // is no stored record that already passed the field's own limit. Only
+        // the request body cap stands between a pasted document and the
+        // prompt, which is a ceiling measured in megabytes rather than in what
+        // the field can hold. Each is clamped to the bound it would have to
+        // obey to be *saved*, so a grounding loses nothing that could have
+        // become the teammate.
+        name: body.name.as_deref().map(clamp_description),
+        role: clamp_description(role),
+        description: body
+            .description
+            .as_deref()
+            .map(|text| ProfileField::Description.clamp(text)),
+        instructions: body
+            .instructions
+            .as_deref()
+            .map(|text| ProfileField::Instructions.clamp(text)),
         // Every teammate on the roster is a sibling of one that is not on it
         // yet, so nothing is filtered out — and this is exactly when the list
         // earns its keep: a mandate written for a teammate about to be added is
@@ -1556,15 +1571,6 @@ pub(super) async fn draft_new_profile(
     Ok(Json(DraftDto::from_draft(field, draft)))
 }
 
-/// Everything a draft is allowed to see about the teammate it is for.
-///
-/// Assembled here, from the record, rather than accepted from the caller. The
-/// console holds all of this already and could have sent it, and that is
-/// exactly why it must not: a grounding the caller composes is a grounding the
-/// caller can widen, and this one is deliberately narrow — this teammate, its
-/// neighbours' ids and roles, and nothing else about the company.
-///
-/// `None` when the id names nobody on the roster.
 /// The two authored fields as the console currently shows them, when it has
 /// something the record does not.
 #[derive(Debug, Default)]
@@ -1580,14 +1586,35 @@ impl InProgress {
     /// them about to write something, not an instruction to the copilot that
     /// the field is now empty. Falling back keeps the draft grounded in the
     /// last thing anyone actually wrote.
-    fn or_stored(on_screen: Option<String>, stored: Option<String>) -> Option<String> {
+    ///
+    /// The on-screen value is clamped to the bound `field` itself obeys, which
+    /// the stored one has already passed on its way in. It arrives from the
+    /// caller and nothing else has bounded it: the request body limit is the
+    /// only ceiling on the way here, and a megabyte of pasted text would go
+    /// into the prompt — and onto the bill — unread. Clamping to the field's
+    /// own bound costs a grounding nothing, because text past that bound could
+    /// never have been saved into the field anyway.
+    fn or_stored(
+        field: ProfileField,
+        on_screen: Option<String>,
+        stored: Option<String>,
+    ) -> Option<String> {
         on_screen
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty())
+            .map(|text| field.clamp(&text))
+            .filter(|text| !text.trim().is_empty())
             .or(stored)
     }
 }
 
+/// Everything a draft is allowed to see about the teammate it is for.
+///
+/// Assembled here, from the record, rather than accepted from the caller. The
+/// console holds all of this already and could have sent it, and that is
+/// exactly why it must not: a grounding the caller composes is a grounding the
+/// caller can widen, and this one is deliberately narrow — this teammate, its
+/// neighbours' ids and roles, and nothing else about the company.
+///
+/// `None` when the id names nobody on the roster.
 fn subject_for(
     record: &CompanyRecord,
     agent_id: &str,
@@ -1619,12 +1646,17 @@ fn subject_for(
         agent_id: agent_id.to_string(),
         name,
         role,
-        description: InProgress::or_stored(on_screen.description, description),
+        description: InProgress::or_stored(
+            ProfileField::Description,
+            on_screen.description,
+            description,
+        ),
         // The persona in force — the override where one is set, else the
         // blueprint seed — so a redraft improves on what the teammate actually
         // runs on rather than on what its manifest row happened to say. Unless
         // the operator is looking at something newer, which wins.
         instructions: InProgress::or_stored(
+            ProfileField::Instructions,
             on_screen.instructions,
             record.effective_instructions(agent_id),
         ),
@@ -4224,6 +4256,59 @@ agent = "claude"
             fell_back.description.as_deref(),
             Some("Sets direction and delegates."),
             "a blank box falls back to what was stored"
+        );
+    }
+
+    /// The on-screen values arrive from the caller and nothing else has bounded
+    /// them — the request body cap is the only ceiling on the way here, and it
+    /// is measured in megabytes. Left unclamped they go into every prompt of
+    /// the conversation, and onto the bill.
+    #[test]
+    fn a_pasted_document_is_cut_to_the_field_before_it_reaches_a_prompt() {
+        let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest: toml::from_str(ROSTER).unwrap(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        };
+        let pasted = "x".repeat(50_000);
+        let subject = super::subject_for(
+            &record,
+            "ceo",
+            Vec::new(),
+            super::InProgress {
+                description: Some(pasted.clone()),
+                instructions: Some(pasted),
+            },
+        )
+        .expect("the ceo is on the roster");
+        assert!(
+            subject
+                .description
+                .as_deref()
+                .expect("kept")
+                .chars()
+                .count()
+                <= crate::company::setup::MAX_DESCRIPTION + 1,
+            "a mandate is cut to the card it goes on"
+        );
+        let persona = subject.instructions.as_deref().expect("kept");
+        assert!(
+            persona.chars().count() < 50_000,
+            "a persona is cut to what a prompt can carry, not to what was pasted"
         );
     }
 }
