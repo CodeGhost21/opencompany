@@ -67,6 +67,21 @@ pub enum Silence {
     /// value was not understood, rather than silence they cannot distinguish
     /// from a working opt-out.
     Unreadable,
+    /// `OPENCOMPANY_ANALYTICS_ENDPOINT` is set to something no client could
+    /// POST to — no scheme, a scheme that is not `http`/`https`, no host, or
+    /// bytes this process cannot read.
+    ///
+    /// Silence rather than reporting, because the alternative is the failure
+    /// this whole module is built to prevent: boot prints "reporting to …",
+    /// the tracker is installed, and every batch dies in `reqwest` behind a
+    /// `debug!` nobody has enabled. An operator reading their own logs would
+    /// have no reason to look again. Naming it as a *reason* is the only thing
+    /// that turns a silent misconfiguration into one line they can act on.
+    ///
+    /// The reason is a constant and never quotes the value: an authenticated
+    /// proxy's URL is exactly where a credential lives — see
+    /// `crate::analytics::boot`.
+    UnusableEndpoint,
 }
 
 impl Silence {
@@ -77,6 +92,9 @@ impl Silence {
             Self::NotHosted => "not a hosted tenant and no explicit opt-in",
             Self::NoToken => "no project token is configured",
             Self::Unreadable => "the OPENCOMPANY_ANALYTICS value is not recognised",
+            Self::UnusableEndpoint => {
+                "the OPENCOMPANY_ANALYTICS_ENDPOINT value is not a usable http(s) URL"
+            }
         }
     }
 }
@@ -121,6 +139,10 @@ impl Decision {
 ///    self-hosted or desktop install that has said nothing sends nothing.
 /// 4. A token is required. Without one there is nowhere to report to, and
 ///    guessing is not an option — see [`TOKEN_ENV`].
+/// 5. And the endpoint has to be one a client could post to. A decision that
+///    says [`Decision::Report`] is a promise the boot line then repeats out
+///    loud, so an endpoint that cannot be sent to is silence with a reason,
+///    not reporting — see [`is_usable_endpoint`].
 pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
     // Read through `get_os`, not `get`. [`EnvSource::get`] maps a non-Unicode
     // value to `None`, which here would read as "the operator said nothing" and
@@ -163,22 +185,91 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
         return Decision::Silent(Silence::NoToken);
     };
 
+    // A non-Unicode token already fails closed on its own: `get` maps it to
+    // `None` and the check above reports `NoToken`. The endpoint is the one
+    // that needed saying out loud, twice over — see below.
+    let endpoint = match env.get_os(ENDPOINT_ENV) {
+        None => DEFAULT_ENDPOINT.to_string(),
+        // Bytes this process cannot read are not a URL it can post to, and
+        // must not fall back to `DEFAULT_ENDPOINT`: an operator who pointed
+        // this at their own proxy would then be reporting to Mixpanel
+        // instead — telemetry sent somewhere they never configured, which is
+        // worse than sending none. `get` cannot express that difference,
+        // which is why this reads through `get_os`.
+        Some(raw) => match raw.into_string() {
+            Err(_) => return Decision::Silent(Silence::UnusableEndpoint),
+            Ok(value) => match value.trim() {
+                // Blank is absent, as it is for the token and the switch.
+                "" => DEFAULT_ENDPOINT.to_string(),
+                configured if is_usable_endpoint(configured) => configured.to_string(),
+                _ => return Decision::Silent(Silence::UnusableEndpoint),
+            },
+        },
+    };
+
     Decision::Report {
-        endpoint: non_blank(env, ENDPOINT_ENV).unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+        endpoint,
         token: ProjectToken::new(token),
     }
+}
+
+/// Whether `raw` is something a client could actually POST a batch to: an
+/// absolute `http`/`https` URL with a host.
+///
+/// This is the check that stops [`resolve`] promising what the transport cannot
+/// deliver. `OPENCOMPANY_ANALYTICS_ENDPOINT=collector.internal/track` — a proxy
+/// hostname written without a scheme, which is how anyone would first write it
+/// — resolved to [`Decision::Report`]: boot said "reporting to
+/// collector.internal/track", the tracker was installed, and every send failed
+/// with `RelativeUrlWithoutBase` behind a `debug!` line. Nothing an operator
+/// would ever see said the endpoint was the problem.
+///
+/// Hand-rolled rather than parsed with a URL crate on purpose. [`resolve`] is
+/// pure and is compiled and tested in the **default** build, where no URL
+/// parser is linked — `url` arrives only with `reqwest`, and only under the
+/// `analytics` feature. Adding a dependency so that the un-gated decision could
+/// validate a string would put a parser in every build to serve the one that
+/// cannot send anything anyway.
+///
+/// It is deliberately *permissive*: it rejects the shapes `reqwest` provably
+/// cannot use and passes everything else, so the failure mode of being wrong is
+/// the old behaviour rather than a working deployment newly silenced. The
+/// endpoint redaction in `crate::analytics::boot` answers a different question —
+/// what may be *printed* — so the two are not two halves of one rule.
+fn is_usable_endpoint(raw: &str) -> bool {
+    // `reqwest` accepts only `http` and `https`; anything else fails at send,
+    // and a value with no `://` at all fails at parse.
+    let Some((scheme, rest)) = raw.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+
+    // The authority is everything before the path, query or fragment. Userinfo
+    // is stripped before the emptiness check so that `http://user:pass@/track`
+    // — a credential with nowhere to send it — is caught rather than passing on
+    // the strength of its password.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
+
+    !host.is_empty() && !host.contains(char::is_whitespace)
 }
 
 /// A configured value, trimmed, or `None` when there is nothing left of it.
 ///
 /// [`EnvSource::get`] already drops an *empty* value, but not a whitespace-only
-/// one, and the difference is not academic: a token or an endpoint mounted from
-/// a file arrives with a trailing newline more often than not. Untrimmed, a
-/// hosted tenant whose token is `"\n"` resolves to [`Decision::Report`], the
-/// boot line says "reporting to …", and every batch is refused by the collector
-/// — the failure mode #1739 added that line to prevent. A blank `ENDPOINT_ENV`
-/// is worse, because it replaces [`DEFAULT_ENDPOINT`] with a URL that cannot
-/// parse, so nothing is sent and nothing says why.
+/// one, and the difference is not academic: a token mounted from a file arrives
+/// with a trailing newline more often than not. Untrimmed, a hosted tenant whose
+/// token is `"\n"` resolves to [`Decision::Report`], the boot line says
+/// "reporting to …", and every batch is refused by the collector — the failure
+/// mode #1739 added that line to prevent.
+///
+/// The endpoint is trimmed by [`resolve`] itself rather than here, because it
+/// has to be read through [`EnvSource::get_os`] to tell an unreadable value from
+/// an absent one.
 ///
 /// The same trim-and-filter the rest of the tree applies to environment values
 /// (`src/bin/opencompany.rs`).
@@ -415,6 +506,153 @@ mod test {
         ) {
             Decision::Report { endpoint, .. } => assert_eq!(endpoint, "http://127.0.0.1:9/track"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// **A malformed endpoint is silence with a reason, not reporting.**
+    ///
+    /// `collector.internal/track` — a proxy hostname written without a scheme,
+    /// which is how anyone would first write one — used to resolve to
+    /// `Decision::Report`. Boot printed "reporting to collector.internal/track",
+    /// the tracker was installed, and every batch died inside `reqwest` behind a
+    /// `debug!` line no operator has enabled. The product said something
+    /// true-sounding and then did nothing, which is the one failure this module
+    /// exists to make impossible.
+    #[test]
+    fn a_malformed_endpoint_is_silence_rather_than_a_broken_report() {
+        for unusable in [
+            "collector.internal/track",
+            "collector.internal",
+            "/track",
+            "://collector.internal/track",
+            "ftp://collector.internal/track",
+            "file:///tmp/track",
+            "http:///track",
+            "https://",
+            "http://someone:hunter2@/track",
+            "http://collector internal/track",
+        ] {
+            let decision = resolve(
+                Deployment::HostedTenant,
+                &token_env(&[(ENDPOINT_ENV, unusable)]),
+            );
+            assert_eq!(
+                decision,
+                Decision::Silent(Silence::UnusableEndpoint),
+                "{unusable:?} must not resolve to a report that cannot be sent"
+            );
+            assert!(!decision.reports(), "{unusable:?}");
+        }
+    }
+
+    /// The reason names the variable and **never the value**: an authenticated
+    /// proxy carries its key in the very URL that was rejected, so quoting the
+    /// bad value would put a credential in the boot line of every
+    /// misconfigured tenant. Asserted case-insensitively, because a guard that
+    /// matched exact case would read a lowercased leak as clean.
+    #[test]
+    fn the_unusable_endpoint_reason_never_quotes_the_endpoint() {
+        const SECRET: &str = "NotARealCollectorKey";
+        let reason = Silence::UnusableEndpoint.as_str();
+        assert!(
+            reason.contains("OPENCOMPANY_ANALYTICS_ENDPOINT"),
+            "the reason must name the variable to act on: {reason}"
+        );
+
+        // Rejected for having no scheme, and carrying a credential while it is
+        // rejected — which is exactly the case that would leak.
+        let raw = format!("collector.internal/track?key={SECRET}");
+        assert_eq!(
+            resolve(
+                Deployment::HostedTenant,
+                &token_env(&[(ENDPOINT_ENV, raw.as_str())])
+            ),
+            Decision::Silent(Silence::UnusableEndpoint)
+        );
+        let printed = format!("{:?} {}", Silence::UnusableEndpoint, reason);
+        assert!(
+            !printed
+                .to_ascii_lowercase()
+                .contains(&SECRET.to_ascii_lowercase()),
+            "the reason leaked the endpoint credential: {printed}"
+        );
+        // The self-check: the needle really is findable in the unredacted
+        // value, in whatever case it comes back, or the guard above is vacuous.
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains(&SECRET.to_ascii_lowercase())
+                && raw
+                    .to_ascii_uppercase()
+                    .to_ascii_lowercase()
+                    .contains(&SECRET.to_ascii_lowercase()),
+            "the needle must be findable before redaction: {raw}"
+        );
+    }
+
+    /// **A non-Unicode endpoint is unusable, not absent.**
+    ///
+    /// `EnvSource::get` maps it to `None`, which fell back to
+    /// `DEFAULT_ENDPOINT` — so a tenant that pointed analytics at its own proxy
+    /// and mistyped the bytes reported to **Mixpanel** instead. Telemetry sent
+    /// somewhere the operator never configured is worse than telemetry not sent
+    /// at all, and it is the one outcome that no amount of reading the boot
+    /// line would have revealed: the line named a destination that was real.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_endpoint_does_not_silently_fall_back_to_mixpanel() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        struct NonUnicodeEndpoint;
+        impl EnvSource for NonUnicodeEndpoint {
+            fn get_os(&self, key: &str) -> Option<OsString> {
+                match key {
+                    ENDPOINT_ENV => Some(OsString::from_vec(
+                        [b"https://collector.invalid/".as_slice(), &[0xff, 0xfe]].concat(),
+                    )),
+                    TOKEN_ENV => Some(OsString::from("not-a-real-token")),
+                    _ => None,
+                }
+            }
+        }
+
+        // The premise: a value `get` cannot see at all.
+        assert_eq!(NonUnicodeEndpoint.get(ENDPOINT_ENV), None);
+        assert!(NonUnicodeEndpoint.get_os(ENDPOINT_ENV).is_some());
+
+        let decision = resolve(Deployment::HostedTenant, &NonUnicodeEndpoint);
+        assert_eq!(decision, Decision::Silent(Silence::UnusableEndpoint));
+        match &decision {
+            Decision::Report { endpoint, .. } => {
+                panic!("reported to {endpoint} — an endpoint the operator never configured")
+            }
+            Decision::Silent(_) => {}
+        }
+    }
+
+    /// The controls that keep the group above from passing by rejecting
+    /// everything: the endpoints a deployment actually uses still resolve, and
+    /// still resolve to themselves.
+    #[test]
+    fn a_usable_endpoint_still_reports_to_exactly_itself() {
+        for usable in [
+            DEFAULT_ENDPOINT,
+            "http://127.0.0.1:9/track",
+            "http://127.0.0.1:9",
+            "https://collector.internal/track",
+            "HTTPS://collector.internal/track",
+            "https://collector.internal/track?key=NotARealCollectorKey",
+            "https://someone:NotARealCollectorKey@collector.internal/track",
+            "https://[::1]:8443/track",
+            "https://collector.internal:8443/track#frag",
+        ] {
+            match resolve(
+                Deployment::HostedTenant,
+                &token_env(&[(ENDPOINT_ENV, usable)]),
+            ) {
+                Decision::Report { endpoint, .. } => assert_eq!(endpoint, usable),
+                other => panic!("{usable:?} must still report: {other:?}"),
+            }
         }
     }
 
