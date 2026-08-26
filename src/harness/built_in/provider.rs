@@ -1455,10 +1455,19 @@ pub async fn probe(decl: &InferenceDecl) -> anyhow::Result<()> {
     )
     .await?;
     let payload = send_plan(&client, &plan, decl.credential()).await?;
-    payload
-        .pointer("/choices/0/message/content")
-        .and_then(|c| c.as_str())
-        .ok_or_else(|| anyhow::anyhow!("probe response missing choices[0].message.content"))?;
+    // Route through the same content extraction the turn path uses
+    // (`model_response_from_payload`) rather than reading `content.as_str()`
+    // directly: `content` may be an array of `{type:"text",text:…}` parts
+    // rather than a bare string, and a direct `.as_str()` read treats that
+    // shape as absent. An endpoint answering with array-shaped content would
+    // then pass every real turn while this probe reported the connection
+    // broken (Codex review on #1779, comment 3864824480).
+    let content = extract_content_text(payload.pointer("/choices/0/message/content"));
+    if content.is_empty() {
+        return Err(anyhow::anyhow!(
+            "probe response missing choices[0].message.content"
+        ));
+    }
     Ok(())
 }
 
@@ -2913,6 +2922,36 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawns an in-process OpenAI-compatible stub whose `message.content` is
+    /// the given raw JSON value rather than a plain string — used to exercise
+    /// the array-of-text-parts content shape end to end.
+    async fn spawn_stub_content(content: serde_json::Value) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let content = content.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": { "role": "assistant", "content": content }
+                        }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
     /// The live-switch contract: the same `TenantProvider` instance routes turn
     /// 1 to stub A, then — after the operator flips the runtime override in the
     /// secret store — routes turn 2 to stub B, with **no rebuild** of the
@@ -3279,5 +3318,33 @@ mod tests {
             2,
             "both turns reached the stub"
         );
+    }
+
+    /// Codex review on #1779 (comment 3864824480): `model_response_from_payload`
+    /// learned to parse array-shaped `content` (`parses_content_as_array_of_text_parts`
+    /// above), but `probe` — the setup wizard's and the console's "Test" button
+    /// connectivity check — still read `content.as_str()` directly. An endpoint
+    /// answering with array-shaped content therefore passed every real turn
+    /// while its own connection probe reported the connection broken. `probe`
+    /// must route through the same `extract_content_text` the turn path uses.
+    #[tokio::test]
+    async fn probe_accepts_array_shaped_content() {
+        let url = spawn_stub_content(serde_json::json!([
+            { "type": "text", "text": "pong" }
+        ]))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        probe(&decl)
+            .await
+            .expect("array-shaped content must be recognized as a successful probe");
     }
 }
