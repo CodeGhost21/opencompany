@@ -42,10 +42,15 @@ export interface ToolGrants {
   /**
    * When a grant starts working, in the host's words.
    *
-   * Rendered rather than paraphrased: a grant lands on the company's NEXT turn,
-   * so a turn already running finishes with the belt it started with. "Make this
-   * work now" is what an operator comes here to do, so that gap is worth stating
-   * rather than leaving them to discover.
+   * Rendered rather than paraphrased, and that is load-bearing: the answer is
+   * not fixed. A company on the harness path picks the grant up on its NEXT
+   * turn; one on the hosted/sidecar/echo path has its runtime rebuilt in place
+   * and holds the tools immediately; and where neither is possible the host
+   * says **restart**, because its teammates were built with a fixed tool belt.
+   *
+   * Paraphrasing this into "takes effect on the next turn" would put the
+   * console back to asserting reach the runtime does not deliver — the whole of
+   * #1796, one layer in. Show what the host said.
    */
   takesEffect: string;
 }

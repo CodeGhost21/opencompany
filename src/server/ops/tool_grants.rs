@@ -47,15 +47,27 @@
 //! [`require_admin`](crate::server::users::admin::require_admin) and stamp who
 //! did it and when. The console renders that attribution.
 //!
-//! ## When a grant takes effect
+//! ## When a grant takes effect — and why that has three answers
 //!
-//! On the company's **next turn**. Tool belts are wired once per roster build,
-//! and `HarnessPool::ensure` rebuilds the roster when its grant fingerprint
-//! moves (`tool_grants_fingerprint`). So the write lands, the next `ensure`
-//! rebuilds, and the following turn runs with the tools — an in-flight turn
-//! finishes with the belt it started with. Since "make this integration
-//! actually work" is what an operator comes here to do, the response says so
-//! rather than leaving them to discover it: see [`ToolGrantsDto::takes_effect`].
+//! Tool belts are wired once per roster build, not read per call, so storing a
+//! grant is not the same as delivering one. Which of three things happens
+//! depends on the company's cognition path, and the response says which:
+//!
+//! - **Harness path** — `HarnessPool::ensure` rebuilds the roster when its
+//!   grant fingerprint moves (`tool_grants_fingerprint`), so the write lands and
+//!   the next turn runs with the tools. An in-flight turn finishes with the belt
+//!   it started with.
+//! - **Hosted / sidecar / echo** — there is no `ensure`. `RuntimeBuilder::build`
+//!   snapshotted the provider's grants and the hosted brain's `tool_catalog` at
+//!   construction, so [`apply_to_runtime`] rebuilds the runtime in place through
+//!   the issue-#290 seam `PUT …/inference` uses.
+//! - **Neither available** — no rebuilder wired, or the rebuild failed. The
+//!   response says **restart**, because that is the truth.
+//!
+//! The third case is the one worth being strict about. Reporting "next turn" to
+//! a company that will not pick the grant up until a restart would be this
+//! page asserting reach the runtime does not deliver — the whole of #1796,
+//! reproduced one layer inside its own fix.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -76,12 +88,28 @@ use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 use crate::server::users::admin::require_admin;
 
-/// What the console tells an operator about when a grant starts working.
+/// What the console tells an operator about when a grant starts working, on a
+/// company whose tool belts are re-resolved live.
 ///
-/// A constant rather than prose invented at the call site, so the three routes
-/// cannot describe the timing differently.
+/// A constant rather than prose invented at the call site, so the routes cannot
+/// describe the timing differently.
 pub(crate) const TAKES_EFFECT: &str =
     "on the next turn — a turn already running finishes with the tools it started with";
+
+/// The same answer for a company whose runtime had to be rebuilt to pick the
+/// grant up (see [`apply_to_runtime`]).
+pub(crate) const TAKES_EFFECT_REBUILT: &str =
+    "now — this company's runtime was rebuilt so its teammates hold the new tools";
+
+/// And the honest answer when neither is true: the grant is stored, and the
+/// belts this company is actually running were fixed when it booted.
+///
+/// Never softened into one of the two above. A grant that reports "next turn"
+/// on a runtime that will not pick it up until a restart is the same lie this
+/// whole change exists to end, one layer in — the console would be asserting
+/// reach the runtime does not deliver.
+pub(crate) const TAKES_EFFECT_RESTART: &str = "on the next restart — this company's teammates were built with a fixed tool belt \
+     and this host cannot rebuild it in place";
 
 /// Builds the tool-grant route fragment.
 pub fn router() -> Router<AppState> {
@@ -113,11 +141,21 @@ pub(crate) struct ToolGrantsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) set_at_millis: Option<u64>,
     /// When a grant starts working, in the host's words.
+    ///
+    /// Resolved per response rather than fixed, because the answer genuinely
+    /// differs by cognition path — see [`apply_to_runtime`].
     pub(crate) takes_effect: &'static str,
 }
 
 impl ToolGrantsDto {
+    /// The read shape, with the live-refresh timing (`GET`, and any write that
+    /// stored nothing). A write that had to reach the runtime reports what
+    /// actually happened via [`Self::build_with`].
     pub(crate) fn build(record: &CompanyRecord) -> Self {
+        Self::build_with(record, TAKES_EFFECT)
+    }
+
+    pub(crate) fn build_with(record: &CompanyRecord, takes_effect: &'static str) -> Self {
         let held = record.overlay_tool_grants.as_ref();
         Self {
             allow: record.effective_tool_allow(),
@@ -132,7 +170,56 @@ impl ToolGrantsDto {
             grantable: CONSOLE_GRANTABLE_NAMESPACES.to_vec(),
             set_by: held.map(|h| h.set_by.id.clone()),
             set_at_millis: held.map(|h| h.at_millis),
-            takes_effect: TAKES_EFFECT,
+            takes_effect,
+        }
+    }
+}
+
+/// Makes a stored grant **live**, and reports which of the three timings the
+/// caller actually got.
+///
+/// # Why a write route has to do anything at all
+///
+/// Tool belts are not read per call. `RuntimeBuilder::build` snapshots the
+/// provider's grant list and the hosted brain's `tool_catalog` from the
+/// manifest at construction, and only one path re-resolves them afterwards:
+/// `HarnessPool::ensure`, which rebuilds the roster when its grant fingerprint
+/// moves. That path lives behind the `openhuman` feature and serves companies
+/// on the **harness** cognition path.
+///
+/// A company on the hosted, sidecar or echo path has no `ensure`. Saving the
+/// record there leaves every status route reporting `granted: true` over belts
+/// that were fixed at boot — the connect page would once again promise reach
+/// the runtime does not deliver, which is the whole of #1796 reproduced inside
+/// its own fix.
+///
+/// So: harness companies need nothing (the fingerprint carries it). Everyone
+/// else gets an in-place rebuild through the same seam `PUT …/inference` uses
+/// for the same reason (issue #290) — and when this host has no rebuilder
+/// wired, or the rebuild fails, the response says **restart** rather than
+/// quietly claiming the next turn.
+///
+/// A failed rebuild is deliberately not an error: the grant is stored and
+/// durable either way, and the company is running exactly what
+/// `TAKES_EFFECT_RESTART` describes. Reporting that honestly is a better
+/// outcome than a 500 over a write that landed.
+async fn apply_to_runtime(state: &AppState, company: &ScopedCompany) -> &'static str {
+    if company.runtime.cognition().path == crate::ports::brain::HARNESS_PATH {
+        return TAKES_EFFECT;
+    }
+    if !state.can_rebuild_in_place() {
+        return TAKES_EFFECT_RESTART;
+    }
+    match crate::runtime::rebuild_company(state, company.id()).await {
+        Ok(_) => TAKES_EFFECT_REBUILT,
+        Err(err) => {
+            tracing::warn!(
+                company = %company.id(),
+                error = %err,
+                "[tools] the grant was stored but this company's runtime could not be rebuilt; \
+                 its teammates keep the belt they booted with until a restart"
+            );
+            TAKES_EFFECT_RESTART
         }
     }
 }
@@ -251,7 +338,8 @@ async fn add_grant(
     record.manifest.tools.allow = record.effective_tool_allow();
 
     save(&company, &record).await?;
-    Ok(Json(ToolGrantsDto::build(&record)))
+    let takes_effect = apply_to_runtime(&state, &company).await;
+    Ok(Json(ToolGrantsDto::build_with(&record, takes_effect)))
 }
 
 /// `DELETE {scope}/tools/grants` — withdraw one console grant
@@ -302,7 +390,11 @@ async fn clear_grants(
     record.manifest.tools.allow = effective_tool_allow(&seed, record.overlay_tool_grants.as_ref());
 
     save(&company, &record).await?;
-    Ok(Json(ToolGrantsDto::build(&record)))
+    // A withdrawal needs the same treatment as a grant, and arguably needs it
+    // more: a revocation the runtime has not picked up is a capability the
+    // operator believes they removed and the agents still hold.
+    let takes_effect = apply_to_runtime(&state, &company).await;
+    Ok(Json(ToolGrantsDto::build_with(&record, takes_effect)))
 }
 
 fn refusal(message: &str) -> Response {
@@ -753,14 +845,71 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
-    /// The response says when the grant starts working. "Connected but nothing
-    /// happened" is the complaint; a grant that silently waits for a restart
-    /// would be the same complaint one step later.
+    /// **A grant must not claim "next turn" on a runtime that cannot deliver it.**
+    ///
+    /// This test used to assert the opposite, and was wrong for the reason
+    /// Codex caught on #1832: the fixture boots on the echo brain — no
+    /// inference credential, and `openhuman` is absent from the default build —
+    /// so it is on a NON-harness cognition path, and `HarnessPool::ensure` (the
+    /// only live grant refresh) never runs for it. `AppState::default` wires no
+    /// rebuilder either.
+    ///
+    /// That is exactly the configuration where storing the record and reporting
+    /// the harness timing tells an operator the integration now reaches their
+    /// teammates while its belts stay as they were at boot — #1796 reproduced
+    /// one layer inside its own fix. The response must say restart.
     #[tokio::test]
-    async fn the_response_says_when_the_grant_bites() {
+    async fn a_grant_on_a_non_harness_runtime_reports_restart_not_next_turn() {
         let dir = home();
         let state = state(dir.path()).await;
-        let (_, body) = call(&state, "PUT", URI, Some(json!({"namespace": "hosting"}))).await;
+        let (status, body) = call(&state, "PUT", URI, Some(json!({"namespace": "hosting"}))).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The grant is stored and durable regardless: the timing is a statement
+        // about reach, not about whether the write landed.
+        assert_eq!(body["added"], json!(["hosting"]));
+        assert_eq!(body["allow"], json!(["*", "search", "hosting"]));
+
+        assert_eq!(
+            body["takesEffect"], TAKES_EFFECT_RESTART,
+            "an echo-brain company with no rebuilder cannot honour the next-turn promise"
+        );
+        assert_ne!(body["takesEffect"], TAKES_EFFECT);
+    }
+
+    /// A withdrawal reports the same way, and needs it more: a revocation the
+    /// runtime has not picked up is a capability the operator believes they
+    /// removed and the agents still hold.
+    #[tokio::test]
+    async fn a_withdrawal_on_a_non_harness_runtime_reports_restart_too() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        call(&state, "PUT", URI, Some(json!({"namespace": "hosting"}))).await;
+        let (status, body) = call(&state, "DELETE", URI, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["added"], json!([]));
+        assert_eq!(body["takesEffect"], TAKES_EFFECT_RESTART);
+    }
+
+    /// A plain read makes no claim about a write, so it keeps the live-refresh
+    /// wording. Only a write that had to reach a runtime reports what happened.
+    #[tokio::test]
+    async fn the_read_route_reports_the_live_timing() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (_, body) = call(&state, "GET", URI, None).await;
+        assert_eq!(body["takesEffect"], TAKES_EFFECT);
+    }
+
+    /// Storing nothing reaches no runtime, so it makes no claim about one:
+    /// granting what version control already grants keeps the read wording and
+    /// does not rebuild anything.
+    #[tokio::test]
+    async fn a_no_op_grant_makes_no_runtime_claim() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (_, body) = call(&state, "PUT", URI, Some(json!({"namespace": "search"}))).await;
+        assert_eq!(body["added"], json!([]));
         assert_eq!(body["takesEffect"], TAKES_EFFECT);
     }
 }

@@ -396,10 +396,25 @@ next rebuild a seed that already grants the namespace, the carry rule would
 correctly clear the override, and an attributed console grant would have been
 silently promoted to a manifest grant beyond the reach of `DELETE`.
 
-A grant takes effect on the company's **next turn**: belts are wired per roster
-build, and the effective grant list is fingerprinted alongside the other
-freshness axes (`tool_grants_fingerprint`), so `HarnessPool::ensure` rebuilds
-the roster in place rather than waiting for a restart. The override survives a
+When a grant takes effect has **three** answers, and the response reports which
+one the caller got. Belts are wired per roster build, not read per call, so
+storing a grant is not the same as delivering one:
+
+- **Harness path** — the effective grant list is fingerprinted alongside the
+  other freshness axes (`tool_grants_fingerprint`), so `HarnessPool::ensure`
+  rebuilds the roster and the **next turn** runs with the tools.
+- **Hosted / sidecar / echo** — there is no `ensure`, and `RuntimeBuilder::build`
+  snapshotted the provider's grants and the hosted brain's `tool_catalog` at
+  construction. The route rebuilds the runtime in place through the same
+  issue-#290 seam `PUT …/inference` uses, and reports **now**.
+- **Neither** — no rebuilder wired, or the rebuild failed. The response says
+  **restart**. A failed rebuild is not an error: the grant is stored either way,
+  and saying so is better than a 500 over a write that landed.
+
+The third case is why this is not one constant. Reporting "next turn" to a
+company that will not pick the grant up until a restart would be the console
+asserting reach the runtime does not deliver — #1796 reproduced one layer
+inside its own fix. The override survives a
 rebuild unless the seed's `[tools]` itself changed — version control wins when
 it speaks, and here that rule is sharper than it is for `[policy]`: a console
 grant outliving a seed edit would be a runtime *widening* surviving the operator
