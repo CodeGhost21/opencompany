@@ -211,3 +211,124 @@ describe("OpenRouter tier model pickers", () => {
     expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
   });
 });
+
+describe("proxy-incompatible overrides survive an unready catalog (issue #1838 follow-up)", () => {
+  it("strips a raw catalog id from the draft while the registry is still loading, before Save is clicked", async () => {
+    // Third instance of the #1838 class: the earlier fix only stripped a
+    // tier value once `modelCatalog.kind === "ready"`, so a keyless company
+    // that already has a raw `<author>/<model>` override stored (from an
+    // earlier keyed session, or from switching onto OpenRouter's own preset)
+    // kept offering it back to Save for as long as the registry request was
+    // still in flight — which, on a slow network, can be indefinitely.
+    const calls: string[] = [];
+    const puts: unknown[] = [];
+    const inference = status(
+      "openrouter",
+      { "chat-v1": "anthropic/claude-sonnet-5", "reasoning-v1": "reasoning-v1" },
+      false,
+    );
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        calls.push(path);
+        if (path.endsWith("/inference/models")) {
+          // Never resolves — the registry request is permanently in flight
+          // for the duration of this test.
+          return new Promise(() => {});
+        }
+        return inference;
+      },
+      put: async (_path: string, body: unknown) => {
+        puts.push(body);
+        return { status: inference, note: "" };
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    // Still loading, never reached "ready".
+    expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).toBeNull();
+    expect(container.querySelector("input#inference-model-chat-v1")).toHaveProperty("value", "");
+    expect(container.querySelector("input#inference-model-reasoning-v1")).toHaveProperty(
+      "value",
+      "reasoning-v1",
+    );
+
+    const button = container.querySelector('[data-testid="inference-save"]') as HTMLButtonElement;
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { models?: Record<string, string> };
+    expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
+  });
+
+  it("does not let Save persist a raw catalog id when the registry failed to load", async () => {
+    // Same class, the "or has failed" half: a failed registry fetch also
+    // never reaches `kind === "ready"`.
+    const { client, puts } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "anthropic/claude-sonnet-5", "reasoning-v1": "reasoning-v1" },
+        false,
+      ),
+      new Error("registry unreachable"),
+    );
+
+    await mount(client);
+
+    expect(container.querySelector('[data-testid="inference-model-catalog-fallback"]')).not.toBeNull();
+    expect(container.querySelector("input#inference-model-chat-v1")).toHaveProperty("value", "");
+
+    const button = container.querySelector('[data-testid="inference-save"]') as HTMLButtonElement;
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { models?: Record<string, string> };
+    expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
+  });
+
+  it("strips a raw catalog id from Remove Key's carried models when the registry fetch fails", async () => {
+    // Fourth instance: Remove Key used to fetch the registry itself to
+    // decide what to carry over, and fell back to sending the stored
+    // overrides completely unfiltered when that fetch failed — the one
+    // outcome guaranteed to break every proxied tier, on exactly the
+    // condition (registry unreachable) that triggers it.
+    const inference = status(
+      "openrouter",
+      { "chat-v1": "anthropic/claude-sonnet-5", "reasoning-v1": "reasoning-v1" },
+      true,
+    );
+    const puts: unknown[] = [];
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/inference/models")) throw new Error("registry unreachable");
+        return inference;
+      },
+      put: async (_path: string, body: unknown) => {
+        puts.push(body);
+        return { status: inference, note: "" };
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    const button = container.querySelector('[data-testid="inference-remove-key"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { key?: string; models?: Record<string, string> };
+    expect(body.key).toBe("");
+    expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
+  });
+});

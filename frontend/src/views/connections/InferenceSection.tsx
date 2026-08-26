@@ -181,6 +181,45 @@ function modelItems(models: InferenceModel[]): Record<string, string> {
 }
 
 /**
+ * Whether `value` has the shape of a raw OpenRouter registry id
+ * (`<author>/<model>`) — the form `model_for_tier` forwards to the platform
+ * proxy verbatim and the proxy rejects — as opposed to the proxy's own
+ * explicit `openrouter/<author>/<model>` passthrough form, which it accepts,
+ * or a bare tier id, which is not an override at all.
+ *
+ * Shape-based rather than catalog-membership-based on purpose (issue #1838
+ * follow-up, third and fourth instance): checking membership in the loaded
+ * catalog only answers the question once the catalog has actually loaded,
+ * and a raw `<author>/<model>` id breaks the proxy whether or not it happens
+ * to appear in whatever catalog snapshot we managed to fetch — an id the
+ * operator typed by hand that just isn't in the catalog (yet, or ever) fails
+ * the exact same way a catalog-picked one does. Keying off the shape instead
+ * means every caller gets the same, correct answer with no dependency on a
+ * network fetch having already resolved.
+ */
+function isRawCatalogId(value: string): boolean {
+  return value.includes("/") && !value.startsWith("openrouter/");
+}
+
+/**
+ * Drop tier overrides that the platform's subscription proxy would reject —
+ * the one place every "about to save under the proxy" call site funnels
+ * through, so the rule can't drift out of sync with itself between the
+ * live-edit effect, `save()`, and `removeKey()` the way three separate partial
+ * implementations of it already had (issue #1838 follow-up).
+ */
+function stripProxyIncompatible<T extends string>(
+  models: Partial<Record<T, string>>,
+): Partial<Record<T, string>> {
+  const next = {} as Partial<Record<T, string>>;
+  for (const key of Object.keys(models) as T[]) {
+    const value = models[key];
+    if (value && !isRawCatalogId(value)) next[key] = value;
+  }
+  return next;
+}
+
+/**
  * Bring-Your-Own-Key inference (issue #56). Shows the company's effective
  * provider (with a source badge + tier→model rows + a "key set" indicator), a
  * live "Test" probe, and a switch form with per-provider presets. The key input
@@ -342,7 +381,7 @@ export function InferenceSection({
     key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
 
   /**
-   * Drop a catalog-picked tier override the moment the form would save
+   * Drop a catalog-shaped tier override the moment the form would save
    * proxied (issue #1838 follow-up).
    *
    * A keyless company can type a key, pick a model from the catalog select —
@@ -351,30 +390,29 @@ export function InferenceSection({
    * and the free-text input reappears, but nothing cleared the value it
    * inherited from the select, so Save still persists that raw id as an
    * override. `model_for_tier` honours overrides verbatim on *both* paths, so
-   * the proxy receives a model namespace it rejects.
+   * the proxy receives a model namespace it rejects. The same thing happens
+   * without ever touching a key at all: switching a keyless company onto
+   * OpenRouter installs that provider's raw-id presets (`PROVIDERS.openrouter
+   * .preset.models`) up front, and Save is not disabled while the catalog is
+   * still loading or has failed.
    *
-   * Only tiers whose current value is actually present in the loaded catalog
-   * are touched — a tier id the operator typed by hand (or the proxy's own
-   * `openrouter/<author>/<model>` passthrough form) is left alone, mirroring
-   * `model_for_tier`'s "an operator's own entry is honoured verbatim"
-   * contract rather than wiping the field outright.
+   * Runs off `stripProxyIncompatible`'s shape check, not catalog membership —
+   * an earlier version of this effect only stripped a value present in the
+   * *loaded* catalog, so it did nothing while `modelCatalog.kind` was
+   * `"loading"` or `"error"`, letting a raw preset or catalog-picked id ride
+   * straight through Save during that window (issue #1838 follow-up, third
+   * instance). A tier id the operator typed by hand that is not a raw
+   * `<author>/<model>` id — a bare tier passthrough, or the proxy's own
+   * `openrouter/<author>/<model>` form — is left alone either way.
    */
   useEffect(() => {
-    if (!wouldSaveProxied || modelCatalog.kind !== "ready") return;
-    const catalogIds = new Set(modelCatalog.models.map((m) => m.id));
+    if (provider !== "openrouter" || !wouldSaveProxied) return;
     setModels((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const tier of TIERS) {
-        const value = next[tier];
-        if (value && catalogIds.has(value)) {
-          delete next[tier];
-          changed = true;
-        }
-      }
+      const next = stripProxyIncompatible(current);
+      const changed = TIERS.some((tier) => (next[tier] ?? "") !== (current[tier] ?? ""));
       return changed ? next : current;
     });
-  }, [wouldSaveProxied, modelCatalog]);
+  }, [provider, wouldSaveProxied]);
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
@@ -438,8 +476,19 @@ export function InferenceSection({
       if (provider === "managed" && !key.trim() && !status?.keyConfigured) {
         result = await revertInference(client, company);
       } else {
+        // Belt-and-suspenders alongside the live-edit effect above: that
+        // effect strips a proxy-incompatible draft value out of `models`
+        // asynchronously, after the state update that made
+        // `wouldSaveProxied` true has committed. Re-applying the same
+        // shape-based strip here means Save can never persist a raw
+        // catalog id under the proxy even in the window before that effect
+        // has run (issue #1838 follow-up).
+        const draftModels =
+          provider === "openrouter" && wouldSaveProxied
+            ? stripProxyIncompatible(models)
+            : models;
         const cleanModels = Object.fromEntries(
-          Object.entries(models)
+          Object.entries(draftModels)
             .map(([t, v]) => [t, (v ?? "").trim()])
             .filter(([, v]) => v.length > 0),
         );
@@ -491,25 +540,19 @@ export function InferenceSection({
       // an id saved while keyed survives this transition and breaks every
       // proxied call afterwards (issue #1838 follow-up).
       //
-      // Fetch the catalog fresh rather than trust the form's `modelCatalog`:
-      // that state tracks the *form's* selected provider, and Remove Key acts
-      // on `status.provider`, which the operator can have moved away from
-      // without saving — so the two can differ right when this runs. A tier
-      // id the operator typed by hand (not present in the catalog) is left
-      // alone, same as the live-edit effect: it is honoured verbatim even if
-      // it will fail, not silently rewritten.
+      // Shape-based (`stripProxyIncompatible`), not a fresh catalog fetch: an
+      // earlier version of this block fetched the registry here and, on
+      // failure, fell back to sending the stored overrides completely
+      // unfiltered — which is exactly the condition an unreachable registry
+      // produces, so the one case this fallback existed for was also the one
+      // case guaranteed to break every proxied tier (issue #1838 follow-up,
+      // fourth instance). `stripProxyIncompatible` needs nothing from the
+      // network, so there is no failure mode left to fall back from, and a
+      // tier id the operator typed by hand (not shaped like a raw catalog id)
+      // is still left alone, same as the live-edit effect.
       if (effective === "openrouter" && carriedModels) {
-        try {
-          const catalog = await listInferenceModels(client, company);
-          const catalogIds = new Set(catalog.map((m) => m.id));
-          const kept = Object.fromEntries(
-            Object.entries(carriedModels).filter(([, v]) => !catalogIds.has(v)),
-          );
-          carriedModels = Object.keys(kept).length ? kept : undefined;
-        } catch {
-          // Catalog fetch failed — fall back to sending the stored overrides
-          // verbatim rather than blocking Remove Key on an unrelated read.
-        }
+        const kept = stripProxyIncompatible(carriedModels);
+        carriedModels = Object.keys(kept).length ? (kept as Record<string, string>) : undefined;
       }
       await setInference(client, company, {
         provider: effective,
