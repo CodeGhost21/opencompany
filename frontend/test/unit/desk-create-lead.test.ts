@@ -67,6 +67,16 @@ function isLead(name: string): boolean {
   return Boolean(toggle(name).parentElement!.querySelector('[data-testid="desk-lead-badge"]'));
 }
 
+/**
+ * The numeric hierarchy position shown next to a selected non-lead teammate's
+ * "Make lead" control, or `null` if the row does not render one (unselected,
+ * or the lead itself — which wears the "Lead" badge instead).
+ */
+function position(name: string): string | null {
+  const el = toggle(name).parentElement!.querySelector('[data-testid="desk-member-position"]');
+  return el?.textContent ?? null;
+}
+
 /** The "Lead: <name>" summary line under the picker. */
 function leadSummary(): string {
   const line = Array.from(
@@ -146,6 +156,36 @@ describe("the desk creator lead picker", () => {
     expect(makeLead("Grace")).toBeTruthy();
     // ...and the summary names the current lead.
     expect(leadSummary()).toContain("Ada");
+  });
+
+  it("keeps each non-lead teammate's hierarchy position visible alongside Make lead", async () => {
+    // Regression for the Codex P2 finding on #1827: with 3+ selected, every
+    // non-lead row used to show only "Make lead", with no way to tell Grace
+    // (2nd) from Linus (3rd) — the seniority order the hint text asks the
+    // operator to build stopped being verifiable the moment a third teammate
+    // joined the selection.
+    await open(stubClient(() => Promise.reject(new Error("must not be called"))));
+
+    await act(async () => {
+      toggle("Ada").click();
+      toggle("Grace").click();
+      toggle("Linus").click();
+    });
+
+    expect(isLead("Ada")).toBe(true);
+    expect(position("Ada")).toBeNull();
+    expect(position("Grace")).toBe("2");
+    expect(position("Linus")).toBe("3");
+
+    // Promoting Linus reshuffles who is 2nd vs 3rd, not just who is lead.
+    await act(async () => {
+      makeLead("Linus")!.click();
+    });
+
+    expect(isLead("Linus")).toBe(true);
+    expect(position("Linus")).toBeNull();
+    expect(position("Ada")).toBe("2");
+    expect(position("Grace")).toBe("3");
   });
 
   it("moves the lead when a non-lead is promoted", async () => {

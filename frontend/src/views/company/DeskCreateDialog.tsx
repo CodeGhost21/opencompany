@@ -279,15 +279,23 @@ export function DeskCreateDialog({
                         Lead
                       </span>
                     ) : selected ? (
-                      <button
-                        type="button"
-                        onClick={() => makeLead(member.id)}
-                        data-testid="desk-make-lead"
-                        aria-label={`Make ${memberName} the desk lead`}
-                        className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-                      >
-                        Make lead
-                      </button>
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        <span
+                          data-testid="desk-member-position"
+                          className="text-xs text-muted-foreground"
+                        >
+                          {order + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => makeLead(member.id)}
+                          data-testid="desk-make-lead"
+                          aria-label={`Make ${memberName} the desk lead`}
+                          className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                        >
+                          Make lead
+                        </button>
+                      </span>
                     ) : null}
                   </div>
                 );
