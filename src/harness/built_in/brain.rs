@@ -122,6 +122,40 @@ pub(crate) fn spend_halt_notice(halt: &crate::harness::SpendHalt) -> String {
     )
 }
 
+/// The authored bubble's placeholder text when a turn paused for lack of
+/// inference budget/credits (issue #1846) — see the override in
+/// [`HarnessBrain::handle_operator_message`]'s caller for why this exists
+/// instead of the teammate's own words: the model call itself failed, so
+/// there is no partial answer to attribute, unlike a step-cap pause or a spend
+/// halt.
+pub(crate) const BUDGET_PAUSED_PLACEHOLDER_REPLY: &str = "(no reply — see the notice below)";
+
+/// The stable prefix every budget-pause system notice starts with (issue
+/// #1846). Kept as a named constant, not just embedded in
+/// [`budget_pause_notice`]'s format string, because the console frontend
+/// pattern-matches on it (`text.startsWith(...)`) to render this notice
+/// distinctly from an ordinary system bubble and offer an "Add credits" CTA —
+/// there is no structured wire field for a notice "kind" here (unlike
+/// `TurnStepFailure` for a tool result), so the prefix IS the contract. A
+/// drift-coupling test on the frontend side should assert against this exact
+/// string; keep the two in sync by hand until a structured field exists.
+pub(crate) const BUDGET_PAUSE_NOTICE_PREFIX: &str = "⏸ Paused — out of credits:";
+
+/// The system bubble emitted when a turn paused for lack of inference
+/// budget/credits (issue #1846) — the sibling of
+/// [`ITERATION_CAP_PAUSE_NOTICE`] and [`spend_halt_notice`], and, like both,
+/// deliberately unauthored: no teammate said this, the account ran out of
+/// money before the model ever replied.
+///
+/// Unlike either sibling, the operator's only lever here is adding credits —
+/// not "continue" (there is no checkpoint to resume) and not "raise the
+/// budget / narrow the ask" (the account itself, not a company-declared cap,
+/// is exhausted). The prefix is load-bearing: see
+/// [`BUDGET_PAUSE_NOTICE_PREFIX`].
+pub(crate) fn budget_pause_notice(pause: &crate::harness::BudgetPause) -> String {
+    format!("{BUDGET_PAUSE_NOTICE_PREFIX} {}", pause.summary)
+}
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
@@ -2949,6 +2983,21 @@ impl HarnessBrain {
                         .await?;
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
+                    // Issue #1846: unlike a step-cap pause or a spend halt —
+                    // both of which stop a turn that had already produced SOME
+                    // text — a budget pause fires on the model call itself
+                    // failing, so `turn.reply` is not a partial answer, it is
+                    // the SAME actionable "add credits" copy the sibling
+                    // notice below carries. Left as-is it would double: the
+                    // operator reads it once attributed to the teammate (who
+                    // said nothing — the call never returned) and again,
+                    // correctly, as the unauthored system notice. Overwritten
+                    // here with a short, honest placeholder so the authored
+                    // bubble never claims words the teammate did not produce,
+                    // and the full explanation lives in exactly one place.
+                    if turn.budget_paused.is_some() {
+                        operator_reply = BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string();
+                    }
 
                     // Drain what the conversation published (#445). Unconditional
                     // so nothing survives into the next turn, and only *recorded*
@@ -3152,6 +3201,28 @@ impl HarnessBrain {
                             channel: "operator".to_string(),
                             agent: None,
                             text: spend_halt_notice(halt),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    // Issue #1846: and a turn paused for lack of inference
+                    // budget/credits says so, in its own bubble, for every
+                    // reason the two blocks above give — sibling not appended,
+                    // unauthored, no steps. Mutually exclusive with a spend
+                    // halt (opposite lever: add money vs. don't ask for more
+                    // work), but not with an iteration-cap pause in principle —
+                    // in practice `classify_turn` only ever reaches the
+                    // budget-paused arm when the model call itself errored,
+                    // which cannot also have hit the iteration cap on the same
+                    // attempt.
+                    if let Some(pause) = &turn.budget_paused {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: "operator".to_string(),
+                            agent: None,
+                            text: budget_pause_notice(pause),
                             steps: Vec::new(),
                             reply_to: None,
                             mentions: Vec::new(),
@@ -9087,6 +9158,7 @@ members = ["eng1", "eng2"]
                 steps: Vec::new(),
                 hit_iteration_cap: false,
                 halted_for_spend: None,
+                budget_paused: None,
             })
         }
         async fn run_steered(
@@ -9364,6 +9436,7 @@ agent = "claude"
             steps: Vec::new(),
             hit_iteration_cap: false,
             halted_for_spend: None,
+            budget_paused: None,
         });
         assert_eq!(bubble.channel, "operator", "the destination is unchanged");
         assert_eq!(
