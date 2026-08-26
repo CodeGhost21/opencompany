@@ -704,12 +704,30 @@ describe("the cancelled-run sentence matches whether a step was actually cut off
     const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
     expect(row?.textContent).not.toContain("was stopped where it was");
     expect(row?.textContent).toContain(
-      "Every step that had started completed and was recorded before the stop took effect.",
+      "Every step recorded as started also finished and was recorded before the stop took effect",
     );
     // The approvals sentence is unconditional and must survive either branch.
     expect(row?.textContent).toContain(
       "Any approvals it had already raised are still waiting for you.",
     );
+  });
+
+  // Codex review on #1821 (thirteenth pass): `WorkflowNodeStarted` is ALSO
+  // appended best-effort (`runner.rs`'s progress collector) — the same
+  // fire-and-forget semantics the tenth-pass fix already established for
+  // `WorkflowNodeFinished`. A node whose own start silently failed to
+  // journal never appears in `startedNodes` at all, so it can never become
+  // `midFlightNode` even if it was genuinely running when the stop landed.
+  // The unconditional "every step that had started completed" therefore only
+  // speaks for the steps the record actually captured, not for every step
+  // that in fact started — this sentence must not promise the wider claim.
+  it("hedges the known-complete sentence instead of promising nothing else was cut off unseen", async () => {
+    await renderHistory(cancelledAtBoundaryRun());
+    const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
+    expect(row?.textContent).not.toContain(
+      "Every step that had started completed and was recorded before the stop took effect.",
+    );
+    expect(row?.textContent).toContain("can't rule out one being cut off unseen");
   });
 });
 
@@ -747,7 +765,7 @@ describe("the cancelled-run sentence hedges when the start trail itself is missi
     );
     const row = container.querySelector('[data-testid="workflow-run-cancelled"]');
     expect(row?.textContent).toContain(
-      "Every step that had started completed and was recorded before the stop took effect.",
+      "Every step recorded as started also finished and was recorded before the stop took effect",
     );
   });
 });

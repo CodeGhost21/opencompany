@@ -910,7 +910,20 @@ export function RunHistoryRow({
                 // claimed unconditionally that a step was cut off, which is
                 // only true when `midFlightNode` names one. Most cancels land
                 // cleanly at a boundary with nothing interrupted at all.
-                "Every step that had started completed and was recorded before the stop took effect."
+                //
+                // Codex review on #1821 (thirteenth pass): `WorkflowNodeStarted`
+                // is ALSO appended best-effort (`runner.rs`'s progress
+                // collector) — the same fire-and-forget semantics the
+                // tenth-pass fix already established for
+                // `WorkflowNodeFinished`. A node whose own start silently
+                // failed to journal never appears in `startedNodes` at all,
+                // so it can never become `midFlightNode` even if it was
+                // genuinely running when the stop landed. "Every step that
+                // had started completed" therefore only speaks for the steps
+                // the record actually captured, not for every step that in
+                // fact started — scoped the claim to what was recorded and
+                // added the hedge instead of promising the wider one.
+                "Every step recorded as started also finished and was recorded before the stop took effect — though a step whose own start silently failed to journal wouldn't appear here at all, so this can't rule out one being cut off unseen."
               : // Codex review on #1821 (ninth pass): a host predating
                 // #1010/#382 sends no `startedNodes` at all, and its own doc
                 // comment says that must read as "no start trail", never as
