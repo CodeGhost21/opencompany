@@ -43,12 +43,16 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 use crate::company::{CompanyManifest, parse_workflow};
+use crate::error::OpenCompanyError;
 use crate::harness::HarnessPool;
 use crate::harness::policy::ApprovalRequestQueue;
+use crate::ports::journal::MemoryJournalStore;
 use crate::ports::types::{
     Actor, ActorKind, ApprovalId, CompanyId, CompanyRecord, CompanySummary, LedgerEntry, Verdict,
 };
-use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
+use crate::ports::{
+    CompanyStore, Durability, JournalStore, WorkflowRun, WorkflowRunContext, WorkflowRunner,
+};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::grants::GrantScope;
 use crate::runtime::workflow_resume::workflow_node_turn_key;
@@ -224,6 +228,172 @@ async fn runtime(
     });
     rt.set_workflow_runner(runner.clone());
     (Arc::new(rt), runner)
+}
+
+/// [`runtime`]'s twin, with the run supervisor's concurrency ceiling pinned
+/// to `limit` instead of [`DEFAULT_MAX_IN_FLIGHT_RUNS`](crate::company::DEFAULT_MAX_IN_FLIGHT_RUNS)'s
+/// 8, for issue #1825's P2 capacity-refusal regression.
+///
+/// Set directly via [`CompanyRuntime::set_run_supervisor`] rather than
+/// through `[workflows].max_in_flight_runs` in the manifest: the builder only
+/// derives the supervisor from that field on the branch where it resolves a
+/// **real** inference config (`RuntimeBuilder::build`'s `configured` gate),
+/// and this fixture's model is a scripted loopback server wired in by hand
+/// afterwards, same as [`runtime`] — so the manifest route silently keeps the
+/// default-8 supervisor `CompanyRuntime::new` already carries, and a `limit`
+/// this low would never actually bind.
+async fn runtime_with_run_limit(
+    home: &std::path::Path,
+    limit: usize,
+    turns: Vec<Turn>,
+) -> (
+    Arc<crate::company::runtime::CompanyRuntime>,
+    Arc<RecordingRunner>,
+) {
+    let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_seed_dir(home.to_path_buf())
+        .build()
+        .await
+        .expect("runtime builds");
+    rt.set_run_supervisor(crate::runtime::RunSupervisor::with_limit(limit));
+
+    let (base_url, _script) = spawn_script_recording(turns).await;
+    let (mut deps, _unused) = deps(base_url, home);
+    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
+    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
+    delivery.parking = Some(super::delivery::DeliveryParking {
+        approvals: rt.approvals.clone(),
+        journal: rt.journal().clone(),
+        continuations: rt.continuations.clone(),
+        gates: rt.workflow_gates().clone(),
+        blocked_nodes: rt.blocked_nodes().clone(),
+    });
+
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record(), &deps).await.expect("roster builds");
+    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+        pool,
+        Arc::new(deps.clone()),
+    ));
+    let runner = Arc::new(RecordingRunner {
+        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
+        started: Mutex::new(Vec::new()),
+    });
+    rt.set_workflow_runner(runner.clone());
+    (Arc::new(rt), runner)
+}
+
+/// A [`JournalStore`] that suspends `append_journal` on a gate the test
+/// controls whenever the line it is about to write contains `match_substr`,
+/// wrapping an in-memory backend so every other append — and every append
+/// before the gate is armed — passes straight through.
+///
+/// Issue #1825 (P1 follow-up): this fix's whole point is that the durable
+/// `BlockedNodeDispatched` write now lands *before* the run it marks is
+/// handed to `tokio::spawn`, not after — closing the window where a crash
+/// between "the run was launched" and "the marker landed" could leave a
+/// finished (or still-running) continuation with nothing durable saying so,
+/// so a restart's `reconcile_stranded_blocked_nodes` would dispatch it a
+/// second time. Freezing exactly the marker's own append — nothing else — is
+/// what lets a test observe, deterministically rather than by racing real
+/// wall-clock timing, whether the run has been launched yet at the instant
+/// the marker write is attempted: on the fix, it cannot have been (the write
+/// happens first), so `RecordingRunner::run` must not have been entered; on
+/// the ordering this fix replaces, the run was already launched before this
+/// write was ever attempted, so — freezing this task here starves nothing
+/// else the single-threaded test runtime needs, and it drives the
+/// already-launched detached run to completion while this one waits.
+struct GatedJournalStore {
+    inner: MemoryJournalStore,
+    match_substr: &'static str,
+    armed: AtomicBool,
+    reached: Notify,
+    release: Notify,
+}
+
+impl GatedJournalStore {
+    fn new(match_substr: &'static str) -> Self {
+        Self {
+            inner: MemoryJournalStore::default(),
+            match_substr,
+            armed: AtomicBool::new(false),
+            reached: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl JournalStore for GatedJournalStore {
+    async fn append_journal(
+        &self,
+        id: &CompanyId,
+        line: &str,
+        durability: Durability,
+    ) -> crate::Result<()> {
+        if self.armed.load(Ordering::SeqCst) && line.contains(self.match_substr) {
+            self.reached.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.append_journal(id, line, durability).await
+    }
+
+    async fn read_journal(&self, id: &CompanyId) -> crate::Result<Vec<String>> {
+        self.inner.read_journal(id).await
+    }
+
+    async fn journal_imported(&self, id: &CompanyId) -> crate::Result<bool> {
+        self.inner.journal_imported(id).await
+    }
+
+    async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> crate::Result<()> {
+        self.inner.complete_import(id, lines).await
+    }
+}
+
+/// [`runtime`]'s twin, wired identically except the journal's durable sink is
+/// a [`GatedJournalStore`] the caller can later arm to freeze mid-append.
+async fn runtime_with_gated_journal_store(
+    home: &std::path::Path,
+    turns: Vec<Turn>,
+    match_substr: &'static str,
+) -> (
+    Arc<crate::company::runtime::CompanyRuntime>,
+    Arc<GatedJournalStore>,
+    Arc<RecordingRunner>,
+) {
+    let store = Arc::new(GatedJournalStore::new(match_substr));
+    let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_seed_dir(home.to_path_buf())
+        .with_journal_store(store.clone())
+        .build()
+        .await
+        .expect("runtime builds");
+
+    let (base_url, _script) = spawn_script_recording(turns).await;
+    let (mut deps, _unused) = deps(base_url, home);
+    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
+    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
+    delivery.parking = Some(super::delivery::DeliveryParking {
+        approvals: rt.approvals.clone(),
+        journal: rt.journal().clone(),
+        continuations: rt.continuations.clone(),
+        gates: rt.workflow_gates().clone(),
+        blocked_nodes: rt.blocked_nodes().clone(),
+    });
+
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record(), &deps).await.expect("roster builds");
+    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+        pool,
+        Arc::new(deps.clone()),
+    ));
+    let runner = Arc::new(RecordingRunner {
+        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
+        started: Mutex::new(Vec::new()),
+    });
+    rt.set_workflow_runner(runner.clone());
+    (Arc::new(rt), store, runner)
 }
 
 /// A [`CompanyStore`] that suspends its `load` calls on a gate the test
@@ -1184,5 +1354,194 @@ async fn reconciliation_does_not_redispatch_a_node_whose_dispatch_already_landed
         2,
         "a turn already durably marked dispatched must not be dispatched a \
          second time by reconciliation"
+    );
+}
+
+/// Issue #1825 (P1 follow-up, found by chatgpt-codex-connector): the durable
+/// `BlockedNodeDispatched` marker must land *before* the continuation it
+/// marks is handed to `tokio::spawn`, not after.
+///
+/// Before this fix, `resume_blocked_agent_node` wrote the marker only once
+/// `spawn_blocked_node_continuation` had already returned — and that
+/// function's own doc is explicit that the run it starts is detached, never
+/// awaited by its caller. So the marker raced the *entire* run rather than a
+/// moment's gap: a crash any time between the run being launched and the
+/// write landing — however long the graph took — left the same durable
+/// signature as no dispatch at all, and `reconcile_stranded_blocked_nodes`
+/// would launch a second one over an approval whose first continuation may
+/// already have finished (or still be mid-flight, having already taken real
+/// action).
+///
+/// Proven by freezing the marker's own journal append (via
+/// [`GatedJournalStore`]) and checking, at the instant the write is
+/// attempted, whether the continuation's run has been launched yet. On `main`
+/// the run was launched (and — nothing else competing for the single-threaded
+/// test runtime's one thread — has already run to completion) *before* the
+/// write was ever attempted, so `runner.started()` already reads 2 at that
+/// point. With the fix, admission happens, the write is attempted (and freezes
+/// here), and only once it lands does `spawn_admitted` exist to launch
+/// anything — so `runner.started()` must still read 1.
+#[tokio::test]
+async fn the_dispatch_marker_lands_before_the_run_is_launched_not_after() {
+    let home = seed_home();
+    let (rt, store, runner) = runtime_with_gated_journal_store(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+        "BlockedNodeDispatched",
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(runner.started(), 1);
+
+    // Arm the gate only now — the cold run's own park/stash appends (and the
+    // upcoming `ApprovalResolved`/`BlockedNodeApproved` writes) must pass
+    // through untouched; only the dispatch marker itself is frozen.
+    store.armed.store(true, Ordering::SeqCst);
+
+    let card = cards[0].clone();
+    let rt_task = Arc::clone(&rt);
+    let resolve = tokio::spawn(async move {
+        rt_task
+            .resolve_approval(&card, Verdict::Approve, operator())
+            .await
+    });
+
+    // Deterministic rendezvous: block here until the dispatch marker's own
+    // append has actually been attempted, rather than racing a fixed sleep
+    // against it.
+    store.reached.notified().await;
+
+    assert_eq!(
+        runner.started(),
+        1,
+        "the continuation's run must not exist yet the instant the dispatch marker's own \
+         write is attempted — a run already launched (and, with nothing else for this \
+         single-threaded runtime to do while the marker write is frozen, already finished) \
+         before that write was ever attempted is exactly the ordering this fix closes"
+    );
+
+    // Let the frozen write land, and the run it now precedes actually launch.
+    store.release.notify_one();
+    let result = resolve
+        .await
+        .expect("the spawned resolve task itself does not panic");
+    assert!(result.is_ok(), "the continuation dispatches: {result:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert_eq!(
+        runner.started(),
+        2,
+        "the continuation actually ran once the marker write released"
+    );
+}
+
+/// Issue #1825 (P2 follow-up, found by chatgpt-codex-connector): a blocked
+/// node's continuation refused at the concurrency ceiling must not have its
+/// recovery record thrown away.
+///
+/// `spawn_blocked_node_continuation` admits through the same
+/// `RunSupervisor::begin` every other entry point uses, so a company already
+/// at `[workflows].max_in_flight_runs` refuses a resume exactly as it refuses
+/// a fresh run — `Err(WorkflowRunLimit)`. Before this fix,
+/// `resume_blocked_agent_node`'s `Err` arm retired the stash unconditionally,
+/// on every error alike — so a capacity refusal discarded the only durable
+/// record the operator's already-given approval had, even though nothing
+/// about the approval or the graph was wrong, only that a slot was not free
+/// yet. Once the ceiling freed there was nothing left to retry from: not this
+/// decision (already resolved), not a future one (none coming), not the
+/// durable stash (retired). The approval was simply gone.
+///
+/// The refusal is reproduced by hand-occupying the company's sole
+/// concurrency slot through the same `RunSupervisor::begin` a real run would
+/// use, held open by not dropping the guard, so the continuation's own
+/// `begin` genuinely refuses rather than the test asserting on a mocked
+/// error.
+#[tokio::test]
+async fn a_capacity_refusal_keeps_the_stash_for_a_later_retry() {
+    let home = seed_home();
+    let (rt, runner) = runtime_with_run_limit(
+        home.path(),
+        1,
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // Occupy the company's sole slot — the same bookkeeping `WorkflowSpawn`
+    // performs on any other entry point's behalf — so the continuation's own
+    // admission attempt genuinely refuses.
+    let (_ctx, guard) = rt
+        .run_supervisor()
+        .begin("occupant", false)
+        .expect("the sole slot is free before this test occupies it");
+
+    let result = rt
+        .resolve_approval(&cards[0], Verdict::Approve, operator())
+        .await;
+
+    assert!(
+        matches!(result, Err(OpenCompanyError::WorkflowRunLimit { .. })),
+        "resolve_approval must propagate the continuation's capacity refusal: {result:?}"
+    );
+    assert_eq!(
+        runner.started(),
+        1,
+        "the refused continuation must not have run"
+    );
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "a capacity refusal must not retire the stash — it is the only durable record able \
+         to resume this approval once a slot frees"
+    );
+    assert!(
+        rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "the durable approval bank must also survive the refusal"
+    );
+    assert!(
+        rt.journal()
+            .blocked_node_dispatched()
+            .iter()
+            .all(|t| t != &turn),
+        "nothing was actually dispatched, so no dispatch marker must exist either"
+    );
+
+    // Free the slot and let a later boot's reconciliation pick the stash back
+    // up — the retry this fix exists to make possible.
+    drop(guard);
+    rt.reconcile_stranded_blocked_nodes().await;
+
+    assert_eq!(
+        runner.started(),
+        2,
+        "once capacity frees, reconciliation redeems the approval that survived the refusal"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "the stash is retired once the retried continuation actually runs"
     );
 }
