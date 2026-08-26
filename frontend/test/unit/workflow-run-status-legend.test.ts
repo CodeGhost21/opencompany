@@ -264,6 +264,23 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).toContain("no such step at all");
   });
 
+  // Codex review on #1821 (thirteenth pass): `WorkflowNodeFinished` is
+  // appended best-effort (`runner.rs`'s progress collector logs a failed
+  // append and lets the run proceed) — the same fire-and-forget semantics
+  // the row body's `midFlightNode` hedge (tenth pass) already accounts for.
+  // This definition still told every reader the mid-flight step's own
+  // completion "was recorded", unconditionally — true only when that node's
+  // finish append happened to succeed.
+  it("does not promise the mid-flight step's completion was recorded", async () => {
+    await renderHistory(stoppedRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).not.toContain("normally ran to completion and was recorded");
+    expect(title).toContain("completion record can go missing");
+  });
+
   // Codex review on #1821: `failureLocation`/`failedNodeOf` (`graph.ts`)
   // explicitly preserve the case where a run's `error` names no node at all —
   // a graph that would not compile, a capability that could not be built, or

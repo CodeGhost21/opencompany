@@ -93,8 +93,15 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
   // zero steps, but this definite description does not: it names a step
   // that, for that run, never existed. The trailing sentence states that
   // case rather than leaving it implied by an empty set.
+  // Codex review on #1821 (thirteenth pass): `WorkflowNodeFinished` is
+  // appended best-effort (`runner.rs`'s progress collector logs a failed
+  // append and lets the run proceed unaffected) — the row body's
+  // `midFlightNode` hedge already treats a missing finish row as inconclusive
+  // rather than as proof a step was cut off. This definition still promised
+  // the mid-flight step's own completion "was recorded", unconditionally —
+  // true only when that node's finish append happened to succeed.
   stopped:
-    "An operator stopped this run before it finished. A step that was mid-flight when the stop landed normally ran to completion and was recorded — only a step stuck waiting on an outside call is cut off where it was. A run stopped before any step began has no such step at all.",
+    "An operator stopped this run before it finished. A step that was mid-flight when the stop landed normally ran to completion — only a step stuck waiting on an outside call is cut off where it was — though its own completion record can go missing if that journal write silently failed. A run stopped before any step began has no such step at all.",
   blocked:
     "A step is waiting on you before the run can go on — usually a card sitting in Approvals, but a call that could not be queued for approval at all leaves nothing there to decide. That isn't always a workflow problem — the approvals queue itself can refuse the write, and no workflow change fixes that.",
   stranded:
