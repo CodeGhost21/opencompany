@@ -822,6 +822,17 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// to Drive), so the Drive entry for it is scoped to `/drive/` — the dedicated
 /// `drive.googleapis.com` host stays an unscoped match since it fronts nothing
 /// else. The path prefix narrows these entries to the API surface only.
+///
+/// Jira is a third shape (PR #1780 review): `api.atlassian.com` is the
+/// OAuth-3LO gateway (`/ex/jira/{cloudId}/...`), but the far more common path
+/// an agent curls by hand is the tenant's own domain,
+/// `https://<site>.atlassian.net/rest/api/3/...` — every Jira Cloud site has
+/// one, and it is what the product surfaces as "your Jira URL". The host
+/// itself is per-tenant, not fixed, so the table entry is the shared parent
+/// `atlassian.net`: [`host_is`]'s suffix match catches any `<site>.` in front
+/// of it. Scoped to `/rest/api/` because the same tenant host also serves the
+/// ordinary Jira web UI (browsing issues, dashboards), which needs no
+/// connection and has no Composio equivalent.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, Option<&'static str>)] {
     match toolkit {
         "github" => &[("api.github.com", None)],
@@ -836,7 +847,10 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, Option<&'static 
         "linear" => &[("api.linear.app", None)],
         "hubspot" => &[("api.hubapi.com", None)],
         "stripe" => &[("api.stripe.com", None)],
-        "jira" => &[("api.atlassian.com", None)],
+        "jira" => &[
+            ("api.atlassian.com", None),
+            ("atlassian.net", Some("/rest/api/")),
+        ],
         "discord" => &[
             ("discord.com", Some("/api/")),
             ("discordapp.com", Some("/api/")),
@@ -1547,6 +1561,42 @@ mod tests {
             web_call_deflection(&connected, "https://drive.googleapis.com/drive/v3/files")
                 .is_some(),
             "the dedicated Drive host stays deflected unscoped"
+        );
+    }
+
+    /// PR #1780 review: `api.atlassian.com` only covers the OAuth-3LO gateway.
+    /// The Jira REST API an agent plausibly curls by hand lives on the
+    /// tenant's own domain, `<site>.atlassian.net/rest/api/...` — before the
+    /// fix that host was not in the table at all, so this request passed
+    /// straight through with no credential instead of being deflected to
+    /// Composio. The same tenant host also serves the ordinary Jira web UI,
+    /// so the match must stay scoped to `/rest/api/`.
+    #[test]
+    fn jira_deflection_covers_the_tenant_specific_atlassian_net_host() {
+        let connected = vec!["jira".to_string()];
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://my-company.atlassian.net/rest/api/3/issue/PROJ-1"
+            )
+            .is_some(),
+            "a tenant's Jira Cloud REST API call must be deflected"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://my-company.atlassian.net/jira/software/projects/PROJ/boards/1"
+            )
+            .is_none(),
+            "the tenant's public Jira web UI outside /rest/api/ must pass through"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://api.atlassian.com/ex/jira/some-cloud-id/rest/api/3/issue/PROJ-1"
+            )
+            .is_some(),
+            "the OAuth-3LO gateway host stays deflected unscoped"
         );
     }
 }
