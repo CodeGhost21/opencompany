@@ -350,6 +350,11 @@ async fn provision(
         Ok(status) => status,
         Err(err) => return ApiError(err).into_response(),
     };
+    // Issue #1739: on a host provisioned into an empty registry, boot had no
+    // runtime to read cognition from and the analytics envelope recorded the
+    // default descriptor (`custom`/`unknown`). Now there is one, so relabel it
+    // — otherwise every event this tenant ever sends is mislabeled.
+    state.analytics().observe_cognition(runtime.cognition());
     state
         .registry()
         .insert(id.clone(), std::sync::Arc::new(runtime));

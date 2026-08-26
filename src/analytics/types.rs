@@ -458,6 +458,31 @@ impl Envelope {
         }
     }
 
+    /// Re-labels the cognition path this host is on.
+    ///
+    /// The envelope is built at boot, and at boot the answer can be wrong in two
+    /// ways that both persist for the life of the process. A hosted host that
+    /// starts with an empty registry and is provisioned through
+    /// `server::provision` afterwards had no runtime to read, so it recorded the
+    /// default descriptor — `custom`/`unknown` — and kept it. And a company that
+    /// configures inference for the first time is *rebuilt in place* (issue
+    /// #290), which moves it from `echo` to `harness` under an envelope that
+    /// still says `echo`.
+    ///
+    /// Most recent observation wins rather than first: every company on a host
+    /// shares its brain mode, so this is one process-wide fact, and the latest
+    /// reading of it is the true one. Events already sent are not revised —
+    /// they were right when they were sent.
+    ///
+    /// Still nothing but `&'static str`: [`Cognition`]'s labels are build facts
+    /// and the provider goes through [`provider_slug`], so this cannot widen
+    /// what a payload may carry.
+    pub fn set_cognition(&mut self, cognition: Cognition) {
+        self.cognition_path = cognition.path;
+        self.cognition_provider = provider_slug(cognition.provider);
+        self.cognition_metering = metering_slug(cognition.metering);
+    }
+
     /// The envelope as super-properties.
     pub fn props(&self) -> Vec<Prop> {
         vec![

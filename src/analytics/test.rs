@@ -359,6 +359,84 @@ async fn a_deferred_tracker_holds_before_install_and_forwards_after() {
     assert_eq!(recorder.events().len(), 4);
 }
 
+/// **A host relabels its cognition when boot's answer stops being true.**
+///
+/// Boot reads the first registered runtime, so a hosted host provisioned into an
+/// empty registry recorded `custom`/`unknown` and kept it for the life of the
+/// process, and a company rebuilt in place after its first inference config
+/// moved from `echo` to `harness` under an envelope that still said `echo`.
+#[test]
+fn an_envelope_relabels_its_cognition() {
+    let mut envelope = Envelope::new(
+        OpaqueId::instance("0123456789abcdef0123456789abcdef"),
+        Deployment::HostedTenant,
+        Cognition::default(),
+    );
+    let event = Event::InstanceStarted {
+        companies: 0,
+        storage: "fs",
+        setup_complete: false,
+    };
+
+    // The premise: an unprovisioned host really does report the default.
+    let before = payload(&envelope, &event);
+    assert_eq!(before["properties"]["cognition_path"], "custom");
+    assert_eq!(before["properties"]["cognition_provider"], "unknown");
+
+    envelope.set_cognition(Cognition {
+        path: "harness",
+        provider: "openrouter",
+        metering: UsageMetering::PerTurn,
+    });
+
+    let after = payload(&envelope, &event);
+    assert_eq!(after["properties"]["cognition_path"], "harness");
+    assert_eq!(after["properties"]["cognition_provider"], "openrouter");
+    assert_eq!(after["properties"]["cognition_metering"], "per-turn");
+}
+
+/// And a relabel cannot widen what a payload may say: an unrecognised provider
+/// folds to `other` on this path exactly as it does everywhere else.
+#[test]
+fn a_relabelled_cognition_still_goes_through_the_closed_vocabulary() {
+    let mut envelope = envelope();
+    envelope.set_cognition(Cognition {
+        path: "harness",
+        provider: "AcmeCorp Holdings",
+        metering: UsageMetering::PerTurn,
+    });
+    let rendered = payload(
+        &envelope,
+        &Event::InstanceStarted {
+            companies: 1,
+            storage: "fs",
+            setup_complete: true,
+        },
+    )
+    .to_string()
+    .to_ascii_lowercase();
+    assert!(!rendered.contains("acmecorp"), "{rendered}");
+    assert!(rendered.contains("other"), "{rendered}");
+}
+
+/// The port carries the observation through the deferred handle, which is how
+/// it reaches the transport from `server::provision` and `runtime::rebuild`.
+#[tokio::test]
+async fn a_deferred_tracker_forwards_a_cognition_observation() {
+    let cognition = Cognition {
+        path: "harness",
+        provider: "openrouter",
+        metering: UsageMetering::PerTurn,
+    };
+    let deferred = DeferredTracker::new();
+    let recorder = std::sync::Arc::new(RecordingTracker::new());
+    assert!(deferred.install(recorder.clone()));
+
+    assert_eq!(recorder.observed_cognition(), None);
+    deferred.observe_cognition(cognition);
+    assert_eq!(recorder.observed_cognition(), Some(cognition));
+}
+
 /// The held buffer is bounded. A handle nobody ever installs — every embedder
 /// that wires no analytics — must not grow without limit, so the oldest are
 /// dropped rather than the process.

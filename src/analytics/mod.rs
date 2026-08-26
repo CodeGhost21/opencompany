@@ -85,6 +85,16 @@ pub trait Tracker: Send + Sync {
     /// flush that could fail would be a flush someone has to handle, at the one
     /// moment when there is nothing sensible to do about it.
     async fn flush(&self);
+
+    /// Tells the tracker what cognition path this host turned out to be on, for
+    /// the two cases where boot's answer stops being true: a hosted host
+    /// provisioned into an empty registry (`server::provision`), and a company
+    /// rebuilt in place after its first inference config (`runtime::rebuild`,
+    /// issue #290), which moves it from `echo` to `harness`.
+    ///
+    /// A default no-op, so a tracker that carries no envelope — and every
+    /// embedder that implements this port — is unaffected.
+    fn observe_cognition(&self, _cognition: crate::ports::brain::Cognition) {}
 }
 
 /// The tracker that does nothing. **The default in every build**, and the only
@@ -113,6 +123,7 @@ pub fn null_tracker() -> Arc<dyn Tracker> {
 pub struct RecordingTracker {
     events: Mutex<Vec<Event>>,
     flushes: Mutex<usize>,
+    cognition: Mutex<Option<crate::ports::brain::Cognition>>,
 }
 
 impl RecordingTracker {
@@ -130,6 +141,11 @@ impl RecordingTracker {
     pub fn flushes(&self) -> usize {
         *self.flushes.lock().expect("recording tracker")
     }
+
+    /// The last cognition observed, if any.
+    pub fn observed_cognition(&self) -> Option<crate::ports::brain::Cognition> {
+        *self.cognition.lock().expect("recording tracker")
+    }
 }
 
 #[async_trait]
@@ -140,6 +156,10 @@ impl Tracker for RecordingTracker {
 
     async fn flush(&self) {
         *self.flushes.lock().expect("recording tracker") += 1;
+    }
+
+    fn observe_cognition(&self, cognition: crate::ports::brain::Cognition) {
+        *self.cognition.lock().expect("recording tracker") = Some(cognition);
     }
 }
 
@@ -259,6 +279,15 @@ impl Tracker for DeferredTracker {
     async fn flush(&self) {
         if let Some(inner) = self.inner.get() {
             inner.flush().await;
+        }
+    }
+
+    /// Forwarded, not held. An observation before installation is redundant:
+    /// `boot::install` reads the registry itself at the moment it builds the
+    /// envelope, so the tracker starts with the newest answer anyway.
+    fn observe_cognition(&self, cognition: crate::ports::brain::Cognition) {
+        if let Some(inner) = self.inner.get() {
+            inner.observe_cognition(cognition);
         }
     }
 }

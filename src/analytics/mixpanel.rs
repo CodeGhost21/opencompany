@@ -89,7 +89,10 @@ mod http {
         client: reqwest::Client,
         endpoint: String,
         token: ProjectToken,
-        envelope: Envelope,
+        /// Behind a lock because its cognition labels are re-read after boot
+        /// — see [`Envelope::set_cognition`]. Only ever held to render one
+        /// payload or to relabel, never across an await.
+        envelope: std::sync::RwLock<Envelope>,
         buffer: Mutex<Vec<serde_json::Value>>,
         /// Held for the whole of one `send_batch`, drain **and** request.
         ///
@@ -115,7 +118,7 @@ mod http {
                     .unwrap_or_default(),
                 endpoint: endpoint.to_string(),
                 token: token.clone(),
-                envelope,
+                envelope: std::sync::RwLock::new(envelope),
                 buffer: Mutex::new(Vec::new()),
                 sending: tokio::sync::Mutex::new(()),
                 stop: tokio::sync::Notify::new(),
@@ -221,7 +224,10 @@ mod http {
     #[async_trait]
     impl Tracker for HttpMixpanelTracker {
         fn track(&self, event: Event) {
-            let body = payload(&self.inner.envelope, &event);
+            let body = {
+                let envelope = self.inner.envelope.read().expect("analytics envelope");
+                payload(&envelope, &event)
+            };
             let mut buffer = self.inner.buffer.lock().expect("analytics buffer");
             if buffer.len() >= MAX_BUFFERED {
                 buffer.remove(0);
@@ -234,6 +240,14 @@ mod http {
             // left, so a shutdown overlapping the 30-second loop does not
             // return while the previous batch is still on the wire.
             self.inner.send_batch().await;
+        }
+
+        fn observe_cognition(&self, cognition: crate::ports::brain::Cognition) {
+            self.inner
+                .envelope
+                .write()
+                .expect("analytics envelope")
+                .set_cognition(cognition);
         }
     }
 }
