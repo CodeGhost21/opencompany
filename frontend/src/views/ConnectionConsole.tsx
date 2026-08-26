@@ -28,6 +28,7 @@ import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { useHosts } from "@/connections/HostsContext";
 import {
   adoptSession,
+  clearDefaultCompany,
   probe,
   retargetCompanyUrlParam,
   retargetDefaultCompany,
@@ -277,6 +278,10 @@ export function ConnectionConsole({
       client={client}
       request={createRequest}
       onClose={(archivedDuringReset) => {
+        // Read before `setCreateRequest(null)` clears it — the id this
+        // reset was archiving, needed below to know whether it is what the
+        // connection is still scoped to.
+        const archivedId = createRequest?.kind === "reset" ? createRequest.company : null;
         setCreateRequest(null);
         // A reset's archive leg landed before the operator backed out of the
         // rest of it (cancelled, or gave up retrying a failed create). The
@@ -286,7 +291,22 @@ export function ConnectionConsole({
         // `backToPicker` already uses so the picker drops the archived card
         // and the console leaves a shell that can no longer be trusted
         // (codex review on #1828, PR comment 3863028405).
-        if (archivedDuringReset) backToPicker();
+        if (archivedDuringReset) {
+          // The in-memory roster refresh above does not reach the
+          // *persisted* bootstrap sources: an explicit-company connection's
+          // profile, and any `?company=` link, still name the id this just
+          // archived. There is no replacement to retarget to — unlike
+          // `onCompanyCreated` — so clear both instead of moving them. Left
+          // alone, the next reload takes the explicit-company boot branch
+          // straight into an id that no longer exists and lands on a
+          // connection error rather than back in the picker (codex review on
+          // #1828, PR comment 3864885215).
+          if (archivedId && connection?.defaultCompany === archivedId) {
+            clearDefaultCompany(connectionId);
+            retargetCompanyUrlParam(archivedId, null);
+          }
+          backToPicker();
+        }
       }}
       onCreated={onCompanyCreated}
     />
