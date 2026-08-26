@@ -165,7 +165,7 @@ are refused with a `400` when the workflow is written, not only when it runs:
 
 | Destination | Refused when | Checked in |
 | --- | --- | --- |
-| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker, and which never includes `operator` | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
+| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker. Desk channels and enabled OpenHuman-provider manifest channels, plus the always-present `operator` channel (issue #1757) — now a durable, journal-backed destination, so the console offers it like any other rather than excluding it | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
 | `email` | this company's `[tools].allow` does not grant `email`, which delivery answers with `Denied` / `EmailNotGranted` before it even looks for a mailbox | `validate_draft_against_record` in `src/company/workflow_create.rs`, beside the `tool_call` grant gate — so the orchestrator's `create_workflow` tool is held to it too |
 
 The `channel` rule lived on the two write routes until issue #1191, which is
