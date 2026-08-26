@@ -15,6 +15,12 @@ import type { SignIn } from "@/api/auth";
 import { ApiError, type CompanyStatus } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { CompanyPicker } from "@/components/company-picker";
+import {
+  CREATE_UNAVAILABLE_NOTE,
+  CreateCompanyDialog,
+  type CreateCompanyRequest,
+  canCreateCompanies,
+} from "@/components/create-company-dialog";
 import { ConsoleChrome } from "@/components/host-switcher";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -196,6 +202,45 @@ export function ConnectionConsole({
       .catch((err: unknown) => setPhase(connectionError(client, err, null)));
   }, [client]);
 
+  // The create/reset dialog's open request (issue #1807). `null` is closed.
+  // Owned here because this is the one place that holds the picker/console phase
+  // machine and `switchCompany` — the fresh company has to be entered, and on a
+  // reset the operator's archived company has to be left, both of which are this
+  // component's job.
+  const [createRequest, setCreateRequest] = useState<CreateCompanyRequest | null>(null);
+  const canCreate = canCreateCompanies(client);
+
+  // Whichever companies the current phase knows about, so a create can drop the
+  // operator into the new one alongside the rest.
+  const knownCompanies =
+    phase.kind === "console" || phase.kind === "picker" ? phase.companies : [];
+
+  const onCompanyCreated = useCallback(
+    (status: CompanyStatus) => {
+      // On a reset the dialog has already archived this id; drop it from the
+      // list it hands `switchCompany` so the operator doesn't land back on a
+      // company that is now gone.
+      const archived =
+        createRequest?.kind === "reset" ? createRequest.company : undefined;
+      setCreateRequest(null);
+      const next = [
+        ...knownCompanies.filter((c) => c.id !== status.id && c.id !== archived),
+        status,
+      ];
+      void switchCompany(status.id, next);
+    },
+    [createRequest, knownCompanies, switchCompany],
+  );
+
+  const createDialog = (
+    <CreateCompanyDialog
+      client={client}
+      request={createRequest}
+      onClose={() => setCreateRequest(null)}
+      onCreated={onCompanyCreated}
+    />
+  );
+
   const consoleCompany = phase.kind === "console" ? phase.company : null;
   const scope = useMemo(
     () => ({ connection: connectionId, company: consoleCompany }),
@@ -318,10 +363,30 @@ export function ConnectionConsole({
                 <span className="font-mono text-xs">opencompany serve --company &lt;dir&gt;</span>.
               </AlertDescription>
             </Alert>
-            <Button className="w-full" onClick={() => setPhase({ kind: "setup" })}>
+            {/* A fully-archived host lands here. Offer New company so it isn't a
+                dead end — but only when this console can actually provision;
+                otherwise say why and leave setup as the way forward. */}
+            {canCreate && (
+              <Button
+                className="w-full"
+                onClick={() => setCreateRequest({ kind: "create" })}
+                data-testid="no-company-new"
+              >
+                New company
+              </Button>
+            )}
+            <Button
+              variant={canCreate ? "outline" : "default"}
+              className="w-full"
+              onClick={() => setPhase({ kind: "setup" })}
+            >
               Open setup
             </Button>
+            {!canCreate && (
+              <p className="text-2xs text-muted-foreground">{CREATE_UNAVAILABLE_NOTE}</p>
+            )}
           </div>
+          {createDialog}
         </FullScreen>
       );
 
@@ -331,7 +396,11 @@ export function ConnectionConsole({
           <CompanyPicker
             companies={phase.companies}
             onPick={(id) => void switchCompany(id, phase.companies)}
+            onCreate={() => setCreateRequest({ kind: "create" })}
+            onReset={(c) => setCreateRequest({ kind: "reset", company: c.id, name: c.name })}
+            canCreate={canCreate}
           />
+          {createDialog}
         </ConsoleChrome>
       );
 
@@ -352,7 +421,12 @@ export function ConnectionConsole({
             companies={phase.companies}
             onSwitchCompany={(id) => void switchCompany(id, phase.companies)}
             onBackToPicker={phase.canGoBack ? backToPicker : undefined}
+            onCreateCompany={() => setCreateRequest({ kind: "create" })}
+            onResetCompany={(id, name) =>
+              setCreateRequest({ kind: "reset", company: id, name })
+            }
           />
+          {createDialog}
         </ConnectionScopeProvider>
       );
   }
