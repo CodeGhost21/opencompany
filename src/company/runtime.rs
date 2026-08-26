@@ -1997,33 +1997,24 @@ impl CompanyRuntime {
         };
         match crate::runtime::workflow_resume::spawn_blocked_node_continuation(
             self,
+            turn,
             &stashed.workflow_id,
             stashed.input,
         )
         .await
         {
             Ok(()) => {
-                // Issue #1825: bank that the dispatch happened BEFORE retiring
-                // the stash below, whose own durable write is best-effort. If
-                // that write fails, `blocked_stashes` and
-                // `blocked_node_approvals` both survive a restart looking
-                // exactly as they would if this spawn had never run at all —
-                // this record is the fact that lets
-                // `reconcile_stranded_blocked_nodes` tell the difference and
-                // not re-spawn a continuation that already executed.
-                if let Err(error) = self.journal.record_blocked_node_dispatched(turn).await {
-                    tracing::warn!(
-                        company = %self.id,
-                        %turn,
-                        %error,
-                        "[approval] a blocked node's dispatch could not be durably banked; a \
-                         restart before its release is recorded may now re-dispatch this run"
-                    );
-                }
-                // Only now — spawn has actually taken hold — is the stash
-                // truly spent. Retiring it here rather than up front is what
-                // lets a crash mid-spawn rehydrate the very stash it needs to
-                // retry from, instead of finding both halves already gone.
+                // Issue #1825: `spawn_blocked_node_continuation` itself banks
+                // `BlockedNodeDispatched` now, between admitting the run and
+                // launching its detached task — see that function's doc for
+                // why the marker moved off this side of the call. By the time
+                // `Ok(())` reaches here the dispatch is already durable (or
+                // the write already failed and warned); nothing left to do on
+                // that front. Only now — spawn has actually taken hold — is
+                // the stash truly spent. Retiring it here rather than up
+                // front is what lets a crash mid-spawn rehydrate the very
+                // stash it needs to retry from, instead of finding both
+                // halves already gone.
                 self.retire_blocked_stash(turn).await;
                 Ok(CycleRunner::new(self).already_resolved_report())
             }
@@ -2035,19 +2026,69 @@ impl CompanyRuntime {
                     "[approval] the workflow run released by a blocked node's approval could \
                      not be continued"
                 );
-                self.announce_to_operator(&format!(
-                    "That workflow step's approval is in, but the run could not be restarted: \
-                     {error}. Nothing else is waiting on you — re-run the workflow to pick it \
-                     back up."
-                ))
-                .await;
-                // A handled, in-process failure (as opposed to a crash) — the
-                // operator has already been told to re-run manually, so the
-                // stash is spent exactly as it was on `main`.
-                self.retire_blocked_stash(turn).await;
+                // Issue #1825 (P2 follow-up): a refusal at the concurrency
+                // ceiling (or, per `spawn_blocked_node_continuation`, any
+                // other failure reached before `RunSupervisor::begin` even
+                // ran, e.g. a transient store read) means nothing was
+                // admitted and nothing was marked dispatched — the stash and
+                // its approval are exactly as durably recoverable as they
+                // were before this attempt. Retiring them here would discard
+                // an approval with real durable state still able to resume
+                // it, leaving nothing to redeem it once capacity frees up.
+                // Keep it stashed and approved so a later boot's
+                // `reconcile_stranded_blocked_nodes` finds it and tries
+                // again, exactly as if this attempt had never run.
+                if Self::is_retryable_dispatch_failure(&error) {
+                    self.announce_to_operator(&format!(
+                        "That workflow step's approval is in, but the run could not start \
+                         right now: {error}. The approval stays recorded and this host will \
+                         retry it automatically."
+                    ))
+                    .await;
+                } else {
+                    self.announce_to_operator(&format!(
+                        "That workflow step's approval is in, but the run could not be \
+                         restarted: {error}. Nothing else is waiting on you — re-run the \
+                         workflow to pick it back up."
+                    ))
+                    .await;
+                    // A handled, permanent, in-process failure (as opposed to
+                    // a crash, and as opposed to a retryable refusal above) —
+                    // the operator has already been told to re-run manually,
+                    // so the stash is spent exactly as it was on `main`.
+                    self.retire_blocked_stash(turn).await;
+                }
                 Err(error)
             }
         }
+    }
+
+    /// Whether a [`spawn_blocked_node_continuation`](crate::runtime::workflow_resume::spawn_blocked_node_continuation)
+    /// failure means nothing was admitted, so the stash it failed to dispatch
+    /// is still worth keeping for a later attempt (issue #1825, P2 follow-up).
+    ///
+    /// [`OpenCompanyError::WorkflowRunLimit`] is the reconciliation-specific
+    /// case the finding names directly: the boot reconciler can rehydrate
+    /// more approved stashes than `[workflows].max_in_flight_runs` admits at
+    /// once, and every one past the ceiling must survive to be retried once
+    /// capacity frees up rather than being discarded on the first refusal.
+    /// [`OpenCompanyError::Store`] and [`OpenCompanyError::StoreIo`] are the
+    /// other case the finding names — `spawn_blocked_node_continuation`'s
+    /// `store().load(...)` for overlay workflows can fail on a host hiccup
+    /// with nothing wrong with the approval or the graph it names.
+    ///
+    /// Every other variant reaching this call site — `CompanyNotFound` (the
+    /// graph was deleted) or `InvalidRequest` (no workflow runner wired) — is
+    /// a fact about the company that a retry cannot change, so those stay
+    /// permanent: retire the stash and tell the operator to re-run by hand,
+    /// exactly as `main` already does for them.
+    fn is_retryable_dispatch_failure(error: &OpenCompanyError) -> bool {
+        matches!(
+            error,
+            OpenCompanyError::WorkflowRunLimit { .. }
+                | OpenCompanyError::Store(_)
+                | OpenCompanyError::StoreIo { .. }
+        )
     }
 
     /// Retires a blocked-node stash — the in-memory fast path and the durable

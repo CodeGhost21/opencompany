@@ -1063,8 +1063,28 @@ async fn spawn_continuation(
 /// Propagated, on [`spawn_continuation`]'s terms: the approval is already
 /// committed, so a graph that has since been deleted or a build with no workflow
 /// execution has to reach the operator at click time, not vanish.
+///
+/// # Marking the dispatch (issue #1825, P1 follow-up)
+///
+/// `turn` is threaded in so the durable
+/// [`BlockedNodeDispatched`](crate::runtime::journal::JournalRecord::BlockedNodeDispatched)
+/// marker can be banked **from inside this function**, between
+/// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) admitting the
+/// run and [`WorkflowSpawn::spawn_admitted`] actually launching its detached
+/// task — not, as the marker's first cut had it, after this whole function
+/// returns to `resume_blocked_agent_node`. That ordering left the marker
+/// racing the *entire* detached run: `spawn`'s own doc is explicit that the
+/// caller does not await the task it launches, so a crash any time between
+/// launch and the write landing — however long the graph took to run — looked
+/// identical to a strand and could re-dispatch a continuation that had
+/// already finished. `begin` and the write it gates are both on this
+/// function's own stack with no detached task between them yet, so the same
+/// crash window now spans only the synchronous handful of instructions
+/// between the write's `.await` returning and `spawn_admitted` being called —
+/// no further `.await` sits in between for anything to preempt.
 pub async fn spawn_blocked_node_continuation(
     runtime: &CompanyRuntime,
+    turn: &str,
     workflow_id: &str,
     input: Value,
 ) -> Result<()> {
@@ -1087,11 +1107,29 @@ pub async fn spawn_blocked_node_continuation(
                  exists)"
             ))
         })?;
-    // Issue #542: a resumed run is always real (`false`). Issue #401: `spawn`
-    // refuses at the concurrency ceiling; propagate it so the caller surfaces
-    // the same refusal rather than losing the run silently.
-    let (run_id, _handle) =
-        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false)?;
+    // Issue #401: `begin` refuses at the concurrency ceiling; propagate it so
+    // the caller surfaces the same refusal rather than losing the run
+    // silently. Deliberately split from `spawn_admitted` below (mirroring the
+    // cron scheduler's own begin/claim ordering, issue #661) rather than
+    // calling the combined `WorkflowSpawn::spawn` — admission has to land
+    // (and can still cleanly fail) *before* the dispatch marker is written,
+    // so a refusal here writes no marker for a run that never started.
+    let ws = WorkflowSpawn::new(runtime, runner);
+    let (ctx, guard) = runtime.run_supervisor().begin(&workflow.id, false)?;
+    if let Err(error) = runtime.journal.record_blocked_node_dispatched(turn).await {
+        tracing::warn!(
+            company = %runtime.id(),
+            %turn,
+            %error,
+            "[approval] a blocked node's dispatch could not be durably banked before its run \
+             was launched; a restart in the instant between this failure and the launch may \
+             still re-dispatch this run"
+        );
+    }
+    // Issue #542: a resumed run is always real (`false`). Nothing here can
+    // fail — `begin`'s ceiling check already ran — so the task exists the
+    // moment this returns, immediately after the write above.
+    let (run_id, _handle) = ws.spawn_admitted(ctx, guard, workflow, input, false);
     tracing::info!(
         company = %runtime.id(),
         workflow = %workflow_id,

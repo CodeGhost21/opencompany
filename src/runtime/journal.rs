@@ -374,23 +374,38 @@ enum JournalRecord {
         /// The turn key whose node had at least one call approved.
         turn: String,
     },
-    /// A blocked agent node's continuation has actually been spawned once
-    /// (issue #1825), written the moment
-    /// [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)'s
-    /// spawn attempt succeeds and **before** it retires the stash via
-    /// [`BlockedNodeReleased`](Self::BlockedNodeReleased).
+    /// A blocked agent node's continuation is about to be launched (issue
+    /// #1825), written by
+    /// [`spawn_blocked_node_continuation`](crate::runtime::workflow_resume::spawn_blocked_node_continuation)
+    /// itself, immediately after the run is admitted
+    /// ([`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin)) and
+    /// immediately before its detached task is actually launched — and,
+    /// either way, well before
+    /// [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)
+    /// retires the stash via [`BlockedNodeReleased`](Self::BlockedNodeReleased).
     ///
     /// That retirement is the pair of facts (`blocked_stashes` and
     /// `blocked_node_approvals`) that would otherwise tell a restart "this
     /// stash is ready to dispatch" — exactly as true after a real dispatch
     /// whose release-write failed as it is before any dispatch at all. Without
-    /// a marker recorded strictly on the success side of the spawn call,
+    /// a marker recorded on the success side of admission,
     /// `reconcile_stranded_blocked_nodes` cannot distinguish the two and would
     /// re-spawn a continuation that already ran, potentially repeating token
     /// spend or unprotected upstream work a second time. This record is that
-    /// marker: it can only ever be written after a spawn has genuinely taken
-    /// hold, so — unlike `BlockedNodeApproved` — it carries no risk of banking
-    /// a dispatch that never happened.
+    /// marker.
+    ///
+    /// **Ordering, precisely.** The write sits between admission and launch
+    /// rather than after the whole spawn call returns (as the first cut of
+    /// this fix had it) because the launched task is detached — its caller
+    /// never awaits it — so a marker written only after the *call* returns
+    /// races the entire run, however long it takes, not a moment's gap. Between
+    /// admission and launch there is no further `.await`, so the crash window
+    /// this leaves is the width of this write's own append landing, nothing
+    /// more: a crash there can still leave the two out of sync (a marker with
+    /// nothing yet launched to justify it, which strands the turn rather than
+    /// duplicating it — the opposite, and cheaper, failure), but a crash
+    /// after the write cannot land inside a run this record does not already
+    /// know about.
     BlockedNodeDispatched {
         /// The turn key whose node's continuation has been spawned.
         turn: String,
