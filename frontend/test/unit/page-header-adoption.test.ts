@@ -2,6 +2,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { VIEWS as ROUTED_VIEWS, type View } from "@/lib/console-routes";
+
 /**
  * Every page's title comes from `PageHeader`. A view that hand-rolls an `<h1>`
  * fails here (issue #1763).
@@ -166,5 +168,119 @@ describe("page headers come from PageHeader (#1763)", () => {
 
     expect(missing, `render <PageHeader> without importing it: ${missing.join(", ")}`).toEqual([]);
     expect(drawn.length).toBeGreaterThan(15);
+  });
+});
+
+/**
+ * Which file names each routed view, and how (codex review, #1785).
+ *
+ * # Why the rest of this file was not enough
+ *
+ * Everything above is a rule about *headings that exist*: it stops a view
+ * inventing a thirteenth style. It says nothing about a view with **no**
+ * heading at all, and a floor of "more than 15 files draw a `PageHeader`"
+ * cannot: delete the header from `WorkspaceView` and sixteen others still
+ * draw one, so the suite stays green. Verified rather than argued — with
+ * `<PageHeader …/>` cut out of `WorkspaceView` entirely, this file passed
+ * 4 of 4.
+ *
+ * That is not a hypothetical regression. It is the exact state Workspace was
+ * in *before* #1763: no header, no `h1`, a page a screen reader could not
+ * announce. A guard that would not have caught the defect it was written for
+ * is worth exactly as much as the count it asserts.
+ *
+ * # The shape
+ *
+ * `Record<View, …>` over the router's own union, the same trick `ROUTABLE` in
+ * `lib/console-routes.ts` uses: a view added to the union with no row here is
+ * a **compile error**, caught by `npm run typecheck:unit`, so a new route
+ * cannot be added without someone deciding what names it. `VIEWS` is then
+ * iterated at runtime, so the two cannot drift apart either.
+ *
+ * The mapping is by hand and cannot be derived: `app-shell.tsx` renders a
+ * wrapper for several of these (`CompanyView`, `SettingsSection`,
+ * `TaskDetailRoute`) and the header lives one level down, which is a fact
+ * about the component tree that no grep over route names can see.
+ */
+type Names =
+  /** The file that renders this view's `<PageHeader>`. */
+  | { pageHeader: string }
+  /**
+   * The file that names it some other way. Only legal for a file already in
+   * `HAND_ROLLED` above — the reason lives there, in one place, rather than
+   * being restated here and drifting.
+   */
+  | { handRolled: string };
+
+const NAMED_BY: Record<View, Names> = {
+  overview: { pageHeader: "OperatorOverview.tsx" },
+  /** Company and Team are two tabs of one page; `TeamView` draws its header. */
+  company: { pageHeader: "TeamView.tsx" },
+  team: { pageHeader: "TeamView.tsx" },
+  chat: { handRolled: "chat/ChatHeader.tsx" },
+  conversation: { pageHeader: "Conversation.tsx" },
+  inbox: { pageHeader: "InboxView.tsx" },
+  /** `#/tasks/<id>` is the card detail pane, not the board. */
+  tasks: { handRolled: "TaskDetailView.tsx" },
+  ledgers: { pageHeader: "LedgersView.tsx" },
+  workspace: { pageHeader: "WorkspaceView.tsx" },
+  approvals: { pageHeader: "ApprovalsView.tsx" },
+  workflows: { pageHeader: "WorkflowsView.tsx" },
+  observatory: { pageHeader: "observatory/ObservatoryView.tsx" },
+  pages: { pageHeader: "PagesView.tsx" },
+  finances: { pageHeader: "FinancesView.tsx" },
+  /** `SettingsSection` is the tab frame; `SettingsView` is the page. */
+  settings: { pageHeader: "SettingsView.tsx" },
+  feedback: { pageHeader: "FeedbackView.tsx" },
+  setup: { handRolled: "setup/SetupWizard.tsx" },
+  "not-found": { pageHeader: "UnknownRouteView.tsx" },
+};
+
+describe("every routed view is named by something (#1763)", () => {
+  it("has a row for every view the router can reach, and no stale ones", () => {
+    // The compile-time `Record<View, …>` already forbids a missing row. This
+    // is the runtime half: `VIEWS` (imported as `ROUTED_VIEWS`, since this
+    // file already has a `VIEWS` of its own) is derived from `ROUTABLE`, so if the two
+    // ever disagree the disagreement is visible here rather than silent.
+    expect([...ROUTED_VIEWS].sort()).toEqual([...(Object.keys(NAMED_BY) as View[])].sort());
+    expect(ROUTED_VIEWS.length).toBeGreaterThan(15);
+  });
+
+  it("has every routed view's named file actually exist", () => {
+    const missing = (Object.entries(NAMED_BY) as [View, Names][])
+      .map(([view, how]) => ["pageHeader" in how ? how.pageHeader : how.handRolled, view] as const)
+      .filter(([file]) => !SOURCES.has(file))
+      .map(([file, view]) => `${view} names ${file}, which is not under src/views`);
+
+    expect(missing, missing.join("\n")).toEqual([]);
+  });
+
+  it("has every routed view without a documented exception rendering PageHeader", () => {
+    const offenders = (Object.entries(NAMED_BY) as [View, Names][])
+      .filter((entry): entry is [View, { pageHeader: string }] => "pageHeader" in entry[1])
+      .filter(([, how]) => !(SOURCES.get(how.pageHeader) ?? "").includes("<PageHeader"))
+      .map(([view, how]) => `${view} is named by ${how.pageHeader}, which renders no <PageHeader>`);
+
+    expect(
+      offenders,
+      `A routed view lost its page header. A page with no header is a page a ` +
+        `screen reader cannot announce — which is the state Workspace and the ` +
+        `unknown-route page were in before #1763.\n` +
+        `Render <PageHeader> there (use hidden if the page is its own content), ` +
+        `or move the row to handRolled and add the file to HAND_ROLLED with a ` +
+        `reason.\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("has every handRolled exception carrying its reason in HAND_ROLLED", () => {
+    // One reason, in one place. A second copy here is a second thing to keep
+    // true, and the whole argument of this file is that nobody notices when a
+    // second copy stops being true.
+    const undocumented = (Object.entries(NAMED_BY) as [View, Names][])
+      .filter((entry): entry is [View, { handRolled: string }] => "handRolled" in entry[1])
+      .filter(([, how]) => !(how.handRolled in HAND_ROLLED))
+      .map(([view, how]) => `${view} names ${how.handRolled} as hand-rolled, but it has no HAND_ROLLED row`);
+
+    expect(undocumented, undocumented.join("\n")).toEqual([]);
   });
 });
