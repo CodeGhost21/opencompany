@@ -412,6 +412,10 @@ async fn run_workflow_inner(
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
+    // Card-less files written by agent nodes. Kept outside the capability
+    // bundle so a failed/blocked engine future cannot drop the capture before
+    // the durable run-output snapshot is assembled.
+    let run_artifacts = super::caps::RunArtifacts::default();
     // Owned out here like `blocks` and `approvals`: the journal write that needs
     // it happens in the collector task, which outlives the capability bundle the
     // engine future drops.
@@ -440,6 +444,7 @@ async fn run_workflow_inner(
             board: board.clone(),
             blocks: blocks.clone(),
             approvals: approvals.clone(),
+            artifacts: run_artifacts.clone(),
             // A dry run records nothing: it makes no effects, so an attempt row
             // for it would be a receipt for work that never happened.
             runs: attempt_runs,
@@ -736,6 +741,11 @@ async fn run_workflow_inner(
             (Vec::new(), serde_json::Map::new(), serde_json::Map::new())
         }
     };
+    // The post-turn capture is a sideways channel because failed and blocked
+    // agent nodes return no engine output. Drain it only after the engine and
+    // progress collector are gone, then fold the same rows into every settle
+    // arm below.
+    let captured_artifacts = run_artifacts.take();
 
     // Resolved only AFTER the drain above, so a cancelled run's completed nodes
     // are journaled exactly like a completed run's before the caller writes the
@@ -763,8 +773,10 @@ async fn run_workflow_inner(
             // genuine-failure and the blocked branches — before #1008 both threw
             // it away, so the inspector wrongly reported "this run predates output
             // capture" for every failed or blocked run.
-            let partial_output =
-                merge_transcripts(&Value::Object(partial_nodes), &node_transcripts);
+            let partial_output = merge_run_artifacts(
+                merge_transcripts(&Value::Object(partial_nodes), &node_transcripts),
+                &captured_artifacts,
+            );
             if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
@@ -824,7 +836,11 @@ async fn run_workflow_inner(
             // node; letting it ride the run inspector as the node's product would
             // re-open the same lie one surface over. The node's `blocked` chip and
             // the run's notice already say what happened.
-            let partial_output = without_nodes(partial_output, &blocked);
+            // Remove the blocked node's refusal prose, then restore only the
+            // files it actually wrote. A partial artifact is a deliverable; an
+            // apology about why the turn stopped is not.
+            let partial_output =
+                merge_run_artifacts(without_nodes(partial_output, &blocked), &captured_artifacts);
             // A blocked run DOES return a `WorkflowRun`, so a failed persist adds
             // an operator-facing notice rather than only a log line (Part 6).
             if !persist_run_output(
@@ -901,7 +917,10 @@ async fn run_workflow_inner(
         // The transcripts the observer collected are not in the engine's run state,
         // so a clean settle would otherwise persist a snapshot that says what every
         // node emitted and nothing about what its agent did.
-        let raw_nodes = merge_transcripts(&raw_nodes, &node_transcripts);
+        let raw_nodes = merge_run_artifacts(
+            merge_transcripts(&raw_nodes, &node_transcripts),
+            &captured_artifacts,
+        );
         if !persist_run_output(
             run_output_store.as_deref(),
             &record.id,
@@ -915,7 +934,7 @@ async fn run_workflow_inner(
             notices.push(run_output_persist_failed_notice());
         }
         return Ok(WorkflowRun {
-            output: outcome.output,
+            output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: true,
@@ -1111,6 +1130,7 @@ async fn run_workflow_inner(
     // persists that canonical map with `partial = false`; a failed write adds an
     // operator notice (Part 6) since this arm returns a `WorkflowRun`.
     let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+    let raw_nodes = merge_run_artifacts(raw_nodes, &captured_artifacts);
     if !persist_run_output(
         run_output_store.as_deref(),
         &record.id,
@@ -1155,7 +1175,7 @@ async fn run_workflow_inner(
     }
 
     Ok(WorkflowRun {
-        output: outcome.output,
+        output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
         pending_approvals,
         deliveries,
         cancelled: false,
@@ -1435,6 +1455,49 @@ fn merge_transcripts(nodes: &Value, transcripts: &serde_json::Map<String, Value>
         slot.insert("transcript".to_string(), transcript.clone());
     }
     Value::Object(merged)
+}
+
+/// Adds card-less run artifacts to their node slots without changing items.
+///
+/// Unlike transcripts, artifacts may legitimately belong to a node that ended
+/// in error and therefore has no engine output slot. Such a slot is created
+/// with an empty `items` array so the inspector can surface the files while
+/// still truthfully showing no reply text.
+fn merge_run_artifacts(nodes: Value, artifacts: &serde_json::Map<String, Value>) -> Value {
+    if artifacts.is_empty() {
+        return nodes;
+    }
+    let mut nodes = match nodes {
+        Value::Object(nodes) => nodes,
+        _ => serde_json::Map::new(),
+    };
+    for (node_id, rows) in artifacts {
+        let slot = nodes
+            .entry(node_id.clone())
+            .or_insert_with(|| serde_json::json!({ "items": [] }));
+        if let Value::Object(slot) = slot {
+            slot.insert("artifacts".to_string(), rows.clone());
+        }
+    }
+    Value::Object(nodes)
+}
+
+/// Applies [`merge_run_artifacts`] to a full engine output envelope.
+fn merge_run_artifacts_envelope(
+    mut output: Value,
+    artifacts: &serde_json::Map<String, Value>,
+) -> Value {
+    if artifacts.is_empty() {
+        return output;
+    }
+    let Value::Object(envelope) = &mut output else {
+        return serde_json::json!({
+            "nodes": merge_run_artifacts(Value::Null, artifacts),
+        });
+    };
+    let nodes = envelope.remove("nodes").unwrap_or(Value::Null);
+    envelope.insert("nodes".to_string(), merge_run_artifacts(nodes, artifacts));
+    output
 }
 
 async fn persist_run_output(
@@ -1951,6 +2014,194 @@ mod tests {
                 seen: std::sync::Mutex::new(Vec::new()),
             })
         }
+    }
+
+    /// A full workflow-node turn double that writes a real sandbox file before
+    /// either failing or parking an approval. It drives the real engine,
+    /// capability, mirror, output-store, and workspace-store seams; only model
+    /// inference is replaced.
+    struct ArtifactWritingTurn {
+        workspace_root: std::path::PathBuf,
+        approvals: crate::harness::policy::ApprovalRequestQueue,
+        blocked: bool,
+    }
+
+    impl ArtifactWritingTurn {
+        async fn execute(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+        ) -> Result<crate::harness::TurnOutcome> {
+            let workspace =
+                crate::harness::build::agent_workspace(&self.workspace_root, company, agent_id);
+            let report = workspace.join("reports/partial.md");
+            tokio::fs::create_dir_all(report.parent().expect("report parent")).await?;
+            tokio::fs::write(&report, b"# Partial report\n\nCaptured before settle.\n").await?;
+
+            if !self.blocked {
+                return Err(OpenCompanyError::Harness(
+                    "synthetic node failure after writing its file".to_string(),
+                ));
+            }
+
+            self.approvals
+                .push(crate::harness::policy::ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "synthetic approval after writing".to_string(),
+                    effect: crate::ports::types::Effect {
+                        kind: "shell".to_string(),
+                        group: crate::ports::types::EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({ "command": "finish-report" }),
+                        agent: Some(agent_id.to_string()),
+                        run_id: None,
+                    },
+                });
+            Ok(crate::harness::TurnOutcome {
+                reply: "Waiting for approval.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                halted_for_spend: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for ArtifactWritingTurn {
+        async fn run(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+    }
+
+    fn artifact_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "artifact_capture"
+name = "Artifact capture"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "work"
+kind = "agent"
+name = "Work"
+summary = "Write a report."
+agent = "ceo"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "work"
+[[edge]]
+from = "work"
+to = "done"
+"#,
+        )
+        .expect("artifact graph parses")
+    }
+
+    async fn assert_partial_run_artifact(blocked: bool) {
+        use crate::ports::workspace::WorkspaceStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FsOps::new(dir.path()));
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace = Some(store.clone());
+        deps.run_output_store = Some(store.clone());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ArtifactWritingTurn {
+            workspace_root: deps.workspace_root.clone(),
+            approvals: deps.approval_requests.clone(),
+            blocked,
+        });
+        let ctx = WorkflowRunContext::new(false);
+
+        let result = run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &artifact_graph(),
+            serde_json::json!({ "request": "make the report" }),
+            &ctx,
+        )
+        .await;
+        if blocked {
+            let run = result.expect("an approval-blocked run settles successfully");
+            assert!(
+                run.blocked_nodes.iter().any(|node| node.node_id == "work"),
+                "the synthetic approval must block work: {run:?}"
+            );
+        } else {
+            assert!(result.is_err(), "the synthetic failure must fail the run");
+        }
+
+        let stored = store
+            .get_run_output(&record.id, &ctx.run_id)
+            .await
+            .expect("run-output read")
+            .expect("failed and blocked runs both persist partial output");
+        assert!(stored.partial, "capture must be marked partial: {stored:?}");
+        let artifact = &stored.nodes["work"]["artifacts"][0];
+        assert_eq!(artifact["source"], "reports/partial.md");
+        let node_id = artifact["workspaceNodeId"]
+            .as_str()
+            .expect("capture links a workspace node");
+        let (node, body) = WorkspaceStore::read(store.as_ref(), &record.id, node_id)
+            .await
+            .expect("workspace read")
+            .expect("mirrored run artifact exists");
+        assert_eq!(node.name, "partial.md");
+        assert!(
+            body.contains("Captured before settle"),
+            "the mirrored node keeps the written body: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
+        assert_partial_run_artifact(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_blocked_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
+        assert_partial_run_artifact(true).await;
     }
 
     #[async_trait]
