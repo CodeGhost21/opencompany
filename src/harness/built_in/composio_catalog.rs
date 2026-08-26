@@ -808,19 +808,32 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// is what the observed failure did (`api.github.com`). A host not listed here
 /// is never deflected, so the table erring small only ever means the S1 brief
 /// still applies while the hard block does not — never a false deny.
-fn toolkit_api_hosts(toolkit: &str) -> &'static [&'static str] {
+///
+/// Each entry pairs a host with an optional required path prefix (PR #1780
+/// review). Most providers front their API from a dedicated subdomain
+/// (`api.github.com`, `*.googleapis.com`, …), where a bare host match is exactly
+/// right. Slack and Discord are the exception: their REST API is served from
+/// the SAME host as their public web product (`slack.com/api/*`,
+/// `discord.com/api/*`), so matching the bare host would also deflect a
+/// `web_fetch` of a public help page or invite link that needs no connection
+/// and has no equivalent Composio action. The path prefix narrows those two
+/// entries to the API surface only.
+fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, Option<&'static str>)] {
     match toolkit {
-        "github" => &["api.github.com"],
-        "gmail" => &["gmail.googleapis.com"],
-        "googlecalendar" => &["calendar.googleapis.com"],
-        "googledrive" => &["drive.googleapis.com", "www.googleapis.com"],
-        "slack" => &["slack.com"],
-        "notion" => &["api.notion.com"],
-        "linear" => &["api.linear.app"],
-        "hubspot" => &["api.hubapi.com"],
-        "stripe" => &["api.stripe.com"],
-        "jira" => &["api.atlassian.com"],
-        "discord" => &["discord.com", "discordapp.com"],
+        "github" => &[("api.github.com", None)],
+        "gmail" => &[("gmail.googleapis.com", None)],
+        "googlecalendar" => &[("calendar.googleapis.com", None)],
+        "googledrive" => &[("drive.googleapis.com", None), ("www.googleapis.com", None)],
+        "slack" => &[("slack.com", Some("/api/"))],
+        "notion" => &[("api.notion.com", None)],
+        "linear" => &[("api.linear.app", None)],
+        "hubspot" => &[("api.hubapi.com", None)],
+        "stripe" => &[("api.stripe.com", None)],
+        "jira" => &[("api.atlassian.com", None)],
+        "discord" => &[
+            ("discord.com", Some("/api/")),
+            ("discordapp.com", Some("/api/")),
+        ],
         _ => &[],
     }
 }
@@ -838,16 +851,21 @@ fn host_is(host: &str, api_host: &str) -> bool {
 /// The S2 decision: given the company's CONNECTED Composio toolkits and the URL
 /// a raw web tool (`http_request` / `curl` / `web_fetch`) is about to call,
 /// return `Some(reason)` — the operator-facing deny message naming the Composio
-/// route — when the URL's host belongs to a connected toolkit, or `None` when
-/// the call must pass through unchanged.
+/// route — when the URL's host (and, where the table requires it, path) belongs
+/// to a connected toolkit's API, or `None` when the call must pass through
+/// unchanged.
 ///
-/// `None` (pass through) covers the three cases the guardrail must NOT block:
-/// a non-provider host, a provider host whose toolkit is **not** in `connected`
+/// `None` (pass through) covers the four cases the guardrail must NOT block: a
+/// non-provider host, a provider host whose toolkit is **not** in `connected`
 /// (the company may legitimately hit a public endpoint of a provider it has not
-/// wired), and a URL that does not parse to a host. The deny is scoped strictly
-/// to hosts of toolkits this company actually connected, per requirement #2.
+/// wired), a provider host outside the API path prefix the table requires (a
+/// public Slack/Discord page, not the Web API), and a URL that does not parse
+/// to a host. The deny is scoped strictly to the API surface of toolkits this
+/// company actually connected, per requirement #2.
 pub fn web_call_deflection(connected: &[String], url: &str) -> Option<String> {
-    let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let path = parsed.path();
     for toolkit in connected {
         let toolkit = toolkit.trim().to_ascii_lowercase();
         if toolkit.is_empty() {
@@ -855,7 +873,10 @@ pub fn web_call_deflection(connected: &[String], url: &str) -> Option<String> {
         }
         if toolkit_api_hosts(&toolkit)
             .iter()
-            .any(|api_host| host_is(&host, api_host))
+            .any(|(api_host, path_prefix)| {
+                host_is(&host, api_host)
+                    && path_prefix.is_none_or(|prefix| path.starts_with(prefix))
+            })
         {
             return Some(web_deflection_message(&toolkit, &host));
         }
@@ -1453,5 +1474,44 @@ mod tests {
         let connected = vec!["github".to_string()];
         assert!(web_call_deflection(&connected, "not a url").is_none());
         assert!(web_call_deflection(&connected, "file:///etc/hosts").is_none());
+    }
+
+    /// PR #1780 review: Slack's Web API is served from `slack.com/api/*`, but
+    /// `slack.com` also hosts Slack's public marketing/help pages. A
+    /// `web_fetch` of one of those pages needs no Composio connection and has
+    /// no equivalent Composio action, so it must pass through untouched even
+    /// when `slack` is connected — only the `/api/` path is deflected.
+    #[test]
+    fn slack_deflection_is_scoped_to_the_api_path_not_the_whole_domain() {
+        let connected = vec!["slack".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://slack.com/api/chat.postMessage").is_some(),
+            "a real Slack Web API call must still be deflected"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://slack.com/help/some-public-article").is_none(),
+            "a public slack.com page outside /api/ must pass through"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://slack.com/").is_none(),
+            "the bare domain root must pass through"
+        );
+    }
+
+    /// Same shape as Slack: Discord's REST API is served from
+    /// `discord.com/api/*`, but `discord.com` also hosts the main web client
+    /// and public invite/marketing pages.
+    #[test]
+    fn discord_deflection_is_scoped_to_the_api_path_not_the_whole_domain() {
+        let connected = vec!["discord".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://discord.com/api/v10/users/@me").is_some(),
+            "a real Discord API call must still be deflected"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://discord.com/invite/somepublicserver")
+                .is_none(),
+            "a public discord.com page outside /api/ must pass through"
+        );
     }
 }
