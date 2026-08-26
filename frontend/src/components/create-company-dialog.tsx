@@ -310,7 +310,29 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
           onCreated(await client.status(autoId));
           return;
         } catch {
-          // Genuinely not there — fall through to the ordinary error path.
+          // Not there under the bare id — on a shared-single-DB host the
+          // company may still be there under its *namespaced* id. The host
+          // applies `<tenant>--` prefixing server-side
+          // (`namespaced_company_id`, `runtime/types.rs`) before storing
+          // whatever id this client sent, but this client never learns its
+          // own tenant namespace (`collidesWithArchived`'s comment says the
+          // same) — so a direct `client.status(autoId)` 404s even though
+          // provisioning fully succeeded. `listCompanies` answers with every
+          // company's real, already-namespaced id, so match against that
+          // instead of the id this client asked for (issue #1828 comment
+          // 3865401513).
+          try {
+            const companies = await client.listCompanies();
+            const match = companies.find(
+              (c) => c.id === autoId || c.id.endsWith(`--${autoId}`),
+            );
+            if (match) {
+              onCreated(match);
+              return;
+            }
+          } catch {
+            // Listing failed too — fall through to the ordinary error path.
+          }
         }
       }
       // `!selfGenerated` — a `company_exists` refusal at this point is about
