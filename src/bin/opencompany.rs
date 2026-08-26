@@ -552,6 +552,13 @@ fn company_builder(
     // fixture that builds a company gets the empty board it is asserting about —
     // see `RuntimeBuilder::with_task_seeding`. First boot only.
     .with_task_seeding(true)
+    // Issue #1844: `OPENCOMPANY_SKIP_ACTIVATION_GATE=1` skips the
+    // account-activation funnel's blocking gate for a company that has never
+    // booted before — see `RuntimeBuilder::skip_activation_gate`'s own doc
+    // comment. Absent (the default) is a no-op; the one setter today is the
+    // e2e host script, which sets it so its shared fixture company does not
+    // gate ~100 unrelated specs that know nothing about the funnel.
+    .skip_activation_gate(std::env::var("OPENCOMPANY_SKIP_ACTIVATION_GATE").as_deref() == Ok("1"))
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
         builder = builder.with_seed_dir(source_dir);
