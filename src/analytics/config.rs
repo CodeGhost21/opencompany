@@ -123,16 +123,33 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
         }
     }
 
-    let Some(token) = env.get(TOKEN_ENV) else {
+    let Some(token) = non_blank(env, TOKEN_ENV) else {
         return Decision::Silent(Silence::NoToken);
     };
 
     Decision::Report {
-        endpoint: env
-            .get(ENDPOINT_ENV)
-            .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+        endpoint: non_blank(env, ENDPOINT_ENV).unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
         token: ProjectToken::new(token),
     }
+}
+
+/// A configured value, trimmed, or `None` when there is nothing left of it.
+///
+/// [`EnvSource::get`] already drops an *empty* value, but not a whitespace-only
+/// one, and the difference is not academic: a token or an endpoint mounted from
+/// a file arrives with a trailing newline more often than not. Untrimmed, a
+/// hosted tenant whose token is `"\n"` resolves to [`Decision::Report`], the
+/// boot line says "reporting to …", and every batch is refused by the collector
+/// — the failure mode #1739 added that line to prevent. A blank `ENDPOINT_ENV`
+/// is worse, because it replaces [`DEFAULT_ENDPOINT`] with a URL that cannot
+/// parse, so nothing is sent and nothing says why.
+///
+/// The same trim-and-filter the rest of the tree applies to environment values
+/// (`src/bin/opencompany.rs`).
+fn non_blank(env: &dyn EnvSource, key: &str) -> Option<String> {
+    env.get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
@@ -213,6 +230,68 @@ mod test {
             resolve(Deployment::SelfHosted, &token_env(&[(ENABLE_ENV, "onn")])),
             Decision::Silent(Silence::NotHosted)
         );
+    }
+
+    /// A token that is only whitespace is not a token. This is not a theoretical
+    /// value: a secret mounted from a file arrives with a trailing newline, and
+    /// a hosted tenant handed a blank one must read as **misconfigured** rather
+    /// than as reporting — otherwise boot prints "reporting to …" and every
+    /// batch is silently refused by the collector.
+    ///
+    /// `EnvSource::get` already drops an *empty* value, so the whitespace-only
+    /// case is the one that needs this and the one asserted here.
+    #[test]
+    fn a_blank_token_is_no_token() {
+        for blank in ["   ", "\n", "\t\n "] {
+            assert_eq!(
+                resolve(Deployment::HostedTenant, &MapEnv::new([(TOKEN_ENV, blank)])),
+                Decision::Silent(Silence::NoToken),
+                "a token of {blank:?} must not read as configured"
+            );
+        }
+    }
+
+    /// And a token that merely *arrived* with surrounding whitespace is used,
+    /// trimmed, rather than put on the wire with a newline in it.
+    #[test]
+    fn a_token_is_trimmed() {
+        match resolve(
+            Deployment::HostedTenant,
+            &MapEnv::new([(TOKEN_ENV, "  not-a-real-token\n")]),
+        ) {
+            Decision::Report { token, .. } => assert_eq!(token.expose(), "not-a-real-token"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A blank endpoint falls back to the default rather than replacing it with
+    /// a URL that cannot parse — the shape of this bug that says nothing at all
+    /// at boot, because the line still reads "reporting to".
+    #[test]
+    fn a_blank_endpoint_falls_back_to_the_default() {
+        match resolve(
+            Deployment::HostedTenant,
+            &token_env(&[(ENDPOINT_ENV, "  \n")]),
+        ) {
+            Decision::Report { endpoint, .. } => assert_eq!(endpoint, DEFAULT_ENDPOINT),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The positive control for the two above, and deliberately **insensitive**
+    /// to the trim: no surrounding whitespace, so this test passes both with the
+    /// filter and without it. Without such a control, "every test in the group
+    /// fails when I revert the fix" would be evidence that the group asserts the
+    /// implementation rather than the behaviour.
+    #[test]
+    fn a_configured_endpoint_still_overrides() {
+        match resolve(
+            Deployment::HostedTenant,
+            &token_env(&[(ENDPOINT_ENV, "http://127.0.0.1:9/track")]),
+        ) {
+            Decision::Report { endpoint, .. } => assert_eq!(endpoint, "http://127.0.0.1:9/track"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The token is a credential: it must not be printable by accident, because
