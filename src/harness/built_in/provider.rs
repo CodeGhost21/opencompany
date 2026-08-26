@@ -1455,19 +1455,20 @@ pub async fn probe(decl: &InferenceDecl) -> anyhow::Result<()> {
     )
     .await?;
     let payload = send_plan(&client, &plan, decl.credential()).await?;
-    // Route through the same content extraction the turn path uses
-    // (`model_response_from_payload`) rather than reading `content.as_str()`
-    // directly: `content` may be an array of `{type:"text",text:…}` parts
-    // rather than a bare string, and a direct `.as_str()` read treats that
-    // shape as absent. An endpoint answering with array-shaped content would
-    // then pass every real turn while this probe reported the connection
-    // broken (Codex review on #1779, comment 3864824480).
-    let content = extract_content_text(payload.pointer("/choices/0/message/content"));
-    if content.is_empty() {
-        return Err(anyhow::anyhow!(
-            "probe response missing choices[0].message.content"
-        ));
-    }
+    // Route through the exact same parser the turn path calls
+    // (`model_response_from_payload`), not a hand-rolled subset of it. An
+    // earlier revision called `extract_content_text` directly here, which
+    // picked up the array-shaped-content case but not the
+    // `reasoning`/`reasoning_content` fallback for reasoning-only turns
+    // (`content: null`, `finish_reason: "stop"`) that lives inside
+    // `model_response_from_payload` — so an endpoint answering with that shape
+    // still passed every real turn while this probe reported the connection
+    // broken (Codex review on #1779, comment 3864906472). Giving the probe a
+    // second, narrower copy of the parsing logic is exactly how it drifted
+    // from the turn path the first time; calling the shared function directly
+    // means there is only one content path to keep in sync.
+    model_response_from_payload(payload)
+        .map_err(|e| anyhow::anyhow!("probe response carried no usable content: {e}"))?;
     Ok(())
 }
 
@@ -2952,6 +2953,37 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawns an in-process OpenAI-compatible stub whose full `message` object
+    /// is the given raw JSON value — used to exercise shapes `spawn_stub_content`
+    /// cannot, such as a reasoning-only turn (`content: null` with the visible
+    /// text under `reasoning`/`reasoning_content` instead).
+    async fn spawn_stub_message(message: serde_json::Value) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let message = message.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": message
+                        }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
     /// The live-switch contract: the same `TenantProvider` instance routes turn
     /// 1 to stub A, then — after the operator flips the runtime override in the
     /// secret store — routes turn 2 to stub B, with **no rebuild** of the
@@ -3326,7 +3358,8 @@ mod tests {
     /// connectivity check — still read `content.as_str()` directly. An endpoint
     /// answering with array-shaped content therefore passed every real turn
     /// while its own connection probe reported the connection broken. `probe`
-    /// must route through the same `extract_content_text` the turn path uses.
+    /// must route through `model_response_from_payload` itself, the same
+    /// parser the turn path calls, rather than any narrower stand-in for it.
     #[tokio::test]
     async fn probe_accepts_array_shaped_content() {
         let url = spawn_stub_content(serde_json::json!([
@@ -3346,5 +3379,39 @@ mod tests {
         probe(&decl)
             .await
             .expect("array-shaped content must be recognized as a successful probe");
+    }
+
+    /// Codex review on #1779 (comment 3864906472): the array-content fix above
+    /// made `probe` call `extract_content_text` directly instead of the shared
+    /// `model_response_from_payload` — which picked up the array-shaped-content
+    /// case but not the `reasoning`/`reasoning_content` fallback for a
+    /// reasoning-only turn (`content: null`, `finish_reason: "stop"`, visible
+    /// text under `reasoning`) that lives inside `model_response_from_payload`.
+    /// A managed reasoning provider answering with that shape passed every
+    /// real turn while its own connection probe reported the connection
+    /// broken — blocking the setup wizard and the console's "Test" button for
+    /// a valid provider. `probe` must route through the exact same parser the
+    /// turn path calls so the two paths cannot diverge again.
+    #[tokio::test]
+    async fn probe_accepts_reasoning_only_content() {
+        let url = spawn_stub_message(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "reasoning": "42 is the answer."
+        }))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        probe(&decl)
+            .await
+            .expect("reasoning-only content must be recognized as a successful probe");
     }
 }
