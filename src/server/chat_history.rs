@@ -219,6 +219,21 @@ pub struct MessageView {
     /// dispatch marker and an agent reply are both `false`: neither was typed by
     /// a person.
     pub by_person: bool,
+    /// Whether this row may reach only administrators (issue #1781 review,
+    /// Codex P1).
+    ///
+    /// `true` for exactly one shape today: an `owner`-destination workflow
+    /// report that fell back to the operator channel because the company has
+    /// no mailbox, or no active admin has an address. The ordinary email
+    /// branch of that same destination reaches active admins only
+    /// (`workflows::delivery::owner_recipients`); this field is what lets the
+    /// channel fallback honour the same restriction rather than silently
+    /// widening the audience to every signed-in company user. The caller
+    /// (`server::operator::chat_history_response`) drops any row with this set
+    /// before returning to a non-admin viewer — see
+    /// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+    /// for how the underlying event is marked.
+    pub admin_only: bool,
     /// The scrubbed processing steps behind a company reply, so a rehydrated
     /// transcript renders the same tool-call timeline the live turn showed.
     /// Empty for operator messages and tool-less replies.
@@ -445,6 +460,7 @@ impl MessageView {
             } => MessageView {
                 id,
                 channel: agent_id.clone(),
+                admin_only: agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR,
                 author: agent_id,
                 text,
                 at_millis,
@@ -485,6 +501,7 @@ impl MessageView {
                 MessageView {
                     id,
                     channel: "operator".to_string(),
+                    admin_only: false,
                     author,
                     text,
                     at_millis,
@@ -527,6 +544,7 @@ impl MessageView {
             } => MessageView {
                 id,
                 channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                admin_only: false,
                 author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: dispatch_marker_text(&column),
                 at_millis,
@@ -543,6 +561,7 @@ impl MessageView {
             other => MessageView {
                 id,
                 channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                admin_only: false,
                 author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: format!("{other:?}"),
                 at_millis,
@@ -779,6 +798,13 @@ pub async fn author_labels(
 /// messages before it are considered. `first` caps how many of the remaining,
 /// most-recent messages come back.
 ///
+/// `is_admin` gates [`MessageView::admin_only`] rows (issue #1781 review,
+/// Codex P1): a non-admin viewer never sees one, and the exclusion happens
+/// **inside** the paging loop, before a row counts toward `first` — filtering
+/// the returned `Vec` afterward would silently short a non-admin's page by
+/// however many admin-only rows it held, which is a pagination bug, not
+/// merely a display one.
+///
 /// Shared by the GraphQL `Chat.history` resolver and the REST
 /// `GET .../chat/history` route so the two can never disagree about what a
 /// desk's history contains (issue #65).
@@ -789,6 +815,7 @@ pub async fn history_for_desk(
     viewer: &Viewer,
     before_seq: Option<u64>,
     first: usize,
+    is_admin: bool,
 ) -> Result<Vec<MessageView>, OpenCompanyError> {
     // A page is events rather than messages: a busy company can put unrelated
     // events between two chat turns. Walking backward keeps the newest `first`
@@ -818,7 +845,14 @@ pub async fn history_for_desk(
         cursor = page.last().map(|event| event.seq);
         for event in page {
             if owns(desk_id, desk_name, &event.event) {
-                messages.push(MessageView::project(event, viewer, &authors));
+                let message = MessageView::project(event, viewer, &authors);
+                // Excluded before it counts toward `first` — see this fn's
+                // doc. A non-admin viewer's page fills with the next visible
+                // row instead of coming back short.
+                if message.admin_only && !is_admin {
+                    continue;
+                }
+                messages.push(message);
                 if messages.len() == first {
                     break;
                 }
@@ -2113,6 +2147,7 @@ mod dead_card_test {
             &Viewer::Operator,
             None,
             50,
+            true,
         )
         .await
         .expect("history");
@@ -2164,6 +2199,7 @@ mod dead_card_test {
             &Viewer::Operator,
             None,
             50,
+            true,
         )
         .await
         .expect("history");
@@ -2215,11 +2251,166 @@ mod dead_card_test {
             &Viewer::Operator,
             None,
             50,
+            true,
         )
         .await
         .expect("history");
 
         assert_eq!(history.len(), 1, "{history:?}");
         assert!(history[0].task_id.is_none(), "{history:?}");
+    }
+
+    /// Issue #1781 review (Codex P1): an `owner`-fallback report — marked via
+    /// [`crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR`] — must never reach a
+    /// non-admin viewer, while an ordinary operator-channel report (any other
+    /// author) is unaffected. Pre-fix, `history_for_desk` had no concept of
+    /// `admin_only` at all: every signed-in company user, admin or Member, saw
+    /// every row on a desk they could address, which is exactly the leak this
+    /// test pins shut.
+    #[tokio::test]
+    async fn an_owner_fallback_row_is_hidden_from_a_non_admin_viewer() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only owner report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "ordinary workflow report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+
+        let as_member = history_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            &Viewer::Operator,
+            None,
+            50,
+            false,
+        )
+        .await
+        .expect("history");
+        assert_eq!(
+            as_member.len(),
+            1,
+            "a non-admin must not see the owner-fallback row: {as_member:?}"
+        );
+        assert_eq!(as_member[0].text, "ordinary workflow report");
+        assert!(!as_member[0].admin_only, "{as_member:?}");
+
+        let as_admin = history_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        assert_eq!(
+            as_admin.len(),
+            2,
+            "an admin must see both rows: {as_admin:?}"
+        );
+        assert!(as_admin.iter().any(|m| m.admin_only), "{as_admin:?}");
+    }
+
+    /// The exclusion happens inside the paging loop, before a row counts
+    /// toward `first` (see `history_for_desk`'s doc) — proven by requesting
+    /// exactly one row as a non-admin with an admin-only row sorted newest: a
+    /// post-fetch filter would come back empty here, not with the one visible
+    /// row underneath it.
+    #[tokio::test]
+    async fn a_non_admin_page_fills_past_an_admin_only_row_instead_of_coming_back_short() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        // Oldest first: the visible row, then the admin-only row on top of it.
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "visible report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+
+        let as_member = history_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            &Viewer::Operator,
+            None,
+            1,
+            false,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(
+            as_member.len(),
+            1,
+            "a non-admin's page must fill with the next visible row, not come \
+             back short: {as_member:?}"
+        );
+        assert_eq!(as_member[0].text, "visible report");
     }
 }

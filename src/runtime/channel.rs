@@ -51,6 +51,27 @@ use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, Out
 /// could ever have minted sidesteps needing one.
 pub const WORKFLOW_REPLY_AUTHOR: &str = "workflow-report";
 
+/// The `agent_id` an `owner`-destination report is journaled under when it
+/// falls back to the operator channel (no mailbox, or no active admin has an
+/// address) — issue #1781 review (Codex P1).
+///
+/// The `owner` destination's whole contract, on the ordinary email branch, is
+/// "active admins only" (`server::workflows::delivery::owner_recipients`
+/// filters to `UserRole::Admin` + `UserStatus::Active`). The channel fallback
+/// used to break that contract silently: it journaled under
+/// [`WORKFLOW_REPLY_AUTHOR`], the same id every other operator-channel report
+/// uses, and `chat_history` authorizes any signed-in company user for a desk
+/// — admin or Member — with no role check at all. A Member could therefore
+/// read a report an unavailable mailbox would otherwise have sent only to
+/// administrators. Journaling under a distinct author id lets the read path
+/// (`server::chat_history::history_for_desk`) drop exactly these rows for a
+/// non-admin viewer, without touching any other report's visibility.
+///
+/// Hyphenated for the same reason `WORKFLOW_REPLY_AUTHOR` is: unmintable by
+/// any roster id, so nothing can ever masquerade as — or be mistaken for — an
+/// owner-fallback report.
+pub const OWNER_FALLBACK_REPORT_AUTHOR: &str = "owner-fallback-report";
+
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
 
@@ -238,9 +259,21 @@ impl ChannelAdapter for DurableOperatorChannel {
                     // matches it (it is NOT folded into General — see
                     // `server::chat_history::is_general_chat`), so the console's
                     // standing Operator channel renders exactly these reports and
-                    // nothing else.
-                    chat_id: OPERATOR_CHANNEL.to_string(),
-                    agent_id: WORKFLOW_REPLY_AUTHOR.to_string(),
+                    // nothing else. Read from `msg.channel` (always
+                    // `OPERATOR_CHANNEL` today, set by the caller,
+                    // `workflows::delivery::send_to_channel_adapter`) rather than
+                    // hardcoded here, so a future caller can resolve a different
+                    // address for this company without this adapter changing.
+                    chat_id: msg.channel,
+                    // Ordinarily `WORKFLOW_REPLY_AUTHOR`. The owner-fallback
+                    // report overrides this to `OWNER_FALLBACK_REPORT_AUTHOR`
+                    // via `msg.agent` so the read path can restrict exactly
+                    // those rows to admins (issue #1781 review, Codex P1) —
+                    // every other producer leaves `agent` unset and gets the
+                    // ordinary author, unchanged.
+                    agent_id: msg
+                        .agent
+                        .unwrap_or_else(|| WORKFLOW_REPLY_AUTHOR.to_string()),
                     text: msg.text,
                     steps: msg.steps,
                     task_id: msg.task_id,

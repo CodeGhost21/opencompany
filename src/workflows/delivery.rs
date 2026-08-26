@@ -1346,7 +1346,7 @@ async fn post_to_channel(
     // channel. No target is refused here by name any more; an id nobody wired is
     // still caught below with the same sentence the console's picker pre-flight
     // shows (issue #981).
-    send_to_channel_adapter(delivery, channel_id, subject, text).await
+    send_to_channel_adapter(delivery, channel_id, subject, text, false).await
 }
 
 /// Posts an `owner` fallback report to the durable operator channel (issue
@@ -1366,11 +1366,17 @@ async fn post_to_operator(
     subject: &str,
     text: &str,
 ) -> Result<(), (DeliveryReason, String)> {
+    // `admin_only: true` — this is precisely the report an unavailable mailbox
+    // would otherwise have sent only to active administrators
+    // (`owner_recipients` filters to `UserRole::Admin` + `UserStatus::Active`).
+    // The channel fallback must not widen that audience just because mail
+    // failed (issue #1781 review, Codex P1); see `OWNER_FALLBACK_REPORT_AUTHOR`.
     send_to_channel_adapter(
         delivery,
         crate::runtime::channel::OPERATOR_CHANNEL,
         subject,
         text,
+        true,
     )
     .await
 }
@@ -1392,11 +1398,18 @@ fn operator_report(subject: &str, text: &str) -> String {
 /// A report bound for the operator channel gets a source header
 /// ([`operator_report`]) so the aggregating surface stays scannable; every other
 /// channel gets the plain `subject`/`text` a desk or provider expects.
+///
+/// `admin_only` marks an owner-fallback report so the read path can restrict it
+/// to administrators (issue #1781 review, Codex P1) — see
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR).
+/// Only `post_to_operator` ever sets it; `post_to_channel`'s explicit `channel`
+/// destination always passes `false`, unchanged.
 async fn send_to_channel_adapter(
     delivery: &WorkflowDeliveryDeps,
     channel_id: &str,
     subject: &str,
     text: &str,
+    admin_only: bool,
 ) -> Result<(), (DeliveryReason, String)> {
     let Some(adapter) = delivery
         .channels
@@ -1426,7 +1439,7 @@ async fn send_to_channel_adapter(
             message_id: None,
             task_id: None,
             channel: channel_id.to_string(),
-            agent: None,
+            agent: admin_only.then(|| crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string()),
             text: body,
             steps: Vec::new(),
             reply_to: None,
@@ -1930,9 +1943,46 @@ admins = [{list}]
                         text,
                         ..
                     } if chat_id == crate::runtime::channel::OPERATOR_CHANNEL
-                        && agent_id == crate::runtime::channel::WORKFLOW_REPLY_AUTHOR =>
+                        // `WORKFLOW_REPLY_AUTHOR` covers an explicit `channel`
+                        // destination's report; `OWNER_FALLBACK_REPORT_AUTHOR`
+                        // covers the `owner`-with-no-mailbox fallback (issue
+                        // #1781 review, Codex P1) — both are still genuine,
+                        // durable operator-channel reports, just gated
+                        // differently on read. A test that cares which one
+                        // landed reads `agent_id` itself via
+                        // `operator_report_authors`.
+                        && (agent_id == crate::runtime::channel::WORKFLOW_REPLY_AUTHOR
+                            || agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR) =>
                     {
                         Some(text)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every operator-channel `AgentReply`'s `(agent_id, text)` pair, for a
+        /// test that needs to tell an owner-fallback report apart from an
+        /// ordinary one rather than just counting them (issue #1781 review,
+        /// Codex P1).
+        async fn operator_report_authors(&self) -> Vec<(String, String)> {
+            self.events
+                .read_from(
+                    &self.company,
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("journal readable")
+                .into_iter()
+                .filter_map(|s| match s.event {
+                    CompanyEvent::AgentReply {
+                        chat_id,
+                        agent_id,
+                        text,
+                        ..
+                    } if chat_id == crate::runtime::channel::OPERATOR_CHANNEL => {
+                        Some((agent_id, text))
                     }
                     _ => None,
                 })
@@ -2190,6 +2240,60 @@ admins = [{list}]
         assert_eq!(landed.len(), 1, "the report must be journaled: {landed:?}");
         assert!(landed[0].contains("Q3 is up 12%."), "{landed:?}");
         assert!(landed[0].contains("Report flow"), "{landed:?}");
+    }
+
+    /// Issue #1781 review (Codex P1): the `owner`-with-no-mailbox fallback must
+    /// journal under a distinct author from an ordinary operator-channel report,
+    /// so the read path (`server::chat_history::history_for_desk`) can restrict
+    /// exactly this row to administrators — the same audience the sibling email
+    /// branch already enforces (`owner_recipients` filters to active admins).
+    ///
+    /// Proven against a **contrasting pair** in the same test rather than just
+    /// asserting the fallback's author: an explicit `channel` destination
+    /// naming `operator` is a workflow author's deliberate choice, general
+    /// audience, and must keep the ordinary `WORKFLOW_REPLY_AUTHOR` — this is
+    /// what shows the fallback's marker is additive, not a wholesale change to
+    /// every operator-channel report.
+    #[tokio::test]
+    async fn owner_fallback_report_is_authored_distinctly_from_an_ordinary_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), false, true);
+        h.add_admin("u1", "ada@acme.test").await;
+
+        deliver_outputs(
+            Some(&h.deps),
+            &record(&[]),
+            &graph("owner", None),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+        deliver_outputs(
+            Some(&h.deps),
+            &record(&[]),
+            &graph("channel", Some(OPERATOR_CHANNEL)),
+            "run-2",
+            &reached_output(),
+            &[],
+        )
+        .await;
+
+        let authors = h.operator_report_authors().await;
+        assert_eq!(authors.len(), 2, "{authors:?}");
+        assert!(
+            authors
+                .iter()
+                .any(|(agent_id, _)| agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR),
+            "the owner fallback must be marked distinctly: {authors:?}"
+        );
+        assert!(
+            authors
+                .iter()
+                .any(|(agent_id, _)| agent_id == crate::runtime::channel::WORKFLOW_REPLY_AUTHOR),
+            "an explicit `channel: operator` destination must keep the ordinary \
+             author — the marker is additive, not a wholesale change: {authors:?}"
+        );
     }
 
     /// A company with a mailbox but no admin address also delivers durably to the

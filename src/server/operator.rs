@@ -3034,21 +3034,50 @@ async fn resolve_desk(
     })
 }
 
-/// Resolves who is reading a desk's history, for the `mine` flag. Reuses
-/// [`chat_actor`]'s auth (session cookie or platform credential, tenant
-/// address-authorization, temporary-password gate) so a history read can
-/// never see more than a matching chat send could.
+/// Resolves who is reading a desk's history, for the `mine` flag, plus
+/// whether they may see an [`MessageView::admin_only`] row (issue #1781
+/// review, Codex P1). Reuses [`chat_actor`]'s auth (session cookie or platform
+/// credential, tenant address-authorization, temporary-password gate) for the
+/// `Viewer` itself, so a history read can never see more than a matching chat
+/// send could.
+///
+/// The admin check is a **second**, independent lookup
+/// ([`current_user`](crate::server::users::routes::current_user)) rather than
+/// widening [`Actor`] with a role: `Actor` is shared with the *send* path
+/// (`OperatorMessage::by`), where a role has no bearing on whether a
+/// signed-in human may post, so adding one there would be dead weight on every
+/// other caller. Safe to run after `chat_actor` already succeeded — this can
+/// only **narrow** what the viewer sees (gate an extra row), never widen
+/// their access, so it needs none of `chat_actor`'s own refusal gates
+/// (address authorization, temporary-password) repeated: those already ran
+/// for this exact request via `chat_actor`, and a `current_user` that somehow
+/// disagreed would only make `is_admin` `false`, the fail-safe direction.
 async fn history_viewer(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Viewer, crate::server::Rejection> {
+) -> Result<(Viewer, bool), crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
-    Ok(match actor {
+    let is_admin = match &actor {
+        // A signed-in human: only an active admin sees an admin-only row.
+        Some(actor) if actor.kind == ActorKind::User => {
+            crate::server::users::routes::current_user(headers, state, company, peer)
+                .await
+                .is_some_and(|principal| principal.role.may_administer())
+        }
+        // No person behind this credential — a platform/machine bearer, or
+        // (pre-attribution) nobody at all. `Viewer::Operator` already carries
+        // full, unrestricted access everywhere else this type is used; an
+        // admin-only row is not a narrower case than the rest of a company's
+        // history, which this same credential can already read in full.
+        _ => true,
+    };
+    let viewer = match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
         _ => Viewer::Operator,
-    })
+    };
+    Ok((viewer, is_admin))
 }
 
 /// Shared body for both scope forms of `GET .../chat/history`.
@@ -3060,14 +3089,22 @@ async fn chat_history_response(
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
-    let viewer = history_viewer(headers, state, company, peer).await?;
+    let (viewer, is_admin) = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
         .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
         .min(CHAT_HISTORY_PAGE_LIMIT);
-    let messages =
-        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit).await?;
+    let messages = history_for_desk(
+        &runtime,
+        &desk_id,
+        &desk_name,
+        &viewer,
+        query.before,
+        limit,
+        is_admin,
+    )
+    .await?;
     Ok(Json(
         messages
             .into_iter()
@@ -3134,7 +3171,7 @@ async fn attribution_audit_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
-    let _viewer = history_viewer(headers, state, company, peer).await?;
+    let (_viewer, _is_admin) = history_viewer(headers, state, company, peer).await?;
     let record = runtime
         .store()
         .load(runtime.id())
