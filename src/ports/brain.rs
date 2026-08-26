@@ -43,6 +43,17 @@ pub enum UsageMetering {
 /// one side silently turn the test into a permanent `false`.
 pub const HARNESS_PATH: &str = "harness";
 
+/// The [`Cognition::path`] label of the offline [`EchoBrain`](crate::brain::EchoBrain)
+/// — the degraded fallback that runs no model at all and answers every operator
+/// message with `"You said: …"`.
+///
+/// A named constant for the same reason [`HARNESS_PATH`] is one: the brain that
+/// *reports* it (`crate::brain::echo`) and the inference-status route that
+/// *tests* it to decide whether this company can think (issue #1735) must agree,
+/// and a literal in both would let a wording change on one side turn the test
+/// into a permanent "configured".
+pub const ECHO_PATH: &str = "echo";
+
 /// How a [`Brain`] does cognition, for metering and operator diagnosis.
 ///
 /// The runtime reads [`Self::provider`] when it meters a cycle's usage, and the

@@ -177,6 +177,30 @@ interface Props {
 /** How long typing settles before the editor pushes a save to the host. */
 const AUTOSAVE_DELAY_MS = 800;
 
+/** Browser-local width of the workspace explorer (issue #1755). */
+const WORKSPACE_LIST_WIDTH_KEY = "oc.workspace.listWidth";
+const DEFAULT_WORKSPACE_LIST_WIDTH = 256;
+const MIN_WORKSPACE_LIST_WIDTH = 200;
+const MAX_WORKSPACE_LIST_WIDTH = 560;
+const WORKSPACE_LIST_KEYBOARD_STEP = 16;
+
+function clampWorkspaceListWidth(width: number): number {
+  return Math.min(MAX_WORKSPACE_LIST_WIDTH, Math.max(MIN_WORKSPACE_LIST_WIDTH, width));
+}
+
+/** Restore a usable saved width without letting blocked storage break the view. */
+function initialWorkspaceListWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_WORKSPACE_LIST_WIDTH;
+  try {
+    const saved = Number(window.localStorage.getItem(WORKSPACE_LIST_WIDTH_KEY));
+    return Number.isFinite(saved) && saved > 0
+      ? clampWorkspaceListWidth(saved)
+      : DEFAULT_WORKSPACE_LIST_WIDTH;
+  } catch {
+    return DEFAULT_WORKSPACE_LIST_WIDTH;
+  }
+}
+
 /**
  * How long the search box waits after the last keystroke before asking the host
  * (issue #607).
@@ -471,6 +495,13 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [moving, setMoving] = useState<FsNode | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
+  const [listWidth, setListWidth] = useState(initialWorkspaceListWidth);
+  const [resizingList, setResizingList] = useState(false);
+  const listResize = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
   const [legacy, setLegacy] = useState<FsNode[]>([]);
   // Whether this connection already said "not now" to the migration offer.
   // Read once per company rather than per render, because the answer lives in
@@ -504,6 +535,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const legacyFolders = useMemo(() => legacy.filter((n) => n.kind === "folder"), [legacy]);
   const legacyFiles = useMemo(() => legacy.filter((n) => n.kind === "file"), [legacy]);
   const uploadRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(WORKSPACE_LIST_WIDTH_KEY, String(listWidth));
+    } catch {
+      // Storage can be blocked by browser policy; resizing should still work
+      // for the current visit.
+    }
+  }, [listWidth]);
 
   // Generation tokens so a response from a previous company scope (or from a
   // file that has since been closed) can never overwrite the current one.
@@ -1438,17 +1478,19 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const secretNote = isSecretNode(nodes, openId);
 
   return (
-    <div className="flex flex-1 overflow-hidden">
+    <div className="flex min-w-0 max-w-full flex-1 overflow-hidden">
       {/* The file tree and editor are the page, with no title of their own
           (issue #1221) — this names the page for a screen reader the same
           way every other view's title does. */}
       <h1 className="sr-only">Workspace</h1>
       {/* Explorer */}
       <aside
+        id="workspace-explorer"
         className={cn(
-          "w-64 shrink-0 flex-col border-r bg-card/40 md:flex",
+          "min-w-0 shrink-0 flex-col overflow-hidden bg-card/40 md:flex",
           showExplorer ? "flex" : "hidden",
         )}
+        style={{ width: listWidth }}
       >
         <div className="flex items-center gap-1 border-b px-2 py-2">
           <span className="flex-1 px-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
@@ -1623,9 +1665,74 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         </div>
       </aside>
 
+      {/* On small screens the explorer and note are mutually exclusive, so a
+          divider only has meaning from the two-pane breakpoint onward. */}
+      <div
+        role="separator"
+        aria-label="Resize workspace explorer"
+        aria-orientation="vertical"
+        aria-controls="workspace-explorer workspace-content"
+        aria-valuemin={MIN_WORKSPACE_LIST_WIDTH}
+        aria-valuemax={MAX_WORKSPACE_LIST_WIDTH}
+        aria-valuenow={listWidth}
+        aria-valuetext={`${listWidth} pixels`}
+        tabIndex={0}
+        data-testid="workspace-list-resizer"
+        className={cn(
+          "relative w-1.5 shrink-0 touch-none cursor-col-resize bg-border outline-none transition-colors select-none motion-reduce:transition-none",
+          "hover:bg-primary/50 focus-visible:bg-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+          resizingList && "bg-primary/70",
+          showExplorer ? "hidden md:block" : "hidden",
+        )}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          listResize.current = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startWidth: listWidth,
+          };
+          e.currentTarget.setPointerCapture(e.pointerId);
+          setResizingList(true);
+        }}
+        onPointerMove={(e) => {
+          const drag = listResize.current;
+          if (!drag || drag.pointerId !== e.pointerId) return;
+          setListWidth(clampWorkspaceListWidth(drag.startWidth + e.clientX - drag.startX));
+        }}
+        onPointerUp={(e) => {
+          if (listResize.current?.pointerId !== e.pointerId) return;
+          listResize.current = null;
+          setResizingList(false);
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+        }}
+        onPointerCancel={(e) => {
+          if (listResize.current?.pointerId !== e.pointerId) return;
+          listResize.current = null;
+          setResizingList(false);
+        }}
+        onLostPointerCapture={() => {
+          listResize.current = null;
+          setResizingList(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+          e.preventDefault();
+          const delta =
+            e.key === "ArrowLeft" ? -WORKSPACE_LIST_KEYBOARD_STEP : WORKSPACE_LIST_KEYBOARD_STEP;
+          setListWidth((width) => clampWorkspaceListWidth(width + delta));
+        }}
+      />
+
       {/* Note pane */}
       <section
-        className={cn("flex-1 flex-col overflow-hidden", showExplorer ? "hidden md:flex" : "flex")}
+        id="workspace-content"
+        className={cn(
+          "min-w-0 flex-1 flex-col overflow-hidden",
+          showExplorer ? "hidden md:flex" : "flex",
+        )}
       >
         {legacy.length > 0 && !importDeclined && (
           <Alert className="m-3 mb-0 w-auto" data-testid="workspace-migration-banner">

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createElement } from "react";
+import { act, createElement, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -147,6 +147,94 @@ describe("the operator overview landing page (#1321)", () => {
 
     expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
     expect(container.querySelector('[href="#/tasks/task-1?run=run-1"]')?.textContent).toContain("Open");
+  });
+
+  it("keeps the previous-visit boundary intact across StrictMode's mount replay (#1745)", async () => {
+    // StrictMode double-invokes mount effects (setup → cleanup → setup) in
+    // development. A `[scope]` *read* effect paired with a `[scope]` *write*
+    // effect looks idempotent but is not: the replay's read effect would
+    // observe the timestamp the first pass's write effect had just recorded,
+    // silently clobbering the true previous-visit boundary with "now" and
+    // hiding this failure on every dev mount.
+    window.localStorage.setItem("oc.overview.last-visit:test-host::acme", "1700000000000");
+    await act(async () => {
+      root.render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(OperatorOverview, {
+            // Answer only the failed-only page so the run is unambiguously a
+            // "since you last opened" hit, not also a "stopped work" hit —
+            // the header text ("Failed attempts recorded after the previous
+            // visit.") is a static description shown whenever a boundary
+            // exists at all, so it cannot prove the boundary is the *right*
+            // one; the run's presence can.
+            client: clientByUrl((url) =>
+              url.includes("status=failed%2Cpaused") ? Promise.resolve([]) : Promise.resolve([run()]),
+            ),
+            company: "acme",
+            companyName: "Acme",
+            feed: readyFeed,
+            scope,
+          }),
+        ),
+      );
+    });
+    await settle();
+
+    // A clobbered boundary ("now") would push this run's finish time before
+    // it, so it silently drops out of the since-visit panel.
+    expect(container.querySelector('[href="#/tasks/task-1?run=run-1"]')).not.toBeNull();
+  });
+
+  it("uses the new scope's own boundary immediately on a scope switch, never the old scope's", async () => {
+    const scopeA = { connection: "host-a", company: "acme" };
+    const scopeB = { connection: "host-b", company: "acme" };
+    window.localStorage.setItem("oc.overview.last-visit:host-a::acme", "1700000000000");
+    window.localStorage.setItem("oc.overview.last-visit:host-b::acme", "1800000000000");
+    // Finished after A's boundary but before B's — only a stale read of A's
+    // boundary after switching to B would surface it as "since your visit".
+    const failedAfterAOnly = run({ finishedAtMillis: 1_750_000_000_000 });
+
+    // Mount directly on scope A rather than the module-level `scope` used by
+    // the `render()` helper — this test cares about the transition between
+    // two specific scopes.
+    await act(async () => {
+      root.render(
+        createElement(OperatorOverview, {
+          client: client(Promise.resolve([])),
+          company: "acme",
+          companyName: "Acme",
+          feed: readyFeed,
+          scope: scopeA,
+        }),
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      root.render(
+        createElement(OperatorOverview, {
+          // Answer only the failed-only page so the run appears solely in the
+          // "since you last opened" panel, not the unrelated stopped-work
+          // panel above it — isolates the assertion to the boundary this
+          // test is about.
+          client: clientByUrl((url) =>
+            url.includes("status=failed%2Cpaused") ? Promise.resolve([]) : Promise.resolve([failedAfterAOnly]),
+          ),
+          company: "acme",
+          companyName: "Acme",
+          feed: readyFeed,
+          scope: scopeB,
+        }),
+      );
+    });
+    await settle();
+
+    // A stale read of A's boundary would surface this failure under "since
+    // your visit"; B's own (later) boundary must instead read it as absent.
+    expect(container.textContent).toContain("No failed attempts were recorded since the previous visit.");
+    expect(container.querySelector('[href="#/tasks/task-1?run=run-1"]')).toBeNull();
   });
 
   it("reads failures on their own page, so paused attempts cannot crowd one out of the since-visit answer", async () => {
@@ -340,6 +428,22 @@ describe("the operator overview landing page (#1321)", () => {
     const recorded = window.localStorage.getItem("oc.overview.last-visit:test-host::acme");
     expect(recorded).not.toBeNull();
     expect(Number(recorded)).toBeGreaterThan(0);
+
+    // …and exactly once. A remount is a second mount, not a second visit, and a
+    // second write here would leave the NEXT page load comparing against a
+    // moment ago — #1700 again, one page load later. This is the assertion that
+    // catches a `writeOverviewVisit(scope, Date.now())` effect finding its way
+    // back in: the module map keeps THIS load's boundary right whatever the
+    // stored value does, so nothing else in this file would notice.
+    act(() => root.unmount());
+    container.remove();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await render(client(Promise.resolve([])), readyFeed);
+    await settle();
+
+    expect(window.localStorage.getItem("oc.overview.last-visit:test-host::acme")).toBe(recorded);
   });
 
   it("re-reads the boundary when the company changes under a mounted view (#1700)", async () => {
