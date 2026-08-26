@@ -275,6 +275,84 @@ describe("raw OpenRouter registry ids vs the proxy's own passthrough shape (issu
   });
 });
 
+describe("clearing a tier override back to the tier default (issue #1838 follow-up)", () => {
+  it("offers a 'Use the tier default' item in the catalog select for a tier with a saved override", async () => {
+    // A keyed OpenRouter company with a saved override and a loaded catalog
+    // used to only ever offer concrete models — no way to remove the one
+    // mapping and let `model_for_tier` fall back to its own default for that
+    // tier. Opening the select must show an explicit way out.
+    const { client } = clientFor(
+      status("openrouter", { "chat-v1": "anthropic/claude-sonnet-5" }, true),
+      [{ id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" }],
+    );
+
+    await mount(client);
+
+    const trigger = container.querySelector(
+      '[data-testid="inference-model-select-chat-v1"]',
+    ) as HTMLButtonElement;
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger.click();
+    });
+    await act(async () => {});
+
+    expect(document.body.querySelector('[data-testid="inference-model-clear-chat-v1"]')).not.toBeNull();
+  });
+
+  it("clears the tier override when 'Use the tier default' is picked, and Save drops it from the wire", async () => {
+    const { client, puts } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "anthropic/claude-sonnet-5", "reasoning-v1": "anthropic/agentic" },
+        true,
+      ),
+      [
+        { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" },
+        { id: "anthropic/agentic", name: "Agentic" },
+      ],
+    );
+
+    await mount(client);
+
+    const trigger = container.querySelector(
+      '[data-testid="inference-model-select-chat-v1"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      trigger.click();
+    });
+    await act(async () => {});
+
+    const clearItem = document.body.querySelector(
+      '[data-testid="inference-model-clear-chat-v1"]',
+    ) as HTMLElement;
+    expect(clearItem).not.toBeNull();
+    await act(async () => {
+      clearItem.click();
+    });
+    await act(async () => {});
+
+    // Cleared tier reverts to the placeholder select (no stored value); the
+    // untouched tier keeps its override and stays a select, not free text.
+    expect(container.querySelector("#inference-model-chat-v1")?.textContent).not.toContain(
+      "anthropic/claude-sonnet-5",
+    );
+    expect(container.querySelector("#inference-model-reasoning-v1")?.textContent).toContain(
+      "Agentic",
+    );
+
+    const save = container.querySelector('[data-testid="inference-save"]') as HTMLButtonElement;
+    await act(async () => {
+      save.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { models?: Record<string, string> };
+    expect(body.models).toEqual({ "reasoning-v1": "anthropic/agentic" });
+  });
+});
+
 describe("proxy-incompatible overrides survive an unready catalog (issue #1838 follow-up)", () => {
   it("strips a raw catalog id from the draft while the registry is still loading, before Save is clicked", async () => {
     // Third instance of the #1838 class: the earlier fix only stripped a

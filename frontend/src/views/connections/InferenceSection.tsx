@@ -172,6 +172,25 @@ function optionsForTier(catalog: InferenceModel[], current: string): InferenceMo
   return [{ id: current, name: "Current custom model" }, ...catalog];
 }
 
+/**
+ * The tier model select's value for "no override — fall back to
+ * `model_for_tier`'s own default for this tier".
+ *
+ * Not `""`: an empty string is Base UI Select's own placeholder/unset
+ * sentinel, so a real option needs a value of its own — the same reason
+ * `AgentDetailView`'s `HARNESS_DEFAULT` exists. `""` is what `models[tier]`
+ * already uses to mean "no override" on the wire (`stripProxyIncompatible`,
+ * `save()`'s `cleanModels` filter), so the boundary is translated at the one
+ * point that crosses it, the select's `onValueChange` below.
+ *
+ * Without this item, a keyed company with a saved override had no way to
+ * clear it back to the tier default once the catalog loaded: the select only
+ * ever offered concrete models, selecting one only replaced the override, and
+ * Reset discards the whole provider configuration and key rather than one
+ * tier (issue #1838 follow-up).
+ */
+const TIER_DEFAULT_MODEL = "__tier_default__";
+
 function modelLabel(model: InferenceModel): string {
   return model.name ? `${model.name} — ${model.id}` : model.id;
 }
@@ -963,8 +982,14 @@ export function InferenceSection({
                               <Select
                                 value={value || null}
                                 disabled={modelCatalog.kind !== "ready"}
-                                onValueChange={(next) => next && setModel(tier, String(next))}
-                                items={modelItems(options)}
+                                onValueChange={(next) => {
+                                  if (!next) return;
+                                  setModel(tier, next === TIER_DEFAULT_MODEL ? "" : String(next));
+                                }}
+                                items={{
+                                  [TIER_DEFAULT_MODEL]: "Use the tier default",
+                                  ...modelItems(options),
+                                }}
                               >
                                 <SelectTrigger
                                   id={`inference-model-${tier}`}
@@ -983,6 +1008,14 @@ export function InferenceSection({
                                   )}
                                 </SelectTrigger>
                                 <SelectContent>
+                                  {value && (
+                                    <SelectItem
+                                      value={TIER_DEFAULT_MODEL}
+                                      data-testid={`inference-model-clear-${tier}`}
+                                    >
+                                      <span>Use the tier default</span>
+                                    </SelectItem>
+                                  )}
                                   {options.map((model) => (
                                     <SelectItem key={model.id} value={model.id}>
                                       <span>{model.name ?? model.id}</span>
