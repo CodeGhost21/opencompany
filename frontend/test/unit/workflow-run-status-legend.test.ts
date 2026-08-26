@@ -156,6 +156,23 @@ describe("the run-status legend affordance", () => {
     // with no accessible name is not discoverable to a screen reader.
     expect(legend?.getAttribute("aria-label")).toBeTruthy();
   });
+
+  // Codex review on #1821 (eleventh pass): the trigger was a bare `<button>`
+  // with no padding, height or width, so its hit box was only its `size-3.5`
+  // (~14×14px) `Info` child — well below a touch-reliable target, even though
+  // switching to `Popover` (fifth pass, above) made a tap capable of opening
+  // it at all. `icon-xs` is the smallest sized hit-area the button scale
+  // already defines (`size-6`, 24×24px) — the same convention
+  // `TaskDetailView`'s redact trigger and the styleguide's own Popover
+  // example already use for an icon-only trigger, rather than a one-off pixel
+  // value invented here.
+  it("gives the legend trigger a touch-sized hit area, not just its icon's box", async () => {
+    await renderHistory(baseRun());
+    const legend = container.querySelector(
+      '[data-testid="workflow-run-legend"]',
+    );
+    expect(legend?.className ?? "").toMatch(/\bsize-6\b/);
+  });
 });
 
 describe("the status dot defines the run's verdict on hover", () => {

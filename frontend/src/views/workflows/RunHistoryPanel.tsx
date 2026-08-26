@@ -158,14 +158,23 @@ function statusDotTitle(label: string): string {
 function RunStatusLegend() {
   return (
     <Popover>
+      {/* Codex review on #1821 (eleventh pass): a bare `<button>` with no
+          padding, height or width sizes itself to its one child — the
+          `size-3.5` icon, ~14×14px — which is fine for a mouse but far below
+          what a touch tap can reliably hit. `icon-xs` is the smallest sized
+          hit-area the button scale already defines (`size-6`, 24×24px) and is
+          the same fix `TaskDetailView`'s redact trigger and the styleguide's
+          own Popover example (`render={<Button ... />}`) already use for an
+          icon-only trigger, rather than inventing a one-off pixel value here. */}
       <PopoverTrigger
         openOnHover
         render={
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon-xs"
             aria-label="What these run statuses mean"
             data-testid="workflow-run-legend"
-            className="inline-flex items-center text-muted-foreground hover:text-foreground"
+            className="text-muted-foreground hover:text-foreground"
           />
         }
       >
