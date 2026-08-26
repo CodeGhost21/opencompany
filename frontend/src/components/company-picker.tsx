@@ -103,6 +103,13 @@ export function CompanyPicker({ companies, onPick, onCreate, onReset, canCreate 
                         e.stopPropagation();
                         onReset(c);
                       }}
+                      // Enter/Space on this button bubble as `keydown` before
+                      // the browser synthesizes their own `click` — the card's
+                      // handler below reacts to that bubbled keydown itself,
+                      // so a `stopPropagation` on click alone (above) is too
+                      // late: Space would switch into the company without
+                      // opening Reset, and Enter could fire both.
+                      onKeyDown={(e) => e.stopPropagation()}
                       data-testid={`picker-reset-${c.id}`}
                     >
                       <RotateCcw className="size-3.5" /> Reset
