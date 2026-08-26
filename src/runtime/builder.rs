@@ -2263,6 +2263,15 @@ impl RuntimeBuilder {
             None => {
                 let blocked_nodes = crate::runtime::blocked_nodes::BlockedNodeQueue::default();
                 blocked_nodes.rearm(journal.blocked_stashes());
+                // Issue #1816: fold in whichever of those rehydrated stashes
+                // already had an approve banked before the restart — the fact
+                // `ContinuationQueue`'s own rearm cannot carry (see its docs),
+                // and the one a blocked node has no re-park to fall back on if
+                // lost. Always after `rearm` above: the stash it names must
+                // already exist for this to land anywhere.
+                for turn in journal.blocked_node_approvals() {
+                    blocked_nodes.mark_approved(&turn);
+                }
                 blocked_nodes
             }
         };
