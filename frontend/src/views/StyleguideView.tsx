@@ -596,15 +596,31 @@ function ToneSection() {
   );
 }
 
+/**
+ * The scale, and what each step is actually for.
+ *
+ * The top of it moved in issue #1763. `text-lg` was labelled "Card titles" and
+ * `text-2xl` "View titles"; both were out of date the moment `PageHeader`
+ * shipped, and a styleguide that names the size a page title should be is not
+ * a specimen sheet — it is the instruction the next page follows. Every page
+ * title is now `PageHeader`'s `text-lg`, and `CardTitle` is `text-base`
+ * (`text-sm` on a `size="sm"` card), so the two labels swap ends of the scale
+ * rather than one of them simply being deleted.
+ *
+ * `text-2xl` survives, but not as a page title: it is the size of a *number* —
+ * the balance on Finance, the spend on Usage — and of the two headings that
+ * live outside the console shell, sign-in and the company picker. Those are
+ * the "hero with air above it" case `page-header.tsx` argues a bar cannot be.
+ */
 const TYPE_STEPS = [
   { cls: "text-3xs", px: "10px", sample: TAGLINE, use: "Table meta, graph labels, counters" },
   { cls: "text-2xs", px: "11px", sample: TAGLINE, use: "Captions, timestamps, key/value rows" },
   { cls: "text-xs", px: "12px", sample: TAGLINE, use: "Dense body — the workhorse" },
   { cls: "text-sm", px: "14px", sample: TAGLINE, use: "Default body, labels, buttons" },
-  { cls: "text-base", px: "16px", sample: TAGLINE, use: "Long-form prose, empty states" },
-  { cls: "text-lg", px: "18px", sample: "A company of one", use: "Card titles" },
+  { cls: "text-base", px: "16px", sample: TAGLINE, use: "Card titles, long-form prose, empty states" },
+  { cls: "text-lg", px: "18px", sample: "A company of one", use: "Page titles — every PageHeader" },
   { cls: "text-xl", px: "20px", sample: "A company of one", use: "Section headings" },
-  { cls: "text-2xl", px: "24px", sample: "A company of one", use: "View titles" },
+  { cls: "text-2xl", px: "24px", sample: "A company of one", use: "Stat values, sign-in and company-picker heroes" },
 ] as const;
 
 function TypeSection() {
