@@ -79,7 +79,7 @@ use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
-use super::workspace_names::{MAX_NAME_BYTES, kebab_name};
+use super::workspace_names::{MAX_NAME_BYTES, kebab_name, kebab_name_or};
 use super::workspace_scaffold::ensure_artifact_folder;
 
 /// One publish, as [`materialize`] needs it.
@@ -153,7 +153,7 @@ pub struct Mirrored {
 
 /// Put `target`'s body into the shared tree and return what it left there.
 ///
-/// The layout is `artifacts/<agent-id>/<task-title>-<task-id>/<source…>`, the
+/// The layout is `artifacts/<agent-id>/<task-title>.<task-id>/<source…>`, the
 /// task folder named by [`task_folder_name`] — readable half first, id last so
 /// the folder is still findable by the id an operator holds (issue #1687). The
 /// agent's folder
@@ -775,23 +775,46 @@ async fn resolve_folder(
 /// being joined, so the title is trimmed to whatever the id leaves and any
 /// separator the cut exposed is trimmed with it. The id is never truncated — a
 /// partial ULID is not the id, and matching one is the whole point of
-/// [`task_folder_id_suffix`]. A card whose title normalizes to nothing (an
-/// emoji, punctuation) is named by the id alone rather than by `untitled`,
-/// which is what [`kebab_name`] would otherwise hand back for every one of
-/// them at once.
+/// [`task_folder_task_id`]. A card whose title normalizes to nothing (an emoji,
+/// punctuation) is named by the id alone rather than by `untitled`, which is
+/// what [`kebab_name`] would otherwise hand back for every one of them at once.
+///
+/// # The two halves are joined by a dot, not by a dash
+///
+/// [`TASK_ID_BOUNDARY`] is the only separator that makes the id half
+/// *findable*, which is the whole job of [`resolve_task_folder`]. A dash cannot:
+/// a seed card's id is `[a-z0-9-]` (`task_file::normalize_task_id`), so cards
+/// `login` and `fix-login` are both legal, and `password-reset-fix-login` ends
+/// with `-login` as surely as `password-reset-login` does. Matching on that
+/// suffix files one card's deliverables in the other's folder, and once both
+/// have published it makes the shorter id ambiguous forever.
+///
+/// A dot has no such twin. Neither id grammar can produce one — a board card's
+/// id is a ULID, a seed card's is `[a-z0-9-]` — so the name's *last* dot is
+/// always the join, and the text after it is the whole id and nothing else. It
+/// is also still one lawful workspace name: [`kebab_name`] keeps a dot that
+/// something precedes, and collapses a dash run, so `--` would fail
+/// [`is_kebab_name`](super::workspace_names::is_kebab_name) where this passes.
 fn task_folder_name(task_id: &str, task_title: Option<&str>) -> String {
     let id = kebab_name(task_id);
-    let Some(title) = task_title else {
+    // An id carrying the boundary itself would put the join in the wrong place,
+    // so such a card is named by its id alone — which is what every folder was
+    // called before this, and what the `name == id` arm of the lookup still
+    // matches. Guarding an input neither id grammar can produce keeps this a
+    // total function rather than one with an unstated precondition.
+    let Some(title) = task_title.filter(|_| !id.contains(TASK_ID_BOUNDARY)) else {
         return id;
     };
-    // A title that normalizes to nothing lands on `FALLBACK_NAME`. Compared
-    // against a fresh `kebab_name("")` rather than against the constant, so
-    // this reads the rule rather than restating it.
-    let mut slug = kebab_name(title);
-    if slug == kebab_name("") {
+    // `kebab_name_or` falls back **only** when the title normalized to nothing,
+    // which is the distinction `kebab_name` flattens: it answers `untitled` both
+    // for a card actually titled "Untitled" — which has a perfectly good name —
+    // and for one titled "🎉", which has none. Falling back to the id keeps the
+    // second off `untitled.<id>` without taking the first's title away.
+    let mut slug = kebab_name_or(title, task_id);
+    if slug == id {
         return id;
     }
-    // `+ 1` for the `-` joining the two halves. Both halves are ASCII by
+    // `+ 1` for the boundary joining the two halves. Both halves are ASCII by
     // construction (`kebab_name` emits only `[a-z0-9.-]`), so a byte cut is
     // always a character cut.
     let room = MAX_NAME_BYTES.saturating_sub(id.len() + 1);
@@ -804,15 +827,23 @@ fn task_folder_name(task_id: &str, task_title: Option<&str>) -> String {
     if slug.is_empty() {
         return id;
     }
-    format!("{slug}-{id}")
+    format!("{slug}{TASK_ID_BOUNDARY}{id}")
 }
 
-/// The suffix [`task_folder_name`] ends every titled folder with.
+/// The character [`task_folder_name`] joins the readable half to the id half
+/// with, and therefore the boundary [`task_folder_task_id`] reads back.
+const TASK_ID_BOUNDARY: char = '.';
+
+/// The task id `name` was composed around, when it was composed by
+/// [`task_folder_name`] at all.
 ///
-/// The stable half of the name, and therefore what a lookup matches on rather
-/// than the whole string — see [`resolve_task_folder`].
-fn task_folder_id_suffix(task_id: &str) -> String {
-    format!("-{}", kebab_name(task_id))
+/// The **last** boundary rather than the first, because the readable half can
+/// hold dots of its own (`v1.2 plan` normalizes to `v1.2-plan`) while the id
+/// half can hold none. So the tail is the whole id, exactly, and a lookup on it
+/// is an equality test rather than the unbounded suffix match a dash join would
+/// force — see [`task_folder_name`] for the card pair that breaks.
+fn task_folder_task_id(name: &str) -> Option<&str> {
+    name.rsplit_once(TASK_ID_BOUNDARY).map(|(_, id)| id)
 }
 
 /// Adopt-or-create the folder holding `task_id`'s deliverables, **matched by
@@ -836,14 +867,38 @@ fn task_folder_id_suffix(task_id: &str) -> String {
 /// must not find their tree rearranged by an upgrade they did not ask for, and
 /// a rename breaks every reference anyone kept to the old name.
 ///
-/// # Ambiguity is refused here too
+/// # A note wearing the id is still refused
 ///
-/// Two folders matching one id is the same unresolvable state
-/// [`resolve_folder`] answers with [`Conflict`](OpenCompanyError::Conflict),
-/// and for the same reason: publishing into either one is a coin flip that
-/// splits a task's deliverables silently. The create still goes through
-/// [`resolve_folder`], so the race that produces that state is still decided
-/// under the store's own lock rather than by this snapshot.
+/// A deliverable cannot be published beneath a note, so a match of the wrong
+/// kind is a [`Conflict`](OpenCompanyError::Conflict) rather than a guess —
+/// the same fail-closed rule [`resolve_folder`] applies to a name.
+///
+/// # Two folders for one task: the oldest wins, deterministically
+///
+/// [`resolve_folder`]'s create is atomic, but it is keyed by the folder's
+/// **name**, and two *first* publishes of one task can now compute two
+/// different names — one caller holding the card's title and one holding
+/// `None` ([`PublishTarget::task_title`]), or a retitle landing between them.
+/// Both then see no match, both create, and the tree carries two folders for
+/// one task.
+///
+/// Answering that with `Conflict` would be the worst of the options available:
+/// the state does not decay, so a race lasting microseconds would refuse every
+/// later publish for that task permanently — the exact failure
+/// [`resolve_folder`] documents at length and the store's atomic
+/// adopt-or-create exists to prevent. And there is no identity here to guess
+/// at, which is what makes this unlike [`resolve_folder`]'s duplicate *name*:
+/// both folders were matched on this task's own immutable id, so both are
+/// provably its own. The lowest node id therefore wins — node ids are ULIDs, so
+/// that is the older of the two, and it is the same answer on every later
+/// publish, in every process, on every backend. The deliverables that landed in
+/// the loser stay where they are and stay readable; nothing is moved or
+/// renamed.
+///
+/// Closing the window instead of converging after it would need an
+/// adopt-or-create keyed by something other than the name — a new
+/// [`WorkspaceStore`] method across all three backends, which is a change to
+/// the port rather than to this naming rule.
 async fn resolve_task_folder(
     workspace: &dyn WorkspaceStore,
     company: &CompanyId,
@@ -854,28 +909,25 @@ async fn resolve_task_folder(
     agent_id: &str,
 ) -> Result<String> {
     let id = kebab_name(task_id);
-    let suffix = task_folder_id_suffix(task_id);
-    let existing: Vec<(String, NodeKind)> = nodes
-        .iter()
-        .filter(|node| node.parent_id.as_deref() == Some(parent))
-        .filter(|node| node.name == id || node.name.ends_with(&suffix))
-        .map(|node| (node.id.clone(), node.kind))
-        .collect();
-    match existing.as_slice() {
-        [(node_id, NodeKind::Folder)] => return Ok(node_id.clone()),
-        [_] => {
-            return Err(OpenCompanyError::Conflict(format!(
-                "`{id}` already exists as a note, not a folder, so a deliverable cannot be \
-                 published beneath it"
-            )));
+    let mut folders: Vec<&str> = Vec::new();
+    let mut other_kind = false;
+    for node in nodes.iter().filter(|node| {
+        node.parent_id.as_deref() == Some(parent)
+            && (node.name == id || task_folder_task_id(&node.name) == Some(id.as_str()))
+    }) {
+        match node.kind {
+            NodeKind::Folder => folders.push(&node.id),
+            _ => other_kind = true,
         }
-        [] => {}
-        many => {
-            return Err(OpenCompanyError::Conflict(format!(
-                "{count} nodes under this folder carry task `{id}`, so the path is ambiguous",
-                count = many.len()
-            )));
-        }
+    }
+    if let Some(oldest) = folders.iter().min() {
+        return Ok((*oldest).to_string());
+    }
+    if other_kind {
+        return Err(OpenCompanyError::Conflict(format!(
+            "`{id}` already exists as a note, not a folder, so a deliverable cannot be \
+             published beneath it"
+        )));
     }
     let name = task_folder_name(task_id, task_title);
     resolve_folder(workspace, company, nodes, parent, &name, agent_id).await
@@ -2518,7 +2570,7 @@ mod test {
 
         assert_eq!(
             path_of(ws, &co, &id).await,
-            format!("{ARTIFACTS_ROOT}/cmo/q3-launch-brief-t-1/launch.md"),
+            format!("{ARTIFACTS_ROOT}/cmo/q3-launch-brief.t-1/launch.md"),
             "the folder must read as the work and still end in the card id"
         );
     }
@@ -2561,11 +2613,11 @@ mod test {
 
         assert_eq!(
             path_of(ws, &co, &first).await,
-            format!("{ARTIFACTS_ROOT}/cmo/q3-launch-brief-t-1/launch.md")
+            format!("{ARTIFACTS_ROOT}/cmo/q3-launch-brief.t-1/launch.md")
         );
         assert_eq!(
             path_of(ws, &co, &second).await,
-            format!("{ARTIFACTS_ROOT}/cmo/q3-launch-brief-t-1/timeline.md"),
+            format!("{ARTIFACTS_ROOT}/cmo/q3-launch-brief.t-1/timeline.md"),
             "a retitled card must publish into the folder it already has, not a second one"
         );
     }
@@ -2626,13 +2678,29 @@ mod test {
 
         // The ordinary case: readable half first, id last, one workspace name.
         let named = task_folder_name(ulid, Some("Q3 Launch Brief"));
-        assert_eq!(named, format!("q3-launch-brief-{ulid}"));
+        assert_eq!(named, format!("q3-launch-brief.{ulid}"));
         assert!(is_kebab_name(&named), "{named}");
 
         // A title that normalizes to nothing must not collapse every such card
-        // onto `untitled-<id>`; the id alone is both shorter and truer.
+        // onto `untitled.<id>`; the id alone is both shorter and truer.
         assert_eq!(task_folder_name(ulid, Some("🎉 ✨")), ulid);
         assert_eq!(task_folder_name(ulid, Some("   ")), ulid);
+
+        // But a card an operator actually titled "Untitled" has a real name,
+        // and it must keep it: `kebab_name` answers `untitled` for that title
+        // and for `🎉` alike, and only the second of those has nothing to say.
+        assert_eq!(
+            task_folder_name(ulid, Some("Untitled")),
+            format!("untitled.{ulid}"),
+            "a real title must not be mistaken for the fallback it collides with"
+        );
+
+        // The id half is read back whole, whatever the title half held — the
+        // one property the lookup depends on.
+        assert_eq!(
+            task_folder_task_id(&task_folder_name("fix-login", Some("v1.2 Plan"))),
+            Some("fix-login")
+        );
 
         // A long title is trimmed to whatever the id leaves — never the id, a
         // partial ULID being no id at all — and leaves no dangling separator.
@@ -2640,5 +2708,117 @@ mod test {
         assert!(long.len() <= MAX_NAME_BYTES, "{} bytes", long.len());
         assert!(long.ends_with(ulid), "{long}");
         assert!(is_kebab_name(&long), "{long}");
+    }
+
+    /// One card's id being the tail of another's must not file one card's
+    /// deliverables in the other's folder.
+    ///
+    /// A seed card's id is `[a-z0-9-]` (`task_file::normalize_task_id`), so
+    /// `login` and `fix-login` are both legal ids on one board, and a dash
+    /// join would leave `password-reset-fix-login` ending in `-login` exactly
+    /// as `login`'s own folder does. The shorter card would then adopt the
+    /// longer card's folder — silently, and overwriting its deliverables
+    /// wherever the two publish the same source path — and once both had
+    /// published, every later lookup for `login` would match two folders. The
+    /// dot boundary makes the id half an equality test rather than a suffix
+    /// search, so neither can reach the other.
+    #[tokio::test]
+    async fn a_card_whose_id_ends_in_another_cards_id_keeps_its_own_folder() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let longer = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "fix-login",
+                task_title: Some("Password reset"),
+                ..target("notes.md", "# Notes")
+            },
+        )
+        .await
+        .expect("publish for `fix-login`")
+        .node_id;
+        assert_eq!(
+            path_of(ws, &co, &longer).await,
+            format!("{ARTIFACTS_ROOT}/cmo/password-reset.fix-login/notes.md")
+        );
+
+        let shorter = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "login",
+                task_title: Some("Login page"),
+                ..target("spec.md", "# Spec")
+            },
+        )
+        .await
+        .expect("publish for `login`")
+        .node_id;
+        assert_eq!(
+            path_of(ws, &co, &shorter).await,
+            format!("{ARTIFACTS_ROOT}/cmo/login-page.login/spec.md"),
+            "`login` must mint its own folder, not adopt the one `fix-login` already has"
+        );
+    }
+
+    /// Two folders for one task converge on one of them, rather than refusing
+    /// every publish that follows.
+    ///
+    /// The create is atomic under the store's lock but keyed by *name*, and two
+    /// first publishes of one card can compute two names — one caller holding
+    /// the title and one holding `None`. Answering the result with `Conflict`
+    /// would make a race lasting microseconds refuse that task's publishes
+    /// permanently, which is the failure `resolve_folder` exists to prevent.
+    /// Both folders were matched on the card's own immutable id, so there is no
+    /// identity to guess at: the older wins, on every later publish and in
+    /// every process.
+    #[tokio::test]
+    async fn two_folders_for_one_task_resolve_to_the_oldest_rather_than_refusing() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("launch.md", "# Launch"))
+            .await
+            .expect("untitled first publish")
+            .node_id;
+        let tree = ws.tree(&co).await.expect("tree");
+        let published = tree.iter().find(|n| n.id == first).expect("published node");
+        let task_folder = tree
+            .iter()
+            .find(|n| Some(&n.id) == published.parent_id.as_ref())
+            .expect("task folder");
+        assert_eq!(task_folder.name, "t-1");
+        let agent_folder = task_folder.parent_id.clone().expect("agent folder");
+
+        // What a concurrent first publish holding the card's title would have
+        // left behind: the same task, under a second name.
+        let twin = ws
+            .adopt_or_create_folder(&co, Some(&agent_folder), "launch-brief.t-1", origin("cmo"))
+            .await
+            .expect("twin folder")
+            .into_node();
+        assert!(
+            twin.id > task_folder.id,
+            "the twin must be the younger of the two for this to prove anything"
+        );
+
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_title: Some("Launch brief"),
+                ..target("timeline.md", "# Timeline")
+            },
+        )
+        .await
+        .expect("a task with two folders must still be publishable")
+        .node_id;
+        assert_eq!(
+            path_of(ws, &co, &second).await,
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/timeline.md"),
+            "the older of the two folders must win, and win the same way every time"
+        );
     }
 }
