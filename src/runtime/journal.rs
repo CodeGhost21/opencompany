@@ -490,25 +490,47 @@ impl JournalRecord {
             // same trade `GrantConsumed` accepted four arms up: one flush on a
             // record written at operator-decision scale.
             //
-            // The card for an agent node's gated tool call stays `Process` here,
-            // but the continuation it strands is now made durable a different
-            // way (issue #1816). The tool-call effect carries no workflow id or
-            // trigger input, so host-flushing the *card* would still buy nothing.
-            // Instead the two facts the continuation needs are written at park
-            // time as a dedicated host-durable `BlockedNodeStashed` record and
-            // re-armed into `BlockedNodeQueue` at boot — so a restart between park
-            // and approve re-dispatches the run from that record, and the card
-            // itself needs no stronger durability than every other park.
+            // The card for an agent node's gated tool call used to stay
+            // `Process` here on the theory that the continuation it strands is
+            // durable a different way (issue #1816): the two facts the
+            // continuation needs are written at park time as a dedicated
+            // host-durable `BlockedNodeStashed` record and re-armed into
+            // `BlockedNodeQueue` at boot, so a restart between park and approve
+            // re-dispatches the run from that record — once the operator has
+            // decided.
             //
-            // Keyed on the effect kind rather than on `run_id`, which cannot do
-            // this job: `run_id` is stamped with a *task attempt* id at the
-            // dispatch boundary and with a *workflow run* id by `gate_effect`,
-            // so `is_some()` also selects card runs and blocked-node parks —
-            // the two cases this must not widen to. `WORKFLOW_APPROVE_KIND` is
-            // minted in exactly one place, for exactly the parks whose loss
-            // strands a run nothing will re-enter.
+            // "Once the operator has decided" is exactly what a lost card takes
+            // away, and nothing gives it back. `BlockedNodeQueue::rearm`
+            // restores the stash, but a stash with no matching card is not a
+            // pending decision: it is invisible to the operator (`pending()`
+            // and `parked_turns()` both replay from this same record, so a
+            // lost line is a lost row on both) and invisible to
+            // `reconcile_stranded_blocked_nodes`, which only resumes a turn
+            // already durably marked in `blocked_node_approvals` — a set this
+            // park's own loss keeps empty, because nobody ever got the chance
+            // to approve it. A restart between the park and the decision does
+            // not strand the *continuation* (#1816 covers that); it strands the
+            // *question*, permanently, with no re-park coming — the identical
+            // failure the workflow-gate arm below exists to close, one caller
+            // down. So this park needs that arm's durability for that arm's
+            // reason, bought the same way: human-approval scale, one flush per
+            // blocked node.
+            //
+            // Keyed on `run_id.is_some()` rather than the effect kind, because
+            // a blocked-node park's kind is the tool name itself and varies per
+            // call — there is no fixed tag to match the way
+            // `WORKFLOW_APPROVE_KIND` is one. `run_id` already carries the
+            // distinction that matters: `ApprovalRequestQueue::stamp_run` stamps
+            // it with the task-attempt id at the dispatch boundary for exactly a
+            // workflow node's own gated call, and deliberately leaves a chat
+            // turn's own park — which DOES re-park on its next attempt — at
+            // `None`. `gate_effect` stamps the workflow gate's own park with a
+            // run id too, so `is_some()` alone already covers it; the explicit
+            // kind check is kept so that arm's own reasoning stays legible
+            // without depending on this one.
             Self::ApprovalParked { effect, .. }
-                if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND =>
+                if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND
+                    || effect.run_id.is_some() =>
             {
                 Durability::Host
             }
@@ -4122,6 +4144,45 @@ mod test {
                  taxes the approval path for a question that comes back on its own"
             );
         }
+    }
+
+    /// **Issue #1825** (Codex finding `3866158654`). A blocked agent-node's
+    /// gated tool call park is host-durable too — the same reasoning as
+    /// `only_a_workflow_gate_park_is_host_durable` above, one caller down:
+    /// `BlockedNodeStashed` durably carries the continuation, but nothing
+    /// regenerates a lost `ApprovalParked` card, so a card lost to a host
+    /// crash between park and approve strands the question forever with no
+    /// re-park coming.
+    ///
+    /// Discriminated by `run_id` rather than `kind`, because a blocked node's
+    /// park carries the tool's own name — it varies per call, unlike
+    /// `WORKFLOW_APPROVE_KIND`. See `ApprovalRequestQueue::stamp_run`'s doc for
+    /// why `run_id` is exactly the field a workflow-dispatched call has and a
+    /// chat turn's own call does not.
+    #[test]
+    fn a_blocked_node_tool_call_park_is_host_durable_too() {
+        let mut blocked_node_park = parked_with_kind("shell");
+        let JournalRecord::ApprovalParked { effect, .. } = &mut blocked_node_park else {
+            panic!("parked_with_kind always returns ApprovalParked");
+        };
+        effect.run_id = Some("run-1".to_string());
+        assert_eq!(
+            blocked_node_park.durability(),
+            Durability::Host,
+            "a blocked node's card is the only durable record that can put its \
+             decision in front of the operator again — losing it strands the \
+             stash `BlockedNodeStashed` keeps alive behind a question nobody can \
+             answer"
+        );
+
+        // A chat turn's own gated call carries no `run_id` (`stamp_run` leaves
+        // it `None`) and must not be swept up by the widened arm above — it
+        // still re-parks on its own next attempt.
+        assert_eq!(
+            parked_with_kind("shell").durability(),
+            Durability::Process,
+            "a chat-turn park has no run_id and re-asks on its own"
+        );
     }
 
     /// **Issue #392**: a host-durable record's append really does take the
