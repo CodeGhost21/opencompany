@@ -817,7 +817,26 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         finish_reason.as_deref(),
         Some("stop") | Some("tool_calls") | Some("function_call")
     );
-    if content.is_empty() && tool_calls.is_empty() && genuinely_finished {
+    // `tool_calls` above is the *parsed* result: `parse_tool_calls` requires a
+    // `/message/tool_calls` array AND drops any entry missing `function.name`,
+    // and it never reads the legacy singular `message.function_call` field at
+    // all. So a malformed tool-call entry, or a legacy `finish_reason:
+    // "function_call"` response using `message.function_call`, leaves the
+    // parsed `tool_calls` empty even though the model requested an action —
+    // which would let this branch silently swap the requested action for
+    // ordinary prose instead of surfacing the parse/empty error below. Check
+    // the *raw* payload for either call shape, independent of finish_reason,
+    // so a genuinely-requested-but-unparseable call can never be promoted
+    // (Codex review on #1779, comment 3862781739).
+    let raw_tool_call_requested = payload
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| !arr.is_empty())
+        || payload
+            .pointer("/choices/0/message/function_call")
+            .is_some_and(|v| !v.is_null());
+    if content.is_empty() && tool_calls.is_empty() && !raw_tool_call_requested && genuinely_finished
+    {
         content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
         if content.is_empty() {
             content = extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
@@ -2019,6 +2038,66 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("failed"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// The legacy `finish_reason: "function_call"` shape carries the request
+    /// under the singular `message.function_call` field, which
+    /// `parse_tool_calls` never reads (it only parses the modern
+    /// `message.tool_calls` array). Pre-fix, `finish_reason: "function_call"`
+    /// sat in the `genuinely_finished` allow-list, so with `tool_calls` empty
+    /// (nothing there to parse) and `content: null`, this fell straight into
+    /// the reasoning fallback and silently swapped the requested action for
+    /// prose — the caller never even sees a tool call was dropped. Must error
+    /// instead (Codex follow-up review on #1779, comment 3862781739).
+    #[test]
+    fn legacy_function_call_with_reasoning_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "function_call",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "function_call": { "name": "get_weather", "arguments": "{}" }
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("a raw legacy function_call must not be dropped for promoted reasoning");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("function_call"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A malformed modern `tool_calls` entry (missing `function.name`) is
+    /// dropped by `parse_tool_calls`'s `filter_map`, leaving the *parsed*
+    /// `tool_calls` empty even though the raw payload clearly requested one.
+    /// The raw-payload guard must catch this too, not just the legacy
+    /// `function_call` field, so a request that fails to parse surfaces as
+    /// the empty-response error rather than a promoted reasoning answer.
+    #[test]
+    fn malformed_modern_tool_call_with_reasoning_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "tool_calls": [{ "id": "call_1", "type": "function", "function": { "arguments": "{}" } }]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a malformed raw tool_calls entry must not be dropped for promoted reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
             "error must name finish_reason for diagnosis, got: {msg}"
         );
     }
