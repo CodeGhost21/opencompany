@@ -541,11 +541,19 @@ export function RunHistoryRow({
         {/* Issue #1798: the run's verdict is otherwise a colour with no word.
             Its hover title names the state and defines it — the same one-liner
             the header legend lists — so the dot stops being a signal only a
-            reader who already knows the palette can act on. */}
+            reader who already knows the palette can act on. `title` alone is a
+            mouse-only affordance (Codex review on #1821, fifth pass): a
+            non-focusable, unlabelled span gives keyboard, touch and
+            screen-reader users nothing, since the header legend defines the
+            terms but never says which one applies to THIS row. `role="img"` +
+            `aria-label` puts the same one-liner in the accessibility tree, the
+            way any other status icon this console labels. */}
         <span
           className={`size-1.5 rounded-full ${tone.dot}`}
           data-testid="workflow-run-status-dot"
           title={statusDotTitle(tone.label)}
+          role="img"
+          aria-label={statusDotTitle(tone.label)}
         />
         {run.scheduled && (
           <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal">
