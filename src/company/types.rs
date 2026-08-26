@@ -1375,7 +1375,11 @@ pub struct ChannelConfig {
 }
 
 /// `[tools]` — company-wide tool grants.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `PartialEq` so `runtime::builder::carry_tool_grants_override` can ask the one
+/// question the seed-wins rule turns on: did version control speak about
+/// `[tools]` since the operator's console grant was written (issue #1796)?
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tools {
     /// `openhuman` (default) | `builtin`.
     #[serde(default = "default_tool_provider")]
@@ -1464,7 +1468,7 @@ pub const DEFAULT_MAX_DELEGATION_DEPTH: u8 = 2;
 pub const MAX_DELEGATION_DEPTH_BOUNDS: std::ops::RangeInclusive<u8> = 1..=4;
 
 /// `[tools.composio]` — the per-tenant Composio toolkit allowlist (issue #110).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ComposioTools {
     /// Toolkit slugs the agent may target (e.g. `gmail`, `slack`, `github`).
     /// Empty defers to the backend's server-enforced allowlist (open mode);

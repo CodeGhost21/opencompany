@@ -35,6 +35,7 @@ use crate::ports::types::{
     AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
     ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
     OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
+    ToolGrantsOverride,
 };
 use crate::store::select::MemoryScopes;
 
@@ -160,6 +161,14 @@ struct BundleMeta {
     /// prevent, on the axis that decides capability rather than autonomy.
     /// `#[serde(default)]` for back-compat with older bundles, which read as
     /// empty: the manifest's ceilings decide, exactly as before.
+    /// The operator's console-added `[tools].allow` grants at export time
+    /// (issue #1796). Preserved so an export→import does not silently revoke an
+    /// integration the operator granted from a connect surface, leaving the
+    /// restored company "Connected" and reaching nobody. `#[serde(default)]`
+    /// for back-compat with older bundles, which read as `None`: the manifest's
+    /// `[tools]` decides, exactly as before.
+    #[serde(default)]
+    overlay_tool_grants: Option<ToolGrantsOverride>,
     #[serde(default)]
     overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids switched off at export time (issue #276). Preserved so
@@ -246,6 +255,10 @@ struct BundleContents {
     /// silently re-tightening (or re-loosening) the approval gate on import —
     /// the same class of loss #343 fixed for spend caps.
     overlay_policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants, carried through the
+    /// bundle so export→import preserves an integration granted from a connect
+    /// surface (rather than restoring it "Connected" and reaching nobody).
+    overlay_tool_grants: Option<ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings, carried through the bundle so
     /// export→import preserves a console-narrowed department (rather than
     /// restoring it at the company's full grant).
@@ -320,6 +333,7 @@ impl BundleContents {
             overlay_agent_edits: record.overlay_agent_edits,
             overlay_retired_agents: record.overlay_retired_agents,
             overlay_policy: record.overlay_policy,
+            overlay_tool_grants: record.overlay_tool_grants,
             overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
         })
@@ -386,6 +400,7 @@ impl BundleContents {
                 overlay_workflows: self.overlay_workflows.clone(),
                 overlay_budgets: self.overlay_budgets.clone(),
                 overlay_policy: self.overlay_policy.clone(),
+                overlay_tool_grants: self.overlay_tool_grants.clone(),
                 overlay_desk_tools: self.overlay_desk_tools.clone(),
                 disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
@@ -435,6 +450,7 @@ impl BundleContents {
             overlay_agent_edits: self.overlay_agent_edits.clone(),
             overlay_retired_agents: self.overlay_retired_agents.clone(),
             overlay_policy: self.overlay_policy.clone(),
+            overlay_tool_grants: self.overlay_tool_grants.clone(),
             overlay_desk_tools: self.overlay_desk_tools.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
@@ -606,6 +622,7 @@ impl BundleContents {
             overlay_agent_edits: meta.overlay_agent_edits,
             overlay_retired_agents: meta.overlay_retired_agents,
             overlay_policy: meta.overlay_policy,
+            overlay_tool_grants: meta.overlay_tool_grants,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
         })
@@ -966,6 +983,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1277,6 +1295,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1360,6 +1379,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1494,6 +1514,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1588,6 +1609,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
@@ -1709,6 +1731,7 @@ mod test {
             overlay_workflows: workflows.clone(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1886,6 +1909,17 @@ mod test {
                 set_by: admin_actor(),
                 at_millis: 1_700_000_000_002,
             }),
+            // Issue #1796: the console tool grants ride the same bundle, and
+            // need it more sharply than the desk ceiling below — this is the
+            // one overlay that WIDENS `[tools].allow`, so dropping it would
+            // silently revoke an integration the operator granted from a
+            // connect surface, leaving the imported company "Connected" and
+            // reaching nobody.
+            overlay_tool_grants: Some(ToolGrantsOverride {
+                added: vec!["chargebee".to_string()],
+                set_by: admin_actor(),
+                at_millis: 1_700_000_000_003,
+            }),
             // Non-empty for the same reason the tier above is: an empty map here
             // could not detect the field being dropped from the bundle, and
             // dropping it would silently restore an imported company's narrowed
@@ -2045,6 +2079,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -2133,6 +2168,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
