@@ -293,42 +293,80 @@ pub async fn oc_adopt_session(
     connection_id: String,
     session: String,
 ) -> Result<(), String> {
+    adopt_session(&proxy, connection_id, session).await
+}
+
+/// The body of [`oc_adopt_session`], off the `State` extractor so a test can
+/// drive it against a bare registry.
+///
+/// Ordered so that nothing durable happens until everything refusable has been
+/// refused, and everything durable is undone when a later step fails anyway:
+///
+/// 1. The connection is looked up first — adopting a session for a connection
+///    the core does not hold stores nothing.
+/// 2. The transport gate runs BEFORE the keychain write. `upsert` would refuse
+///    the credential afterwards, but by then the keychain would hold a session
+///    the next launch's `oc_connect` dutifully presents — and its `upsert`
+///    refuses the whole registration, leaving the connection unusable until
+///    someone finds the hidden keychain entry. The precheck is the same
+///    function `upsert` consults, so the two cannot disagree.
+/// 3. A read-back miss is an error, not a quiet `Credential::None`. The
+///    read-back exists to surface a write that did not survive; installing
+///    nothing and reporting success would have the console record a credential
+///    while every request runs anonymous — the exact silence this command was
+///    added to end.
+/// 4. An `upsert` refusal rolls the keychain entry back, best-effort, for the
+///    same reason as (2): a credential the registry refused must not ambush
+///    the next launch.
+pub(crate) async fn adopt_session(
+    proxy: &crate::proxy::ProxyRegistry,
+    connection_id: String,
+    session: String,
+) -> Result<(), String> {
     // Refused before anything is stored: a session that authenticates as
     // nobody must not survive into the keychain, where the next launch would
     // dutifully present it and read the host's 401 as a revoked sign-in.
     if session.trim().is_empty() {
         return Err("a sign-in session cannot be empty".to_string());
     }
-    crate::keychain::remember_device(&connection_id, &session)
-        .map_err(|error| error.to_string())?;
-
-    // Re-register so the credential takes effect without waiting for a reload,
-    // exactly as `oc_pair_device` does — and like there, the session is read
-    // back from the keychain rather than reused from the argument: what
-    // matters is what the store will hand out on the *next* boot, so a write
-    // that did not survive surfaces here rather than as a mysterious 401
-    // later.
     let base_url = proxy
         .base_url(&connection_id)
         .await
         .map_err(|error| error.to_string())?;
-    let credential = match crate::keychain::device_session(&connection_id) {
-        Some(session) => Credential::Device(session),
-        None => Credential::None,
+    if !may_carry_a_credential(&base_url) {
+        // The registry's own words for this refusal, so the sign-in screen and
+        // a failed registration name the problem identically.
+        return Err(crate::proxy::ProxyError::InsecureBaseUrl(base_url).to_string());
+    }
+
+    crate::keychain::remember_device(&connection_id, &session)
+        .map_err(|error| error.to_string())?;
+
+    // Read back from the store rather than reused from the argument: what
+    // matters is what the store will hand out on the *next* boot, so a write
+    // that did not survive surfaces here — as a failure, with the entry
+    // removed — rather than as a mysterious 401 later.
+    let Some(stored) = crate::keychain::device_session(&connection_id) else {
+        let _ = crate::keychain::forget_device(&connection_id);
+        return Err(
+            "the session was stored but could not be read back from the keychain".to_string(),
+        );
     };
-    // `upsert` re-runs the transport gate, so a plain-HTTP remote host refuses
-    // the credential here — at sign-in, where the person is still looking —
-    // rather than silently carrying a secret over a wire anyone can read.
     proxy
         .upsert(
-            connection_id,
+            connection_id.clone(),
             Connection {
                 base_url,
-                credential,
+                credential: Credential::Device(stored),
             },
         )
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            // Best-effort: the refusal is the error worth reporting, and a
+            // failed tidy-up must not replace it.
+            let _ = crate::keychain::forget_device(&connection_id);
+            error.to_string()
+        })
 }
 
 /// Forgets this machine's stored session for a connection.
@@ -862,4 +900,87 @@ mod test {
 #[tauri::command]
 pub async fn oc_device_identity() -> Result<crate::identity::DeviceIdentity, String> {
     Ok(crate::identity::device_identity())
+}
+
+#[cfg(test)]
+mod adopt_session_tests {
+    use super::adopt_session;
+    use crate::proxy::{Connection, Credential, ProxyRegistry};
+
+    async fn registry_with(id: &str, base_url: &str) -> ProxyRegistry {
+        let proxy = ProxyRegistry::new();
+        proxy
+            .upsert(
+                id.to_string(),
+                Connection {
+                    base_url: base_url.to_string(),
+                    credential: Credential::None,
+                },
+            )
+            .await
+            .expect("a bare registration is always accepted");
+        proxy
+    }
+
+    /// The bricking sequence issue #1858's review named: a plain-HTTP remote
+    /// host's sign-in must be refused BEFORE the keychain write, because a
+    /// stored session the next launch's `oc_connect` presents makes `upsert`
+    /// refuse the whole registration — a connection unusable until someone
+    /// finds the hidden keychain entry.
+    #[tokio::test]
+    async fn an_insecure_host_is_refused_before_anything_is_stored() {
+        let proxy = registry_with("insecure-1", "http://192.168.1.20:8080").await;
+
+        let result =
+            adopt_session(&proxy, "insecure-1".to_string(), "acme.tok".to_string()).await;
+
+        let error = result.expect_err("a credential must not ride plain HTTP off-machine");
+        assert!(error.contains("not encrypted"), "{error}");
+        assert!(
+            crate::keychain::device_session("insecure-1").is_none(),
+            "nothing may survive into the keychain for the next launch to trip over"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_connection_stores_nothing() {
+        let proxy = ProxyRegistry::new();
+
+        let result = adopt_session(&proxy, "nobody-1".to_string(), "acme.tok".to_string()).await;
+
+        assert!(result.is_err());
+        assert!(crate::keychain::device_session("nobody-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_empty_session_is_refused_outright() {
+        let proxy = registry_with("empty-1", "https://acme.example.com").await;
+
+        let result = adopt_session(&proxy, "empty-1".to_string(), "   ".to_string()).await;
+
+        assert!(result.is_err());
+        assert!(crate::keychain::device_session("empty-1").is_none());
+    }
+
+    /// The happy path, on the transports a credential may ride: https anywhere,
+    /// and plain HTTP only to this machine (the embedded host's own case).
+    #[tokio::test]
+    async fn a_session_is_kept_where_a_credential_may_travel() {
+        for (id, base_url) in [
+            ("kept-https", "https://acme.example.com"),
+            ("kept-local", "http://127.0.0.1:8080"),
+        ] {
+            let proxy = registry_with(id, base_url).await;
+
+            adopt_session(&proxy, id.to_string(), "acme.tok".to_string())
+                .await
+                .expect("a securely-reachable host keeps its sign-in");
+
+            assert_eq!(
+                crate::keychain::device_session(id).as_deref(),
+                Some("acme.tok"),
+                "the next launch's oc_connect reads this back"
+            );
+        }
+    }
 }

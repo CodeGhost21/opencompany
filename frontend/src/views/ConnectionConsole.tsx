@@ -104,11 +104,22 @@ export function ConnectionConsole({
           try {
             await adoptSession(connectionId, result.session);
           } catch (error) {
-            // The session could not be stored (a keychain refusal, a plain-HTTP
-            // host the core will not carry a credential to). Probing anyway
-            // would 401 and land back on this sign-in screen with no
-            // explanation; the console names the reason instead.
-            console.error("[sign-in] the session could not be adopted", error);
+            // The session could not be kept — a locked keychain, a plain-HTTP
+            // host the core refuses to carry a credential to. Probing anyway
+            // would authenticate as nobody, 401, and land back on this screen
+            // wearing the generic "credential refused" face: a person who just
+            // signed in successfully, told their credential was wrong. So the
+            // sign-in view returns instead, carrying the refusal's own words —
+            // the core writes them for exactly this reading ("this host is not
+            // encrypted…" names an action; "sign-in failed" names nothing).
+            const reason =
+              error instanceof Error ? error.message : String(error ?? "the session could not be stored");
+            setPhase({
+              kind: "login",
+              company: defaultCompany,
+              notice: `You signed in, but this session could not be kept: ${reason}`,
+            });
+            return;
           }
         }
         await probe(connectionId);
@@ -116,7 +127,7 @@ export function ConnectionConsole({
         setBootEpoch((n) => n + 1);
       })();
     },
-    [connectionId],
+    [connectionId, defaultCompany],
   );
 
   useEffect(() => {

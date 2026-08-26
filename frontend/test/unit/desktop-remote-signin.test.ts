@@ -123,6 +123,28 @@ describe("adopting a sign-in on the desktop (#1855)", () => {
     expect(JSON.stringify(connection)).not.toContain("a-session-token");
   });
 
+  it("leaves the credential untouched when the core refuses the session", async () => {
+    // The core refuses for a reason it names — a locked keychain, a plain-HTTP
+    // remote host. Recording a `device` credential anyway would have every
+    // check treat this connection as signed-in while every request runs
+    // anonymous: the silence this whole issue is about, one layer up.
+    desktop(true, (cmd) =>
+      cmd === "oc_adopt_session"
+        ? Promise.reject(new Error("this host is not encrypted, so a credential cannot be sent to it"))
+        : Promise.resolve(),
+    );
+    const id = addConnection({
+      baseUrl: "https://acme.example.com",
+      transport: new RouteTransport({}),
+    });
+
+    await expect(adoptSession(id, "acme.a-session-token")).rejects.toThrow("not encrypted");
+
+    const connection = getConnection(id);
+    expect(connection?.credential.kind).not.toBe("device");
+    expect(JSON.stringify(connection)).not.toContain("a-session-token");
+  });
+
   it("keeps the browser path exactly as it was: the console holds the token", async () => {
     desktop(false);
     const id = addConnection({
