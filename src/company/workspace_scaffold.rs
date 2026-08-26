@@ -572,6 +572,17 @@ async fn ensure_member_folder(
 /// system root ([`SYSTEM_ROOTS`]) is refused outright even if handed in: an
 /// empty root is boot scaffolding, and the next boot re-lays it regardless.
 ///
+/// The guard is enforced by [`WorkspaceStore::delete_if_empty`], not by the
+/// `tree()` read below — that read only picks removal order (child-first) and
+/// filters out reserved roots. Deciding go/no-go from it directly would be
+/// exactly the bug review found on this PR: a concurrent adopter can land a
+/// child in the window between this `tree()` call and a later `delete()`, and
+/// an unconditional `delete` would sweep that child away with the folder. Each
+/// `delete_if_empty` call instead re-checks the store's *current* state, which
+/// is also why no bookkeeping is needed across iterations of the loop below —
+/// once a child folder is actually removed, the store's own state reflects
+/// that for its parent's check, unlike this function's now-stale `nodes` read.
+///
 /// Best-effort by design: it is undoing a path that has already failed, so a
 /// tree read or delete that itself errors is swallowed — the caller is already
 /// returning the original error, and a folder that survives cleanup is exactly
@@ -591,26 +602,16 @@ pub(crate) async fn rollback_empty_minted_folders(
 
     // Deepest first, so a member/task folder is cleared before any folder it was
     // the sole occupant of. A reserved root is dropped here rather than deleted.
+    // Order only — the actual emptiness decision is the store's, made fresh
+    // inside `delete_if_empty` below, never from this snapshot.
     let mut targets: Vec<&String> = minted
         .iter()
         .filter(|id| !is_reserved_root(&nodes, id))
         .collect();
     targets.sort_by_key(|id| std::cmp::Reverse(node_depth(&nodes, id)));
 
-    let mut removed: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for id in targets {
-        // "Gained a child in the window" is measured against the fresh read plus
-        // whatever this loop has already removed, so a member folder cleared a
-        // moment ago does not keep its parent from being cleared too.
-        let has_live_child = nodes.iter().any(|node| {
-            node.parent_id.as_deref() == Some(id.as_str()) && !removed.contains(node.id.as_str())
-        });
-        if has_live_child {
-            continue;
-        }
-        if store.delete(company, id).await.unwrap_or(false) {
-            removed.insert(id.as_str());
-        }
+        let _ = store.delete_if_empty(company, id).await;
     }
 }
 
@@ -1640,6 +1641,204 @@ mod tests {
         assert!(
             paths.contains(&"agents/ceo/brief.md".to_string()),
             "and its child must not be deleted out from under it: {paths:?}"
+        );
+    }
+
+    /// A store double that, the first time `tree` is called, hands back a
+    /// snapshot exactly like the real one below it — and then, *after*
+    /// capturing that snapshot but before returning it, writes a child into
+    /// `inject_child_under` directly against the wrapped store. This puts the
+    /// wrapped store one write ahead of whatever the caller does with the
+    /// snapshot it receives — precisely the shape of the race review found: a
+    /// concurrent adopter's write landing in the window between a `tree()`
+    /// read and a later `delete()` built from it.
+    ///
+    /// Every other method forwards straight through; only `tree`'s first call
+    /// carries the injected write, so a second `tree()` call (e.g. inside
+    /// `delete_if_empty`'s own fresh check) sees it, but the snapshot handed
+    /// to the *caller* of the first call never does.
+    struct InjectChildAfterFirstTree {
+        inner: Arc<dyn WorkspaceStore>,
+        inject_child_under: String,
+        injected: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkspaceStore for InjectChildAfterFirstTree {
+        async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
+            let snapshot = self.inner.tree(company).await?;
+            if !self
+                .injected
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.inner
+                    .create(
+                        company,
+                        &WorkspaceNode {
+                            id: "raced-in-note".to_string(),
+                            name: "raced-in.md".to_string(),
+                            kind: NodeKind::File,
+                            parent_id: Some(self.inject_child_under.clone()),
+                            updated_at_millis: 1,
+                            created_by: WorkspaceOrigin::Operator,
+                            updated_by: WorkspaceOrigin::Operator,
+                            mime: None,
+                            size: None,
+                            sha256: None,
+                        },
+                        Some("landed mid-rollback"),
+                    )
+                    .await
+                    .expect("inject concurrent child");
+            }
+            Ok(snapshot)
+        }
+
+        async fn read(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, String)>> {
+            self.inner.read(company, id).await
+        }
+
+        async fn write(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            content: &str,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            self.inner.write(company, id, content, author).await
+        }
+
+        async fn create(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            content: Option<&str>,
+        ) -> Result<()> {
+            self.inner.create(company, node, content).await
+        }
+
+        async fn adopt_or_create_folder(
+            &self,
+            company: &CompanyId,
+            parent: Option<&str>,
+            name: &str,
+            origin: WorkspaceOrigin,
+        ) -> Result<crate::ports::workspace::FolderClaim> {
+            self.inner
+                .adopt_or_create_folder(company, parent, name, origin)
+                .await
+        }
+
+        async fn create_binary(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            bytes: &[u8],
+        ) -> Result<WorkspaceNode> {
+            self.inner.create_binary(company, node, bytes).await
+        }
+
+        async fn write_binary(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            bytes: &[u8],
+            mime: Option<&str>,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            self.inner
+                .write_binary(company, id, bytes, mime, author)
+                .await
+        }
+
+        async fn read_bytes(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            self.inner.read_bytes(company, id).await
+        }
+
+        async fn rename_move(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            name: Option<&str>,
+            parent: Option<Option<&str>>,
+        ) -> Result<WorkspaceNode> {
+            self.inner.rename_move(company, id, name, parent).await
+        }
+
+        async fn swap_files(
+            &self,
+            company: &CompanyId,
+            expected_id: Option<&str>,
+            replacement_id: &str,
+            name: &str,
+        ) -> Result<Option<WorkspaceNode>> {
+            self.inner
+                .swap_files(company, expected_id, replacement_id, name)
+                .await
+        }
+
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            self.inner.delete(company, id).await
+        }
+
+        // Forwarded explicitly, exactly like the production decorators
+        // (`WorkspaceAnnouncer`, `QuotaEnforcedWorkspace`, `DerivedGuardWorkspace`)
+        // — so this test exercises the wrapped store's own `delete_if_empty`
+        // (here, `FsOps`'s single-lock override) rather than the default trait
+        // method re-deriving the check at this wrapper's level.
+        async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            self.inner.delete_if_empty(company, id).await
+        }
+
+        async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
+            self.inner.is_empty(company).await
+        }
+    }
+
+    /// The race itself: a child lands under a minted-but-empty folder in the
+    /// window between `rollback_empty_minted_folders`'s own `tree()` read and
+    /// the `delete` it would have issued from that stale read. Before the
+    /// fix, `rollback_empty_minted_folders` decided emptiness from that same
+    /// stale snapshot and called the unconditional `delete`, which recursed
+    /// through the folder and erased the concurrently-landed child with it —
+    /// this test fails on that code, asserting the child survives. After the
+    /// fix, the decision is `delete_if_empty`'s own fresh re-check, which sees
+    /// the child and refuses to remove the folder.
+    #[tokio::test]
+    async fn rollback_does_not_erase_a_child_that_lands_mid_rollback() {
+        let (_dir, real) = store().await;
+        let company = CompanyId::new("acme");
+        ensure_workspace_scaffold(real.as_ref(), &company)
+            .await
+            .unwrap();
+        let (home, _) = ensure_agent_folder_tracked(real.as_ref(), &company, "ceo")
+            .await
+            .unwrap();
+
+        let racy: Arc<dyn WorkspaceStore> = Arc::new(InjectChildAfterFirstTree {
+            inner: real.clone(),
+            inject_child_under: home.clone(),
+            injected: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        rollback_empty_minted_folders(racy.as_ref(), &company, &[home]).await;
+
+        let paths = tree_paths(&real, &company).await;
+        assert!(
+            paths.contains(&"agents/ceo".to_string()),
+            "a folder a concurrent write landed a child into mid-rollback must survive: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"agents/ceo/raced-in.md".to_string()),
+            "the concurrently-landed child must not be erased by the rollback: {paths:?}"
         );
     }
 
