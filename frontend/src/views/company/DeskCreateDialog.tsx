@@ -94,6 +94,17 @@ export function DeskCreateDialog({
     );
   }
 
+  // Promote a selected teammate to the lead slot (index 0), which the whole
+  // stack treats as the desk's lead (`members[0]` — see `chat/model.ts` and
+  // `api/types.ts`). The others keep their relative order behind the new lead.
+  // No-ops (returns the same reference) when the id is already the lead, and no
+  // backend call — the choice is posted with the rest of the draft on Create.
+  function makeLead(id: string) {
+    setMembers((current) =>
+      current[0] === id ? current : [id, ...current.filter((m) => m !== id)],
+    );
+  }
+
   function memberLabel(id: string): string {
     const member = roster.find((r) => r.id === id);
     return member?.name ?? member?.role ?? id;
@@ -194,6 +205,10 @@ export function DeskCreateDialog({
 
         <div className="grid gap-2">
           <Label>Teammates</Label>
+          <p className="text-xs text-muted-foreground">
+            The top teammate leads the desk — add them in seniority order, or use “Make lead” to
+            promote anyone.
+          </p>
           {roster.length === 0 ? (
             <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
               No roster teammates to add — you can add them after the desk exists.
@@ -213,20 +228,27 @@ export function DeskCreateDialog({
               {visibleRoster.map((member) => {
                 const order = members.indexOf(member.id);
                 const selected = order !== -1;
+                const memberName = member.name ?? member.role;
                 return (
-                  <button
-                    type="button"
+                  // A row, not a button: the select/deselect toggle and the
+                  // "Make lead" promote control are siblings, because nesting an
+                  // interactive control inside the toggle button is invalid HTML
+                  // and would make a promote click also toggle selection.
+                  <div
                     key={member.id}
-                    onClick={() => toggleMember(member.id)}
-                    aria-pressed={selected}
                     className={cn(
-                      "flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-left text-sm transition-colors",
+                      "flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm transition-colors",
                       selected
                         ? "border-primary/50 bg-primary/10"
                         : "hover:bg-muted/60",
                     )}
                   >
-                    <span className="flex min-w-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => toggleMember(member.id)}
+                      aria-pressed={selected}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                    >
                       <span
                         aria-hidden="true"
                         className={cn(
@@ -239,7 +261,7 @@ export function DeskCreateDialog({
                         {selected && <Check className="size-3" />}
                       </span>
                       <TeammateAvatar
-                        name={member.name ?? member.role}
+                        name={memberName}
                         avatar={avatarRef(member.avatar, member.id ?? member.name ?? "")}
                         tone={toneFor(member.id ?? member.name ?? "")}
                         className="size-5 shrink-0"
@@ -247,14 +269,27 @@ export function DeskCreateDialog({
                       {order === 0 && (
                         <Crown role="img" aria-label="Desk lead" className="size-3.5 shrink-0 text-muted-foreground" />
                       )}
-                      <span className="truncate">{member.name ?? member.role}</span>
-                    </span>
-                    {selected && (
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {order === 0 ? "1 · Lead" : order + 1}
+                      <span className="truncate">{memberName}</span>
+                    </button>
+                    {order === 0 ? (
+                      <span
+                        data-testid="desk-lead-badge"
+                        className="shrink-0 rounded-full bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary"
+                      >
+                        Lead
                       </span>
-                    )}
-                  </button>
+                    ) : selected ? (
+                      <button
+                        type="button"
+                        onClick={() => makeLead(member.id)}
+                        data-testid="desk-make-lead"
+                        aria-label={`Make ${memberName} the desk lead`}
+                        className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                      >
+                        Make lead
+                      </button>
+                    ) : null}
+                  </div>
                 );
               })}
               {visibleRoster.length === 0 && (
