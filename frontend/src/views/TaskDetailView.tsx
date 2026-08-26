@@ -456,6 +456,19 @@ export function TaskDetailView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/*
+        This pane's heading is the card's own title, inside `DetailHeader`,
+        which needs a loaded `detail`. So a cold `#/tasks/<id>` was unnamed
+        while the read was in flight, and stayed unnamed if it failed with
+        anything other than a 404 — `detail` is left null and nothing retries
+        (codex review, #1785).
+
+        "Task", not the id: an id is a string the operator did not choose and
+        cannot read out, and announcing one would be worse than announcing the
+        kind of page. It disappears the moment the real title exists, so the
+        two are never both on screen.
+      */}
+      {!detail && <PageHeader title="Task" hidden />}
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <Button
           variant="ghost"
