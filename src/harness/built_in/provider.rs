@@ -978,10 +978,8 @@ impl ChatModel<()> for HostedProvider {
         // structured `tool_calls` instead of hand-written `<tool_call>` XML.
         attach_tools(&mut body, wire_tools(&request.tools), &request.tool_choice);
 
-        let url = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
+        let base_url = self.config.base_url.trim_end_matches('/');
+        let url = format!("{base_url}/chat/completions");
         let mut http = self.client.post(&url).json(&body);
         if self.product_identity {
             // The normal constructor is the managed TinyHumans path. The
@@ -1016,7 +1014,8 @@ impl ChatModel<()> for HostedProvider {
             }
             let text = response.text().await.unwrap_or_default();
             let error = format!("hosted inference returned {status}: {text}");
-            if let Some(advice) = model_unavailable_advice(status, &error) {
+            let models_url = format!("{base_url}/models");
+            if let Some(advice) = model_unavailable_advice(status, &error, &models_url) {
                 return Err(TinyAgentsError::Model(advice));
             }
             return Err(TinyAgentsError::Model(error));
@@ -1174,13 +1173,25 @@ const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
 /// words (which carry the bad id and the list-models hint) at the end for
 /// support.
 ///
+/// `models_url` is the catalog endpoint for the request that actually failed —
+/// `{base_url}/models`, the same pattern [`discover_local_model`] already uses.
+/// Callers derive it from the same `base_url` that built the chat-completions
+/// URL rather than this function assuming TinyHumans' `/openai/v1/models`: for
+/// a direct OpenRouter, Ollama, or arbitrary `openai_compatible` BYOK endpoint
+/// (issue #1811 follow-up) that path 404s and points the operator at the wrong
+/// catalog.
+///
 /// Gated two ways to stay quiet on everything else: a 4xx only (a 5xx is the
 /// provider's fault and must not be reframed as a misconfiguration), and the
 /// body must name a `model` (so a 4xx about something else — `user does not
 /// exist` — is never mistaken for a model error). Deliberately not an allowlist
 /// of model ids: that would rot as providers add models, so this recognises the
 /// *refusal*, not the catalogue.
-fn model_unavailable_advice(status: reqwest::StatusCode, error: &str) -> Option<String> {
+fn model_unavailable_advice(
+    status: reqwest::StatusCode,
+    error: &str,
+    models_url: &str,
+) -> Option<String> {
     if !status.is_client_error() {
         return None;
     }
@@ -1197,7 +1208,7 @@ fn model_unavailable_advice(status: reqwest::StatusCode, error: &str) -> Option<
     Some(format!(
         "the configured inference model is not available from the provider — update the agent's \
          model, or the company's `[inference].models` mapping, to one the provider offers (list \
-         them with `GET /openai/v1/models`). {error}"
+         them with `GET {models_url}`). {error}"
     ))
 }
 
@@ -1235,7 +1246,17 @@ async fn send_plan(
         }
         let text = response.text().await.unwrap_or_default();
         let error = format!("inference returned {status}: {}", scrub(text));
-        if let Some(advice) = model_unavailable_advice(status, &error) {
+        // `plan.url` is always `{base_url}/chat/completions` (see
+        // `RequestPlan::url`'s doc and `request_plan`'s construction of it), so
+        // this recovers the same `base_url` the failed request actually used —
+        // OpenRouter's, Ollama's, or an arbitrary `openai_compatible` endpoint's,
+        // not a hard-coded TinyHumans path.
+        let models_url = plan
+            .url
+            .strip_suffix("/chat/completions")
+            .map(|base| format!("{base}/models"))
+            .unwrap_or_else(|| plan.url.clone());
+        if let Some(advice) = model_unavailable_advice(status, &error, &models_url) {
             return Err(anyhow::anyhow!("{advice}"));
         }
         return Err(anyhow::anyhow!("{error}"));
@@ -2929,8 +2950,12 @@ mod tests {
             r#"{"error":"Model 'deepseek/deepseek-v4-pro' is not available. "#,
             r#"Use GET /openai/v1/models to list available models.","errorCode":"BAD_REQUEST"}"#,
         );
-        let advice = model_unavailable_advice(reqwest::StatusCode::BAD_REQUEST, raw)
-            .expect("recognised as a missing model");
+        let advice = model_unavailable_advice(
+            reqwest::StatusCode::BAD_REQUEST,
+            raw,
+            "https://api.tinyhumans.ai/openai/v1/models",
+        )
+        .expect("recognised as a missing model");
         assert!(
             advice.contains("update the agent's model"),
             "the fix is named: {advice}"
@@ -2944,8 +2969,34 @@ mod tests {
             "the offending id survives for support: {advice}"
         );
         assert!(
-            advice.contains("GET /openai/v1/models"),
-            "the provider's list-models hint survives: {advice}"
+            advice.contains("GET https://api.tinyhumans.ai/openai/v1/models"),
+            "the caller-supplied catalog endpoint is used: {advice}"
+        );
+    }
+
+    /// Issue #1811 follow-up (Codex review on #1824): a direct OpenRouter,
+    /// Ollama, or arbitrary `openai_compatible` BYOK endpoint must get *its own*
+    /// catalog URL in the advice, not the TinyHumans-managed `/openai/v1/models`
+    /// path. Before the fix this string was hard-coded regardless of
+    /// `models_url`, so this assertion fails on the pre-fix code even though the
+    /// raw provider error here (OpenRouter's own wording) never mentions
+    /// `/openai/v1/models` at all.
+    #[test]
+    fn byok_provider_advice_points_at_its_own_catalog() {
+        let raw = "inference returned 400 Bad Request: openai/made-up is not a valid model ID";
+        let advice = model_unavailable_advice(
+            reqwest::StatusCode::BAD_REQUEST,
+            raw,
+            "https://openrouter.ai/api/v1/models",
+        )
+        .expect("recognised as a missing model");
+        assert!(
+            advice.contains("GET https://openrouter.ai/api/v1/models"),
+            "OpenRouter's own catalog endpoint is named: {advice}"
+        );
+        assert!(
+            !advice.contains("openai/v1/models"),
+            "the TinyHumans-managed path must not leak into a direct-provider hint: {advice}"
         );
     }
 
@@ -2959,7 +3010,12 @@ mod tests {
             "inference returned 400 Bad Request: openai/made-up is not a valid model ID",
         ] {
             assert!(
-                model_unavailable_advice(reqwest::StatusCode::BAD_REQUEST, body).is_some(),
+                model_unavailable_advice(
+                    reqwest::StatusCode::BAD_REQUEST,
+                    body,
+                    "https://example.com/v1/models",
+                )
+                .is_some(),
                 "should be recognised as a missing model: {body}"
             );
         }
@@ -2975,6 +3031,7 @@ mod tests {
             model_unavailable_advice(
                 reqwest::StatusCode::UNAUTHORIZED,
                 "inference returned 401 Unauthorized: invalid api key",
+                "https://example.com/v1/models",
             ),
             None,
             "a bad key is not a missing model"
@@ -2983,6 +3040,7 @@ mod tests {
             model_unavailable_advice(
                 reqwest::StatusCode::BAD_REQUEST,
                 "inference returned 400 Bad Request: user does not exist",
+                "https://example.com/v1/models",
             ),
             None,
             "a 4xx that never names a model is not a missing model"
@@ -2991,6 +3049,7 @@ mod tests {
             model_unavailable_advice(
                 reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 "inference returned 500: the model host crashed",
+                "https://example.com/v1/models",
             ),
             None,
             "a 5xx is the provider's fault, not the operator's config"
