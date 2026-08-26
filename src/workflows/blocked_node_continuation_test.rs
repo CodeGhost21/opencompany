@@ -1155,6 +1155,100 @@ async fn a_restart_after_the_last_approval_banks_but_before_release_still_contin
     );
 }
 
+/// Issue #1825 (P2 follow-up, found by chatgpt-codex-connector): a restart
+/// landing after a blocked node's last decision resolves as a denial (or
+/// expiry) — but before the retirement that resolution owes — must not leave
+/// the stash rehydrated forever.
+///
+/// Mirrors `a_restart_after_the_last_approval_banks_but_before_release_still_continues_the_run`
+/// exactly, but denies the node's only call instead of approving it. On
+/// `main`, `reconcile_stranded_blocked_nodes` only ever scanned
+/// `approved_turns()` — a stash that is durably unparked (every decision on
+/// it landed) but never approved never appears there, so it rehydrates on
+/// every boot's `rearm` and is never retired: the leak the finding names,
+/// growing by one turn per restart that races this exact window, or whose
+/// `retire_blocked_stash` write itself fails.
+#[tokio::test]
+async fn reconciliation_retires_an_unapproved_stash_stranded_after_its_last_denial() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1, "the cold run parks exactly one card");
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // Durably settle the denial — removes it from `parked`, appends
+    // `ApprovalResolved` — exactly as `resolve_approval` does, then abort the
+    // detached follow-up before it can run `continue_turn` (and therefore
+    // `retire_blocked_stash`) at all.
+    let (_, follow_up) = rt
+        .resolve_approval_spawned(&cards[0], Verdict::Deny, operator(), GrantScope::Once)
+        .await
+        .expect("the verdict settles durably");
+    follow_up.abort();
+    let _ = follow_up.await;
+
+    assert_eq!(
+        runner.started(),
+        1,
+        "precondition: the crash lands before any continuation runs"
+    );
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "precondition: the stash is still live — release never ran"
+    );
+    assert!(
+        !rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "precondition: nothing on this turn was ever approved"
+    );
+    assert!(
+        rt.journal().parked_turns().iter().all(|t| t != &turn),
+        "precondition: the denial is already durably resolved, so a boot \
+         rearm would find nothing left parked for this turn"
+    );
+
+    // On `main` nothing drives a retirement here: `reconcile_stranded_blocked_nodes`
+    // only ever scanned `approved_turns()`, and this turn — durably unparked,
+    // never approved — never appeared there, so it survives every subsequent
+    // boot's rearm unretired.
+    rt.reconcile_stranded_blocked_nodes().await;
+
+    assert_eq!(
+        runner.started(),
+        1,
+        "an unapproved, resolved stash must not be dispatched — there is no approval to \
+         redeem"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "the stash is retired instead of surviving indefinitely in memory"
+    );
+    assert!(
+        rt.journal()
+            .blocked_stashes()
+            .iter()
+            .all(|(t, _, _)| t != &turn),
+        "the durable stash is retired too, or the next boot's rearm would rehydrate the \
+         same leak"
+    );
+}
+
 /// A node still genuinely waiting on a sibling decision must not be resumed
 /// by reconciliation just because one of its two calls is durably approved —
 /// only a turn with nothing left parked is stranded; this one is mid-turn.
