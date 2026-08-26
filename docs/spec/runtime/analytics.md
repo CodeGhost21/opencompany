@@ -137,17 +137,18 @@ symptom in analytics is inflated install counts, not lost data.
 
 | Variable | Meaning |
 |---|---|
-| `OPENCOMPANY_DEPLOYMENT` | `desktop` \| `self-hosted` \| `hosted-tenant`. Declared by whoever launches the process. Default and fallback: `self-hosted`. |
+| `OPENCOMPANY_DEPLOYMENT` | `desktop` \| `self-hosted` \| `hosted-tenant`. Declared by whoever launches the process. Default and fallback: `self-hosted`, including when the declared value cannot be read. |
 | `OPENCOMPANY_ANALYTICS` | `on` forces reporting; `off` forbids it and outranks everything else. |
 | `OPENCOMPANY_ANALYTICS_TOKEN` | the Mixpanel project token. **Configuration, never a compiled-in constant** — a token baked into a public binary is a token everyone has. |
-| `OPENCOMPANY_ANALYTICS_ENDPOINT` | overrides the collector URL. |
+| `OPENCOMPANY_ANALYTICS_ENDPOINT` | overrides the collector URL. Must be an absolute `http`/`https` URL with a host; anything else is silence with a reason. |
 
 Reporting happens only when **all** of these hold:
 
 1. the binary was built with `--features analytics`;
 2. `OPENCOMPANY_ANALYTICS` is not `off`;
 3. the deployment is `hosted-tenant`, **or** `OPENCOMPANY_ANALYTICS=on`;
-4. a project token is configured.
+4. a project token is configured;
+5. the collector endpoint is one a client could actually POST to.
 
 Condition 1 is met in exactly one place in this repository: `TENANT_FEATURES` in
 `.github/workflows/deploy-staging.yml`, the hosted tenant image's feature set.
@@ -157,8 +158,16 @@ image whose feature list drops `analytics` reports nothing however the manager
 configures it, and says so at boot rather than failing quietly.
 
 `OPENCOMPANY_TENANT_ID` implies `hosted-tenant` when `OPENCOMPANY_DEPLOYMENT`
-says nothing — the control plane injects it and nothing else does. That is the
-only inference taken. A discriminator sniffed from something incidental (the
+says **nothing at all** — the control plane injects it and nothing else does.
+That is the only inference taken. A declaration that is present but unusable —
+an unknown slug, or bytes this process cannot decode — is not "nothing": it wins
+over the inference and resolves to `self-hosted`. Reading it through
+`EnvSource::get` rather than `get_os` made a non-UTF-8 value indistinguishable
+from an absent one, so an explicitly-declared shared-single-DB tenant fell
+through to the inference and came back `hosted-tenant` — reporting switched
+**on** by a malformed variable, on the discriminator every other decision here
+rests on. A **blank** declaration is still absent, so a launcher that exports an
+empty variable changes nothing. A discriminator sniffed from something incidental (the
 data dir, the bind address, `harness_in_build`) inverts the day someone changes
 an unrelated setting, silently, and points at the wrong file.
 
@@ -182,9 +191,23 @@ and it is the first thing checked. Boot prints one line either way:
 analytics: off (not a hosted tenant and no explicit opt-in)
 analytics: off (operator opted out)
 analytics: off (the OPENCOMPANY_ANALYTICS value is not recognised)
+analytics: off (the OPENCOMPANY_ANALYTICS_ENDPOINT value is not a usable http(s) URL)
 analytics: off (reporting to https://api.mixpanel.com/track was configured, but this build was compiled without the `analytics` feature)
 analytics: reporting to https://api.mixpanel.com/track
 ```
+
+The fifth of those is the endpoint check. `OPENCOMPANY_ANALYTICS_ENDPOINT` is
+validated where the decision is made, not where the send is attempted:
+`collector.internal/track` — a proxy hostname written without a scheme, which is
+how anyone writes one the first time — used to resolve to reporting, so boot
+announced "reporting to collector.internal/track" and every batch then died
+inside `reqwest` behind a `debug!` line no operator has enabled. The product said
+something true-sounding and did nothing. Bytes that are not valid UTF-8 are
+rejected the same way rather than falling back to the default endpoint: a tenant
+that pointed analytics at its own proxy and mistyped it would otherwise have
+reported to Mixpanel instead, which is telemetry sent somewhere nobody
+configured. The reason line never quotes the rejected value, for the reason
+below.
 
 The endpoint is named; the token never is — and the endpoint is named
 **sanitized**. `OPENCOMPANY_ANALYTICS_ENDPOINT` exists so a deployment can front
@@ -194,6 +217,17 @@ query string (`?key=…`). Both are stripped before the line is printed, leaving
 scheme, host and path, and the line says `(credentials redacted)` when it
 shortened anything — a silently truncated URL is its own hour of confusion. The
 `ProjectToken` redaction does not cover this; it guards a different string.
+
+The same URL reaches one other log line: the `debug!` the transport writes when
+a send fails. `reqwest::Error` retains the request URL and prints it, so an
+unreachable collector wrote the proxy key into container logs by a path the boot
+line's redaction never touched. Measured against reqwest 0.12.28, userinfo is
+already stripped from what it prints and **the query string is not** — so `?key=…`
+was leaking and `user:pass@` was not. The transport calls `without_url`, which
+removes the URL rather than rewriting it, so neither shape can reach the line
+whatever a future reqwest decides to print; the destination on that same line
+comes from the one `loggable_endpoint` helper the boot line uses, so there is no
+second redaction to fall out of step with the first.
 
 The fourth line is the one worth reading twice. It reports what the process will
 **do**, not what was configured: a build without the `analytics` feature
