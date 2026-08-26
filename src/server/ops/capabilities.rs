@@ -190,8 +190,13 @@ struct CapabilityStatusDto {
     /// out by asking an agent and watching nothing happen.
     mcp_in_build: bool,
     /// Whether this company's teammates can actually think, and why not when
-    /// they cannot (issue #1735): `configured`, `unconfigured`, or
-    /// `unavailable`.
+    /// they cannot (issue #1735).
+    ///
+    /// The wire labels are [`CognitionState`]'s own — read them there rather
+    /// than from a list here. This comment carried a hand-copied list of three
+    /// and was stale within two commits of the states growing to five, which is
+    /// exactly the second copy of a fact that this field exists to avoid
+    /// (CodeRabbit review of PR #1740).
     ///
     /// The one capability on this response that is **not** a build fact alone.
     /// `media_in_build` and its neighbours answer "was this compiled in";
