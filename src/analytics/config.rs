@@ -224,39 +224,47 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
 /// with `RelativeUrlWithoutBase` behind a `debug!` line. Nothing an operator
 /// would ever see said the endpoint was the problem.
 ///
-/// Hand-rolled rather than parsed with a URL crate on purpose. [`resolve`] is
-/// un-gated: it compiles and is tested in every feature combination, including
-/// those with no `reqwest` in the graph at all. `url` is not a dependency of
-/// this crate — it arrives transitively through `reqwest`, which is optional —
-/// so reaching for `Url::parse` here would mean declaring a new direct
-/// dependency, unconditionally, in every build, to validate one string for the
-/// one build that can actually send anything.
+/// **Parsed with `url`, the same crate `reqwest` parses with, rather than
+/// approximated.** The first version of this check hand-rolled the grammar to
+/// avoid what it wrongly believed would be a new dependency — `url` has been an
+/// unconditional one since issue #673, added there with the rule this check
+/// should have followed: it must be *the same* parser `reqwest` uses, because
+/// "a grant key computed by a second, hand-rolled reader is a bypass waiting to
+/// be found". The hand-rolled version accepted five shapes `reqwest` rejects
+/// outright:
+/// `http://[::1/track` (unclosed bracket), `http://host:99999/track` and
+/// `:65536` (port out of range), `http://host:abc/track`,
+/// `http://host:8080:9090/track`, and `http://999.999.999.999/track`. Each one
+/// resolved to `Report` and then dropped every batch — the exact failure the
+/// check exists to prevent, reintroduced by the check itself. The IPv4-shaped-
+/// host rule (`127.0.0.1.5` is rejected, `exa_mple.com` is not) is the tell
+/// that the tail here is unbounded: an approximation of a grammar this fiddly
+/// is a standing source of the same bug. One parser, and it is the transport's
+/// own.
 ///
-/// It is deliberately *permissive*: it rejects the shapes `reqwest` provably
-/// cannot use and passes everything else, so the failure mode of being wrong is
-/// the old behaviour rather than a working deployment newly silenced. The
-/// endpoint redaction in `crate::analytics::boot` answers a different question —
-/// what may be *printed* — so the two are not two halves of one rule.
+/// Two things are still checked beyond parsing, because `url` is happy with
+/// both and `reqwest` is not:
+///
+/// * **the scheme.** `url` parses `ftp://collector.internal/track` and
+///   `reqwest` will even *build* a request from it; the send then fails with
+///   "URL scheme is not allowed". Measured, not assumed.
+/// * **a non-empty host**, defensively. No input has been found where `url`
+///   returns a parsed `http`/`https` URL with an empty host — `https://` is a
+///   parse error, and `http:///track` is *not* the counter-example it looks
+///   like, because `url` normalizes it to `http://track/`, taking the first
+///   path segment as the host. The guard stays because "there is somewhere to
+///   connect to" is the property actually being asserted, and it should not
+///   rest on a normalization rule holding forever.
+///
+/// This asks a different question from the endpoint redaction in
+/// `crate::analytics::boot` — that one is about what may be *printed* — so the
+/// two are not two halves of one rule.
 fn is_usable_endpoint(raw: &str) -> bool {
-    // `reqwest` accepts only `http` and `https`; anything else fails at send,
-    // and a value with no `://` at all fails at parse.
-    let Some((scheme, rest)) = raw.split_once("://") else {
+    let Ok(parsed) = url::Url::parse(raw) else {
         return false;
     };
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return false;
-    }
-
-    // The authority is everything before the path, query or fragment. Userinfo
-    // is stripped before the emptiness check so that `http://user:pass@/track`
-    // — a credential with nowhere to send it — is caught rather than passing on
-    // the strength of its password.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_userinfo, host)| host);
-
-    !host.is_empty() && !host.contains(char::is_whitespace)
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some_and(|host| !host.is_empty())
 }
 
 /// A configured value, trimmed, or `None` when there is nothing left of it.
@@ -528,7 +536,6 @@ mod test {
             "://collector.internal/track",
             "ftp://collector.internal/track",
             "file:///tmp/track",
-            "http:///track",
             "https://",
             "http://someone:hunter2@/track",
             "http://collector internal/track",
@@ -628,6 +635,92 @@ mod test {
                 panic!("reported to {endpoint} — an endpoint the operator never configured")
             }
             Decision::Silent(_) => {}
+        }
+    }
+
+    /// **The endpoint check agrees with what `reqwest` can actually send to.**
+    ///
+    /// Every row was measured against reqwest 0.12.28 — `Url::parse`,
+    /// `Client::post(..).build()`, and for the scheme, what the send does — not
+    /// reasoned about. The rows marked below are the ones a hand-rolled grammar
+    /// check accepted and `reqwest` rejects; they resolved to `Decision::Report`
+    /// and then dropped every batch, which is the very failure
+    /// `is_usable_endpoint` exists to prevent.
+    #[test]
+    fn the_endpoint_check_matches_what_the_transport_accepts() {
+        // (endpoint, usable) — `false` means `reqwest` cannot send to it.
+        let measured: &[(&str, bool)] = &[
+            // Rejected by `Url::parse`. Each of these was accepted by the
+            // hand-rolled check this replaced.
+            ("http://[::1/track", false),  // unclosed IPv6 bracket
+            ("http://]::1[/track", false), // brackets inside out
+            ("http://collector.internal:99999/track", false), // port out of range
+            ("http://collector.internal:65536/track", false), // one past the top
+            ("http://collector.internal:abc/track", false), // port not a number
+            ("http://host:8080:9090/track", false), // two ports
+            ("http://127.0.0.1.5/track", false), // IPv4-shaped, invalid
+            ("http://999.999.999.999/track", false), // IPv4-shaped, invalid
+            // Rejected by `Url::parse` and by the hand-rolled check alike.
+            ("collector.internal/track", false),
+            ("collector.internal", false),
+            ("/track", false),
+            ("://collector.internal/track", false),
+            ("https://", false),
+            ("http://someone:hunter2@/track", false),
+            ("http://collector internal/track", false),
+            // Parsed happily by `url` — and even built by `reqwest` — but not
+            // sendable, so checked on top of the parse.
+            ("ftp://collector.internal/track", false), // scheme refused at send
+            ("file:///tmp/track", false),
+            // NOT here: `http:///track`. It looks like an empty host and is
+            // not one — `url` normalizes it to `http://track/`, taking the
+            // first path segment as the host, and `reqwest` sends to it. A
+            // collector named `track` that does not resolve is an unreachable
+            // collector like any other, which #1739 makes a no-op on purpose.
+            // Accepted, and the ones a deployment actually uses.
+            (DEFAULT_ENDPOINT, true),
+            ("http://127.0.0.1:9/track", true),
+            ("http://127.0.0.1:9", true),
+            ("http://collector.internal:65535/track", true), // the top of the range
+            ("http://collector.internal:/track", true),      // empty port is legal
+            ("https://collector.internal/track", true),
+            ("HTTPS://collector.internal/track", true),
+            (
+                "https://collector.internal/track?key=NotARealCollectorKey",
+                true,
+            ),
+            (
+                "https://someone:NotARealCollectorKey@collector.internal/track",
+                true,
+            ),
+            ("https://[::1]:8443/track", true),
+            ("http://[::1]/track", true),
+            ("https://collector.internal:8443/track#frag", true),
+            // Odd but legal, and deliberately still accepted: rejecting these
+            // would silence a working deployment, which is the direction that
+            // costs more than it saves.
+            ("http://exa_mple.com/track", true),
+            ("http://-example.com/track", true),
+            ("http://\u{4f8b}\u{3048}.jp/track", true),
+        ];
+
+        for (endpoint, usable) in measured {
+            let decision = resolve(
+                Deployment::HostedTenant,
+                &token_env(&[(ENDPOINT_ENV, endpoint)]),
+            );
+            if *usable {
+                match decision {
+                    Decision::Report { endpoint: got, .. } => assert_eq!(&got, endpoint),
+                    other => panic!("{endpoint:?} must still report: {other:?}"),
+                }
+            } else {
+                assert_eq!(
+                    decision,
+                    Decision::Silent(Silence::UnusableEndpoint),
+                    "{endpoint:?} cannot be sent to, so it must not resolve to a report"
+                );
+            }
         }
     }
 
