@@ -104,11 +104,19 @@ fn stamp_build_commit(root: &Path) {
     // would report the tree as it stood the last time some *other* watched
     // path moved, which is a stamp that lies in the reassuring direction.
     //
+    // `Cargo.lock` is here for the same reason as `Cargo.toml`, not as a
+    // duplicate of it: a bare `cargo update` rewrites only the lockfile, and
+    // cargo will happily recompile the dependency graph — and this binary
+    // with it — while every other watched path is untouched. The stamp would
+    // then keep a clean SHA on a tree the probe now calls dirty.
+    //
     // Editing `docs/` or `frontend/` deliberately does not restamp: neither
     // changes this binary, so a stamp that stays clean across such an edit is
     // still telling the truth about the code that was compiled.
     watch_if_present(&root.join("src"));
     watch_if_present(&root.join("Cargo.toml"));
+    watch_if_present(&root.join("Cargo.lock"));
+    watch_submodule_heads(root);
 
     let commit = resolve_build_commit(
         std::env::var("OPENCOMPANY_BUILD_COMMIT").ok(),
@@ -166,6 +174,55 @@ fn watch_git_refs(root: &Path) {
         && let Some(resolved) = git(root, &["rev-parse", "--git-path", &head_ref])
     {
         watch_if_present(&root.join(resolved));
+    }
+}
+
+/// Watches each submodule's own `HEAD`, because moving one changes both the
+/// source that compiles in and the answer the dirty probe gives.
+///
+/// `git status --ignore-submodules=dirty` still reports a submodule whose
+/// checkout has left the commit the gitlink records — that is exactly the
+/// state this catches, and nothing else in the watch set moves when it
+/// happens: `git -C vendor/openhuman checkout <other>` rewrites no file under
+/// `src/`, no manifest, and none of the superproject's refs.
+///
+/// Read from `.gitmodules` rather than hard-coded, so a submodule added later
+/// is watched because it is declared. Nested submodules are deliberately not
+/// recursed into: their gitlinks are recorded inside the parent's tree, so
+/// `--ignore-submodules=dirty` never reports them, and watching what the probe
+/// cannot see would only cost build time.
+fn watch_submodule_heads(root: &Path) {
+    let Some(declared) = git(
+        root,
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ],
+    ) else {
+        // No `.gitmodules`, no git, or no repository at all. Same contract as
+        // everywhere else here: absence is a case, not a failure.
+        return;
+    };
+    for line in declared.lines() {
+        let Some((_, rel)) = line.split_once(' ') else {
+            continue;
+        };
+        let rel = rel.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let dir = root.join(rel);
+        // An uninitialized submodule is an empty directory with no `.git`, so
+        // `git` declines and there is nothing to watch. `--git-path` rather
+        // than an assumed `.git/modules/...` layout, for the reason
+        // `watch_git_refs` gives: a submodule inside a linked worktree keeps
+        // its git directory somewhere neither guess would find.
+        if let Some(head) = git(&dir, &["rev-parse", "--git-path", "HEAD"]) {
+            watch_if_present(&dir.join(head));
+        }
     }
 }
 
