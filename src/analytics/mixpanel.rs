@@ -91,6 +91,17 @@ mod http {
         token: ProjectToken,
         envelope: Envelope,
         buffer: Mutex<Vec<serde_json::Value>>,
+        /// Held for the whole of one `send_batch`, drain **and** request.
+        ///
+        /// Without it, the shutdown flush and the 30-second drain could
+        /// overlap: the drain takes the entire buffer and awaits its POST, the
+        /// flush finds an empty buffer, returns at once, and process exit
+        /// cancels the request still in flight. That loses the whole batch
+        /// exactly when the collector is slow — the one case the graceful flush
+        /// exists for. An **async** mutex because it is held across an await;
+        /// the `buffer` lock below stays a `std::sync` one and is never held
+        /// across one.
+        sending: tokio::sync::Mutex<()>,
         stop: tokio::sync::Notify,
     }
 
@@ -106,6 +117,7 @@ mod http {
                 token: token.clone(),
                 envelope,
                 buffer: Mutex::new(Vec::new()),
+                sending: tokio::sync::Mutex::new(()),
                 stop: tokio::sync::Notify::new(),
             });
 
@@ -157,7 +169,13 @@ mod http {
     impl Inner {
         /// Drains the buffer and posts it. Every failure is swallowed after one
         /// debug line: a dead collector is a no-op, per #1739's constraints.
+        ///
+        /// Serialized: a caller entering while another send is in flight waits
+        /// for it and then drains whatever has arrived since. That is what makes
+        /// [`Tracker::flush`] a real guarantee rather than a buffer inspection —
+        /// see [`Inner::sending`].
         async fn send_batch(&self) {
+            let _sending = self.sending.lock().await;
             let batch = {
                 let mut buffer = self.buffer.lock().expect("analytics buffer");
                 if buffer.is_empty() {
@@ -212,6 +230,9 @@ mod http {
         }
 
         async fn flush(&self) {
+            // Waits on any in-flight periodic drain before draining what is
+            // left, so a shutdown overlapping the 30-second loop does not
+            // return while the previous batch is still on the wire.
             self.inner.send_batch().await;
         }
     }
@@ -228,6 +249,7 @@ mod test {
     use crate::ports::brain::Cognition;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     /// A local collector that counts what it is sent.
     struct Collector {
@@ -239,6 +261,12 @@ mod test {
     }
 
     async fn spawn_collector() -> Collector {
+        spawn_collector_taking(Duration::ZERO).await
+    }
+
+    /// A collector that takes `delay` to answer, so a test can observe what
+    /// happens while a request is still in flight.
+    async fn spawn_collector_taking(delay: Duration) -> Collector {
         let hits = Arc::new(AtomicUsize::new(0));
         let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen_hits = hits.clone();
@@ -250,6 +278,9 @@ mod test {
                 let hits = seen_hits.clone();
                 let bodies = seen_bodies.clone();
                 async move {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
                     hits.fetch_add(1, Ordering::SeqCst);
                     bodies.lock().unwrap().push(body);
                     axum::Json(serde_json::json!({"status": 1}))
@@ -418,5 +449,63 @@ mod test {
         }
         // No assertion on an internal count — the observable property is that
         // this returns at all, promptly, with no reachable collector.
+    }
+
+    /// **A shutdown flush waits for a send already in flight.**
+    ///
+    /// The periodic drain takes the whole buffer before it awaits its POST, so
+    /// a flush that only inspected the buffer would find it empty, return at
+    /// once, and let process exit cancel the request carrying the batch —
+    /// losing everything precisely when the collector is slow, which is the one
+    /// case the graceful flush exists for.
+    ///
+    /// Asserted by timing, against a collector that takes 600ms: the second
+    /// flush must not return before the first request completes. The threshold
+    /// is 300ms against a 600ms delay, so it neither trips on scheduling jitter
+    /// nor passes without the wait (the unserialized version returns in
+    /// microseconds).
+    #[tokio::test]
+    async fn a_flush_waits_for_a_send_already_in_flight() {
+        let collector = spawn_collector_taking(Duration::from_millis(600)).await;
+        let env = MapEnv::new([
+            (DEPLOYMENT_ENV, "hosted-tenant"),
+            (TOKEN_ENV, "not-a-real-token"),
+            (ENDPOINT_ENV, collector.url.as_str()),
+        ]);
+        let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+
+        tracker.track(Event::InstanceStarted {
+            companies: 1,
+            storage: "fs",
+            setup_complete: true,
+        });
+
+        // Stands in for the 30-second drain loop: it takes the buffer and is
+        // then parked on the POST.
+        let first = {
+            let tracker = tracker.clone();
+            tokio::spawn(async move { tracker.flush().await })
+        };
+        // Long enough for the spawned task to drain the buffer and start its
+        // request, short enough to be well inside the 600ms the collector takes.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let started = Instant::now();
+        tracker.flush().await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= Duration::from_millis(300),
+            "the flush returned in {waited:?} while a send was still in flight; \
+             on a real shutdown that batch would be cancelled with the process"
+        );
+
+        first.await.expect("the in-flight send finished");
+        assert_eq!(
+            collector.hits.load(Ordering::SeqCst),
+            1,
+            "the batch really was in flight and really did land"
+        );
+        collector.stop().await;
     }
 }
