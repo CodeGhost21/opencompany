@@ -201,6 +201,25 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).not.toContain("was dropped where it was");
   });
 
+  // Codex review on #1821 (eleventh pass): the fix above stopped claiming the
+  // mid-flight step was unconditionally dropped, but still spoke of "the step
+  // that was mid-flight" as a step every stopped run has. `stoppedRun()` here
+  // carries no `nodes` and no `startedNodes` — the exact shape `runner.rs`'s
+  // `a_run_cancelled_before_it_starts_does_not_walk_the_graph` proves happens
+  // when the cancel signal is already fired before the graph is ever walked —
+  // so there was no mid-flight step for this run at all. Unlike the row
+  // body's "every step that had started completed", which is vacuously true
+  // over an empty set, a definite "the step that was mid-flight" presupposes
+  // one exists and is simply false here.
+  it("does not presuppose a mid-flight step for a run stopped before any step began", async () => {
+    await renderHistory(stoppedRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).toContain("no such step at all");
+  });
+
   // Codex review on #1821: `failureLocation`/`failedNodeOf` (`graph.ts`)
   // explicitly preserve the case where a run's `error` names no node at all —
   // a graph that would not compile, a capability that could not be built, or

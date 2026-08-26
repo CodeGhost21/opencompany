@@ -83,8 +83,18 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
   ok: "Finished, with nothing left undelivered and nobody waiting on you — every report either reached its destination or didn't need to (a dry run, or one an earlier run already delivered).",
   failed:
     "The run ended in error — usually a step that failed and the workflow needs a fix, but sometimes nothing in the graph got the chance to run at all, and the error can be a host restart or a capability that failed to build rather than anything wrong with the workflow. Read the error before assuming the workflow needs correcting.",
+  // Codex review on #1821 (eleventh pass): this still asserted "the step
+  // that was mid-flight" as if every stopped run has one. A run cancelled
+  // before it ever reached the graph — `a_run_cancelled_before_it_starts_
+  // does_not_walk_the_graph` in `runner.rs` is exactly this path, and
+  // `RunHistoryPanel`'s own row body already treats an empty `startedNodes`
+  // as its own case — has no mid-flight step to speak of, so the row body's
+  // vacuous "every step that had started completed" holds trivially over
+  // zero steps, but this definite description does not: it names a step
+  // that, for that run, never existed. The trailing sentence states that
+  // case rather than leaving it implied by an empty set.
   stopped:
-    "An operator stopped this run before it finished; the step that was mid-flight normally ran to completion and was recorded — only a step stuck waiting on an outside call is cut off where it was.",
+    "An operator stopped this run before it finished. A step that was mid-flight when the stop landed normally ran to completion and was recorded — only a step stuck waiting on an outside call is cut off where it was. A run stopped before any step began has no such step at all.",
   blocked:
     "A step is waiting on you before the run can go on — usually a card sitting in Approvals, but a call that could not be queued for approval at all leaves nothing there to decide. That isn't always a workflow problem — the approvals queue itself can refuse the write, and no workflow change fixes that.",
   stranded:
