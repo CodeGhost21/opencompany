@@ -52,6 +52,7 @@ import {
   companyCovers,
   draftFrom,
   draftIsValid,
+  missingRequired,
   emptyDraft,
   grantCeiling,
   harnessEdit,
@@ -291,6 +292,14 @@ export function AgentDetailView({
       live = false;
     };
   }, [client, company]);
+
+  /**
+   * The required fields the draft leaves blank, so the form can say why Save is
+   * disabled instead of just being disabled (issue #1776).
+   *
+   * Empty until the teammate loads — there is nothing to require a value of.
+   */
+  const missing = agent ? missingRequired(draft, (key) => isEditable(agent, key)) : [];
 
   // Issue #1776: read the cognition path while the edit form is open, so the
   // copilot can say "no model is configured" instead of offering a draft that
@@ -869,7 +878,22 @@ export function AgentDetailView({
                       restores: {agent.blueprintInstructions.trim()}
                     </p>
                   )}
-                  <div className="flex justify-end gap-2">
+                  <div className="flex items-center justify-end gap-2">
+                    {/* Why Save is dead, next to Save (issue #1776). A manifest
+                        teammate carries no name of its own, so this form opens
+                        with Name blank and the button already disabled — and
+                        until this line the only way to find that out was to
+                        guess. The fields themselves are marked too; this says
+                        it where the operator is looking when they wonder. */}
+                    {missing.length > 0 && (
+                      <p
+                        className="mr-auto text-2xs text-muted-foreground"
+                        data-testid="agent-save-blocked"
+                      >
+                        {missing.map((field) => field.label).join(" and ")}{" "}
+                        {missing.length > 1 ? "are" : "is"} required to save.
+                      </p>
+                    )}
                     <Button
                       variant="ghost"
                       onClick={() => {

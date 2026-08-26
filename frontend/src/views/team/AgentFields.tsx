@@ -3,7 +3,12 @@ import type { ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { AGENT_FIELDS, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
+import {
+  AGENT_FIELDS,
+  draftHasContent,
+  type AgentDraft,
+  type AgentFieldKey,
+} from "@/lib/agent";
 
 /**
  * An agent's authored fields, rendered from one definition (issue #264).
@@ -12,6 +17,14 @@ import { AGENT_FIELDS, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
  * the same three things, and rendering them from
  * [`AGENT_FIELDS`](@/lib/agent) is what keeps the labels, the placeholders and
  * the order the same in both places rather than the same by coincidence.
+ *
+ * A **required** field says so, and a blank one is marked invalid once the form
+ * holds anything at all (issue #1776). Both surfaces disable their submit while
+ * a required field is empty, and until this the button simply sat there dead:
+ * on a manifest teammate — which carries no name of its own, and is shown
+ * everywhere by its role — the edit form opened with Name blank and Save
+ * already disabled, with nothing saying which box was responsible. The rule was
+ * never wrong; it was invisible.
  *
  * `copilot` renders the drafting control under a field (issue #1776). A render
  * prop rather than a set of handlers, because the two surfaces ask the host
@@ -57,14 +70,33 @@ export function AgentFields({
    */
   copilot?: (key: AgentFieldKey) => ReactNode;
 }) {
+  // Whether a blank required field is shown as an error yet. See
+  // `draftHasContent`: an edit form always holds something, so it marks the gap
+  // immediately; a fresh Add form stays quiet until the operator types.
+  const touched = draftHasContent(draft);
   return (
     <>
       {AGENT_FIELDS.map((field) => {
         const id = `${idPrefix}-${field.key}`;
         const locked = readOnly?.(field.key) ?? false;
+        // A locked field cannot be the reason a save is refused — the host is
+        // not being sent it — so it is never marked as one.
+        const missing = Boolean(field.required) && !locked && draft[field.key].trim() === "";
         return (
           <div key={field.key} className="grid gap-2">
-            <Label htmlFor={id}>{field.label}</Label>
+            <Label htmlFor={id} className="gap-1.5">
+              {field.label}
+              {field.required && !locked && (
+                <span
+                  className={
+                    missing && touched ? "text-2xs text-destructive" : "text-2xs text-muted-foreground"
+                  }
+                  data-testid={`agent-field-required-${field.key}`}
+                >
+                  Required
+                </span>
+              )}
+            </Label>
             {field.kind === "prose" ? (
               <Textarea
                 id={id}
@@ -82,6 +114,11 @@ export function AgentFields({
                 readOnly={locked}
                 onChange={(e) => onChange(field.key, e.target.value)}
                 placeholder={field.placeholder}
+                // The codebase's own error idiom (`aria-invalid` styling lives
+                // in `ui/input.tsx`), so this reads as every other invalid
+                // field does and is announced to a screen reader rather than
+                // being colour alone.
+                aria-invalid={missing && touched}
                 data-testid={`agent-field-${field.key}`}
               />
             )}

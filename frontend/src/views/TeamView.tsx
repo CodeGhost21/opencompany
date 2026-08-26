@@ -29,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
+import { emptyDraft, missingRequired, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
 import { draftNewAgentField } from "@/api/agent-copilot";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { fetchBoardColumns } from "@/lib/board-columns";
@@ -940,6 +940,15 @@ function AddMemberDialog({
    * `AgentDetailView` for why that is the right way to be wrong.
    */
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
+  /**
+   * The required fields still blank (issue #1776).
+   *
+   * Read from `AGENT_FIELDS` rather than re-spelled as
+   * `!draft.name.trim() || !draft.role.trim()`, which is what this button
+   * checked before: two forms deciding separately what a teammate needs is how
+   * they drift, and the edit form asks the same question one import away.
+   */
+  const missing = missingRequired(draft);
 
   useEffect(() => {
     if (!open) return;
@@ -1056,13 +1065,22 @@ function AddMemberDialog({
           </span>
           <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this teammate an inbox" />
         </label>
-        <DialogFooter>
+        <DialogFooter className="items-center">
+          {/* Why the button is dead, next to the button (issue #1776) — the
+              same answer the edit form gives, from the same definition, so the
+              two forms cannot come to disagree about what a teammate needs. */}
+          {missing.length > 0 && (
+            <p className="mr-auto text-2xs text-muted-foreground" data-testid="team-add-blocked">
+              {missing.map((field) => field.label).join(" and ")}{" "}
+              {missing.length > 1 ? "are" : "is"} required.
+            </p>
+          )}
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button
             onClick={submit}
-            disabled={!draft.name.trim() || !draft.role.trim() || budgetInvalid}
+            disabled={missing.length > 0 || budgetInvalid}
           >
             Add teammate
           </Button>
