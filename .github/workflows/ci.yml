@@ -351,6 +351,18 @@ jobs:
       - name: Assert merge-group CI wiring
         run: scripts/ci/assert-merge-group-workflow.sh
 
+      # Issue #1738. The desktop's shipped feature set lives on three command
+      # lines and in no manifest — `DESKTOP_RELEASE_FEATURES` in
+      # `release-desktop-macos.yml`, the `Desktop` lane's clippy and test steps
+      # below, and `scripts/desktop-dev.sh`. Until #1738 the dev script had no
+      # copy at all, so a developer ran the DEFAULT build and every user
+      # installed the release one. Here rather than in the `Desktop` job because
+      # this is a text check on repo config that needs no toolchain, and because
+      # `Desktop` is path-filtered on `src-tauri/**` — a drift introduced by
+      # editing only a workflow or only the dev script would not run that lane.
+      - name: Assert desktop feature sets agree
+        run: scripts/ci/assert-desktop-features.sh
+
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
