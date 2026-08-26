@@ -513,6 +513,13 @@ function failedAfterNodesRun(): WorkflowRunOutcome {
 // already completed collapsed into the same "nothing in the graph got the
 // chance to run" claim as a run that never started at all — contradicting
 // the finish rows sitting right above it in the same card.
+//
+// Codex review on #1821 (tenth pass): the ninth-pass fix then named a
+// specific alternate cause ("a host or capability problem") for that same
+// case — but `WorkflowNodeFinished` is appended best-effort (`runner.rs`),
+// so a missing finish row is not proof the culprit node's own failure never
+// happened; its append can silently drop while `run.error` still lands. The
+// sentence now stops naming a cause it cannot actually rule in or out.
 describe("the failed-run remedy distinguishes an interrupted run from one that never started", () => {
   it("names the steps that completed instead of claiming nothing ran", async () => {
     await renderHistory(failedAfterNodesRun());
@@ -520,9 +527,10 @@ describe("the failed-run remedy distinguishes an interrupted run from one that n
     expect(row?.textContent).not.toContain(
       "nothing in the graph got the chance to run",
     );
-    expect(row?.textContent).toContain(
-      "2 steps completed before this run was interrupted",
-    );
+    expect(row?.textContent).toContain("2 steps completed before this run ended");
+    // Does not commit to a specific alternate cause a missing row cannot prove.
+    expect(row?.textContent).not.toContain("host or capability problem");
+    expect(row?.textContent).toContain("may not be fully recorded here");
   });
 
   it("still says nothing ran for a run that failed with no nodes at all", async () => {
