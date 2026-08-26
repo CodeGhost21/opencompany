@@ -424,6 +424,13 @@ pub(crate) struct DeskReply {
     /// claim it makes is incomplete but never wrong, the same trade the
     /// first-wins `spawned_task` beside it already takes.
     pub(crate) halted_for_spend: Option<crate::harness::SpendHalt>,
+    /// The budget pause behind this answer, if this teammate's own turn — or
+    /// any turn nested beneath it — paused for lack of inference budget/credits
+    /// (issue #1846).
+    ///
+    /// Folded exactly as `halted_for_spend` is, first-wins, for the same
+    /// reason: one bubble, one figure worth naming.
+    pub(crate) budget_paused: Option<crate::harness::BudgetPause>,
 }
 
 /// What was already decided about the operator message a drain belongs to
@@ -574,6 +581,13 @@ pub(crate) struct OperatorTurn {
     /// hit. Where the flag beside it ORs, this keeps the first `Some` — it
     /// carries figures, and one notice can quote one cap.
     pub(crate) halted_for_spend: Option<crate::harness::SpendHalt>,
+    /// The budget pause behind **any** turn on this bubble (issue #1846) — the
+    /// responder's, a desk lead's, or the CEO relay's.
+    ///
+    /// First-wins, for the same reason `halted_for_spend` is: one bubble, one
+    /// figure worth naming, and the relay turn replaces the reply text so
+    /// tracking only the last value would erase an earlier pause.
+    pub(crate) budget_paused: Option<crate::harness::BudgetPause>,
 }
 
 /// What a **dispatched card's** turn handed off (issue #204).
@@ -1328,6 +1342,11 @@ impl<'a> DelegationRunner<'a> {
         // overwritten, only filled when still empty — so a spend halt the
         // responder hit survives the relay turn replacing the reply text.
         let mut halted_for_spend = outcome.halted_for_spend;
+        // Issue #1846: sticky the same way, first-wins — the top-level fix
+        // this issue adds. A responder whose own turn paused for lack of
+        // inference budget/credits must survive the relay turn replacing the
+        // reply text, exactly like a spend halt.
+        let mut budget_paused = outcome.budget_paused;
         // Settle the direct-answer card from the turn that just ran. Done before
         // the delegation drain because a direct responder queues nothing — it
         // has no delegation tools — so there is no relay turn coming that could
@@ -1376,6 +1395,7 @@ impl<'a> DelegationRunner<'a> {
             operator_steps.extend(desk.steps);
             hit_iteration_cap |= desk.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(desk.halted_for_spend);
+            budget_paused = budget_paused.or(desk.budget_paused);
             desk_replies.push((desk.member, desk.reply));
         }
         // CEO-relay hand-back: when a synchronous desk delegation answered, run
@@ -1446,6 +1466,7 @@ impl<'a> DelegationRunner<'a> {
             operator_steps.extend(relay.steps);
             hit_iteration_cap |= relay.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(relay.halted_for_spend);
+            budget_paused = budget_paused.or(relay.budget_paused);
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -1471,6 +1492,7 @@ impl<'a> DelegationRunner<'a> {
             spawned_task,
             hit_iteration_cap,
             halted_for_spend,
+            budget_paused,
         })
     }
 
@@ -2033,6 +2055,10 @@ impl<'a> DelegationRunner<'a> {
         // is told nothing. First-wins, so the shallower halt (the one nearest
         // the answer the operator reads) is the one named.
         let mut halted_for_spend = outcome.halted_for_spend;
+        // Issue #1846: folded exactly as `halted_for_spend` is, first-wins, for
+        // the same reason — a deeper delegate's pause is folded INTO this
+        // member's answer, and there is one figure worth naming per bubble.
+        let mut budget_paused = outcome.budget_paused;
         for deeper in nested.desk_replies {
             reply.push_str(&format!(
                 "\n\n{} (delegated by {member}) replied:\n{}",
@@ -2041,6 +2067,7 @@ impl<'a> DelegationRunner<'a> {
             steps.extend(deeper.steps);
             hit_iteration_cap |= deeper.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(deeper.halted_for_spend);
+            budget_paused = budget_paused.or(deeper.budget_paused);
         }
         // A cancelled nested run folds in as a cancellation, NEVER as a
         // reply: the member said it was handing that slice on, and an
@@ -2082,6 +2109,7 @@ impl<'a> DelegationRunner<'a> {
                 steps,
                 hit_iteration_cap,
                 halted_for_spend,
+                budget_paused,
             }),
             cancelled: false,
             // Issue #442: the hand-off's own card, reported the same way
@@ -3704,6 +3732,13 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
         /// run no model — so this is how a test scripts "this teammate ran out
         /// of money mid-turn" and then asserts where that fact ends up.
         spend_halt: Option<crate::harness::SpendHalt>,
+        /// The budget pause this turn reports (issue #1846), standing in for
+        /// `classify_turn` recognising a budget-exhausted `Err` from a real
+        /// model turn. There is no way to arm that classification here either
+        /// — these fixtures run no model — so this is how a test scripts "this
+        /// teammate's turn ran out of inference credits" and then asserts the
+        /// pause survives the delegation folds, including the nested one.
+        budget_paused: Option<crate::harness::BudgetPause>,
     }
 
     impl Turn {
@@ -3770,6 +3805,21 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
                     agent: agent.to_string(),
                     spent_usd,
                     cap_usd,
+                }),
+                ..Self::default()
+            }
+        }
+
+        /// A turn that paused for lack of inference budget/credits (issue
+        /// #1846): it replies with the actionable pause copy, and reports the
+        /// pause alongside — the delegation-fold analogue of
+        /// [`spend_halted`](Self::spend_halted).
+        fn budget_paused(reply: &str, agent: &str, summary: &str) -> Self {
+            Self {
+                reply: reply.to_string(),
+                budget_paused: Some(crate::harness::BudgetPause {
+                    agent: agent.to_string(),
+                    summary: summary.to_string(),
                 }),
                 ..Self::default()
             }
@@ -3981,6 +4031,12 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
                 // that one cannot, is that the halt survives the DELEGATION
                 // folds, including the nested one.
                 halted_for_spend: turn.spend_halt,
+                // Issue #1846: scripted the same way, for the same reason —
+                // `classify_turn` needs a real model `Err` to classify, which is
+                // proved end-to-end elsewhere. What this fixture proves is that
+                // a budget pause survives the DELEGATION folds, including the
+                // nested one, exactly like a spend halt.
+                budget_paused: turn.budget_paused,
             }
         }
     }
@@ -7090,6 +7146,175 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             out.halted_for_spend.is_none(),
             "a notice that fires on every turn is as useless as one that never fires: {:?}",
             out.halted_for_spend
+        );
+    }
+
+    // ── issue #1846: the budget pause folds like the spend halt does ────────
+
+    /// The delegation-fold analogue of
+    /// [`a_nested_delegates_spend_halt_reaches_the_operator_turn`]: a delegate
+    /// two levels down pauses for lack of inference budget/credits, and the
+    /// operator is told — because the pause folds into the member's answer
+    /// exactly as its reply and steps already do, and survives the relay
+    /// turn's overwrite the same way a spend halt does.
+    #[tokio::test]
+    async fn a_nested_delegates_budget_pause_reaches_the_operator_turn() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                // Two levels down, and out of inference credits partway through.
+                Turn::budget_paused(
+                    "Paused — researcher's turn ran out of inference budget/credits.",
+                    "researcher",
+                    "Paused — researcher's turn ran out of inference budget/credits, so it \
+                     stopped instead of failing silently. Add credits to your account, then \
+                     resend your message to continue.",
+                ),
+                Turn::reply("Built. Research is paused for credits."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let pause = out
+            .budget_paused
+            .expect("a pause two levels down must reach the operator bubble");
+        assert_eq!(
+            pause.agent, "researcher",
+            "the notice must name the teammate that actually paused, not the one relaying it"
+        );
+        assert!(pause.summary.contains("add credits") || pause.summary.contains("Add credits"));
+        // The relay really did replace the reply — so the pause survived an
+        // overwrite rather than riding along on text that happened to persist.
+        assert_eq!(out.reply, "Built. Research is paused for credits.");
+    }
+
+    /// The negative control the test above needs: the same four-turn chain
+    /// with nobody paused reports no budget pause.
+    ///
+    /// Without this, `budget_paused` wired to a hardcoded `Some` would pass
+    /// every other assertion in this file.
+    #[tokio::test]
+    async fn a_chain_where_nobody_paused_reports_no_budget_pause() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::reply("everyone lands around 100 rps"),
+                Turn::reply("Built, and research says ~100 rps is the norm."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            out.budget_paused.is_none(),
+            "a notice that fires on every turn is as useless as one that never fires: {:?}",
+            out.budget_paused
+        );
+    }
+
+    /// The responder's own pause survives the relay turn replacing its text —
+    /// the budget-pause analogue of
+    /// [`a_responders_own_halt_survives_the_relay_replacing_the_reply`].
+    #[tokio::test]
+    async fn a_responders_own_budget_pause_survives_the_relay_replacing_the_reply() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                // The orchestrator runs out of credits AND still manages to hand
+                // off — the pause is on the turn that queued the delegation.
+                Turn {
+                    reply: "handing it to engineering".to_string(),
+                    tool_pushes: vec![handoff("ship the API")],
+                    budget_paused: Some(crate::harness::BudgetPause {
+                        agent: "chief".to_string(),
+                        summary: "Paused — chief's turn ran out of inference budget/credits."
+                            .to_string(),
+                    }),
+                    ..Turn::default()
+                },
+                Turn::reply("shipped"),
+                Turn::reply("All shipped."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let pause = out
+            .budget_paused
+            .expect("the responder's pause must survive the relay overwriting the reply");
+        assert_eq!(pause.agent, "chief");
+        assert_eq!(out.reply, "All shipped.", "the relay did replace the text");
+    }
+
+    /// A spend halt and a budget pause on the SAME chain are both reported —
+    /// they are different terminal states with different operator actions
+    /// (raise a cap / narrow the ask vs. add credits), so one must not mask
+    /// the other.
+    #[tokio::test]
+    async fn a_spend_halt_and_a_budget_pause_in_the_same_chain_both_survive() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::spend_halted("I got as far as two competitors", "researcher", 4.02, 4.0),
+                Turn {
+                    reply: "Built. Research is partial, and I'm out of credits too.".to_string(),
+                    budget_paused: Some(crate::harness::BudgetPause {
+                        agent: "engineer".to_string(),
+                        summary: "Paused — engineer's turn ran out of inference budget/credits."
+                            .to_string(),
+                    }),
+                    ..Turn::default()
+                },
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            out.halted_for_spend.map(|h| h.agent),
+            Some("researcher".to_string()),
+            "the spend halt must still surface"
+        );
+        assert_eq!(
+            out.budget_paused.map(|p| p.agent),
+            Some("engineer".to_string()),
+            "and the budget pause, on a DIFFERENT teammate, must not be masked by it"
         );
     }
 
