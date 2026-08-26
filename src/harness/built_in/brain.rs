@@ -1933,6 +1933,11 @@ impl HarnessBrain {
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
                     task_id: &card.id,
+                    // Issue #1687: the folder the deliverable lands in is
+                    // named for the work, not only keyed by it. The card is
+                    // right here and its title is the one string that says
+                    // what an operator is looking at.
+                    task_title: Some(card.title.as_str()),
                     source: &pending.source,
                     payload: match &pending.payload {
                         crate::harness::publish::PublishPayload::Text(text) => {
@@ -4125,7 +4130,10 @@ members = ["engineer"]
                     && n.parent_id
                         .as_deref()
                         .and_then(name_of)
-                        .is_some_and(|parent| parent == "t-1")
+                        // Issue #1687: the task folder is named for the work
+                        // and keyed by the card id — `<title>.<id>`, not the
+                        // bare id — so browsing by path lands on that name.
+                        .is_some_and(|parent| parent == "ship-the-thing.t-1")
             })
             .expect("agent B finds the deliverable by browsing the shared tree");
 
