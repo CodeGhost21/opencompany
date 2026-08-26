@@ -15,6 +15,10 @@ export const REWRITE_RETIRED = (
   sub: string | null,
 ): [View, string | null] | null => {
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
+  // `#/work` is where the "Work" nav row points in shared and bookmarked links;
+  // the board itself lives at `#/ledgers/tasks`, so send the alias there rather
+  // than let it fall through to not-found (issue #1797).
+  if (head === "work") return ["ledgers", BOARD_LEDGER];
   if (head === "memory") return ["settings", "brain"];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
