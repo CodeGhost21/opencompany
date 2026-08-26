@@ -28,6 +28,7 @@ import {
   closeSshTunnel,
   forgetConnection,
   openSshTunnel,
+  adoptSessionIntoCore,
   registerConnection,
 } from "@/api/transport/desktop";
 import {
@@ -693,7 +694,30 @@ export function unpairConnection(id: ConnectionId): void {
  * Replaces the client, through `adoptCredential`, so every request after this
  * carries the new session rather than the one it was constructed with.
  */
-export function adoptSession(id: ConnectionId, session: string): void {
+export async function adoptSession(id: ConnectionId, session: string): Promise<void> {
+  // On the desktop the session goes to the CORE, not into this client
+  // (issue #1855). The webview cannot use it: the proxy strips a caller-
+  // supplied `x-opencompany-session` (`RESERVED_HEADERS`) and the event
+  // stream carries only the core-held credential — both deliberate, so the
+  // page never decides what a request authenticates as. The core stores it in
+  // the keychain under this connection id, which is exactly where a paired
+  // device's session lived and what `oc_connect` reads back on the next
+  // launch — so a sign-in here survives an app restart, which the browser's
+  // never could.
+  //
+  // Awaited by the caller before it probes: a probe that ran first would
+  // authenticate with the pre-sign-in credential and conclude the host still
+  // refuses us.
+  if (isDesktopRuntime()) {
+    await adoptSessionIntoCore(id, session);
+    // `device` rather than a webview-held `session`: the record says where the
+    // credential lives, and every check keyed off it — the insecure-transport
+    // refusal, what a probe may claim — already treats a core-held credential
+    // correctly under this kind. The ref names the pairing for a person; a
+    // sign-in has no device id, so it says what it is.
+    adoptCredential(id, { kind: "device", ref: "signed-in" });
+    return;
+  }
   adoptCredential(id, { kind: "session", value: session });
 }
 
@@ -961,6 +985,16 @@ async function runProbe(
       patch(id, { status: "live", companies: [], waking: false });
       return null;
     } catch (statusErr) {
+      // A 401 from the companies list outranks whatever the alias said
+      // (issue #1855). The fallback exists for single-company hosts, and on a
+      // platform host it answers 404 for everyone — so letting that 404 win
+      // reported "down" about a host that had answered, precisely, "sign in".
+      // `keepWaking` then retried `down` for the whole cloud wake window,
+      // which is the spinner-over-a-sign-in that `waking.ts` promises never
+      // to show.
+      if (listErr instanceof ApiError && listErr.status === 401) {
+        return statusFromError(listErr);
+      }
       return statusFromError(statusErr ?? listErr);
     }
   }
