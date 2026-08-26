@@ -725,6 +725,35 @@ export function retargetDefaultCompany(id: ConnectionId, company: string): void 
   reseat(id, { ...existing, defaultCompany: company });
 }
 
+/**
+ * Rewrites a `?company=<archivedId>` URL param to `newId` in place (issue
+ * #1807).
+ *
+ * {@link retargetDefaultCompany} fixes the persisted profile, but
+ * `resolveConfig()` re-derives its `company` fresh from
+ * `window.location.search` on every load — the URL itself is not part of the
+ * registry and a reset never touches it. Left stale, the *next* reload's
+ * bootstrap `addConnection` call looks up `findProfile(baseUrl, archivedId)`,
+ * which no longer matches the retargeted profile (its `defaultCompany` is now
+ * `newId`), mints a fresh, duplicate connection scoped to the archived id
+ * instead of reusing it, and that connection's boot effect asks the host for
+ * an id that no longer exists. Rewriting the param here keeps the URL naming
+ * the same company the retargeted profile does, so the next reload's lookup
+ * matches instead of orphaning it (codex review on #1828, PR comment
+ * 3863028385).
+ *
+ * A no-op when the URL never named `archivedId` in the first place — a
+ * connection opened by picking a company from the switcher, rather than by a
+ * shared link, has no query param to correct.
+ */
+export function retargetCompanyUrlParam(archivedId: string, newId: string): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("company") !== archivedId) return;
+  url.searchParams.set("company", newId);
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 /** What "modify a host" may change about one. See {@link editConnection}. */
 export interface HostEdit {
   /** What this connection is called in the switcher. Blank keeps the old name. */

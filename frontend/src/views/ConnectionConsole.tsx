@@ -26,7 +26,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { useHosts } from "@/connections/HostsContext";
-import { adoptSession, probe, retargetDefaultCompany, useConnection } from "@/connections/registry";
+import {
+  adoptSession,
+  probe,
+  retargetCompanyUrlParam,
+  retargetDefaultCompany,
+  useConnection,
+} from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { withHostParam } from "@/hooks/use-host-route";
 import { Login } from "@/views/Login";
@@ -231,6 +237,10 @@ export function ConnectionConsole({
       // reload asks for the id this reset just archived. A no-op for a
       // connection that was never company-scoped.
       retargetDefaultCompany(connectionId, status.id);
+      // The registry fix above does not reach a `?company=` link's own URL —
+      // see `retargetCompanyUrlParam` for why a stale param there still
+      // orphans the retargeted profile on the next reload.
+      if (archived) retargetCompanyUrlParam(archived, status.id);
       void switchCompany(status.id, next);
     },
     [connectionId, createRequest, knownCompanies, switchCompany],
