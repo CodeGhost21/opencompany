@@ -853,7 +853,15 @@ export function AgentDetailView({
                           // grounds the draft in its own record rather than in
                           // anything this console sends.
                           onTurn={(conversation) =>
-                            draftAgentField(client, company, agentId, key, conversation)
+                            draftAgentField(client, company, agentId, key, conversation, {
+                              // The form's own values, not the host's. An
+                              // operator who took a draft and has not saved is
+                              // looking at something the record does not have,
+                              // and a copilot grounded in the record would
+                              // refine a version that is no longer on screen.
+                              description: draft.description,
+                              instructions: draft.instructions,
+                            })
                           }
                           // Fills the form draft and nothing else. The Save
                           // below is still what writes, which is what makes a

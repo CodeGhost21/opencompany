@@ -176,10 +176,20 @@ export function draftAgentField(
   agentId: string,
   field: DraftableField,
   conversation: CopilotTurn[],
+  onScreen?: { description?: string; instructions?: string },
 ): Promise<ProfileDraft> {
   return client.post<ProfileDraft>(
     `${client.scopeFor(company)}/team/${encodeURIComponent(agentId)}/draft`,
-    { field, messages: conversation.map(turnForWire) },
+    {
+      field,
+      messages: conversation.map(turnForWire),
+      // What the form holds right now, which is not always what the host has
+      // stored: the operator may have taken a draft with `Use it` and not
+      // pressed Save. The host prefers these when present, because "make it
+      // shorter" has to mean shorter than the text they are looking at.
+      description: onScreen?.description?.trim() || undefined,
+      instructions: onScreen?.instructions?.trim() || undefined,
+    },
   );
 }
 

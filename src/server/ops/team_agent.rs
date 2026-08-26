@@ -1249,6 +1249,24 @@ pub(super) struct DraftRequest {
     /// nothing else.
     #[serde(default)]
     messages: Vec<WireTurn>,
+    /// The mandate as it stands **on the operator's screen**, when the console
+    /// holds one the record does not.
+    ///
+    /// The grounding is otherwise read from the record, which is right until
+    /// the operator has taken a draft and not saved it yet. Then the two
+    /// disagree, and the record is the wrong one to believe: "make it shorter"
+    /// has to mean shorter than what they are looking at, not shorter than what
+    /// was stored before this conversation began.
+    ///
+    /// Not a widening. These are the two fields this same request is drafting,
+    /// authored on screen right now — the same argument the Add-teammate route
+    /// makes for carrying them. Everything else about the company is still
+    /// assembled host-side and cannot be influenced from here.
+    #[serde(default)]
+    description: Option<String>,
+    /// The persona as it stands on the operator's screen. See `description`.
+    #[serde(default)]
+    instructions: Option<String>,
 }
 
 /// One turn of a copilot conversation, on the wire.
@@ -1423,12 +1441,21 @@ pub(super) async fn draft_profile(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
 
-    let subject =
-        subject_for(&record, &agent_id, conversation_from(body.messages)).ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(format!(
-                "teammate {agent_id}"
-            )))
-        })?;
+    let on_screen = InProgress {
+        description: body.description,
+        instructions: body.instructions,
+    };
+    let subject = subject_for(
+        &record,
+        &agent_id,
+        conversation_from(body.messages),
+        on_screen,
+    )
+    .ok_or_else(|| {
+        ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "teammate {agent_id}"
+        )))
+    })?;
 
     let turns = subject.conversation.len();
     let draft = build_draft(&company, field, &subject).await;
@@ -1538,10 +1565,34 @@ pub(super) async fn draft_new_profile(
 /// neighbours' ids and roles, and nothing else about the company.
 ///
 /// `None` when the id names nobody on the roster.
+/// The two authored fields as the console currently shows them, when it has
+/// something the record does not.
+#[derive(Debug, Default)]
+pub(super) struct InProgress {
+    pub(super) description: Option<String>,
+    pub(super) instructions: Option<String>,
+}
+
+impl InProgress {
+    /// The on-screen value where there is one, else what was stored.
+    ///
+    /// A blank on-screen value is NOT a value: the operator clearing the box is
+    /// them about to write something, not an instruction to the copilot that
+    /// the field is now empty. Falling back keeps the draft grounded in the
+    /// last thing anyone actually wrote.
+    fn or_stored(on_screen: Option<String>, stored: Option<String>) -> Option<String> {
+        on_screen
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .or(stored)
+    }
+}
+
 fn subject_for(
     record: &CompanyRecord,
     agent_id: &str,
     conversation: Vec<CopilotTurn>,
+    on_screen: InProgress,
 ) -> Option<ProfileSubject> {
     // The same two halves `detail` resolves, in the same order: a manifest row
     // with the operator's edits applied wins an id collision, exactly as
@@ -1568,11 +1619,15 @@ fn subject_for(
         agent_id: agent_id.to_string(),
         name,
         role,
-        description,
+        description: InProgress::or_stored(on_screen.description, description),
         // The persona in force — the override where one is set, else the
         // blueprint seed — so a redraft improves on what the teammate actually
-        // runs on rather than on what its manifest row happened to say.
-        instructions: record.effective_instructions(agent_id),
+        // runs on rather than on what its manifest row happened to say. Unless
+        // the operator is looking at something newer, which wins.
+        instructions: InProgress::or_stored(
+            on_screen.instructions,
+            record.effective_instructions(agent_id),
+        ),
         siblings: siblings_of(record, agent_id),
         conversation,
     })
@@ -4123,7 +4178,8 @@ agent = "claude"
             role: crate::company::profile_draft::TurnRole::Operator,
             text: "keep it short".to_string(),
         }];
-        let subject = super::subject_for(&record, "ceo", said).expect("the ceo is on the roster");
+        let subject = super::subject_for(&record, "ceo", said, Default::default())
+            .expect("the ceo is on the roster");
         assert_eq!(subject.role, "Chief Executive");
         assert_eq!(subject.company_name, "Acme");
         assert_eq!(subject.conversation.len(), 1);
@@ -4140,6 +4196,34 @@ agent = "claude"
             "an overlay teammate is a neighbour too: {sibling_ids:?}"
         );
 
-        assert!(super::subject_for(&record, "nobody", Vec::new()).is_none());
+        assert!(super::subject_for(&record, "nobody", Vec::new(), Default::default()).is_none());
+
+        // What the operator is LOOKING AT wins over what was stored: "make it
+        // shorter" has to mean shorter than the text on screen, not shorter
+        // than a version this conversation never saw.
+        let on_screen = super::InProgress {
+            description: Some("A draft they took but have not saved.".to_string()),
+            instructions: None,
+        };
+        let looking_at = super::subject_for(&record, "ceo", Vec::new(), on_screen)
+            .expect("the ceo is on the roster");
+        assert_eq!(
+            looking_at.description.as_deref(),
+            Some("A draft they took but have not saved.")
+        );
+
+        // …but an emptied box is the operator about to type, not a statement
+        // that the field is now blank.
+        let cleared = super::InProgress {
+            description: Some("   ".to_string()),
+            instructions: None,
+        };
+        let fell_back = super::subject_for(&record, "ceo", Vec::new(), cleared)
+            .expect("the ceo is on the roster");
+        assert_eq!(
+            fell_back.description.as_deref(),
+            Some("Sets direction and delegates."),
+            "a blank box falls back to what was stored"
+        );
     }
 }
