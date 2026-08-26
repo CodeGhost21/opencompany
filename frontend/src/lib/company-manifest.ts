@@ -1,0 +1,130 @@
+// Company creation: the pure half (issue #1807).
+//
+// Everything about provisioning a company that is decidable without a network
+// or a DOM — building the minimal manifest the host accepts, and turning a
+// refused provision into a sentence an operator can act on. Kept here, out of
+// the dialog, so both are unit-testable as plain functions and the component
+// stays a rendering concern.
+
+import { ApiError } from "@/api/types";
+
+/** What the New-company form collects. */
+export interface ManifestInput {
+  /** The company name — the one required field; the host derives the id from it. */
+  name: string;
+  /**
+   * An email that may sign in as an admin without an invite first. Optional:
+   * on a hosted tenant the manager injects `OPENCOMPANY_ADMIN_EMAIL` as a
+   * standing admin, so a company provisioned with none is not a dead end.
+   */
+  adminEmail?: string;
+  /**
+   * The approval tier, when the operator overrode it. Omitted for the default:
+   * the host records `[policy].mode = "auto"` for a manifest that names none,
+   * so leaving it out is how the operator says "use the host default" rather
+   * than pinning `auto` in the manifest text.
+   */
+  policyMode?: string;
+}
+
+/** The named escapes a TOML basic string gives control characters. */
+const TOML_NAMED_ESCAPES: Record<string, string> = {
+  "\b": "\\b",
+  "\t": "\\t",
+  "\n": "\\n",
+  "\f": "\\f",
+  "\r": "\\r",
+};
+
+/**
+ * One TOML basic string, with the escapes the spec requires.
+ *
+ * A company name is operator-typed free text, so it can hold a quote, a
+ * backslash, or a stray control character — each of which would otherwise
+ * either break the parse or, worse, parse into something other than what was
+ * typed. Escaping here is what lets `buildManifestToml` interpolate the value
+ * without the caller having to sanitise it first.
+ *
+ * Built by walking code points rather than a control-character regex range so
+ * the source carries no literal control byte of its own.
+ */
+function tomlString(value: string): string {
+  let out = '"';
+  for (const ch of value) {
+    if (ch === "\\") {
+      out += "\\\\";
+    } else if (ch === '"') {
+      out += '\\"';
+    } else if (ch in TOML_NAMED_ESCAPES) {
+      out += TOML_NAMED_ESCAPES[ch];
+    } else if (ch.charCodeAt(0) < 0x20) {
+      out += `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`;
+    } else {
+      out += ch;
+    }
+  }
+  return `${out}"`;
+}
+
+/**
+ * The smallest manifest that provisions the company the operator described.
+ *
+ * `[company].name` is the only section always present — the host injects the
+ * policy tier and the user auth mode when the text omits them, so a name alone
+ * is a complete, valid body (`server/provision.rs`). The two optional sections
+ * are written only when the operator gave a value: an empty `[users].admins`
+ * or a redundant `[policy].mode = "auto"` would say something the operator did
+ * not, and the omitted-field form is exactly what the host reads as "use the
+ * default".
+ */
+export function buildManifestToml(input: ManifestInput): string {
+  const lines: string[] = ["[company]", `name = ${tomlString(input.name)}`];
+
+  const email = input.adminEmail?.trim();
+  if (email) {
+    lines.push("", "[users]", `admins = [${tomlString(email)}]`);
+  }
+
+  const mode = input.policyMode?.trim();
+  if (mode) {
+    lines.push("", "[policy]", `mode = ${tomlString(mode)}`);
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The provision-error codes this surface words specially.
+ *
+ * The host's own message is already prose for most refusals (a quota is "tenant
+ * company quota of N reached", ownership is a full sentence ending "retry the
+ * request"), so those are shown verbatim. Only two codes get a console-authored
+ * line: `company_exists`, where the host names the id but the operator typed a
+ * name, and the platform-scope refusal, which the console can explain in terms
+ * of the sign-in rather than the raw `401`.
+ */
+export function describeProvisionError(err: unknown): string {
+  if (!(err instanceof ApiError)) {
+    return "Something went wrong creating the company. Try again.";
+  }
+
+  // A session cookie can never reach `PlatformScope`, whatever it holds. The
+  // control is gated on `carriesPlatformBearer` so this should be unreachable
+  // from the UI, but a race (a bearer that lost its scope, a token swapped mid
+  // session) still lands here, and the honest answer is about the sign-in.
+  if (err.status === 401) {
+    return "This sign-in can't create companies — that needs a platform credential, which a person signed in here doesn't hold.";
+  }
+
+  switch (err.code) {
+    case "company_exists":
+      return "A company with that name already exists on this host. Choose a different name.";
+    case "network_error":
+      return err.message;
+    // quota_exceeded, ownership_not_persisted, auth_mode_none_not_allowed,
+    // manifest_parse, invalid_request and the manifest-validation envelope all
+    // arrive as operator-readable prose from the host — show it verbatim.
+    default:
+      return err.message;
+  }
+}
