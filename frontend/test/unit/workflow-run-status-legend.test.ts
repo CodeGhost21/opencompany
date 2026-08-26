@@ -76,6 +76,26 @@ function undeliveredRun(): WorkflowRunOutcome {
   });
 }
 
+/** A dry run: its one delivery is `skipped` with reason `dry-run` —
+ * `isUndelivered` (`run-health.ts`) deliberately exempts that reason, so
+ * `undeliveredCount` is 0 and `verdictOf` reads this run as `ok`, the same as
+ * a run that actually sent something. Nothing was attempted, on purpose. */
+function dryRunOkRun(): WorkflowRunOutcome {
+  return baseRun({
+    seq: 6,
+    deliveries: [
+      {
+        node: "digest",
+        kind: "channel",
+        target: "engineering",
+        status: "skipped",
+        reason: "dry-run",
+        detail: "dry run — nothing sent",
+      },
+    ],
+  });
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -203,6 +223,23 @@ describe("the status dot defines the run's verdict on hover", () => {
     expect(title).not.toContain("decide it in Approvals");
     // The hedge names the case that has no card, and what to do about it.
     expect(title).toContain("nothing there to decide");
+  });
+
+  // Codex review on #1821: `isUndelivered` (`run-health.ts`) exempts a
+  // `skipped` row whose reason is `dry-run` — a test run attempted nothing,
+  // on purpose — so `verdictOf` reads it as `ok` the same as a run that
+  // actually sent something. The old wording claimed "every report reached
+  // its destination", which is false for a report that was never attempted.
+  it("does not claim every report was delivered for a dry run read as ok", async () => {
+    await renderHistory(dryRunOkRun());
+    const dot = container.querySelector(
+      '[data-testid="workflow-run-status-dot"]',
+    );
+    const title = dot?.getAttribute("title") ?? "";
+    expect(title).toContain("ok");
+    expect(title).not.toContain("every report reached its destination");
+    // The hedge covers the report that was never attempted, not just refused.
+    expect(title).toContain("didn't need to");
   });
 });
 
