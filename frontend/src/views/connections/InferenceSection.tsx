@@ -404,15 +404,28 @@ export function InferenceSection({
    * instance). A tier id the operator typed by hand that is not a raw
    * `<author>/<model>` id — a bare tier passthrough, or the proxy's own
    * `openrouter/<author>/<model>` form — is left alone either way.
+   *
+   * Folds the strip into `baseline` in the same pass, not just `models`.
+   * `pickProvider` seeds both together from the same preset, so skipping
+   * `baseline` here left it holding the raw ids this effect had just
+   * stripped out of `models` — and `hasTypedDraft()` reads any such gap as
+   * an operator draft, however it got there. That flipped a same-tick
+   * `pickProvider("openrouter")` → `pickProvider(<something else>)` (typing
+   * a key in between, never touching Base URL or a model field) into an
+   * unwanted "Replace the provider draft?" confirmation, because this
+   * effect's own cleanup — not anything the operator typed — was the entire
+   * difference `hasTypedDraft()` saw. An automatic proxy-safety strip is no
+   * more a typed draft than the preset it is correcting; `baseline` has to
+   * move with it for the same reason it moves with the preset itself.
    */
   useEffect(() => {
     if (provider !== "openrouter" || !wouldSaveProxied) return;
-    setModels((current) => {
-      const next = stripProxyIncompatible(current);
-      const changed = TIERS.some((tier) => (next[tier] ?? "") !== (current[tier] ?? ""));
-      return changed ? next : current;
-    });
-  }, [provider, wouldSaveProxied]);
+    const next = stripProxyIncompatible(models);
+    const changed = TIERS.some((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
+    if (!changed) return;
+    setModels(next);
+    setBaseline((b) => ({ ...b, models: next }));
+  }, [provider, wouldSaveProxied, models]);
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
