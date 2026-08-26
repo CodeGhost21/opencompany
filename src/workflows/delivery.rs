@@ -1491,6 +1491,7 @@ mod tests {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::UserRecord;
     use crate::ports::types::CompanyId;
+    use crate::ports::types::SecretValue;
     use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
     use crate::server::ops::mailer::{MailSender, RecordingMailSender};
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
@@ -1606,7 +1607,7 @@ allow = [{allow}]
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "acme".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: COMPANY_ADDRESS.into(),
         }

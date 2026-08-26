@@ -10,6 +10,7 @@ pub mod a2a;
 pub mod acp;
 pub(crate) mod approval_visibility;
 pub mod chat_history;
+pub mod cognition;
 pub mod cors;
 mod error;
 pub mod feedback;

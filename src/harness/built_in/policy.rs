@@ -4083,6 +4083,7 @@ mod tests {
             cost_usd: usd,
             kind: SampleKind::Inference,
             run_id: None,
+            model: None,
         }
     }
 

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
-import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -59,6 +60,8 @@ interface Props {
    * client the blob route needs. Absent where nothing renders attachments.
    */
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /**
    * Places a first brief into the composer on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
@@ -80,6 +83,14 @@ interface Props {
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
   failedApprovals?: Record<string, string>;
   onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  /**
+   * Whether this company's teammates can think (issue #1735). On either echo
+   * state every company-side row below is a canned line rather than a
+   * teammate's answer (issue #1734). Passed straight through to `MessageRow`,
+   * which explains why this is a company-level fact and not a per-message one,
+   * and why it carries the cause rather than a boolean.
+   */
+  cognition?: CognitionState | null;
 }
 
 /**
@@ -123,6 +134,7 @@ export function MessageTimeline({
   onDismissCard,
   dismissingCardId,
   resolveAttachmentUrl,
+  taskStatusByTaskId,
   onStartBrief,
   onAddPeople,
   now,
@@ -131,6 +143,7 @@ export function MessageTimeline({
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
+  cognition,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
@@ -296,6 +309,9 @@ export function MessageTimeline({
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
                 resolveAttachmentUrl={resolveAttachmentUrl}
+                taskStatusByTaskId={taskStatusByTaskId}
+                now={now ?? Date.now()}
+                cognition={cognition}
               />
             </div>
           ) : (

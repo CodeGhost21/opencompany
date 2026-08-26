@@ -176,3 +176,27 @@ test("#1391 the teammate action is a focused title button, not an interactive ca
   await open.press("Enter");
   await expect(page).toHaveURL(/#\/team\/maya$/);
 });
+
+test("#1810 the teammate card opens without swallowing its actions menu", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // The description is deliberately plain card content, not the title button.
+  // Clicking it proves the stretched title action covers the card surface.
+  const description = await maya.getByTestId("team-card-description").boundingBox();
+  if (!description) throw new Error("Maya's description has no clickable bounds");
+  await page.mouse.click(description.x + 4, description.y + 4);
+  await expect(page).toHaveURL(/#\/team\/maya$/);
+
+  await page.goto("/#/company");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // The overflow stays above the stretched target: it opens Remove without
+  // navigating to the teammate underneath it.
+  await maya.getByRole("button", { name: "Teammate actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Remove" })).toBeVisible();
+  await expect(page).toHaveURL(/#\/company$/);
+});

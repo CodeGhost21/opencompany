@@ -649,7 +649,7 @@ async fn saving_the_from_name_alone_keeps_the_stored_password() {
     let presented = sender.presented();
     assert_eq!(presented.len(), 1);
     let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
-    assert_eq!(creds.password, "the-original-pw");
+    assert_eq!(creds.password.expose(), "the-original-pw");
     assert_eq!(creds.from_name, "Acme Inc");
 }
 
@@ -738,7 +738,8 @@ async fn a_password_keeps_its_leading_and_trailing_spaces() {
     assert_eq!(presented.len(), 1);
     let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
     assert_eq!(
-        creds.password, padded,
+        creds.password.expose(),
+        padded,
         "the stored password must be byte-for-byte what was supplied",
     );
 }
@@ -945,7 +946,7 @@ async fn a_passwordless_save_does_not_revert_a_concurrent_rotation() {
     let presented = sender.presented();
     assert_eq!(presented.len(), 1);
     let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
-    assert_eq!(creds.password, rotated);
+    assert_eq!(creds.password.expose(), rotated);
     assert_eq!(creds.from_name, "Acme Inc");
 }
 
@@ -1031,7 +1032,7 @@ async fn a_pre_split_password_survives_a_passwordless_save() {
     assert_eq!(response.status(), StatusCode::OK);
     let presented = sender.presented();
     let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
-    assert_eq!(creds.password, legacy);
+    assert_eq!(creds.password.expose(), legacy);
     assert_eq!(creds.from_name, "Acme Inc");
 }
 
@@ -1134,8 +1135,11 @@ async fn a_rotation_racing_the_legacy_migration_is_not_lost() {
 #[test]
 fn debugging_the_stored_config_does_not_print_a_legacy_password() {
     // `StoredConfig` is the one place a password can still ride along inside
-    // otherwise non-secret configuration, so a derived `Debug` would put a live
-    // credential into any log line or panic message that formats one.
+    // otherwise non-secret configuration, so a `Debug` that printed it would
+    // put a live credential into any log line or panic message that formats
+    // one. Since issue #1770 the redaction comes from the field's type rather
+    // than from a hand-written impl on this struct, so the marker is
+    // `SECRET_REDACTED` and a plain `#[derive(Debug)]` here is safe.
     let config: super::smtp::StoredConfig = serde_json::from_value(serde_json::json!({
         "host": "smtp.acme.test",
         "port": 587,
@@ -1148,7 +1152,10 @@ fn debugging_the_stored_config_does_not_print_a_legacy_password() {
     .unwrap();
     let rendered = format!("{config:?}");
     assert!(!rendered.contains("must-not-appear"), "{rendered}");
-    assert!(rendered.contains("<redacted>"), "{rendered}");
+    assert!(
+        rendered.contains(crate::ports::types::SECRET_REDACTED),
+        "{rendered}"
+    );
     // Still useful for diagnosis.
     assert!(rendered.contains("smtp.acme.test"), "{rendered}");
 }
@@ -1223,6 +1230,6 @@ async fn an_all_whitespace_password_counts_as_omitted() {
     assert_eq!(response.status(), StatusCode::OK);
     let presented = sender.presented();
     let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
-    assert_eq!(creds.password, stored);
+    assert_eq!(creds.password.expose(), stored);
     assert_eq!(creds.from_name, "Acme Inc");
 }

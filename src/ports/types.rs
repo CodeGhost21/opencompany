@@ -5,6 +5,11 @@
 //! here. Every type derives `Clone, Debug, Serialize, Deserialize` so it can
 //! round-trip through JSONL persistence and the HTTP surface.
 //!
+//! [`SecretValue`] is the one deliberate exception: it hand-writes `Debug` and
+//! `Serialize` so neither can emit the plaintext credential, whichever struct
+//! happens to embed it. See its own docs for why, and
+//! `secret_value_redacts_in_debug_and_serialize` for the guard.
+//!
 //! Field lists are Phase-1-minimal: the port contract in
 //! `docs/spec/runtime/ports.md` binds trait and method names, and permits
 //! payload fields to evolve within Phase 1.
@@ -148,14 +153,99 @@ impl std::fmt::Display for ChunkAddr {
     }
 }
 
+/// The single string every redacting rendering of a [`SecretValue`] emits, in
+/// `Debug` and in `Serialize` alike.
+///
+/// One constant on purpose: the assertion that a secret did not escape is
+/// "the plaintext is absent", and a second spelling of the marker is a second
+/// thing a future guard could check for and miss.
+pub const SECRET_REDACTED: &str = "[redacted]";
+
 /// Opaque per-company secret value.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Why `Debug` and `Serialize` are hand-written
+///
+/// Both derived impls emit the plaintext credential, and both are reachable by
+/// accident rather than by mistake. The `Debug` half was patched five separate
+/// times on *enclosing* structs — [`RuntimeConfig`](crate::app::config::RuntimeConfig),
+/// [`AppConfig`](crate::app::AppConfig), `ChargebeeConfig`, `MailCredentials`,
+/// `HttpTinyplaceClient` — each time after somebody noticed a live key in a log
+/// line. That is the failure mode of guarding the container instead of the
+/// contents: it protects the structs that exist and none of the ones written
+/// next.
+///
+/// `Serialize` is the same trap with a wider blast radius, because serializing
+/// a config is a *normal* thing to do — a DTO, an event payload, a diagnostic
+/// dump. Guarding here means a struct that derives `Serialize` and holds a
+/// secret is safe the day it is written, with nobody having to remember
+/// (issue #1741).
+///
+/// # Why a marker and not a refusal
+///
+/// [`Serialize`] emits [`SECRET_REDACTED`] rather than returning an error.
+/// A refusal aborts the *whole* enclosing serialization, so an incidental
+/// diagnostic dump becomes a runtime failure in the one code path least able to
+/// cope with one — and a caller who hits it is pushed toward
+/// [`expose`](Self::expose) to work around it, which is the actual leak. The
+/// marker gives that caller exactly what they should have got. It mirrors the
+/// hand-written `Debug` impls, which cannot refuse either.
+///
+/// # Why persistence is unaffected
+///
+/// Nothing serializes a `SecretValue` through serde. Every secret-store backend
+/// — `FsSecretStore`, `SqliteStore`, `MongoStore` — writes
+/// [`expose`](Self::expose) and reads back through the `SecretValue` constructor;
+/// config resolution maps `String -> SecretValue` the same way. That is the
+/// "storable form goes through one explicit, named method" discipline, and it
+/// was already the house style before this impl existed:
+/// `cargo check --all-targets --all-features` passes with *both* serde derives
+/// deleted outright. So the redacting `Serialize` costs no persistence path.
+///
+/// `Deserialize` stays derived: reading a secret *in* never leaks one, and a
+/// config or stored shape that names a `SecretValue` field is legitimate. The
+/// asymmetry is deliberate — a serde round-trip yields
+/// `SecretValue("[redacted]")`, which fails closed at the point of use instead
+/// of quietly carrying a live credential somewhere it was never meant to go.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct SecretValue(pub String);
 
 impl SecretValue {
     /// Borrows the underlying secret string.
+    ///
+    /// The *named* way to get the plaintext out — but **not the only one**, and
+    /// an audit that greps for `expose(` alone will miss the rest. The field is
+    /// `pub`, so `let SecretValue(raw) = value` reads it just as well, and ten
+    /// production call sites already do: four in `company::mcp`, three in
+    /// `company::inference`, two in `company::composio`, one in
+    /// `company::company_key`. A complete search is
+    /// `grep -E 'expose\(|SecretValue\('`.
+    ///
+    /// Stating that rather than the tidier claim is deliberate: the tidier one
+    /// was in this file and was false, and a security audit that trusts an
+    /// incomplete grep is worse off than one told where the gaps are. Closing
+    /// the gap means privatizing the field behind a constructor, which is a
+    /// mechanical change across ~110 construction sites and belongs in its own
+    /// change rather than riding along with the serialization guard.
     pub fn expose(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Newtype shape, redacted contents: an enclosing struct's *derived*
+        // `Debug` still reads sensibly, which is the point — the container no
+        // longer has to remember anything.
+        write!(f, "SecretValue({SECRET_REDACTED})")
+    }
+}
+
+impl Serialize for SecretValue {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(SECRET_REDACTED)
     }
 }
 
@@ -4725,6 +4815,149 @@ mod test {
                 .setup,
             None
         );
+    }
+
+    /// Issue #1741: `SecretValue` derived `Serialize`, so
+    /// `serde_json::to_value` over anything holding one emitted the plaintext
+    /// credential. Unlike the `Debug` surface — patched five separate times on
+    /// the *enclosing* structs, each time after somebody noticed a live key in
+    /// a log line — no test anywhere caught the serialize side.
+    ///
+    /// The guard lives on `SecretValue` itself, so the assertions below are
+    /// deliberately made through containers the type knows nothing about: a
+    /// struct with a plain `#[derive(Serialize)]` standing in for the next
+    /// config struct somebody writes, plus `Option`, `Vec`, a map value, and
+    /// `#[serde(flatten)]` (a genuinely different serde code path), across
+    /// both `to_string` and `to_value` (also different code paths in
+    /// `serde_json`). Regress the impl to a derive and every arm fails.
+    #[test]
+    fn secret_value_redacts_in_debug_and_serialize() {
+        use std::collections::BTreeMap;
+
+        // Obviously fake, and distinctive enough that a substring hit is a real
+        // hit. Same sentinel as the four existing planted-secret tests.
+        const FAKE_SECRET: &str = "NOT-A-REAL-KEY-planted-for-tests";
+
+        // Case-**insensitive**. A leak that arrives lowercased, uppercased, or
+        // case-mangled on the way out is still a leak, and an exact-case search
+        // reads it as clean — which is how a sibling change shipped a
+        // leak-detection test that passed a deliberate leak.
+        fn leaks(rendering: &str) -> bool {
+            rendering
+                .to_ascii_lowercase()
+                .contains(&FAKE_SECRET.to_ascii_lowercase())
+        }
+
+        // Sanity: the detector detects. Without this the whole test could be
+        // vacuous and read as green.
+        assert!(
+            leaks(&format!("token={}", FAKE_SECRET.to_ascii_lowercase())),
+            "the leak detector cannot see a lowercased sentinel; every \
+             assertion below would be vacuous"
+        );
+
+        /// The next config struct somebody writes: derives `Serialize` and
+        /// `Debug` with no idea a secret is in there.
+        #[derive(Debug, Serialize)]
+        struct UnsuspectingConfig {
+            bind: String,
+            token: SecretValue,
+            optional: Option<SecretValue>,
+            many: Vec<SecretValue>,
+            by_name: BTreeMap<String, SecretValue>,
+            // No map-*key* arm: `SecretValue` derives neither `Ord` nor
+            // `Hash`, so it cannot occupy a key position in any std map. That
+            // is worth keeping — a credential is not an identity to index by.
+            #[serde(flatten)]
+            nested: NestedSecrets,
+        }
+
+        /// Flattened into the outer struct, so serde uses `FlatMapSerializer`
+        /// instead of the ordinary struct serializer.
+        #[derive(Debug, Serialize)]
+        struct NestedSecrets {
+            inner: SecretValue,
+        }
+
+        let secret = SecretValue(FAKE_SECRET.to_string());
+        let config = UnsuspectingConfig {
+            bind: "127.0.0.1:8080".to_string(),
+            token: secret.clone(),
+            optional: Some(secret.clone()),
+            many: vec![secret.clone(), secret.clone()],
+            by_name: BTreeMap::from([("github".to_string(), secret.clone())]),
+            nested: NestedSecrets {
+                inner: secret.clone(),
+            },
+        };
+
+        // --- Serialize, both serde_json entry points -----------------------
+        let as_string = serde_json::to_string(&config).expect("serialize");
+        assert!(
+            !leaks(&as_string),
+            "plaintext reached to_string: {as_string}"
+        );
+
+        let as_value = serde_json::to_value(&config).expect("to_value");
+        let value_text = as_value.to_string();
+        assert!(
+            !leaks(&value_text),
+            "plaintext reached to_value: {value_text}"
+        );
+
+        // The bare type, not just embedded in something.
+        let bare = serde_json::to_string(&secret).expect("serialize bare");
+        assert!(
+            !leaks(&bare),
+            "plaintext reached a bare serialization: {bare}"
+        );
+        assert_eq!(bare, format!("\"{SECRET_REDACTED}\""));
+
+        // Redaction is *visible*, not a silently dropped field: an operator
+        // reading a dump can tell a secret was there and was withheld.
+        assert!(
+            as_string.contains(SECRET_REDACTED),
+            "the marker is missing, so the field vanished silently: {as_string}"
+        );
+        // Everything non-secret still serializes normally — the guard is
+        // scoped to the secret, not to the struct.
+        assert!(as_string.contains("127.0.0.1:8080"), "{as_string}");
+
+        // --- Debug, plain and alternate ------------------------------------
+        for rendering in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(
+                !leaks(&rendering),
+                "plaintext reached a Debug rendering: {rendering}"
+            );
+            assert!(rendering.contains(SECRET_REDACTED), "{rendering}");
+        }
+        // On the type itself, so an enclosing struct's *derived* Debug is safe
+        // and the container stops having to remember.
+        assert_eq!(
+            format!("{secret:?}"),
+            format!("SecretValue({SECRET_REDACTED})")
+        );
+
+        // --- The persistence door is still open ----------------------------
+        // Every secret-store backend writes `expose()` and reads back through
+        // the constructor; none of them touch serde. That path must keep
+        // returning the plaintext or storing a credential stops working.
+        assert_eq!(secret.expose(), FAKE_SECRET);
+        assert_eq!(SecretValue(secret.expose().to_string()), secret);
+
+        // --- Deserialization keeps working ---------------------------------
+        // Reading a secret *in* never leaks one, so `Deserialize` stays
+        // derived: a config or stored shape may name a `SecretValue` field.
+        let loaded: SecretValue =
+            serde_json::from_str(&format!("\"{FAKE_SECRET}\"")).expect("deserialize");
+        assert_eq!(loaded.expose(), FAKE_SECRET);
+
+        // The asymmetry is deliberate, and asserted so nobody discovers it in
+        // production: a serde round-trip yields the marker, which fails closed
+        // at the point of use rather than carrying a live credential onward.
+        let round_tripped: SecretValue = serde_json::from_str(&bare).expect("round-trip");
+        assert_eq!(round_tripped.expose(), SECRET_REDACTED);
+        assert_ne!(round_tripped, secret);
     }
 
     fn round_trip<T>(value: &T) -> T

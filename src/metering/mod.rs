@@ -48,6 +48,9 @@ pub mod capability;
 pub mod daily_budget;
 mod finances;
 pub mod inference;
+/// Issue #1749: [`ModelSlug`], the closed vocabulary a metered sample names its
+/// model in. See [`model`].
+pub mod model;
 pub mod oauth;
 /// Issue #337: the planning pass's usage sample and its company-bucket
 /// attribution rule. See [`planning`].
@@ -72,6 +75,7 @@ pub use inference::{
     INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
     inference_sample, record_inference_usage,
 };
+pub use model::ModelSlug;
 pub use oauth::{
     MCP_PROVIDER_PREFIX, UNKNOWN_PROVIDER, mcp_provider, oauth_call_sample, record_oauth_call,
 };

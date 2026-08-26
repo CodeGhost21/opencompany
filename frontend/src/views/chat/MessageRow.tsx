@@ -1,9 +1,12 @@
 import { MessageSquareReply } from "lucide-react";
 
+import type { TaskStatus } from "@/api/tasks";
+import type { CognitionState } from "@/api/types";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
+import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { timeAgo } from "@/lib/language";
 import { MessageAttachments } from "./MessageAttachments";
@@ -17,7 +20,9 @@ import {
   type Sender,
   type TimelineEntry,
 } from "./model";
+import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { CardChip, StepTimeline } from "./StepTimeline";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
   entry: TimelineEntry;
@@ -35,6 +40,71 @@ interface Props {
    * client the blob route needs.
    */
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /** Shared shell clock for elapsed background-work copy. */
+  now?: number;
+  /**
+   * Whether this company's teammates can think, as the host reported it (issue
+   * #1735). On either echo state nothing on the company side of this transcript
+   * was written by the teammate it appears under, and every such row is marked
+   * (issue #1734).
+   *
+   * The **discriminated state** rather than a boolean, because the marker's
+   * tooltip has to name the cause: `unconfigured` and `unavailable` have
+   * different remedies, and a chip that says "no model configured" on a host
+   * with no harness contradicts the banner directly above it. Collapsing them
+   * here is what made that contradiction possible (CodeRabbit and codex both
+   * caught it on PR #1740).
+   *
+   * A company-level fact rather than a per-message one, because that is the
+   * only shape the truth has here: `ChatMessage` carries no provenance, so a
+   * canned line and a considered one are byte-for-byte identical at this layer.
+   * The alternatives were worse. Matching the text (`"You said: …"`) would hide
+   * a genuine reply that happens to start that way, and would miss the echo
+   * brain's other two lines (`"Acknowledged."`, `"webhook on …"`) entirely.
+   * Suppressing the row would leave the operator's message with no answer at
+   * all, which reads as "still working" — one lie traded for another, and it
+   * would put the transcript out of step with the journal, which did record a
+   * reply.
+   *
+   * The known imprecision runs both ways, and both are the price of having no
+   * per-message provenance: a company on the echo brain *now* may hold replies
+   * from a boot when it was configured and those get marked too, and a company
+   * configured *since* keeps historical echoes unmarked. Marking by the
+   * company's current state is what the console can actually know; stamping
+   * provenance at write time is a host change (issue #1792).
+   *
+   * `undefined` is unknown — an older host — and marks nothing.
+   */
+  cognition?: CognitionState | null;
+}
+
+/**
+ * Whether a card-linked reply still represents background work (#1758).
+ *
+ * An in-flight row wins over a briefly stale board read. Otherwise the board
+ * is authoritative, and {@link IN_FLIGHT_COLUMNS} is the one place that says
+ * which stages are actually active (`board-columns.ts`) — reused rather than
+ * re-derived here so a card back in `pending` (a planning failure, a cancel,
+ * or a revision) reads as stopped, the same as review, done or paused, rather
+ * than defaulting to "working" for anything that isn't a known terminal word.
+ */
+export function isTaskWorking(status: TaskStatus | undefined): boolean {
+  if (!status) return false;
+  return status.startedAt !== undefined || IN_FLIGHT_COLUMNS.includes(status.column);
+}
+
+/** The requested stable elapsed sentence, or nothing without a run clock. */
+export function taskElapsedLabel(
+  startedAt: number | undefined,
+  now: number,
+): string | null {
+  if (startedAt === undefined || !Number.isFinite(startedAt) || !Number.isFinite(now)) {
+    return null;
+  }
+  const minutes = Math.max(0, Math.floor((now - startedAt) / 60_000));
+  return `${minutes} min elapsed, still working`;
 }
 
 /**
@@ -75,10 +145,16 @@ export function MessageRow({
   onDismissCard,
   dismissingCardId,
   resolveAttachmentUrl,
+  taskStatusByTaskId,
+  now = Date.now(),
+  cognition,
 }: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
+  const taskStatus = message.taskId ? taskStatusByTaskId?.[message.taskId] : undefined;
+  const taskWorking = isTaskWorking(taskStatus);
+  const elapsed = taskWorking ? taskElapsedLabel(taskStatus?.startedAt, now) : null;
 
   if (sender.kind === "system") return <SystemPill message={message} />;
 
@@ -113,7 +189,16 @@ export function MessageRow({
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {!continuation && <AuthorLine sender={sender} at={message.at} />}
+        {!continuation && (
+          <AuthorLine
+            sender={sender}
+            at={message.at}
+            // One predicate, shared with `ThreadPanel`: neither the reader's
+            // own line nor another signed-in person's is the echo brain's, and
+            // both arrive as `from: "company"`. `system` never reaches here.
+            placeholder={echoMarkerFor(message, sender, cognition)}
+          />
+        )}
         <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
 
         {message.attachments && message.attachments.length > 0 && (
@@ -125,12 +210,27 @@ export function MessageRow({
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.taskId && (
-          <CardChip
-            taskId={message.taskId}
-            busy={dismissingCardId === message.taskId}
-            disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
-            onDismiss={onDismissCard}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <CardChip
+              taskId={message.taskId}
+              busy={dismissingCardId === message.taskId}
+              disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
+              onDismiss={onDismissCard}
+            />
+            {taskWorking && (
+              <div className="mt-1.5 flex min-w-0 items-center gap-2">
+                <WorkingIndicator
+                  srLabel="This task is still working."
+                  className="shrink-0 px-2 py-0.5 text-2xs"
+                />
+                {elapsed && (
+                  <span className="text-2xs text-muted-foreground tabular-nums">
+                    {elapsed}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {chips.length > 0 && (
@@ -205,7 +305,20 @@ function SystemPill({ message }: { message: ChatMessage }) {
   );
 }
 
-function AuthorLine({ sender, at }: { sender: Sender; at: number }) {
+function AuthorLine({
+  sender,
+  at,
+  placeholder,
+}: {
+  sender: Sender;
+  at: number;
+  /**
+   * Why this line is not authored by the voice above it (issue #1734), or
+   * `null` when it is. Carries the cause rather than a flag so the chip's
+   * tooltip can name it — see `EchoPlaceholder`.
+   */
+  placeholder?: CognitionState | null;
+}) {
   const openProfile = useAgentProfileOpener();
   const { agentId } = sender;
   // The name is the other half of the same target as the avatar beside it: a
@@ -225,6 +338,7 @@ function AuthorLine({ sender, at }: { sender: Sender; at: number }) {
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 leading-5">
       {name}
+      {placeholder && <EchoPlaceholder author={sender.name} cause={placeholder} />}
       <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
         {formatTime(at)}
       </span>

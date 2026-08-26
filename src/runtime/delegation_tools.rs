@@ -168,6 +168,57 @@ pub fn desk_lead(record: &CompanyRecord, desk: &str) -> Option<String> {
         .find(|m| record.is_roster_agent(m))
 }
 
+/// Which roster teammate answers a message addressed to `chat` — or `None`
+/// when the key names neither a desk nor a teammate.
+///
+/// The four arms, in order, are the ones the harness brain's `responder_for`
+/// has always tried: a desk key resolves to its
+/// [`desk_lead`], a bare roster agent id answers as itself, and the console's
+/// `dm:<teammate-id>` thread key is unwrapped and tried both ways (issue #982,
+/// step 3) — last, so it can only claim a key that resolves to nothing today.
+///
+/// **Returns `None` rather than falling back to the orchestrator**, because the
+/// two callers want different things from a miss: the harness brain logs a
+/// warning and answers as the orchestrator it resolved when it was built, while
+/// the cycle's small-talk fast path (issue #1725) resolves the orchestrator off
+/// the record in hand. Folding the fallback in here would make one of those
+/// wrong.
+///
+/// Lifted out of the harness brain so the fast path — which is brain-agnostic
+/// and runs before any brain — attributes its reply to the same teammate the
+/// turn it replaced would have been answered by.
+///
+/// # The built-in `#general` channel answers to nobody here (issue #1743)
+///
+/// A General spelling that no desk claimed is the **company's own line**, and
+/// `None` is the right answer for it: both callers then resolve their own
+/// orchestrator, which is what has always answered an unaddressed message.
+///
+/// Without the guard the roster arm below claims it. `mint_agent_id` reserves
+/// `main` and `General`, but a manifest can still declare a teammate with one,
+/// and that teammate would then answer every unaddressed message — while
+/// `GET chat/history?desk=main` returned the *folded General conversation*
+/// rather than its transcript (`is_general_chat` has folded `""`, `main`,
+/// `General` and `general` into one since issue #65). The responder and the
+/// transcript named different conversations. The fold is a fact about the
+/// address, not about who was addressed.
+///
+/// Only the **bare** key. The teammate keeps its DM under `dm:<id>`, which the
+/// arm below still unwraps and resolves, and a desk that claims the key is
+/// matched first and still wins.
+pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
+    let direct = |key: &str| desk_lead(record, key).or_else(|| record.resolve_roster_agent_id(key));
+    if let Some(lead) = desk_lead(record, chat) {
+        return Some(lead);
+    }
+    if crate::server::chat_history::is_general_chat(Some(chat)) {
+        return None;
+    }
+    record
+        .resolve_roster_agent_id(chat)
+        .or_else(|| crate::runtime::assignee::dm_key(chat).and_then(direct))
+}
+
 /// How many desk ids a rejection message names before eliding the rest, so the
 /// message stays short enough to be useful on a company with many desks.
 const LISTED_DESKS: usize = 12;
@@ -844,6 +895,102 @@ members = ["counsel"]
             template_provenance: None,
             setup: None,
         }
+    }
+
+    /// Issue #1725: the four arms the harness brain used to hold inline. The
+    /// cycle's small-talk fast path answers in the same voice a turn would
+    /// have, and this is the resolution both now share.
+    #[test]
+    fn chat_responder_resolves_a_desk_a_teammate_and_a_dm_key() {
+        let record = record();
+        // A desk key -> its lead member.
+        assert_eq!(
+            chat_responder(&record, "engineering").as_deref(),
+            Some("ceo")
+        );
+        // A desk *name*, case-insensitively, resolves the same way.
+        assert_eq!(
+            chat_responder(&record, "Content desk").as_deref(),
+            Some("writer")
+        );
+        // A bare roster teammate id -> that teammate.
+        assert_eq!(chat_responder(&record, "writer").as_deref(), Some("writer"));
+        // The console's DM thread key, unwrapped (issue #982, step 3).
+        assert_eq!(
+            chat_responder(&record, "dm:writer").as_deref(),
+            Some("writer")
+        );
+        assert_eq!(
+            chat_responder(&record, "dm:engineering").as_deref(),
+            Some("ceo")
+        );
+        // A desk whose members are all off the roster resolves to nobody, and
+        // so does a key that names nothing — the caller decides the fallback.
+        assert_eq!(chat_responder(&record, "legal"), None);
+        assert_eq!(chat_responder(&record, "nope"), None);
+        assert_eq!(chat_responder(&record, "dm:"), None);
+    }
+
+    /// The built-in `#general` channel resolves to **nobody**, so both callers
+    /// answer as their own orchestrator (issue #1743).
+    ///
+    /// The teammate is the point: `mint_agent_id` reserves `main` and
+    /// `General`, but a manifest can declare one, and without the guard the
+    /// roster arm hands it every unaddressed message — while
+    /// `GET chat/history?desk=main` returns the folded General conversation
+    /// rather than that teammate's transcript. The bare key is the line; the
+    /// teammate keeps its DM.
+    #[test]
+    fn chat_responder_leaves_the_general_line_to_the_caller() {
+        let mut record = record();
+        for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
+            assert_eq!(
+                chat_responder(&record, spelling),
+                None,
+                "the company's line resolves to nobody, addressed as {spelling:?}"
+            );
+        }
+
+        record
+            .overlay_agents
+            .push(crate::ports::types::OverlayAgent {
+                id: "main".to_string(),
+                name: "Mainard".to_string(),
+                role: "Analyst".to_string(),
+                description: None,
+                tools: Vec::new(),
+                model: None,
+                harness: None,
+            });
+        assert!(record.is_roster_agent("main"), "the roster arm would match");
+        assert_eq!(
+            chat_responder(&record, "main"),
+            None,
+            "a teammate called `main` does not inherit the company's line"
+        );
+        assert_eq!(
+            chat_responder(&record, "dm:main").as_deref(),
+            Some("main"),
+            "and keeps its own DM, which is how the console addresses one"
+        );
+
+        // An overlay desk squatting the key does not take it either — the
+        // resolver declines it (see `resolve_desk_id`).
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "main".to_string(),
+            name: "Front office".to_string(),
+            description: None,
+            members: vec!["writer".to_string()],
+        });
+        assert_eq!(chat_responder(&record, "main"), None);
+
+        // A desk the *blueprint* declares still wins, as it always has.
+        let declared: crate::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n[[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"writer\"]\n",
+        )
+        .expect("valid manifest");
+        record.manifest.group_chats.extend(declared.group_chats);
+        assert_eq!(chat_responder(&record, "main").as_deref(), Some("writer"));
     }
 
     #[test]

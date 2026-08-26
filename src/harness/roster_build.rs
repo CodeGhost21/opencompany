@@ -208,6 +208,14 @@ impl RosterBuilder {
         self.model.telemetry_provider_id()
     }
 
+    /// The model this pass's usage is metered against, read live off the
+    /// provider and already folded onto the closed vocabulary (issue #1749).
+    /// `None` before the provider has issued a turn, or when it cannot name a
+    /// model.
+    pub fn model_slug(&self) -> Option<crate::metering::ModelSlug> {
+        self.model.telemetry_model()
+    }
+
     /// Proposes a roster for these answers.
     ///
     /// **Infallible by design.** There is no `Result`, because there is no

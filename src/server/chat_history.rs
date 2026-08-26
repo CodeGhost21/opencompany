@@ -199,6 +199,26 @@ pub struct MessageView {
     pub at_millis: f64,
     /// Whether it is the operator's own message.
     pub mine: bool,
+    /// Whether a **person** wrote this line, as opposed to the runtime.
+    ///
+    /// Not derivable downstream, which is why it is projected here (issue
+    /// #1734). [`Self::mine`] answers "did *you* write it" and is per-viewer, so
+    /// a colleague's message reads `mine: false` and reaches the console on the
+    /// company side of the transcript — indistinguishable there from an agent
+    /// reply. [`Self::channel`] cannot separate them either: the offline echo
+    /// brain names its own outbound channel `operator`, exactly as the
+    /// `OperatorMessage` arm does, so a journaled echo reply and a human's
+    /// message carry the same label.
+    ///
+    /// The host is the only layer that still knows the difference — it is
+    /// reading the event variant. Anything downstream is guessing, and the guess
+    /// this exists to stop is chat marking a colleague's own words as the echo
+    /// brain's, which fabricates an attribution rather than merely missing one.
+    ///
+    /// `true` for [`CompanyEvent::OperatorMessage`] and nothing else. A
+    /// dispatch marker and an agent reply are both `false`: neither was typed by
+    /// a person.
+    pub by_person: bool,
     /// The scrubbed processing steps behind a company reply, so a rehydrated
     /// transcript renders the same tool-call timeline the live turn showed.
     /// Empty for operator messages and tool-less replies.
@@ -429,6 +449,8 @@ impl MessageView {
                 text,
                 at_millis,
                 mine: false,
+                // The runtime wrote this, whichever brain produced it.
+                by_person: false,
                 steps,
                 task_id,
                 parent_id: parent.map(|seq| seq.value().to_string()),
@@ -467,6 +489,8 @@ impl MessageView {
                     text,
                     at_millis,
                     mine,
+                    // A person typed this — the one arm where that is true.
+                    by_person: true,
                     steps: Vec::new(),
                     task_id: None,
                     parent_id: parent.map(|seq| seq.value().to_string()),
@@ -507,6 +531,7 @@ impl MessageView {
                 text: dispatch_marker_text(&column),
                 at_millis,
                 mine: false,
+                by_person: false,
                 steps: Vec::new(),
                 task_id: Some(task_id),
                 parent_id: None,
@@ -522,6 +547,7 @@ impl MessageView {
                 text: format!("{other:?}"),
                 at_millis,
                 mine: false,
+                by_person: false,
                 steps: Vec::new(),
                 task_id: None,
                 parent_id: None,
@@ -1227,6 +1253,76 @@ mod test {
             deliverable: None,
             attachments: Vec::new(),
         }
+    }
+
+    /// Who *typed* a line is a fact only the host still holds (issue #1734).
+    ///
+    /// Every downstream shortcut for it is wrong, and the two obvious ones are
+    /// wrong in ways that look right:
+    ///
+    /// * `mine` is per-viewer, so a colleague's own message is `mine: false`
+    ///   and lands on the company side of their reader's transcript, beside the
+    ///   agent replies.
+    /// * `channel == "operator"` collides head-on. The offline echo brain names
+    ///   its own outbound channel `operator` (`brain::echo`), exactly as this
+    ///   arm does, so a journaled echo reply and a human's message carry the
+    ///   same label. A console that split on it marked neither, which suppressed
+    ///   the marker on precisely the replies it exists for — caught in a browser
+    ///   against a live host, not by a unit test.
+    ///
+    /// So the projection says it, and this test pins both directions with the
+    /// echo brain's own channel label in play, because that is the collision.
+    #[test]
+    fn only_a_persons_message_is_projected_as_by_person() {
+        let typed = MessageView::project(
+            at(
+                1,
+                CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: "on it".to_string(),
+                    by: Some(Actor {
+                        kind: ActorKind::User,
+                        id: "u1".to_string(),
+                    }),
+                    chat: Some("studio".to_string()),
+                    deliverable: None,
+                    attachments: Vec::new(),
+                },
+            ),
+            // Projected for *another* reader, which is the case that matters:
+            // for them this is `mine: false` and nothing else distinguishes it.
+            &Viewer::User("u2".to_string()),
+            &labels(),
+        );
+        assert!(typed.by_person, "a person typed this");
+        assert!(!typed.mine, "and it is not this reader's own line");
+
+        // The echo brain's reply as the runtime journals it: an `AgentReply`
+        // whose agent id is the outbound channel the brain named — `operator`,
+        // the very label the arm above hardcodes.
+        let echoed = MessageView::project(
+            at(
+                2,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: "studio".to_string(),
+                    agent_id: "operator".to_string(),
+                    text: "You said: on it".to_string(),
+                    steps: Vec::new(),
+                },
+            ),
+            &Viewer::User("u2".to_string()),
+            &labels(),
+        );
+        assert!(!echoed.by_person, "no person typed the echo brain's reply");
+        assert_eq!(
+            echoed.channel, typed.channel,
+            "the collision is real: the channel label cannot tell these apart",
+        );
     }
 
     /// A person's mention reaches a reader as a **label**, never as the user id

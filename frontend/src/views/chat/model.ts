@@ -798,7 +798,23 @@ export function buildTimeline(
       m.at - prev.message.at < GROUP_WINDOW_MS &&
       // A row with replies ends its run — the summary row below it would
       // otherwise sit between two lines that read as one utterance.
-      prev.replies.length === 0;
+      prev.replies.length === 0 &&
+      // Who *typed* it ends a run too (issue #1734, codex review of #1740).
+      //
+      // A collaborator's message and an agent reply share a sender key: both
+      // are `from: "company"`, and the offline echo brain names its outbound
+      // channel `operator` exactly as an operator message does, so `senderOf`
+      // resolves both to the channel's own voice. Grouped, the second row is a
+      // continuation — no author line, and therefore no Placeholder marker —
+      // and it reads as part of the first one's utterance. That runs both ways
+      // and is wrong both ways: an echo reply hides inside a colleague's run
+      // unmarked, and a colleague's own words sit under an author line the
+      // marker has already labelled as the echo brain's.
+      //
+      // Breaking the run is the honest rendering rather than a workaround: two
+      // consecutive lines with different authorship are not one utterance, and
+      // a run is a claim that they are.
+      !!prev.message.byPerson === !!m.byPerson;
 
     const own = replies.get(m.id) ?? [];
     const entry: TimelineEntry = {

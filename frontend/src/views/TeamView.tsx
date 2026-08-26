@@ -613,7 +613,10 @@ function MemberCard({
   return (
     <Card
       data-testid="team-card"
-      className="transition-colors"
+      className={cn(
+        "relative transition-colors",
+        onOpen && "cursor-pointer hover:border-primary/40 hover:shadow-sm",
+      )}
     >
       <CardContent className="flex h-full flex-col gap-3 py-4">
         <div className="flex items-start gap-3">
@@ -631,7 +634,10 @@ function MemberCard({
             <button
               type="button"
               onClick={onOpen}
-              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              // Issue #1810: stretch the title's native button over the card,
+              // instead of turning a container with nested controls into a
+              // button. The menu and desk links sit above this layer below.
+              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left after:absolute after:inset-0 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="team-card-open"
             >
               <span className="block truncate font-medium">{member.name}</span>
@@ -665,7 +671,8 @@ function MemberCard({
               )}
             </div>
           )}
-          <div>
+          {/* Above the title button's stretched click target (issue #1810). */}
+          <div className="relative z-10">
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
@@ -730,7 +737,10 @@ function MemberCard({
               <Badge
                 key={desk.id}
                 variant="secondary"
-                className={cn("gap-1 text-3xs", onNavigateToDesk && "cursor-pointer")}
+                className={cn(
+                  "gap-1 text-3xs",
+                  onNavigateToDesk && "relative z-10 cursor-pointer",
+                )}
                 data-testid={`team-card-desk-${desk.id}`}
                 onClick={
                   onNavigateToDesk

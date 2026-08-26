@@ -42,6 +42,7 @@ use crate::company::inference::{
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::UsageMetering;
+use crate::server::cognition::InferenceResolution;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
@@ -192,6 +193,29 @@ async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiEr
         .unwrap_or_default())
 }
 
+/// What resolving this company's inference configuration produced.
+///
+/// The same three-way read [`runner_gap_for`] performs, lifted out so
+/// [`crate::server::ops::capabilities`] can classify cognition for the chat
+/// surface (issue #1735) from the identical evidence. One reader, so the two
+/// surfaces cannot tell one operator two different next steps about one
+/// company: what `restartRequired` and `inference_required` mean on the
+/// Inference card is what the chat banner says, by construction.
+///
+/// "Manifest unreadable" and "resolve failed" are deliberately folded together
+/// as [`InferenceResolution::Unreadable`] — the operator can act on neither,
+/// and [`runner_gap_for`] already folds them the same way.
+pub(crate) async fn inference_resolution(runtime: &CompanyRuntime) -> InferenceResolution {
+    let Ok(manifest) = manifest_inference(runtime).await else {
+        return InferenceResolution::Unreadable;
+    };
+    match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
+        Ok(Some(_)) => InferenceResolution::Resolved,
+        Ok(None) => InferenceResolution::Nothing,
+        Err(_) => InferenceResolution::Unreadable,
+    }
+}
+
 /// The console-facing source label for a resolved source badge.
 fn source_label(source: InferenceSource) -> &'static str {
     match source {
@@ -209,13 +233,18 @@ fn source_label(source: InferenceSource) -> &'static str {
 /// pool is attached whenever the serve path ran `attach_harness`, independently
 /// of which brain arm won — which is exactly the "this host could have run the
 /// harness, and didn't" signal we need.
+///
+/// Shared with [`crate::server::ops::capabilities`], which asks the same
+/// question for the chat surface's cognition state (issue #1735): whether
+/// Settings → Inference is a remedy or a dead end is one fact, and two copies
+/// of it would let the two surfaces disagree about the same company.
 #[cfg(feature = "openhuman")]
-fn harness_reachable(runtime: &CompanyRuntime) -> bool {
+pub(crate) fn harness_reachable(runtime: &CompanyRuntime) -> bool {
     runtime.harness().is_some()
 }
 
 #[cfg(not(feature = "openhuman"))]
-fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
+pub(crate) fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
     false
 }
 
@@ -1870,6 +1899,7 @@ base_url = "https://byo.example/v1"
                 // A stub brain meters per turn and reports zero usage, so
                 // nothing is double-counted (see `Brain::cognition`).
                 provider: "stub",
+                model: None,
                 metering: crate::ports::UsageMetering::PerTurn,
             }
         }

@@ -457,6 +457,30 @@ export function isRosterRoot(folder: FsNode | undefined): boolean {
 }
 
 /**
+ * The roster id whose subtree `id` sits in, or `undefined` when it sits in
+ * nobody's (issue #1723).
+ *
+ * `agents/<roster-id>/…` and `artifacts/<roster-id>/…` are the two subtrees
+ * whose whole contents are already attributed by the folder they hang under —
+ * every node beneath one was written by that teammate, and the row for the
+ * folder itself is labelled with their name. A per-row provenance pill in
+ * there repeats the same fact once per row: on a `artifacts/<agent>/<task>/`
+ * subtree that is four identical pills stacked vertically, each one eating the
+ * width the *name* needs in a 256px pane.
+ *
+ * Scoped to the second level, and to the same two roots {@link isRosterRoot}
+ * names, for the reason that function gives: a folder somebody named
+ * "artifacts" inside their own subtree is theirs, and nothing under it is a
+ * roster id.
+ */
+export function rosterOwnerOf(nodes: FsNode[], id: string | null): string | undefined {
+  const ancestry = pathOf(nodes, id);
+  const [root, owner] = ancestry;
+  if (!root || !owner || !isRosterRoot(root)) return undefined;
+  return owner.kind === "folder" ? owner.name : undefined;
+}
+
+/**
  * A folder's full path as one line, with roster ids resolved (issue #1381).
  *
  * The Move dialog listed every folder by bare `name`, so two `Drafts` under

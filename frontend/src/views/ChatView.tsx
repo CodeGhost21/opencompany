@@ -14,7 +14,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent } from "@/api/tasks";
+import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
@@ -23,6 +23,7 @@ import {
   ApiError,
   type ApprovalSummary,
   type AttachmentDto,
+  type CognitionState,
   type GrantScope,
   type TeamMemberDto,
   type TurnStep,
@@ -40,6 +41,7 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
+import { settingsHref } from "@/views/settings-pages";
 import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
   addMemberFailure,
@@ -66,6 +68,7 @@ import {
   type Mention,
   type Mentionable,
 } from "./chat/mentions";
+import { echoCause } from "./chat/EchoPlaceholder";
 import { MessageTimeline } from "./chat/MessageTimeline";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
@@ -256,6 +259,18 @@ interface Props {
     loadedMessageIds?: ReadonlySet<string>,
   ) => void;
   /**
+   * Reports whether the transcript is actually on screen right now — below
+   * `lg`, `mobilePane === "rail"` hides it behind the channel list even
+   * though `onChannelViewed`'s last report still names that channel.
+   * Distinct from `onChannelViewed`'s own channel memory (which the shell
+   * also uses to address an unaddressed system line after the operator walks
+   * off to Approvals, and must keep doing even while the rail is showing):
+   * this is only for "is a completion's inline marker visible right now",
+   * so a stale-but-correct channel name does not suppress its toast for a
+   * transcript the operator cannot see (#1768 codex review).
+   */
+  onChatPaneVisibilityChange?: (visible: boolean) => void;
+  /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
    *
@@ -268,6 +283,8 @@ interface Props {
    */
   approvals?: ApprovalSummary[];
   chatChannelByThread?: Record<string, string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -329,8 +346,10 @@ export function ChatView({
   mentions,
   mentionFeedRevision,
   onChannelViewed,
+  onChatPaneVisibilityChange,
   approvals,
   chatChannelByThread,
+  taskStatusByTaskId,
   now,
   onDecideApproval,
   decidingApprovals,
@@ -341,6 +360,37 @@ export function ChatView({
   const scope = useLocalScope();
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
+  /**
+   * Whether this company's teammates can actually think (issue #1734/#1735),
+   * **stamped with the scope that produced it**.
+   *
+   * `null` until the host has answered, and the `state` inside stays `null` on
+   * a host that has no such field — an older one, or one that could not answer.
+   * That silence is *not* evidence of an echo, so the banner stays down and
+   * every row renders exactly as it did before. The failure this fixes is the
+   * console asserting something it was never told; asserting the opposite would
+   * be the same bug pointed the other way.
+   *
+   * The `client`/`company` stamp is what keeps that promise across a company
+   * switch. This view stays mounted when `company` changes, and effects run
+   * *after* the render that changed it — so a bare `CognitionState` would still
+   * be holding the previous company's answer on the first render of the next
+   * one, showing its banner and its Placeholder chips over a transcript they
+   * are not about. Clearing inside the effect cannot fix that; it runs too
+   * late. Deriving through the stamp below makes the stale value unreadable
+   * rather than merely short-lived (CodeRabbit review of PR #1740).
+   */
+  /**
+   * Monotonic ticket for the cognition read, so only the newest one commits.
+   * A ref rather than state: it must be readable and bumped synchronously by a
+   * read that is already in flight, and changing it must not re-render.
+   */
+  const cognitionRead = useRef(0);
+  const [loadedCognition, setLoadedCognition] = useState<{
+    client: OpenCompanyClient;
+    company: string | null;
+    state: CognitionState | null;
+  } | null>(null);
   const [fromHost, setFromHost] = useState(false);
   /**
    * The company's channels — `null` until `/desks` has answered.
@@ -399,6 +449,94 @@ export function ChatView({
   useEffect(() => {
     setChannelsCollapsed(readChannelRailCollapsed(scope));
   }, [scope]);
+
+  /**
+   * Ask the host whether this company can think (issues #1734, #1735).
+   *
+   * There is no other way to tell. A company with no inference configured
+   * answers `200` with `"You said: <your message>"` from the offline echo
+   * brain, and that reply reaches the transcript with the same shape as a
+   * considered one — same avatar, same name, same timestamp. The runtime knows
+   * the difference and, until #1735, never said so.
+   *
+   * Re-read on every company switch, and every answer is stamped with the
+   * scope it came from — the read is what is scoped, not just when it is
+   * cleared. On failure the stamped state is `null`: see the state declaration
+   * for why silence must not become a claim.
+   *
+   * Also re-read whenever the tab comes back to the foreground, because this
+   * answer can go stale under a console that is doing nothing at all: another
+   * admin, or this operator in a second window, can configure inference and
+   * rebuild the runtime while this chat sits open (codex, PR #1740). The
+   * operator's *own* trip to Settings → Inference already re-reads — the shell
+   * mounts and unmounts `ChatView` per route, so coming back remounts it — but
+   * nothing covered the cross-session case, and a standing banner insisting
+   * that a company which now thinks perfectly well cannot is the same class of
+   * wrong claim as the one this surface exists to remove.
+   *
+   * A visibility hook rather than a poll: it re-asks exactly when someone is
+   * about to read the answer, costs nothing while the tab is hidden, and adds
+   * no host concept. It does not close the window for an operator who never
+   * leaves the tab; a runtime revision on the wire is the complete answer, and
+   * it belongs with the host rather than in a console-honesty fix.
+   */
+  useEffect(() => {
+    let live = true;
+    const read = async () => {
+      // Which read this is. Two can be in flight at once — the mount's and a
+      // visibility refresh's — and they are not guaranteed to settle in the
+      // order they were issued, so a slow *older* one could otherwise land last
+      // and put back the state the newer one had just corrected (codex, PR
+      // #1740). The scope stamp cannot catch that: both carry the same scope.
+      // Only the newest read may commit, in either direction, including its
+      // failure path — a stale rejection overwriting a fresh success is the
+      // same bug with the sign flipped.
+      const ticket = ++cognitionRead.current;
+      const isCurrent = () => live && ticket === cognitionRead.current;
+      try {
+        const capabilities = await client.capabilityStatus(company);
+        if (isCurrent()) {
+          setLoadedCognition({ client, company, state: capabilities.cognition ?? null });
+        }
+      } catch (e) {
+        // An older host, or one that could not answer. Nothing is claimed
+        // either way, and chat renders exactly as it did before the banner
+        // existed.
+        console.debug("[ChatView] cognition state unavailable", e);
+        if (isCurrent()) setLoadedCognition({ client, company, state: null });
+      }
+    };
+    void read();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void read();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      live = false;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [client, company]);
+
+  /**
+   * The host's answer *for the company on screen right now*, or `null` while
+   * this company's own read is still in flight. A value stamped with another
+   * scope is not an answer about this one.
+   */
+  const cognition =
+    loadedCognition &&
+    loadedCognition.client === client &&
+    loadedCognition.company === company
+      ? loadedCognition.state
+      : null;
+
+  /**
+   * The company is on the offline echo brain, whichever of the two reasons it
+   * is for. Both mean the same thing to a reader of the transcript: the lines
+   * on the company side were not written by the teammates they appear under.
+   * The *cause* still travels separately, because the two have different
+   * remedies and the banner and the chips both have to name the right one.
+   */
+  const echoing = echoCause(cognition) !== null;
 
   function toggleChannels() {
     setChannelsCollapsed((collapsed) => {
@@ -912,6 +1050,17 @@ export function ChatView({
     loadedMessageIds,
     chatPaneVisible,
   ]);
+
+  // The visibility half of the report above: `onChannelViewed` only ever says
+  // *which* channel, and only while it is visible, so nothing tells the shell
+  // the moment that stops being true — its "last channel seen" memory keeps
+  // naming whatever was visible before the operator dropped to the rail. A
+  // plain mirror of `chatPaneVisible`, not folded into that report, because
+  // the two callbacks answer different questions the shell must not conflate
+  // (see the prop doc).
+  useEffect(() => {
+    onChatPaneVisibilityChange?.(chatPaneVisible);
+  }, [chatPaneVisible, onChatPaneVisibilityChange]);
 
   // Upload one attachment's bytes for the composer (issue #1682). Bound to the
   // active connection's client/company so the composer stays agnostic of both.
@@ -1609,9 +1758,97 @@ export function ChatView({
                 </span>
               </p>
             )}
+            {/* Issues #1734 / #1735. Above the scroller rather than inside it,
+                like the two strips it sits between: this is a standing fact
+                about the company, not a row in the transcript, and it must not
+                scroll away from the operator who is reading the replies it
+                explains. `role="status"` (not `alert`) for the reason
+                `components/ui/alert.tsx` gives — a notice present on mount
+                should not interrupt a screen reader. */}
+            {echoing && (
+              <p
+                role="status"
+                data-testid="chat-cognition-banner"
+                className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0">
+                  {cognition === "unconfigured" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think yet.
+                      </span>{" "}
+                      This company has no model configured, so the replies below come from the
+                      offline echo brain rather than the teammate they appear under. Choose a
+                      provider in{" "}
+                      <a
+                        className="font-medium text-foreground underline-offset-4 hover:underline"
+                        href={settingsHref("inference")}
+                      >
+                        Settings → Inference
+                      </a>
+                      .
+                    </>
+                  )}
+                  {/* A provider is configured and resolves; the runtime just
+                      predates it. Saying "no model configured" here sends an
+                      operator who did exactly the right thing back to redo it,
+                      which is why this is its own state. The link goes to the
+                      card that owns the restart — and stops there, because
+                      whether a restart can be performed in place is that card's
+                      fact to report (#1736), not a promise to make from here. */}
+                  {cognition === "restart-required" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think yet — the model isn&apos;t live.
+                      </span>{" "}
+                      A provider is configured, but this company&apos;s runtime was built before
+                      it was saved, so the replies below still come from the offline echo brain
+                      rather than the teammate they appear under. Finish the switch in{" "}
+                      <a
+                        className="font-medium text-foreground underline-offset-4 hover:underline"
+                        href={settingsHref("inference")}
+                      >
+                        Settings → Inference
+                      </a>
+                      .
+                    </>
+                  )}
+                  {cognition === "unavailable" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        This host cannot reach a model — no agent harness is available.
+                      </span>{" "}
+                      The replies below come from the offline echo brain rather than the teammate
+                      they appear under. No setting changes that: it takes a host built and
+                      started with the harness.
+                    </>
+                  )}
+                  {/* The host is on the echo brain and cannot say why: it could
+                      not read this company's inference configuration. Names no
+                      remedy on purpose — an unreadable config is no evidence
+                      that saving one would help, which is the same #266
+                      doctrine that stops the workflow-run route answering
+                      `inference_required` in this state. A settings link here
+                      would be the switch that does nothing, one more time. */}
+                  {cognition === "undetermined" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think, and this host can&apos;t say why.
+                      </span>{" "}
+                      Its inference configuration could not be read, so the replies below come
+                      from the offline echo brain rather than the teammate they appear under.
+                      Until the host can read that configuration, saving a provider is not known
+                      to help.
+                    </>
+                  )}
+                </span>
+              </p>
+            )}
             <MessageTimeline
               channel={channel}
               items={items}
+              cognition={cognition}
               historyPending={historyPending}
               openThreadId={openThreadId}
               // An open turn keeps the row up after the POST has resolved, and
@@ -1624,6 +1861,7 @@ export function ChatView({
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
               resolveAttachmentUrl={resolveAttachmentUrl}
+              taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
                 setComposerPrefill((current) => ({
                   text: FIRST_TEAM_BRIEF,
@@ -1692,6 +1930,7 @@ export function ChatView({
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
+              youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) =>
                 void send(text, undefined, parent.id, undefined, mentions)
@@ -1699,6 +1938,10 @@ export function ChatView({
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
               onTyping={() => onTyping?.(active.id, parent.id)}
+              // A thread is not a lesser transcript (issue #1734): an echoed
+              // reply read here is the same false attribution as one read in
+              // the channel, so the panel marks its rows from the same state.
+              cognition={cognition}
             />
           )}
 

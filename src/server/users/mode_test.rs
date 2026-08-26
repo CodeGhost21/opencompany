@@ -24,7 +24,7 @@ use tower::ServiceExt;
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
 use crate::runtime::RuntimeBuilder;
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
@@ -152,7 +152,7 @@ fn mail_connections() -> ConnectionsRuntime {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
             from_name: "Acme".into(),
             from_email: "noreply@acme.test".into(),
         }))

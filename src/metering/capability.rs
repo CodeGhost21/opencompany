@@ -336,6 +336,7 @@ mod tests {
             cost_usd: 0.0,
             kind: SampleKind::Inference,
             run_id: None,
+            model: None,
         }
     }
 
@@ -350,6 +351,7 @@ mod tests {
             cost_usd: 0.0,
             kind: SampleKind::OauthCall,
             run_id: None,
+            model: None,
         }
     }
 

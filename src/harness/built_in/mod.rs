@@ -169,6 +169,7 @@ pub use brain::HarnessBrain;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use openhuman_core::openhuman as oh;
 use tokio::sync::{Mutex, RwLock};
@@ -1010,9 +1011,20 @@ impl CompanyAgent {
                 hooks,
                 Box::pin(async {
                     let mut usages: Vec<TurnUsage> = Vec::new();
+                    // Issue #1680: timed PER ATTEMPT, not across the retry. Each
+                    // `agent.turn` opens a fresh harness run with a fresh
+                    // wall-clock budget, so a duration spanning both attempts
+                    // would be compared against a ceiling neither of them saw.
+                    // This is the only per-turn duration measured anywhere —
+                    // `WorkflowRunNodeRow::elapsed_ms` is per NODE, and a node
+                    // is not a turn.
+                    let started = std::time::Instant::now();
                     let first = agent.turn(message).await;
+                    let first_elapsed = started.elapsed();
                     usages.push(read_turn_usage(&agent));
-                    let reply: crate::Result<String> = match self.classify_turn(first) {
+                    let reply: crate::Result<String> = match self
+                        .classify_turn(first, first_elapsed)
+                    {
                         AttemptOutcome::Reply(reply) => Ok(reply),
                         AttemptOutcome::Hard(err) => Err(err),
                         AttemptOutcome::Empty => {
@@ -1091,9 +1103,11 @@ impl CompanyAgent {
                                 {
                                     agent.set_next_turn_overrides(overrides);
                                 }
+                                let retry_started = std::time::Instant::now();
                                 let second = agent.turn(message).await;
+                                let second_elapsed = retry_started.elapsed();
                                 usages.push(read_turn_usage(&agent));
-                                match self.classify_turn(second) {
+                                match self.classify_turn(second, second_elapsed) {
                                     AttemptOutcome::Reply(reply) => Ok(reply),
                                     AttemptOutcome::Empty => Ok(crate::harness::mcp_probe::scrub(
                                         GRACEFUL_EMPTY_REPLY,
@@ -1212,11 +1226,25 @@ impl CompanyAgent {
     }
 
     /// Classify one `agent.turn` result for the retry wrapper.
-    fn classify_turn(&self, result: anyhow::Result<String>) -> AttemptOutcome {
+    ///
+    /// `elapsed` is how long THIS attempt ran, and is used only by the
+    /// wall-clock-ceiling arm (issue #1680) — see
+    /// [`wall_clock_ceiling_message`].
+    fn classify_turn(&self, result: anyhow::Result<String>, elapsed: Duration) -> AttemptOutcome {
         match result {
             Ok(reply) if reply.trim().is_empty() => AttemptOutcome::Empty,
             Ok(reply) => AttemptOutcome::Reply(reply),
             Err(err) if is_transient_empty_response(&err) => AttemptOutcome::Empty,
+            // Issue #1680: still Hard — a ceiling hit is not retryable and the
+            // one-shot retry must not double a ten-minute failure — but told in
+            // terms the operator can act on rather than the harness's own.
+            Err(err) if is_wall_clock_ceiling(&err) => {
+                AttemptOutcome::Hard(OpenCompanyError::Harness(wall_clock_ceiling_message(
+                    &self.agent_id,
+                    elapsed,
+                    &err,
+                )))
+            }
             Err(err) => AttemptOutcome::Hard(OpenCompanyError::Harness(format!(
                 "turn for '{}': {err}",
                 self.agent_id
@@ -1246,6 +1274,127 @@ fn is_transient_empty_response(err: &anyhow::Error) -> bool {
     format!("{err:#}")
         .to_ascii_lowercase()
         .contains("empty response")
+}
+
+/// The two phrasings `TinyAgentsError::Timeout` uses when the run's wall-clock
+/// budget expires around a call.
+///
+/// Copied from the vendored crate's own list — `web_errors::is_turn_timeout_error`
+/// anchors on exactly these — rather than invented here, so a phrasing added
+/// upstream is a diff against a known set instead of a silent miss.
+const WALL_CLOCK_CEILING_LEAVES: [&str; 2] = [
+    "exceeded its remaining wall-clock budget",
+    "exceeded its wall-clock deadline",
+];
+
+/// Whether a turn error is the harness's per-turn wall-clock ceiling firing
+/// (issue #1680).
+///
+/// Matched on the error chain's message for the same reason
+/// [`is_transient_empty_response`] is: `turn` returns `anyhow::Result`, so the
+/// typed error is erased by the time it reaches us. The leaf reads
+/// "…exceeded its remaining wall-clock budget (56636 ms)", raised by
+/// `with_call_budget` in the vendored tinyagents harness.
+///
+/// **Whole phrases, not the words `wall-clock budget`.** A provider's response
+/// body reaches this chain verbatim — `provider.rs` raises
+/// `TinyAgentsError::Model(format!("hosted inference returned {status}: {text}"))`
+/// — so a hosted or BYOK endpoint that says anything about a wall-clock budget
+/// of its own would otherwise be reported as this ceiling, complete with a
+/// measured duration of a second or two and an instruction to raise
+/// `OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`, which would fix nothing. Being wrong in
+/// that direction is worse than the bare wrapper this replaces, because it
+/// reads as a diagnosis.
+fn is_wall_clock_ceiling(err: &anyhow::Error) -> bool {
+    let chain = format!("{err:#}").to_ascii_lowercase();
+    WALL_CLOCK_CEILING_LEAVES
+        .iter()
+        .any(|leaf| chain.contains(leaf))
+}
+
+/// A duration as an operator reads one: `9s`, `1m 30s`, `10m 01s`.
+fn humanise_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    format!("{}m {:02}s", secs / 60, secs % 60)
+}
+
+/// What an operator should be told when a turn hits the wall-clock ceiling
+/// (issue #1680).
+///
+/// ## Why this message exists at all
+///
+/// The harness's own leaf reads "model call for run 'agent_turn' exceeded its
+/// remaining wall-clock budget (56636 ms)", and every part of that is true and
+/// almost every part of it misleads.
+///
+/// The ceiling is a **whole-turn** bound, armed as the harness policy's
+/// `max_wall_clock_ms` and checked as `ceiling − Instant::elapsed()` since the
+/// run began. Model time is therefore fully counted against it, as is tool
+/// time, sub-agent time and retry backoff. But the number the harness prints is
+/// the budget that **remained** when the offending call was issued, not that
+/// call's duration and not the ceiling — so a turn that genuinely ran for the
+/// full ten minutes reports a figure ten times smaller than the limit it hit,
+/// and reads as though one slow model call were at fault.
+///
+/// That reading is what issue #1680 was filed on: a node that had spent about
+/// nine minutes before its last model call even started was diagnosed as a 56
+/// second budget being too tight. Nothing about the mechanism was wrong; the
+/// only defect was that its report could not be read correctly.
+///
+/// ## Why the underlying error is kept
+///
+/// Appended verbatim rather than replaced. It is the only thing that names
+/// which call was in flight when the ceiling fired, and a bug report that has
+/// lost it is worse than a wordy one. The console strips known wrapper prefixes
+/// (`run-error-message.ts`) and leaves this leaf intact.
+///
+/// Rendered `{err:#}` — the whole chain — rather than `{err}`, which is only
+/// the outermost context. Today's leaf happens to arrive flattened
+/// (`vendor/openhuman/.../agent/tinyagents/mod.rs` interpolates it into a
+/// single `anyhow!`), but [`is_wall_clock_ceiling`] already searches `{err:#}`
+/// precisely because a chained one is possible; the two halves must agree, and
+/// only one of them is safe if it is. On a flat error the two render
+/// identically, so this costs nothing to be right about.
+///
+/// ## Why the ceiling's value is not quoted
+///
+/// `DEFAULT_AGENT_TURN_TIMEOUT_SECS` is private to the vendored openhuman crate
+/// and cannot be read from here. Restating `600` would be a copy that silently
+/// goes stale on the next vendored bump — the elapsed time is measured, and the
+/// knob's NAME is a fact independent of its value, so both can be stated
+/// honestly while the number cannot.
+///
+/// ## Why it hedges about the figure
+///
+/// "**any** millisecond figure below", not "the figure below", because the two
+/// spellings this classifies do not both carry one. `with_call_budget` raises
+/// `… exceeded its remaining wall-clock budget (56636 ms)`; the run loop and the
+/// tool loop raise `run \`agent_turn\` exceeded its wall-clock deadline`, which
+/// has no number in it at all. Pointing at a figure that is not there would
+/// reintroduce this issue's own defect one spelling over — an accurate sentence
+/// that cannot be followed. One clause covers both; a branch on the spelling
+/// would be two messages to keep true.
+///
+/// ## Why it is not longer than this
+///
+/// `RunHistoryPanel` renders a journaled run's error as the row's **headline**
+/// sentence, so every extra clause is a wall of red text over the run the
+/// operator is trying to read. Three facts earn their place — what the turn
+/// spent, that the harness's number is a remainder, and which knob moves the
+/// ceiling. The rest of the explanation belongs in
+/// `docs/spec/runtime/harnesses.md`, not in every failed run.
+fn wall_clock_ceiling_message(agent_id: &str, elapsed: Duration, err: &anyhow::Error) -> String {
+    format!(
+        "turn for '{agent_id}' hit the harness's per-turn wall-clock ceiling after {}. \
+         The ceiling bounds the whole turn, model time included, so any millisecond \
+         figure below is the budget that REMAINED when the last call started — not a \
+         limit on that call. Give this step less to do, or raise the ceiling with \
+         OPENHUMAN_AGENT_TURN_TIMEOUT_SECS. Underlying error: {err:#}",
+        humanise_elapsed(elapsed)
+    )
 }
 
 /// What a workspace-ensure attempt should say, given what the last attempt for
@@ -2786,11 +2935,13 @@ impl HarnessPool {
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
+        let model_slug = deps.provider.telemetry_model();
         for turn_cost in &turn_costs {
             record_turn_cost(
                 turn_cost,
                 confine::CONFINED_AGENT_ID,
                 &provider_slug,
+                model_slug,
                 company,
                 deps.store.as_ref(),
                 deps.meter.as_deref(),
@@ -3051,11 +3202,16 @@ impl HarnessPool {
         // a console BYOK switch changes the slug between turns, so read it live
         // rather than trusting the static `deps.provider_slug` baked at build.
         let provider_slug = deps.provider.telemetry_provider_id();
+        // And to the model it actually resolved to, read live for the same
+        // reason and folded onto the closed vocabulary at the provider so no
+        // operator-authored model name reaches the meter (issue #1749).
+        let model_slug = deps.provider.telemetry_model();
         for turn_cost in &turn_costs {
             record_turn_cost(
                 turn_cost,
                 agent_id,
                 &provider_slug,
+                model_slug,
                 company,
                 deps.store.as_ref(),
                 deps.meter.as_deref(),
@@ -6002,6 +6158,222 @@ description = "Builds the product."
         );
     }
 
+    // --- the per-turn wall-clock ceiling (issue #1680) -----------------------
+
+    /// The leaf as the vendored harness actually writes it, taken verbatim from
+    /// the failing run in issue #1680.
+    fn ceiling_error() -> anyhow::Error {
+        anyhow::anyhow!(
+            "tinyagents harness run failed; model error; run timed out; model call for run \
+             'agent_turn' exceeded its remaining wall-clock budget (56636 ms)"
+        )
+    }
+
+    /// The same failure as [`ceiling_error`], but arriving as an `anyhow`
+    /// context chain instead of one flattened string. Nothing guarantees the
+    /// vendored crate keeps flattening it, and `is_wall_clock_ceiling` already
+    /// assumes it might not.
+    fn chained_ceiling_error() -> anyhow::Error {
+        use anyhow::Context as _;
+        Err::<(), _>(anyhow::anyhow!(
+            "model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)"
+        ))
+        .context("run timed out")
+        .context("model error")
+        .context("tinyagents harness run failed")
+        .unwrap_err()
+    }
+
+    /// A chain must not lose its leaf. `{err}` renders only the outermost
+    /// context — `tinyagents harness run failed` — which drops both the
+    /// remaining-budget figure and the call that was in flight, the two things
+    /// the message promises to keep. `{err:#}` renders the whole chain.
+    #[test]
+    fn a_chained_ceiling_error_keeps_its_leaf() {
+        let err = chained_ceiling_error();
+        assert_eq!(
+            format!("{err}"),
+            "tinyagents harness run failed",
+            "the premise: the outermost context alone says nothing useful"
+        );
+        assert!(
+            is_wall_clock_ceiling(&err),
+            "a chained ceiling hit is still a ceiling hit"
+        );
+
+        let msg =
+            wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
+        assert!(
+            msg.contains("56636 ms"),
+            "the remaining-budget figure survives the chain: {msg}"
+        );
+        assert!(
+            msg.contains("model call for run 'agent_turn'"),
+            "and so does the call that was in flight: {msg}"
+        );
+    }
+
+    #[test]
+    fn wall_clock_ceiling_is_recognised_and_other_timeouts_are_not() {
+        assert!(
+            is_wall_clock_ceiling(&ceiling_error()),
+            "the harness's own ceiling leaf must be recognised"
+        );
+        assert!(
+            !is_wall_clock_ceiling(&anyhow::anyhow!(
+                "request timed out after 30s connecting to the provider"
+            )),
+            "an ordinary provider timeout is NOT the turn ceiling — it keeps its own text"
+        );
+        assert!(
+            !is_wall_clock_ceiling(&anyhow::anyhow!("daily budget exceeded for agent 'ceo'")),
+            "a SPEND budget is not a wall-clock budget"
+        );
+    }
+
+    /// A provider's response body reaches this chain verbatim — `provider.rs`
+    /// raises `TinyAgentsError::Model("hosted inference returned {status}: {text}")`
+    /// — so an endpoint with a wall-clock budget of its own must not be read as
+    /// OpenHuman's per-turn ceiling. That misdiagnosis is worse than the plain
+    /// wrapper: it would report the second the request took as if it were a
+    /// ten-minute turn, and tell the operator to raise a ceiling that was never
+    /// reached.
+    #[test]
+    fn a_provider_body_that_mentions_a_wall_clock_budget_is_not_the_ceiling() {
+        for body in [
+            "hosted inference returned 429: {\"error\":\"wall-clock budget for this key is exhausted\"}",
+            "hosted inference returned 400: your per-request wall-clock budget must be positive",
+        ] {
+            assert!(
+                !is_wall_clock_ceiling(&anyhow::anyhow!("{body}")),
+                "a provider body is not the turn ceiling: {body}"
+            );
+        }
+        // Both phrasings the vendored harness actually raises still match,
+        // including the deadline spelling the old three-word search covered
+        // only by accident.
+        for leaf in [
+            "model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)",
+            "tool call for run 'agent_turn' exceeded its wall-clock deadline",
+        ] {
+            assert!(
+                is_wall_clock_ceiling(&anyhow::anyhow!("{leaf}")),
+                "the harness's own leaf must still be recognised: {leaf}"
+            );
+        }
+    }
+
+    #[test]
+    fn elapsed_reads_as_an_operator_reads_a_clock() {
+        assert_eq!(humanise_elapsed(Duration::from_millis(9_400)), "9s");
+        assert_eq!(humanise_elapsed(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(humanise_elapsed(Duration::from_millis(601_000)), "10m 01s");
+    }
+
+    /// The whole point of #1680: the operator is told what the turn actually
+    /// spent, and told that the harness's own number is the remainder rather
+    /// than a limit. The old text said neither.
+    #[test]
+    fn ceiling_message_reports_elapsed_and_reframes_the_harness_number() {
+        let err = ceiling_error();
+        let msg =
+            wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
+
+        assert!(msg.contains("product_manager"), "names the agent: {msg}");
+        assert!(
+            msg.contains("10m 01s"),
+            "states what the turn actually spent: {msg}"
+        );
+        assert!(
+            msg.contains("REMAINED"),
+            "says the harness's figure is the remainder, not a limit: {msg}"
+        );
+        assert!(
+            msg.contains("OPENHUMAN_AGENT_TURN_TIMEOUT_SECS"),
+            "names the knob that moves the ceiling: {msg}"
+        );
+        assert!(
+            msg.contains("56636 ms"),
+            "keeps the underlying diagnostic verbatim: {msg}"
+        );
+        // The ceiling's own value is private to the vendored crate, so it is
+        // deliberately not restated — a stale copy would be worse than none.
+        assert!(
+            !msg.contains("600"),
+            "must not hardcode a ceiling it cannot read: {msg}"
+        );
+    }
+
+    /// At the classifier, where the retry wrapper actually reads it: a ceiling
+    /// hit stays HARD (a ten-minute failure must not be retried into twenty),
+    /// and carries the honest message rather than the bare `turn for 'x': …`.
+    /// The other spelling the harness raises carries **no** figure — `run
+    /// `agent_turn` exceeded its wall-clock deadline` — so the message must not
+    /// point the operator at one. Being accurate but unfollowable is the exact
+    /// defect #1680 was filed on; reintroducing it one spelling over would be a
+    /// poor way to close it.
+    #[test]
+    fn the_figure_less_spelling_is_not_promised_a_figure() {
+        let err = anyhow::anyhow!(
+            "tinyagents harness run failed: run timed out: run `agent_turn` exceeded its \
+             wall-clock deadline"
+        );
+        assert!(
+            is_wall_clock_ceiling(&err),
+            "it is still the ceiling, and still classified here"
+        );
+
+        let msg = wall_clock_ceiling_message("ceo", Duration::from_secs(600), &err);
+        assert!(
+            !msg.contains("the figure below"),
+            "there is no figure below to point at: {msg}"
+        );
+        assert!(
+            msg.contains("10m 00s"),
+            "the measured elapsed still leads: {msg}"
+        );
+        assert!(
+            msg.contains("OPENHUMAN_AGENT_TURN_TIMEOUT_SECS"),
+            "and the knob is still named: {msg}"
+        );
+        assert!(
+            msg.contains("exceeded its wall-clock deadline"),
+            "the leaf survives verbatim: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_turn_reframes_a_ceiling_hit_and_keeps_it_hard() {
+        let (agent, _deps) = scripted_agent(vec![]);
+
+        let outcome = agent.classify_turn(Err(ceiling_error()), Duration::from_millis(601_000));
+        let AttemptOutcome::Hard(err) = outcome else {
+            panic!("a ceiling hit is not retryable and must classify Hard");
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("per-turn wall-clock ceiling after 10m 01s"),
+            "got {text}"
+        );
+
+        // Every other hard error keeps the plain wrapper, unchanged.
+        let other = agent.classify_turn(
+            Err(anyhow::anyhow!("provider refused the request")),
+            Duration::from_secs(3),
+        );
+        let AttemptOutcome::Hard(err) = other else {
+            panic!("an unrelated failure is still Hard");
+        };
+        assert!(
+            err.to_string().contains("provider refused the request"),
+            "an unrelated failure keeps its own text: {err}"
+        );
+        assert!(
+            !err.to_string().contains("wall-clock"),
+            "and gains no ceiling prose: {err}"
+        );
+    }
+
     // --- MCP-freshness ------------------------------------------------------
 
     /// In-memory secret store so `ensure` can re-resolve the runtime MCP index.
@@ -7076,6 +7448,7 @@ description = "Sets direction."
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -7249,6 +7622,7 @@ description = "Sets direction."
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -7339,6 +7713,7 @@ description = "Sets direction."
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -7445,6 +7820,7 @@ description = "Builds the product."
             cost_usd: usd,
             kind: crate::ports::SampleKind::Inference,
             run_id: None,
+            model: None,
         }
     }
 
