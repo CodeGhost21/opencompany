@@ -50,7 +50,7 @@ DELETE …/team/{agentId}                      remove a teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
-POST   …/team/{agentId}/draft                draft this teammate's mandate or persona (writes nothing)
+POST   …/team/{agentId}/draft                one copilot turn on this teammate's mandate or persona (writes nothing)
 POST   …/team/draft                          the same, for a teammate being added
 POST   …/avatars                            upload an image → an avatar reference (avatars.md)
 POST   …/setup/roster                       propose a starting team from three answers (company-setup/overview.md)
@@ -287,12 +287,34 @@ policy decision rather than a form field.
 
 ### Drafting a mandate or a persona
 
-`POST …/team/{agentId}/draft` asks a model to write one of two fields —
-`description` (the mandate on the roster card) or `instructions` (the persona
-appended to the teammate's system prompt) — and returns the text. `POST
-…/team/draft` does the same for a teammate the operator is still filling in on
-the Add form, which has no id yet; it takes the `role` being typed (blank is a
-`400`) and the other authored fields alongside.
+`POST …/team/{agentId}/draft` runs one turn of a conversation about one of two
+fields — `description` (the mandate on the roster card) or `instructions` (the
+persona appended to the teammate's system prompt). `POST …/team/draft` does the
+same for a teammate the operator is still filling in on the Add form, which has
+no id yet; it takes the `role` being typed (blank is a `400`) and the other
+authored fields alongside.
+
+The body carries `messages`: the conversation so far, oldest first, each
+`{role: "operator" | "copilot", text}`. Empty means the opening turn — "draft
+something, I have not said anything yet" — which is deliberate: an operator
+staring at a blank persona box wants a starting point to react to, and making
+them type first asks for the thing they opened the copilot because they could
+not write.
+
+The answer is `{reply, text?}`. `reply` is what the copilot says — what it
+changed, or what it needs to know. `text` is the **whole** field as it now
+stands, never a diff. `text` is absent on a turn that asked a question instead
+of drafting, which is not a failure: `source` is still `"model"`, and letting a
+turn ask is what makes this a conversation rather than a hint box.
+
+**The console owns the transcript; the host stores nothing.** That is the whole
+of "in-session" — no journal to rehydrate, no thread id to collide with a desk,
+and nothing to clean up when the form closes. It is bounded host-side all the
+same (the last 16 turns, 2,000 characters each, blanks and turns with an
+unreadable `role` dropped silently), because a transcript the caller composes is
+one the caller can grow without limit. A dropped turn is not a `400`: the
+transcript is context, not the request, and losing the operator's actual
+question over one malformed old message would be the worse failure.
 
 **Neither route writes.** No record is touched, no draft is stored, and no lock
 is taken — the response is text, and it becomes a teammate's persona only if the
@@ -326,7 +348,15 @@ field is `400`, but "no model is wired", "the provider did not answer" and "the
 answer could not be read" all come back `200` with `source: "unavailable"` and a
 distinct `reason` (`no_model` / `model_unreachable` / `unreadable`), because each
 implies a different next move for the operator and none of them is a failure of
-the request. There is no curated fallback text, unlike the roster proposal:
+the request.
+
+`unreadable` is narrower than it looks. An answer that is not in the format
+asked for is read as a **reply carrying no draft** rather than refused: the
+format exists because a draft has to be extracted exactly, and a conversational
+reply does not. Only an answer with nothing in it at all is `unreadable`. That
+distinction is not theoretical — asked something vague, a model answers with a
+plain-prose question about half the time, and refusing those told the operator
+their copilot was broken at the exact moment it was doing the right thing. There is no curated fallback text, unlike the roster proposal:
 "what does this particular teammate own" has no canned answer, and inventing one
 would put words in the company's mouth.
 
