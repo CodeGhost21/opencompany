@@ -330,9 +330,16 @@ Two constraints on that message are deliberate:
 
 ### The per-tool bounds this crate *does* set
 
-Two tools bound themselves, more tightly than the ceiling and independently of
-it, so a turn can lose a call without being anywhere near its own limit:
+Several tools bound themselves, more tightly than the ceiling and independently
+of it, so a turn can lose a call without being anywhere near its own limit:
 
+- **The built-in web tools** — `web_fetch`, `http_request` and `curl`, all three
+  wired in `web_tools` (`src/harness/built_in/toolbelt.rs`) from
+  `HttpRequestConfig::default().timeout_secs`, which is **30 seconds**. One
+  source deliberately: `curl` takes it too rather than its own schema default of
+  120, and `web_fetch` is constructed with `None` so it falls back to the same
+  number. This is the bound an operator is most likely to meet and least likely
+  to look for, because nothing in the tool's own output names the ceiling.
 - **BYO web search** — `TIMEOUT_SECS` in `src/harness/built_in/search_byo.rs`,
   thirty seconds, passed to each provider tool and applied as the HTTP request
   timeout on its client. Deliberately shorter than a turn: a search that has not
@@ -343,11 +350,16 @@ it, so a turn can lose a call without being anywhere near its own limit:
   in the company's MCP config, and the one bound on this page an operator can
   actually edit.
 
-Neither ends the turn. A call that trips its own bound comes back as a failed
-tool result, which the agent may retry or route around; only the ceiling above
-fails the node. The ceiling still counts every second either of them spent —
-which is the reading #1680 turned on, since a turn can burn most of its budget
-on tool calls that each looked fine.
+None of them ends the turn. A call that trips its own bound comes back as a
+failed tool result, which the agent may retry or route around; only the ceiling
+above fails the node. The ceiling still counts every second they spent — which
+is the reading #1680 turned on, since a turn can burn most of its budget on tool
+calls that each looked fine.
+
+So a timeout an operator sees is one of two different facts, and the message is
+what tells them apart: a per-tool bound names the tool (`tool \`curl\` timed out
+after 30000 ms`), while the ceiling names the run and the *remaining* budget,
+which is what this crate rewrites.
 
 ### What this crate does not bound
 
