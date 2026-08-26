@@ -21,6 +21,7 @@ vi.mock("sonner", () => {
 const {
   handleEvent,
   isBudgetPauseNotice,
+  isBudgetPauseNoticeSuperseded,
   parseBudgetPauseAgent,
   BUDGET_PAUSE_NOTICE_PREFIX,
 } = await import("@/hooks/use-events");
@@ -72,6 +73,48 @@ describe("parseBudgetPauseAgent", () => {
     expect(parseBudgetPauseAgent("Acknowledged.")).toBeNull();
     expect(parseBudgetPauseAgent("The reply above is where this turn stopped")).toBeNull();
     expect(parseBudgetPauseAgent("")).toBeNull();
+  });
+});
+
+describe("isBudgetPauseNoticeSuperseded", () => {
+  // Issue #1846 review (Codex #3864988184): the backend keeps at most one
+  // marker per agent, so an OLD notice's "Add credits & resend" must disable
+  // itself once a newer pause has been parked for the same agent — otherwise
+  // clicking the stale card redeems the newer, unrelated marker while
+  // claiming to resend the message on screen.
+  it("is NOT superseded when this message IS the latest for its agent", () => {
+    const latest = new Map([["ceo", "msg-2"]]);
+    expect(isBudgetPauseNoticeSuperseded("ceo", "msg-2", latest)).toBe(false);
+  });
+
+  it("IS superseded when a newer pause has been parked for the same agent", () => {
+    const latest = new Map([["ceo", "msg-2"]]);
+    // msg-1 is an earlier notice for the SAME agent — a fresh pause since
+    // overwrote the backend's single per-agent marker, so redeeming msg-1's
+    // card would actually redeem whatever msg-2 parked.
+    expect(isBudgetPauseNoticeSuperseded("ceo", "msg-1", latest)).toBe(true);
+  });
+
+  it("is not superseded by a DIFFERENT agent's newer pause", () => {
+    const latest = new Map([
+      ["ceo", "msg-2"],
+      ["growth_lead", "msg-3"],
+    ]);
+    expect(isBudgetPauseNoticeSuperseded("ceo", "msg-1a", latest)).toBe(true);
+    // ceo's own latest notice stays live even though growth_lead has a
+    // separate, newer one — the two agents' markers do not interact.
+  });
+
+  it("degrades to NOT superseded when the caller has not wired the map", () => {
+    // `undefined` is "unknown", not "stale": a caller that has not been
+    // taught to compute the map (or an isolated unit render) must not have
+    // every budget-pause card in the app read as disabled by default.
+    expect(isBudgetPauseNoticeSuperseded("ceo", "msg-1", undefined)).toBe(false);
+  });
+
+  it("is never superseded when the notice text carried no agent id", () => {
+    const latest = new Map([["ceo", "msg-2"]]);
+    expect(isBudgetPauseNoticeSuperseded(null, "msg-1", latest)).toBe(false);
   });
 });
 

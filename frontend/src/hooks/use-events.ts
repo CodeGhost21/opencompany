@@ -447,6 +447,28 @@ export function parseBudgetPauseAgent(text: string): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * Whether a budget-pause notice's "Add credits & resend" CTA must be
+ * disabled because a NEWER pause has since been parked for the same agent
+ * (issue #1846 review, Codex #3864988184).
+ *
+ * The backend keeps at most one marker per agent (a fresh pause overwrites
+ * the last), so redeeming an old notice would resend whatever pause is
+ * parked NOW, not the one on the card the operator clicked — silently
+ * reissuing a different message than the one shown. `latestMessageIdByAgent`
+ * is `undefined` for a caller that has not been taught to compute it (or an
+ * isolated render, as in a test): that reads as "unknown", not "stale", so
+ * this returns `false` rather than disabling every card by default.
+ */
+export function isBudgetPauseNoticeSuperseded(
+  agentId: string | null,
+  messageId: string,
+  latestMessageIdByAgent: Map<string, string> | undefined,
+): boolean {
+  if (agentId == null || latestMessageIdByAgent == null) return false;
+  return latestMessageIdByAgent.get(agentId) !== messageId;
+}
+
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {
   chatId: string;
