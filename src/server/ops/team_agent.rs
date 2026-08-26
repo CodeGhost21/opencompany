@@ -791,8 +791,10 @@ async fn edit_agent(
             .effective_harnesses()
             .iter()
             .any(|h| h.id == *id);
-        let bindable =
-            declared || (ACP_AGENTS.contains(&id.as_str()) && state.acp_agents().is_some());
+        // `can_run_local_acp()` rather than `acp_agents().is_some()` — see
+        // issue #1814 and the method's own doc. The picker above uses the same
+        // predicate, which is the point of it being one method.
+        let bindable = declared || (ACP_AGENTS.contains(&id.as_str()) && state.can_run_local_acp());
         if !bindable {
             return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
                 "no harness named `{id}` is available for this company."
@@ -2930,8 +2932,13 @@ prompt = "Lead decisively."
     /// implicit-local fallback, so without this gate a hosted admin could bind
     /// a teammate to a CLI the server has nothing to launch — accepted by
     /// `PATCH`, then dead on the next rebuild. The picker (`GET
-    /// {scope}/harnesses`) already refuses to offer detected CLIs without an
-    /// `AcpAgentFactory`; the write path must agree.
+    /// {scope}/harnesses`) refuses to offer such CLIs; the write path must
+    /// agree, and this test is what holds the two together.
+    ///
+    /// Issue #1814: "can run one" is `can_run_local_acp()`, not "a factory was
+    /// wired". The desktop wires one even when compiled without `acp`, where
+    /// nothing can be built from it — so the wired-factory half below expects
+    /// a refusal in that configuration, matching the picker.
     #[tokio::test]
     async fn an_undeclared_coding_cli_is_bindable_only_where_this_host_can_run_one() {
         struct StubFactory;
@@ -2955,15 +2962,25 @@ prompt = "Lead decisively."
         let (status, refusal) = patch_agent(&hosted, &jamie, json!({"harness": "claude"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
 
-        // Desktop shape (factory wired): the same id is bindable.
+        // Desktop shape (factory wired): bindable only where this build can
+        // actually build an engine from that factory (issue #1814).
         let desktop_home = home();
         let desktop = state_with_manifest(desktop_home.path(), ACP_ROSTER)
             .await
             .with_acp_agents(std::sync::Arc::new(StubFactory));
         let jamie = add_overlay(&desktop, "Jamie", "Growth").await;
         let (status, set) = patch_agent(&desktop, &jamie, json!({"harness": "claude"})).await;
-        assert_eq!(status, StatusCode::OK, "{set}");
-        assert_eq!(set["harness"], "claude");
+        if cfg!(feature = "acp") {
+            assert_eq!(status, StatusCode::OK, "{set}");
+            assert_eq!(set["harness"], "claude");
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "a build without `acp` cannot run `claude`, so the write path \
+                 must refuse it exactly as the picker declines to offer it: {set}"
+            );
+        }
 
         // A factory must not widen the vocabulary beyond the coding CLIs.
         let (status, refusal) =

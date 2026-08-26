@@ -12,7 +12,7 @@ use crate::ports::types::{CompanyId, SecretValue};
 use crate::runtime::CompanyRegistry;
 use crate::server::platform_auth::PlatformAuthConfig;
 use crate::server::webhook::WebhookConfig;
-use crate::{VERSION, tiny::RuntimeModuleStatus};
+use crate::{BUILD_COMMIT, VERSION, tiny::RuntimeModuleStatus};
 
 /// Runtime configuration for OpenCompany.
 ///
@@ -594,6 +594,35 @@ impl AppState {
         self.acp_agents.clone()
     }
 
+    /// Whether a `transport = "local"` ACP harness can actually run here.
+    ///
+    /// Issue #1814. Two callers — the harness picker and the teammate `PATCH`
+    /// validator — used to ask [`acp_agents`](Self::acp_agents) directly, which
+    /// answers a different question: whether a factory was HANDED OVER, not
+    /// whether this build can use one. Those coincide on every server build and
+    /// on a desktop compiled with `acp`, and diverge on exactly one
+    /// configuration — a desktop compiled WITHOUT it:
+    ///
+    /// * [`with_acp_agents`](Self::with_acp_agents) is deliberately ungated, so
+    ///   that `src-tauri` can hand over a factory without pulling the whole
+    ///   embedded harness in behind `crate::harness` (`crate::ports::acp` exists
+    ///   for that reason). The desktop shell calls it unconditionally.
+    /// * The runtime cannot use what it was given: `RuntimeBuilder` forces
+    ///   `acp_agents = None` under `cfg(not(feature = "acp"))`, and
+    ///   `lanes::resolve_acp_engine` is an unconditional `Err` there — its
+    ///   factory parameter is typed `Infallible`, so `Some` is uninhabited.
+    ///
+    /// The result was a picker that offered `claude` and `codex`, a `PATCH`
+    /// that accepted the binding, and then every turn failing with `lanes.rs`'s
+    /// "run it from the desktop app" — advice for somebody already in it.
+    ///
+    /// One method rather than the same conjunct at both call sites: they were
+    /// already copy-paste siblings, comments included, and a predicate the two
+    /// can state differently is what opened the gap in the first place.
+    pub fn can_run_local_acp(&self) -> bool {
+        cfg!(feature = "acp") && self.acp_agents.is_some()
+    }
+
     /// Sessions opened through the host's ACP HTTP transport.
     #[cfg(feature = "acp")]
     pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
@@ -1075,6 +1104,7 @@ impl AppState {
         AppSpec {
             name: "opencompany",
             version: VERSION,
+            build_commit: BUILD_COMMIT,
             framework: "axum",
             modules: vec![
                 "app",
@@ -1143,6 +1173,31 @@ pub struct AppSpec {
     pub name: &'static str,
     /// Crate version.
     pub version: &'static str,
+    /// The Git commit this host was built from: a short object id, suffixed
+    /// `-dirty` when the tree carried uncommitted changes, or `"unknown"`
+    /// when the build could not determine one.
+    ///
+    /// On the unauthenticated handshake, beside [`Self::version`], because the
+    /// line this surface polices is **build facts versus deployment facts**. A
+    /// build fact is identical for every instance compiled from the same
+    /// artifact and says nothing about *this* host. A deployment fact — the
+    /// storage path two fields below, a connection string, a data root — is
+    /// unique to this host and directly actionable, which is why
+    /// [`Self::storage`] reports a kind and not a location. A revision id is
+    /// the first kind: it is `version` at usable precision, and `version` has
+    /// always been served here.
+    ///
+    /// That line survives this repository going private, which is the case
+    /// worth stating explicitly. A commit id is an opaque hash; without the
+    /// repository it maps to nothing, so closing the source *narrows* what
+    /// this field discloses rather than widening it. The residual risk is the
+    /// public case — an unauthenticated caller can look the revision up and
+    /// read off which fixes are missing — and it is accepted deliberately.
+    /// Answering "which build is this host actually running?" without a shell
+    /// on the box is the entire reason the field exists: an operator served a
+    /// three-day-old binary on 2026-08-25 had to compare `strings` output to
+    /// work that out.
+    pub build_commit: &'static str,
     /// HTTP framework used by this host.
     pub framework: &'static str,
     /// First-class source modules.
