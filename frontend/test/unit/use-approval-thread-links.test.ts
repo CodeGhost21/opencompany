@@ -112,6 +112,20 @@ describe("useApprovalThreadLinks", () => {
     expect(lastLinks?.get("a1")).toEqual({ channelId: "main", label: "#general" });
   });
 
+  it("labels an alias with the grandfathered desk that owns the line", async () => {
+    // The approval was raised under `main`; the line renders as the blueprint's
+    // own `#ops-lead` desk. Looking the desk up by the raw thread id found
+    // nothing and the card read "Origin unavailable" — for a conversation whose
+    // transcript is on screen. The lookup follows the resolved channel instead.
+    const client = {
+      listDesks: vi.fn(async () => [{ id: "general", name: "Ops lead", members: [] }]),
+      listTeam: vi.fn(async () => []),
+    } as unknown as OpenCompanyClient;
+    await render(client, [approval("a1", "main")]);
+
+    expect(lastLinks?.get("a1")).toEqual({ channelId: "general", label: "#ops-lead" });
+  });
+
   it("lets a blueprint desk that authored a general id keep its own label", async () => {
     const client = {
       listDesks: vi.fn(async () => [{ id: "general", name: "Ops lead", members: [] }]),

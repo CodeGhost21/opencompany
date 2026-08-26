@@ -6,7 +6,12 @@ import { describe, expect, it } from "vitest";
 
 import { defaultDesks, GENERAL_CHANNEL, isGeneralChannel, type Desk } from "@/lib/desks";
 import type { TeamMember } from "@/lib/team";
-import { buildChannels, channelIdForThread, channelMembers } from "@/views/chat/model";
+import {
+  buildChannels,
+  channelForThread,
+  channelIdForThread,
+  channelMembers,
+} from "@/views/chat/model";
 
 /**
  * The built-in `#general` channel (issue #1743).
@@ -177,6 +182,24 @@ describe("resolving a host thread to the general channel", () => {
     expect(channelIdForThread("eng", DESKS, ROSTER)).toBe("dm:eng");
   });
 
+  it("gives a teammate whose id is a General spelling its own DM", () => {
+    // The host reserves `main` and `general` against newly minted teammates
+    // (`RESERVED_AGENT_IDS`), but a manifest can still declare one — and
+    // `responder_for` resolves a chat key desk-first, then roster, so such a
+    // teammate really does answer that thread. Folding it into `#general` would
+    // render its conversation as the company-wide line while the host answered
+    // as the teammate.
+    const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
+    expect(channelIdForThread("main", DESKS, withMain)).toBe("dm:main");
+    // A desk still outranks both, exactly as it does on the host.
+    const deskMain: Desk[] = [
+      { id: "main", channel: "front-office", name: "Front office", blurb: "", members: ["eng"] },
+    ];
+    expect(channelIdForThread("main", deskMain, withMain)).toBe("main");
+    // And with nobody claiming it, the fold is unchanged.
+    expect(channelIdForThread("main", DESKS, ROSTER)).toBe("main");
+  });
+
   it("lets a blueprint desk that authored a general id keep its own thread", () => {
     const authored: Desk[] = [
       { id: "general", channel: "general", name: "General", blurb: "", members: ["ceo"] },
@@ -305,5 +328,38 @@ describe("the shell maps the main line to #general, not to the first desk", () =
     expect(shell).toContain(
       "channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,",
     );
+  });
+});
+
+/**
+ * The shell's thread → channel lookup, which cannot be a plain `map[id]`.
+ *
+ * The host compares the General spellings case-insensitively and then emits, on
+ * every live event, the raw id the caller addressed. A map of four literals
+ * therefore misses `MAIN` or `GENERAL` from an API client — and a missed frame
+ * is a reply and a working indicator that simply never appear until polling
+ * recovers the durable history.
+ */
+describe("resolving a live frame's thread id against the shell's map", () => {
+  const MAP = { "": "main", main: "main", General: "main", general: "main", eng: "dm:eng" };
+
+  it("matches exactly when it can", () => {
+    expect(channelForThread(MAP, "eng")).toBe("dm:eng");
+    expect(channelForThread(MAP, "main")).toBe("main");
+  });
+
+  it("accepts every casing of a General spelling, as the host does", () => {
+    for (const spelling of ["MAIN", "GENERAL", "Main", "gEnErAl", "  Main  "]) {
+      expect(channelForThread(MAP, spelling)).toBe("main");
+    }
+  });
+
+  it("follows the map to a grandfathered desk rather than assuming `main`", () => {
+    const owned = { "": "general", main: "general", General: "general", general: "general" };
+    expect(channelForThread(owned, "MAIN")).toBe("general");
+  });
+
+  it("answers null for a thread the map does not know", () => {
+    expect(channelForThread(MAP, "workflows")).toBeNull();
   });
 });

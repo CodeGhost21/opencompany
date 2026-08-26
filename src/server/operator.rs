@@ -174,24 +174,36 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     overlay_created: false,
                 }
             });
-            let overlay_desks = record.overlay_desks.iter().map(|desk| {
-                let members = record.effective_desk_members(&desk.id);
-                // For an overlay desk the founding members are `desk.members`;
-                // anything beyond them came from the desk-member overlay.
-                let overlay_members = members
-                    .iter()
-                    .filter(|m| !desk.members.contains(m))
-                    .cloned()
-                    .collect();
-                DeskDto {
-                    id: desk.id.clone(),
-                    name: desk.name.clone(),
-                    description: desk.description.clone(),
-                    members,
-                    overlay_members,
-                    overlay_created: true,
-                }
-            });
+            // An overlay desk standing where `#general` does is not projected:
+            // the console would show it as the company-wide line, offer the
+            // edit and delete controls a desk row carries, and every one of
+            // them would be refused (`is_general_channel`). The rule this file
+            // follows is not to offer a control that will be refused. Nothing
+            // is lost by hiding it — its transcript is already folded into
+            // `#general` by `is_general_chat`, and that channel's membership is
+            // the whole roster, a superset of whatever this desk held.
+            let overlay_desks = record
+                .overlay_desks
+                .iter()
+                .filter(|desk| !shadows_general_channel(desk))
+                .map(|desk| {
+                    let members = record.effective_desk_members(&desk.id);
+                    // For an overlay desk the founding members are `desk.members`;
+                    // anything beyond them came from the desk-member overlay.
+                    let overlay_members = members
+                        .iter()
+                        .filter(|m| !desk.members.contains(m))
+                        .cloned()
+                        .collect();
+                    DeskDto {
+                        id: desk.id.clone(),
+                        name: desk.name.clone(),
+                        description: desk.description.clone(),
+                        members,
+                        overlay_members,
+                        overlay_created: true,
+                    }
+                });
             manifest_desks.chain(overlay_desks).collect()
         })
         .unwrap_or_default();
@@ -211,12 +223,41 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
 /// reason rather than answered with a bare `404`, which is a different fact —
 /// an id the host reserves is not an id nobody created.
 ///
-/// Guarded on `!desk_exists` on purpose: a company whose blueprint really does
-/// declare a `[[group_chat]]` with one of those ids keeps behaving exactly as
-/// it did. This only ever replaces the "no such desk" answer; it never takes a
-/// desk away from a manifest that has one.
+/// Guarded on the **manifest** on purpose: a company whose blueprint really
+/// does declare a `[[group_chat]]` with one of those ids keeps behaving exactly
+/// as it did. This only ever replaces the "no such desk" answer; it never takes
+/// a desk away from a manifest that has one.
+///
+/// Deliberately *not* `desk_exists`, which also admits operator-created overlay
+/// desks. `create_desk` refuses these ids now, but it did not before issue
+/// #1743 — so an instance can be carrying a persisted overlay desk called
+/// `general` or `main`, and exempting it would leave the channel this issue
+/// promises is permanent staffable, reorderable and deletable after all. Such a
+/// desk is excluded from `GET .../desks` too ([`shadows_general_channel`]), so
+/// the refusal is never a control the console offered.
 fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
-    !record.desk_exists(desk_id) && crate::server::chat_history::is_general_chat(Some(desk_id))
+    let declared = record
+        .manifest
+        .group_chats
+        .iter()
+        .any(|c| c.id == desk_id || c.name.eq_ignore_ascii_case(desk_id));
+    !declared && crate::server::chat_history::is_general_chat(Some(desk_id))
+}
+
+/// Whether an operator-created overlay desk stands where the built-in
+/// `#general` channel does (issue #1743).
+///
+/// Both the id and the display name count, because `resolve_desk_id` matches
+/// either: an id collides with the thread key the console addresses, and a name
+/// collides with the `General` that `HarnessBrain::everyone_desk` folds `main`
+/// to. Creation refuses both now; neither was refused before, so this is
+/// reachable persisted state rather than a hypothesis.
+///
+/// Only overlay desks. A manifest desk answering to one of those spellings is
+/// the blueprint's own General desk, which this host has always honoured.
+fn shadows_general_channel(desk: &crate::ports::types::OverlayDesk) -> bool {
+    let general = |s: &str| crate::server::chat_history::is_general_chat(Some(s));
+    general(&desk.id) || general(&desk.name)
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -548,7 +589,16 @@ async fn create_desk(
     // instead of the orchestrator (issue #1743). Refused at creation, which
     // costs nothing — no manifest can reach this path, so no existing company
     // loses a desk.
-    if crate::server::chat_history::is_general_chat(Some(&id)) {
+    //
+    // The **display name** is reserved for the same reason and not a weaker
+    // one: `resolve_desk_id` matches a desk by id *or* by case-insensitive
+    // name, so `{"id": "ops", "name": "General"}` shadows the channel just as
+    // thoroughly — `everyone_desk` folds the built-in `main` thread to
+    // `General`, that lookup then selects this desk, and `@everyone` on the
+    // company-wide line expands to its members instead of the roster.
+    if crate::server::chat_history::is_general_chat(Some(&id))
+        || crate::server::chat_history::is_general_chat(Some(&name))
+    {
         return Err(ApiError(OpenCompanyError::Conflict(
             language::GENERAL_CHANNEL_RESERVED.to_string(),
         )));
@@ -5297,6 +5347,115 @@ mode = "full"
                 !crate::server::chat_history::is_general_chat(Some(id)),
                 "the desk list must not carry the built-in channel, found {id}"
             );
+        }
+    }
+
+    /// An overlay desk carrying an explicit, unreserved id but the reserved
+    /// **display name** shadows the channel just as thoroughly (issue #1743).
+    ///
+    /// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
+    /// `{"id": "ops", "name": "General"}` is selected when
+    /// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
+    /// `General` — and `@everyone` on the company-wide line then expands to
+    /// that desk's members instead of the roster. The id check alone missed it
+    /// because the id is only *derived* from the name when none is supplied.
+    #[tokio::test]
+    async fn a_desk_cannot_take_the_general_display_name_under_another_id() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for body in [
+            r#"{"id":"ops","name":"General"}"#,
+            r#"{"id":"ops","name":"general"}"#,
+            r#"{"id":"ops","name":"Main"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
+        }
+
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1, "nothing was created");
+    }
+
+    /// An overlay desk persisted **before** the ids were reserved is still not
+    /// the built-in channel (issue #1743).
+    ///
+    /// `create_desk` accepted `general` and `main` until this issue, so this is
+    /// state an upgraded instance can be carrying. Guarding the immutability
+    /// checks on `desk_exists` would have exempted it — leaving the channel
+    /// this issue promises is permanent staffable, reorderable and deletable
+    /// after all, which is the whole claim rather than an edge of it.
+    #[tokio::test]
+    async fn a_pre_existing_overlay_desk_does_not_become_the_general_channel() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        // Persisted as an upgraded instance would be carrying it — through the
+        // store the handlers read, not through the create route, which now
+        // refuses this id.
+        {
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+            let store = runtime.store();
+            let mut record = store.load(&id).await.unwrap().unwrap();
+            record.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "general".to_string(),
+                name: "Legacy general".to_string(),
+                description: None,
+                members: vec!["ceo".to_string()],
+            });
+            store.save(&record).await.unwrap();
+        }
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Not projected, so no desk surface can offer it a control at all.
+        let desks = get_desks(&app, &cookie).await;
+        for desk in desks.as_array().unwrap() {
+            assert_ne!(
+                desk["id"], "general",
+                "a shadowing overlay desk must not be listed: {desks}"
+            );
+        }
+
+        // And every write aimed at it is refused with the channel's reason,
+        // not answered as if it were an ordinary desk.
+        for (method, uri, body) in [
+            (
+                "POST",
+                "/api/v1/company/desks/general/members",
+                Some(r#"{"agent_id":"eng"}"#),
+            ),
+            ("DELETE", "/api/v1/company/desks/general", None),
+        ] {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", &cookie);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
+            }
+            let response = app
+                .clone()
+                .oneshot(req.body(body.map_or_else(Body::empty, Body::from)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {uri}");
         }
     }
 

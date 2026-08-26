@@ -3547,10 +3547,11 @@ impl OverlayBlob {
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
 /// free the roster leaves them: the always-present operator channel, the two
-/// workspace system roots, and the author the runtime speaks under.
+/// workspace system roots, the author the runtime speaks under, and the two
+/// spellings of the built-in `#general` channel.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the four moves this list with it instead of quietly
+/// rename of any of them moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
 ///
@@ -3561,11 +3562,23 @@ impl OverlayBlob {
 /// `agent_slug("System")` produces it — which is what separates it from
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
-pub const RESERVED_AGENT_IDS: [&str; 4] = [
+///
+/// [`MAIN_THREAD_ID`](crate::server::chat_history::MAIN_THREAD_ID) and
+/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK) join them for
+/// issue #1743, and both are ordinary slugs — a teammate named "Main" or
+/// "General" mints straight onto one. That id is a chat address: `responder_for`
+/// checks roster ids before it falls back to the orchestrator, so the teammate
+/// would answer every unaddressed message on the company-wide line, and the
+/// console would render the line's transcript as that teammate's DM. Desk ids
+/// and names are already excluded a few lines below; these are the two keys
+/// that route like a desk without being one.
+pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
+    crate::server::chat_history::MAIN_THREAD_ID,
+    crate::server::ops::language::DEFAULT_DESK,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -6182,9 +6195,16 @@ mod test {
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
         assert_eq!(record.mint_agent_id("System"), "system_2");
+        // Issue #1743: both spellings of the built-in `#general` channel. A
+        // teammate minted onto one becomes the answer to every unaddressed
+        // message on the company-wide line — `responder_for` checks roster ids
+        // before falling back to the orchestrator — and the console renders
+        // that line's transcript as the teammate's DM.
+        assert_eq!(record.mint_agent_id("Main"), "main_2");
+        assert_eq!(record.mint_agent_id("General"), "general_2");
         assert_eq!(
             RESERVED_AGENT_IDS,
-            ["operator", "agents", "desks", "system"]
+            ["operator", "agents", "desks", "system", "main", "General"]
         );
     }
 

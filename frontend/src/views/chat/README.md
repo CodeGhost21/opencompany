@@ -69,8 +69,11 @@ the channel. See `docs/spec/runtime/api.md`.
 
 **Unless a blueprint already declared one.** The host grandfathers a company
 whose manifest names a `[[group_chat]]` with a General id — `is_general_channel`
-is guarded on `!record.desk_exists`, so that desk keeps its lead, its writes and
-its routing, and `responder_for` answers there as it always did. `buildChannels`
+is guarded on the *manifest*, so that desk keeps its lead, its writes and its
+routing, and `responder_for` answers there as it always did. Only the manifest:
+an operator-created overlay desk that took one of those ids before they were
+reserved is refused every desk write and is not listed by `GET .../desks` at
+all, so it never reaches this rail and the built-in channel owns the line. `buildChannels`
 follows the same rule: the built-in channel is added **only when no desk claims
 a General spelling**, and no desk is ever filtered out of the rail. The two
 affordances above are decided by whether the desk list holds the active id

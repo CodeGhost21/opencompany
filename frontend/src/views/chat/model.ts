@@ -379,6 +379,8 @@ export function channelIdForThread(
   members: TeamMember[],
 ): string | null {
   if (desks.some((d) => d.id === threadId)) return threadId;
+  const member = members.find((m) => m.id === threadId);
+  if (member) return dmChannelId(member);
   // The built-in `#general` channel is in no desk list, so it has to be
   // resolved by name (issue #1743). The host journals this one conversation
   // under four ids — `""`, `main`, `General`, `general` — and folds them on
@@ -386,18 +388,45 @@ export function channelIdForThread(
   // renders it. Without this, an approval raised on the company's main line
   // matched no channel and stayed stranded on the Approvals page.
   //
-  // After the desk scan, deliberately: a blueprint desk that authored one of
-  // those ids keeps its own thread. And when it did, every *other* spelling has
-  // to follow it there — `buildChannels` renders no built-in channel beside
-  // such a desk, so answering `main` for a company whose line is `#general`
-  // names a channel that does not exist, and whatever was addressed there (a
-  // live frame, an unread badge, an approval's "Asked in" link) lands in a
-  // bucket the operator cannot open.
+  // **Last**, and in this order for a reason. `responder_for` resolves a chat
+  // key desk-first, then roster, and only then falls back to the orchestrator;
+  // this mirrors it, so the console never claims a thread belongs somewhere the
+  // host would answer from somewhere else. A desk that authored one of those
+  // ids keeps its own thread, and a teammate whose id *is* one keeps its DM —
+  // the host reserves both spellings against newly minted teammates
+  // (`RESERVED_AGENT_IDS`), but a manifest can still declare one, and a
+  // manifest is not a thing this console gets to overrule.
+  //
+  // When a desk does own the line, every *other* spelling follows it there:
+  // `buildChannels` renders no built-in channel beside such a desk, so
+  // answering `main` for a company whose line is `#general` names a channel
+  // that does not exist, and whatever was addressed there — a live frame, an
+  // unread badge, an approval's "Asked in" link — lands in a bucket the
+  // operator cannot open.
   if (isGeneralChannel(threadId)) {
     return generalChannelId(desks);
   }
-  const member = members.find((m) => m.id === threadId);
-  return member ? dmChannelId(member) : null;
+  return null;
+}
+
+/**
+ * The channel that renders `threadId`, given the shell's thread → channel map.
+ *
+ * The map holds one entry per id the company can be addressed on, which cannot
+ * cover the General spellings exhaustively: the host compares them
+ * case-insensitively (`is_general_chat`) and then emits on live events the raw
+ * id it was addressed with, so an API client posting to `MAIN` produces frames
+ * keyed `MAIN` and a four-literal map misses them. A missed frame is not a
+ * cosmetic loss — the reply and the working indicator simply do not appear
+ * until polling happens to recover the durable history.
+ *
+ * So: exact match first, then the same question the host asks.
+ */
+export function channelForThread(
+  map: Readonly<Record<string, string>>,
+  threadId: string,
+): string | null {
+  return map[threadId] ?? (isGeneralChannel(threadId) ? (map[MAIN_THREAD_ID] ?? null) : null);
 }
 
 export function findChannel(sections: ChannelSection[], id: string | null): Channel | null {

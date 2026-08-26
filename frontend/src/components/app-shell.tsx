@@ -106,6 +106,7 @@ import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
+  channelForThread,
   channelIdForThread,
   deskFromDto,
   dmChannelId,
@@ -1261,7 +1262,7 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = chatChannelByThreadRef.current[threadId];
+          const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
           // (issue #1701). The `threads` fold above still ran; park the id so
@@ -1644,7 +1645,7 @@ export function AppShell({
    */
   const onThreadViewed = useCallback(
     (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
-      const channelId = chatChannelByThreadRef.current[threadId];
+      const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
       if (!channelId) return;
       onChannelViewed(
         channelId,

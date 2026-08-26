@@ -131,17 +131,36 @@ different facts the caller needs to tell apart:
 | `DELETE …/desks/{general}/members/{agentId}` | `409` — same |
 | `PUT …/desks/{general}/order` | `409` — it has no hierarchy to order |
 | `POST …/desks` with a general id (given or derived from the name) | `409` — the id is reserved, so no desk can shadow the channel |
+| `POST …/desks` with the general **display name** under any id | `409` — same reason: `resolve_desk_id` matches a desk by name too |
 
 There is no `PATCH …/desks/{id}` route on this host, so that table is the
 complete desk mutation surface.
 
-The refusals are guarded on the id naming **no existing desk**. A company whose
-blueprint really declares a `[[group_chat]]` with one of those ids keeps it and
-keeps every write that has always worked on it — the reservation replaces the
-"no such desk" answer and nothing else. Refusing on the id alone would have
-taken a desk away from every company that authored one, which is a migration
-rather than a feature. No shipped `companies/` manifest declares one, and new
-ones are refused at creation.
+The refusals are guarded on **the manifest**, not on "no existing desk". A
+company whose blueprint really declares a `[[group_chat]]` with one of those
+ids keeps it and keeps every write that has always worked on it — the
+reservation replaces the "no such desk" answer and nothing else. Refusing on the
+id alone would have taken a desk away from every company that authored one,
+which is a migration rather than a feature. No shipped `companies/` manifest
+declares one, and new ones are refused at creation.
+
+**An operator-created overlay desk is not grandfathered**, because it is not a
+blueprint. `POST …/desks` accepted these ids and this name until this issue, so
+an upgraded instance can be carrying one — and exempting it would leave the
+channel this section calls permanent staffable, reorderable and deletable after
+all. Such a desk is therefore:
+
+- **absent from `GET …/desks`**, so no desk-shaped surface offers it a control
+  that the writes above would refuse;
+- **refused every write in the table**, with the channel's reason;
+- **not selected by `@everyone`** on the company-wide line, which keeps
+  expanding to the whole roster (`runtime::mentions`), even though
+  `resolve_desk_id` can still match it by name.
+
+Nothing is deleted to achieve that. Its transcript was already folded into
+`#general` by `is_general_chat`, and that channel's membership is the whole
+roster — a superset of whatever the desk held — so the conversation and the
+people are both still there under the channel that renders them.
 
 ### Chat attachments (issue #1682)
 

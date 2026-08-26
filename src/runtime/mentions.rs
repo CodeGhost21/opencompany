@@ -916,7 +916,18 @@ pub fn mentioned_agents(
                     }
                 }
             }
-            MentionTarget::Everyone => match record.resolve_desk_id(desk) {
+            MentionTarget::Everyone => match record.resolve_desk_id(desk).filter(|id| {
+                // An **overlay** desk may not stand in for the built-in
+                // `#general` channel (issue #1743). It can only have taken one
+                // of the General spellings — as an id, or as a display name,
+                // both of which `resolve_desk_id` matches — from before those
+                // were reserved, and expanding a company-wide broadcast against
+                // whatever membership it happens to hold is precisely the
+                // narrowing this arm exists to prevent. A desk the *blueprint*
+                // declares is the company's own General desk and still wins.
+                !crate::server::chat_history::is_general_chat(Some(desk))
+                    || record.manifest.group_chats.iter().any(|c| &c.id == id)
+            }) {
                 Some(desk_id) => {
                     for member in record.effective_desk_members(&desk_id) {
                         push(&mut out, record, responder, member);
@@ -1649,6 +1660,42 @@ members = ["engineer", "ceo"]
                 "@everyone addressed as {spelling:?} must name the whole roster"
             );
         }
+    }
+
+    /// An **overlay** desk that took a General spelling before those were
+    /// reserved must not narrow the company-wide broadcast (issue #1743).
+    ///
+    /// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
+    /// a persisted `{id: "ops", name: "General"}` is selected when
+    /// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
+    /// `General` — and `@everyone` on the one channel where everyone means
+    /// everyone would reach only that desk's members. A desk the *blueprint*
+    /// declares is the company's own General desk and still wins; this is only
+    /// about state `create_desk` used to accept and now refuses.
+    #[test]
+    fn an_overlay_desk_squatting_a_general_spelling_does_not_narrow_the_broadcast() {
+        let mut record = acme();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops".to_string(),
+            name: "General".to_string(),
+            description: None,
+            members: vec!["ceo".to_string()],
+        });
+        let found = resolve_text("@everyone standup in five");
+        for spelling in ["general", "General", "main", ""] {
+            assert_eq!(
+                mentioned_agents(&record, spelling, &found, None),
+                vec!["engineer".to_string(), "ceo".to_string()],
+                "@everyone addressed as {spelling:?} must still name the whole roster"
+            );
+        }
+        // And the squatting desk keeps working as the desk it is, addressed by
+        // its own id — this narrows the broadcast, nothing else.
+        assert_eq!(
+            mentioned_agents(&record, "ops", &found, None),
+            vec!["ceo".to_string()],
+            "the desk itself is unchanged"
+        );
     }
 
     /// A named desk keeps expanding against **its own** membership, not the

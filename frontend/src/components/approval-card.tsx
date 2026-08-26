@@ -55,7 +55,7 @@ import {
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { workflowHref } from "@/lib/task-output";
-import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
+import { channelForThread, channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -251,7 +251,8 @@ export function ApprovalMeta({
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
-  const conversationChannelId = a.thread ? (chatChannelByThread?.[a.thread] ?? null) : null;
+  const conversationChannelId =
+    a.thread && chatChannelByThread ? channelForThread(chatChannelByThread, a.thread) : null;
   const workflowId = workflowIdForApproval(a);
   const workflowRunHref =
     workflowId && a.workflow_run_id ? workflowHref(workflowId, a.workflow_run_id) : null;
@@ -546,7 +547,13 @@ export function approvalThreadLink(
   const channelId = channelIdForThread(approval.thread, desks, members);
   if (!channelId) return null;
 
-  const desk = desks.find((candidate) => candidate.id === approval.thread);
+  // Looked up by the **resolved channel**, not by the raw thread id. They are
+  // the same string for an ordinary desk, and deliberately different when a
+  // blueprint desk is grandfathered onto the company-wide line: an approval
+  // raised under `main` resolves to that desk's channel, and asking for a desk
+  // called `main` would find nothing and label it "Origin unavailable" — on a
+  // conversation whose transcript is right there on screen.
+  const desk = desks.find((candidate) => candidate.id === channelId);
   if (desk) return { channelId, label: `#${desk.channel}` };
 
   // The built-in `#general` channel (issue #1743), which is deliberately in no
