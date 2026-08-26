@@ -813,10 +813,15 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
     // blocklisting the failures we happened to think of, so an unrecognized
     // failure reason fails closed. Fall through to the empty-response error
     // below otherwise.
-    let genuinely_finished = matches!(
-        finish_reason.as_deref(),
-        Some("stop") | Some("tool_calls") | Some("function_call")
-    );
+    // Only `stop` means "finished, with prose, asking for nothing else".
+    // `tool_calls` and `function_call` were in this list until PR #1779's
+    // review: both assert the model requested an ACTION, so a response
+    // carrying one of them has not produced a final answer at all — whether
+    // or not the call body parses. Promoting a chain of thought over a
+    // requested action is the same class of substitution the truncation
+    // guard below prevents, so they are excluded here rather than handled by
+    // a special case per payload shape.
+    let genuinely_finished = matches!(finish_reason.as_deref(), Some("stop"));
     // `tool_calls` above is the *parsed* result: `parse_tool_calls` requires a
     // `/message/tool_calls` array AND drops any entry missing `function.name`,
     // and it never reads the legacy singular `message.function_call` field at
@@ -2102,10 +2107,92 @@ mod tests {
         );
     }
 
+    /// A `finish_reason: "tool_calls"` response that carries no call body at
+    /// all (no `tool_calls` field, no legacy `function_call` field) must
+    /// error rather than promote `reasoning` into the final answer. The
+    /// finish reason itself asserts the model requested an action; treating
+    /// it as "genuinely finished" let the raw-payload guard (which only
+    /// checks for a *present* call) miss the case where there is no call
+    /// field to find. Pre-fix, this silently swapped the requested action
+    /// for prose (Codex review on #1779, comment 3864692178).
+    #[test]
+    fn tool_calls_finish_reason_with_missing_call_body_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("a tool_calls finish reason with no call body must not promote reasoning");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same gap, but the provider sends an explicit empty `tool_calls: []`
+    /// array instead of omitting the field — the raw-payload guard treats an
+    /// empty array as "nothing requested" (correctly, for `parse_tool_calls`
+    /// purposes) but that must not be read as license to promote reasoning
+    /// when the finish reason itself claims an action was intended.
+    #[test]
+    fn tool_calls_finish_reason_with_empty_call_array_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "tool_calls": []
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a tool_calls finish reason with an empty call array must not promote reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// The legacy sibling of the above: `finish_reason: "function_call"` with
+    /// no `message.function_call` field present at all.
+    #[test]
+    fn function_call_finish_reason_with_missing_call_body_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "function_call",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a function_call finish reason with no call body must not promote reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("function_call"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
     /// Any other non-success finish reason — including ones this module does
     /// not name explicitly — must fail closed rather than be assumed safe to
-    /// promote. The guard is an allow-list of known-good completions
-    /// (`stop`/`tool_calls`/`function_call`), not a blocklist of known
+    /// promote. The guard is an allow-list of genuine textual completions
+    /// (`stop` only — see [`model_response_from_payload`] for why
+    /// `tool_calls`/`function_call` are excluded), not a blocklist of known
     /// failures, so an unrecognized value never silently promotes reasoning.
     #[test]
     fn unrecognized_finish_reason_reasoning_only_turn_errors() {
