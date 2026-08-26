@@ -4025,6 +4025,40 @@ impl CompanyRecord {
                 || self.overlay_agents.iter().any(|a| a.id == agent_id))
     }
 
+    /// The chat id the durable Operator system feed journals under for this
+    /// company (issue #1781 review — CodeRabbit Major + Codex P2).
+    ///
+    /// Ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL)
+    /// itself. Diverted to
+    /// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+    /// in exactly one case: a grandfathered roster **teammate** already holds
+    /// the literal id `operator` (`is_roster_agent` true) and no desk of the
+    /// same id exists (`desk_exists` false). Using `OPERATOR_CHANNEL` there
+    /// would put that teammate's private DM and the public "what happened"
+    /// system feed on one address — a post to the visible read-only feed
+    /// could reach them, and a delivered report would be indistinguishable
+    /// from their own words. Diverting is collision-impossible by
+    /// construction (see the fallback constant's doc for why nothing can ever
+    /// mint that id) rather than something a migration has to detect and
+    /// clean up: nothing already stored is renamed, only where NEW system-feed
+    /// content lands moves.
+    ///
+    /// The **other** grandfather case — a real **desk** already owning
+    /// `operator` (`desk_exists` true) — is not this method's concern:
+    /// `server::operator::list_desks` already omits the synthetic system desk
+    /// entirely there (905297aef), so nothing calls this method on that path
+    /// at all; that company simply has no system feed, same as before this
+    /// fix.
+    pub fn operator_feed_channel(&self) -> &'static str {
+        if !self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+            && self.is_roster_agent(crate::runtime::OPERATOR_CHANNEL)
+        {
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+        } else {
+            crate::runtime::OPERATOR_CHANNEL
+        }
+    }
+
     /// Mints the roster id for a teammate about to be added under
     /// `display_name`: [`agent_slug`] of the name, suffixed `_2`, `_3`, … until
     /// it collides with nothing this record already routes on (issue #686).

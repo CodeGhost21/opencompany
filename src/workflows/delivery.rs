@@ -726,7 +726,7 @@ async fn deliver_one(
                         )
                     };
                     reports.push(
-                        post_to_operator(delivery, subject, text)
+                        post_to_operator(delivery, record, subject, text)
                             .await
                             .map(|()| {
                                 row(
@@ -829,7 +829,7 @@ async fn deliver_one(
         // --- channel: only a channel the deployment already wired ------------
         "channel" => {
             reports.push(
-                match post_to_channel(delivery, target, subject, text).await {
+                match post_to_channel(delivery, record, target, subject, text).await {
                     Ok(()) => row(
                         Some(target.to_string()),
                         DeliveryStatus::Sent,
@@ -1336,6 +1336,7 @@ async fn recipient_is_established(
 /// is exactly the pattern-match-on-prose coupling issue #248 exists to avoid.
 async fn post_to_channel(
     delivery: &WorkflowDeliveryDeps,
+    record: &CompanyRecord,
     channel_id: &str,
     subject: &str,
     text: &str,
@@ -1346,7 +1347,7 @@ async fn post_to_channel(
     // channel. No target is refused here by name any more; an id nobody wired is
     // still caught below with the same sentence the console's picker pre-flight
     // shows (issue #981).
-    send_to_channel_adapter(delivery, channel_id, subject, text, false).await
+    send_to_channel_adapter(delivery, record, channel_id, subject, text, false).await
 }
 
 /// Posts an `owner` fallback report to the durable operator channel (issue
@@ -1363,6 +1364,7 @@ async fn post_to_channel(
 /// silently discarding it.
 async fn post_to_operator(
     delivery: &WorkflowDeliveryDeps,
+    record: &CompanyRecord,
     subject: &str,
     text: &str,
 ) -> Result<(), (DeliveryReason, String)> {
@@ -1373,6 +1375,7 @@ async fn post_to_operator(
     // failed (issue #1781 review, Codex P1); see `OWNER_FALLBACK_REPORT_AUTHOR`.
     send_to_channel_adapter(
         delivery,
+        record,
         crate::runtime::channel::OPERATOR_CHANNEL,
         subject,
         text,
@@ -1404,8 +1407,18 @@ fn operator_report(subject: &str, text: &str) -> String {
 /// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR).
 /// Only `post_to_operator` ever sets it; `post_to_channel`'s explicit `channel`
 /// destination always passes `false`, unchanged.
+///
+/// `record` resolves the **journal** address for the operator channel via
+/// [`CompanyRecord::operator_feed_channel`] — ordinarily the same as
+/// `channel_id`, except for a company whose roster grandfathers a teammate at
+/// the literal `operator` id, where it diverts to a disjoint id so a report can
+/// never land on that teammate's own DM (issue #1781 review, CodeRabbit Major +
+/// Codex P2). `channel_id` itself still drives the **adapter lookup** below —
+/// `DurableOperatorChannel::channel_id()` is always the literal `operator`, in
+/// every company, so the lookup is unaffected by the divergence.
 async fn send_to_channel_adapter(
     delivery: &WorkflowDeliveryDeps,
+    record: &CompanyRecord,
     channel_id: &str,
     subject: &str,
     text: &str,
@@ -1429,16 +1442,22 @@ async fn send_to_channel_adapter(
             crate::runtime::channel::undeliverable_channel_message(channel_id, &wired),
         ));
     };
-    let body = if channel_id == crate::runtime::channel::OPERATOR_CHANNEL {
+    let is_operator = channel_id == crate::runtime::channel::OPERATOR_CHANNEL;
+    let body = if is_operator {
         operator_report(subject, text)
     } else {
         format!("{subject}\n\n{text}")
+    };
+    let journal_channel = if is_operator {
+        record.operator_feed_channel()
+    } else {
+        channel_id
     };
     adapter
         .send(OutboundMessage {
             message_id: None,
             task_id: None,
-            channel: channel_id.to_string(),
+            channel: journal_channel.to_string(),
             agent: admin_only.then(|| crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string()),
             text: body,
             steps: Vec::new(),
@@ -2293,6 +2312,95 @@ admins = [{list}]
                 .any(|(agent_id, _)| agent_id == crate::runtime::channel::WORKFLOW_REPLY_AUTHOR),
             "an explicit `channel: operator` destination must keep the ordinary \
              author — the marker is additive, not a wholesale change: {authors:?}"
+        );
+    }
+
+    /// Issue #1781 review (CodeRabbit Major + Codex P2): a company whose roster
+    /// already grandfathers a **teammate** at the literal id `operator` (no desk
+    /// of the same id — see `CompanyRecord::operator_feed_channel`) must not
+    /// have the durable Operator system feed land on that same address. Proven
+    /// for **both** report shapes that can reach the operator channel — the
+    /// `owner` fallback and an explicit `channel: operator` destination — since
+    /// review found the collision on the desk-list/read side, not the write
+    /// guard, and either shape re-opens it if only one were fixed.
+    ///
+    /// Pre-fix, both reports journaled at `chat_id == OPERATOR_CHANNEL`
+    /// (`"operator"`) — exactly the address `ChatView` addresses that teammate's
+    /// own DM by (issue #364). This test's whole point is that the two lines
+    /// now diverge.
+    #[tokio::test]
+    async fn a_report_diverts_off_a_grandfathered_teammates_own_operator_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), false, true);
+        h.add_admin("u1", "ada@acme.test").await;
+
+        let mut collided = record(&[]);
+        collided.manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "operator"
+role = "Chief of Staff"
+"#,
+        )
+        .expect("valid manifest with a grandfathered `operator` teammate");
+        assert!(
+            collided.is_roster_agent(OPERATOR_CHANNEL) && !collided.desk_exists(OPERATOR_CHANNEL),
+            "fixture must actually be in the collision state this test exercises"
+        );
+
+        deliver_outputs(
+            Some(&h.deps),
+            &collided,
+            &graph("owner", None),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+        deliver_outputs(
+            Some(&h.deps),
+            &collided,
+            &graph("channel", Some(OPERATOR_CHANNEL)),
+            "run-2",
+            &reached_output(),
+            &[],
+        )
+        .await;
+
+        let landed = h
+            .events
+            .read_from(
+                &h.company,
+                crate::ports::types::EventSeq::new(0),
+                usize::MAX,
+            )
+            .await
+            .expect("journal readable")
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(landed.len(), 2, "{landed:?}");
+        assert!(
+            landed
+                .iter()
+                .all(|chat_id| chat_id == crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK),
+            "every report bound for the system feed must land off the \
+             grandfathered teammate's own `operator` line, not on it: {landed:?}"
+        );
+        assert!(
+            landed.iter().all(|chat_id| chat_id != OPERATOR_CHANNEL),
+            "the literal `operator` line must stay untouched by the durable \
+             feed — that is the teammate's own DM address: {landed:?}"
         );
     }
 

@@ -206,8 +206,9 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
             // The always-present Operator channel (issue #1757) — a system desk,
             // not a `[[group_chat]]`. It is the aggregating "what happened" feed
             // where workflow-run reports and the owner/no-mailbox fallback land,
-            // journaled on the `operator` chat line the durable delivery adapter
-            // writes to. Listed last, after the real desks.
+            // journaled on the chat line `CompanyRecord::operator_feed_channel`
+            // resolves — ordinarily `operator` itself. Listed last, after the
+            // real desks.
             //
             // Migration note: `operator` was not a reserved id before this issue
             // — `create_desk` and manifest validation only started refusing it
@@ -221,8 +222,20 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
             // that desk instead: skip the synthetic entry so the pre-existing
             // desk stays the one and only `operator` id. `chat_and_emit` carries
             // the matching carve-out so it stays writable.
-            let synthetic_operator_desk =
-                (!record.desk_exists(crate::runtime::OPERATOR_CHANNEL)).then(operator_system_desk);
+            //
+            // The **other** grandfather case — a roster **teammate** (not a
+            // desk) already named `operator` — still gets a synthetic desk
+            // here (`desk_exists` is false for it), but at
+            // `record.operator_feed_channel()`'s id rather than the literal
+            // `operator`: CodeRabbit + Codex review on PR #1781 flagged that
+            // showing it at the literal id put a private legacy DM and the
+            // public system feed on one address. Delivery already journals
+            // there instead (`workflows::delivery::send_to_channel_adapter`),
+            // so this just points the console at the same, disjoint place —
+            // the feed keeps working for that company, and the teammate's own
+            // `operator` line is untouched.
+            let synthetic_operator_desk = (!record.desk_exists(crate::runtime::OPERATOR_CHANNEL))
+                .then(|| operator_system_desk(record.operator_feed_channel()));
             manifest_desks
                 .chain(overlay_desks)
                 .chain(synthetic_operator_desk)
@@ -230,19 +243,23 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
         })
         // Even a company that failed to load still surfaces the Operator channel,
         // so the console always has the standing system surface.
-        .unwrap_or_else(|| vec![operator_system_desk()]);
+        .unwrap_or_else(|| vec![operator_system_desk(crate::runtime::OPERATOR_CHANNEL)]);
     Ok(Json(desks))
 }
 
 /// The always-present Operator channel as a [`DeskDto`] (issue #1757).
 ///
-/// A read-only system desk keyed by [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL):
-/// it is not a `[[group_chat]]` or an overlay desk, so it has no members and no
+/// A read-only system desk keyed by `id` — ordinarily
+/// [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL), or
+/// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+/// for the one company shape that collides with it — see
+/// [`CompanyRecord::operator_feed_channel`](crate::ports::types::CompanyRecord::operator_feed_channel).
+/// It is not a `[[group_chat]]` or an overlay desk, so it has no members and no
 /// mutation routes, and its history is read through the ordinary
-/// `chat/history?desk=operator` path (the `operator` chat id `owns` matches).
-fn operator_system_desk() -> DeskDto {
+/// `chat/history?desk=<id>` path (the chat id `owns` matches).
+fn operator_system_desk(id: &str) -> DeskDto {
     DeskDto {
-        id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+        id: id.to_string(),
         name: "Operator".to_string(),
         description: Some(
             "Workflow reports and notifications — what happened and what needs you".to_string(),
@@ -2384,6 +2401,20 @@ async fn chat_and_emit(
     // collapsing it into "no real desk" — that would misreport a transient
     // store error as the ordinary read-only refusal for every company, not
     // only a grandfathered one, and journal the failure nowhere.
+    // `OPERATOR_CHANNEL_COLLISION_FALLBACK` is refused unconditionally, same
+    // sentence: it is the id `list_desks` hands out for the synthetic system
+    // desk on a company in the roster-teammate collision (see
+    // `CompanyRecord::operator_feed_channel`), and nothing should ever be
+    // minting or hand-addressing it directly — it is unmintable by
+    // construction (see the constant's doc), so there is no grandfather case
+    // to carve out here the way there is for the literal `operator` below.
+    if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "the Operator channel is a read-only feed of workflow reports and notifications — \
+             it cannot be posted to"
+                .to_string(),
+        )));
+    }
     if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
         let has_real_operator_recipient = runtime.store().load(id).await?.is_some_and(|record| {
             record.desk_exists(crate::runtime::OPERATOR_CHANNEL)
@@ -5904,6 +5935,74 @@ mode = "full"
             "a pre-existing teammate that already owns the `operator` id must \
              stay DM-able, got {}",
             response.status()
+        );
+    }
+
+    /// Issue #1781 review (CodeRabbit Major + Codex P2), the read side of the
+    /// same grandfather case the test above covers on the write side: a
+    /// company whose roster names a teammate `operator` (no desk of the same
+    /// id) must not have `list_desks` synthesize the system feed at that exact
+    /// address — pre-fix, both a direct post to the visible read-only feed and
+    /// the teammate's own DM landed on `chat_id == "operator"`, indistinguishable
+    /// from each other. The synthetic desk must come back at the disjoint
+    /// fallback id instead, and that id must itself stay refused as read-only.
+    #[tokio::test]
+    async fn the_synthetic_desk_diverts_off_a_grandfathered_teammates_operator_line() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state.clone());
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        let operator_desk = desks
+            .iter()
+            .find(|d| d["system"] == serde_json::json!(true))
+            .expect("the synthetic system desk must still be listed: {desks:?}");
+        assert_eq!(
+            operator_desk["id"],
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the system desk must not claim the literal `operator` id once a \
+             teammate already holds it: {desks:?}"
+        );
+        assert!(
+            desks
+                .iter()
+                .all(|d| d["id"] != crate::runtime::OPERATOR_CHANNEL),
+            "the literal `operator` id must not appear as a desk at all here — \
+             it belongs to the teammate's own DM, not a desk: {desks:?}"
+        );
+
+        // The disjoint fallback id is unmintable and system-only: a direct post
+        // to it must stay refused exactly like the literal `operator` id is,
+        // even though nothing minted it as a desk.
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"text":"hello","chat":"{}"}}"#,
+                        crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the disjoint system-feed address must stay read-only"
         );
     }
 
