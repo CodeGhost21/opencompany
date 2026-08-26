@@ -5,7 +5,6 @@
 //! here prevents setup from knowing only about the first entry while the picker
 //! grows a second interpretation of the same provider response.
 
-use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -50,33 +49,41 @@ struct RegistryModel {
     context_length: Option<u64>,
 }
 
-/// Parse every concrete model in a standard OpenAI-compatible catalog.
+/// Parse every concrete model in a standard OpenAI-compatible catalog, in the
+/// order the provider listed them.
 ///
 /// Each `data` entry is decoded on its own so a single malformed record (bad
 /// field type, missing `id`, …) is skipped rather than rejecting entries this
 /// same response otherwise reported cleanly.
+///
+/// Order is preserved rather than sorted here: `src/server/setup.rs`'s probe
+/// path takes `.next()` off this list to pick a local/custom endpoint's
+/// leading model, the same thing the pre-catalog `discover_local_model` did
+/// by taking the provider's first array entry. Sorting only matters for the
+/// operator-facing OpenRouter catalog, so [`openrouter_models`] sorts its own
+/// copy before caching it rather than this shared parser reordering every
+/// caller's result.
 fn parse_models(payload: RegistryResponse) -> Vec<InferenceModel> {
-    let mut unique = BTreeMap::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut models = Vec::new();
     for entry in payload.data {
         let Ok(model) = serde_json::from_value::<RegistryModel>(entry) else {
             continue;
         };
         let id = model.id.trim();
-        if id.is_empty() {
+        if id.is_empty() || !seen.insert(id.to_string()) {
             continue;
         }
-        unique
-            .entry(id.to_string())
-            .or_insert_with(|| InferenceModel {
-                id: id.to_string(),
-                name: model
-                    .name
-                    .map(|name| name.trim().to_string())
-                    .filter(|name| !name.is_empty()),
-                context_length: model.context_length,
-            });
+        models.push(InferenceModel {
+            id: id.to_string(),
+            name: model
+                .name
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty()),
+            context_length: model.context_length,
+        });
     }
-    unique.into_values().collect()
+    models
 }
 
 /// Fetch every model from an OpenAI-compatible `{base_url}/models` endpoint.
@@ -143,7 +150,7 @@ pub(crate) async fn openrouter_models() -> Result<Vec<InferenceModel>, String> {
     }
 
     let fetch = discover_models(crate::company::inference::OPENROUTER_BASE_URL, None);
-    let models = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, fetch)
+    let mut models = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, fetch)
         .await
         .map_err(|_| {
             "OpenRouter's model registry did not answer within 10 seconds".to_string()
@@ -151,6 +158,10 @@ pub(crate) async fn openrouter_models() -> Result<Vec<InferenceModel>, String> {
     if models.is_empty() {
         return Err("OpenRouter's model registry returned no models".to_string());
     }
+    // Sorted here, not in `parse_models`: this is the operator-facing
+    // catalog picker's own copy, while `parse_models` also serves
+    // `setup.rs`'s local/custom probe, which relies on provider order.
+    models.sort_by(|a, b| a.id.cmp(&b.id));
     openrouter_cache().store(models.clone(), now);
     Ok(models)
 }
@@ -168,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_parser_returns_every_non_empty_unique_model() {
+    fn catalog_parser_returns_every_non_empty_unique_model_in_provider_order() {
         let parsed = parse_models(RegistryResponse {
             data: vec![
                 serde_json::json!({"id": " vendor/zeta ", "name": " Zeta ", "context_length": 128_000}),
@@ -179,10 +190,33 @@ mod tests {
         });
 
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], model("vendor/alpha"));
-        assert_eq!(parsed[1].id, "vendor/zeta");
-        assert_eq!(parsed[1].name.as_deref(), Some("Zeta"));
-        assert_eq!(parsed[1].context_length, Some(128_000));
+        assert_eq!(parsed[0].id, "vendor/zeta");
+        assert_eq!(parsed[0].name.as_deref(), Some("Zeta"));
+        assert_eq!(parsed[0].context_length, Some(128_000));
+        assert_eq!(parsed[1], model("vendor/alpha"));
+    }
+
+    /// Regression for a Minor review finding on #1838: the previous
+    /// `BTreeMap`-keyed parser returned ids in lexicographic order, so
+    /// `src/server/setup.rs` taking `.next()` off the result silently swapped
+    /// from "the provider's first-listed model" (what the deleted
+    /// `discover_local_model` returned) to "the alphabetically first model" —
+    /// an arbitrary pick on any multi-model host whose ids don't already
+    /// sort first-to-preferred.
+    #[test]
+    fn catalog_parser_does_not_alphabetize_a_local_hosts_leading_model() {
+        let parsed = parse_models(RegistryResponse {
+            data: vec![
+                serde_json::json!({"id": "zephyr-preferred"}),
+                serde_json::json!({"id": "alpaca-not-preferred"}),
+            ],
+        });
+
+        assert_eq!(
+            parsed.first().map(|m| m.id.as_str()),
+            Some("zephyr-preferred"),
+            "the provider's leading model must survive `.next()` in setup.rs, not lose to sort order"
+        );
     }
 
     /// Regression for a P2 review finding on #1838: a single malformed
