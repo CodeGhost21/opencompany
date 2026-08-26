@@ -496,8 +496,10 @@ struct DraftAnswer {
 /// 1. The named fence. Everything outside it is the reply.
 /// 2. Any fence, when the named one is absent — a model that dropped the tag
 ///    still meant the block, and losing a draft over a missing word is the
-///    worse failure. A persona containing a fence of its own would be misread
-///    here; that is judged the rarer accident.
+///    worse failure.
+///
+/// Either way the block runs to the **last** ``` in the answer, so a persona
+/// carrying fenced examples of its own arrives whole — see [`fenced`].
 /// 3. A JSON object, for a model that reverts to the older habit.
 /// 4. Failing all of those, the whole answer as a reply carrying no draft. A
 ///    question asked in prose is still a good turn; only the *draft* ever
@@ -537,19 +539,29 @@ fn parse_answer(text: &str) -> Option<DraftAnswer> {
     })
 }
 
-/// The first block opened by `open`, with everything outside it as the reply.
+/// The block opened by `open`, with everything outside it as the reply.
 ///
 /// An unterminated fence is read to the end of the answer rather than
 /// discarded: that is what a response cut off at the token ceiling looks like,
 /// and a persona missing its last sentence is worth far more to an operator
 /// than no persona at all — they can see the cut and ask for the rest.
+///
+/// The block closes at the **last** ``` rather than the first. The persona
+/// brief asks for worked examples, and a persona writes them the way a person
+/// would — fenced. Closing at the first ``` cuts the document at its first
+/// example and spills the remainder into the reply, which the operator then
+/// accepts with nothing on screen saying anything was dropped. The last ``` is
+/// the real closer of a well-formed answer. What it costs is a reply written
+/// *after* the block, which is swallowed into the field — but only when the
+/// model both trails its reply and fences an example, and losing a sentence of
+/// commentary is the lesser of the two.
 fn fenced(body: &str, open: &str) -> Option<DraftAnswer> {
     let at = body.find(open)?;
     let after = &body[at + open.len()..];
     // The tag line ends at the first newline; a bare ``` opens immediately.
     let inner_start = after.find('\n').map(|i| i + 1).unwrap_or(after.len());
     let inner = &after[inner_start..];
-    let (field, tail) = match inner.find("```") {
+    let (field, tail) = match inner.rfind("```") {
         Some(close) => (&inner[..close], &inner[close + 3..]),
         None => (inner, ""),
     };
@@ -696,6 +708,21 @@ mod test {
         ))
         .expect("parses");
         assert_eq!(answer.text.as_deref(), Some(persona));
+    }
+
+    /// A persona is invited to show worked examples, and a good one fences
+    /// them. Closing the block at the first ``` would cut the document at its
+    /// first example and hand the operator a partial persona with nothing on
+    /// screen saying the rest had been dropped.
+    #[test]
+    fn a_field_carrying_its_own_fence_arrives_whole() {
+        let persona = "HOW YOU WORK\n  - Say what you shipped, then what is blocked.\n\nGOOD ANSWER\n```\nShipped: 4 orders. Blocked: staging is red.\n```\n\nBAD ANSWER\n```\nMaking good progress!\n```\n\nNever the second one.";
+        let answer = parse_answer(&format!(
+            "Added worked examples of both answers.\n\n```teammate-field\n{persona}\n```"
+        ))
+        .expect("parses");
+        assert_eq!(answer.text.as_deref(), Some(persona));
+        assert_eq!(answer.reply, "Added worked examples of both answers.");
     }
 
     /// A model that dropped the tag still meant the block.
