@@ -97,13 +97,13 @@
 //! one that already fired or one the operator took back.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::ports::generate_id;
-use crate::ports::types::{Actor, ApprovalId, EventSeq};
+use crate::ports::types::{Actor, ApprovalId, CompanyId, EventSeq};
 
 /// How long an unredeemed grant stays live: 15 minutes.
 ///
@@ -950,6 +950,141 @@ impl std::fmt::Debug for GrantSet {
             .field("standing", &self.standing_count())
             .finish_non_exhaustive()
     }
+}
+
+/// A parked "budget paused" turn (issue #1846), waiting for the operator to
+/// add credits and trigger a re-issue.
+///
+/// Modelled on the same "mint on park, consume on redeem" shape a
+/// [`GrantedCall`] uses, but simpler on two axes that follow from what a
+/// budget pause actually is:
+///
+/// * **Matches on `(company, agent)` alone.** A grant matches a specific tool
+///   call with specific arguments because approving one call must not open the
+///   door to a different one; a budget pause has no call to be specific
+///   about — the operator is not re-approving an action, they are re-sending
+///   the message that stalled.
+/// * **In-memory only, not journaled.** [`GrantSet`] is replayed on boot
+///   because losing an approved-but-unredeemed grant silently drops consent
+///   the operator already gave. Losing a budget-pause marker on a restart
+///   costs strictly less: the operator re-sends the same message, which is
+///   already the whole redemption story (issue #561: this was never going to
+///   be a resume). The durability this issue asks for is "outlives the
+///   request", not "survives a process restart".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BudgetPauseMarker {
+    /// Mint-order id, so a client reading the marker back can tell a fresh
+    /// park from the one it already saw.
+    pub id: String,
+    /// The teammate whose turn paused — carried for display only; redemption
+    /// re-enters the SAME cycle path an ordinary operator message takes
+    /// ([`crate::ports::types::CompanyEvent::OperatorMessage`]), which routes
+    /// on `chat_id` exactly as the original message did. A nested delegate's
+    /// pause therefore re-issues from the top, not as a targeted re-call of
+    /// that one delegate's own turn — consistent with "not true resume".
+    pub agent: String,
+    /// The chat/desk thread to re-dispatch on. `None` re-issues on the
+    /// default (unaddressed → orchestrator) thread, matching how the original
+    /// message routed.
+    pub chat_id: Option<String>,
+    /// The ORIGINAL message text the turn was answering — what gets re-sent,
+    /// from the top, on redeem.
+    pub message: String,
+    /// The actionable halt copy the pause reported, carried along so a
+    /// console reading the marker back — rather than the chat bubble — can
+    /// still show why it exists and what it will do.
+    pub summary: String,
+    /// Epoch-millis the marker was parked.
+    pub at_millis: u64,
+}
+
+/// One company's parked budget pauses, at most one per agent (issue #1846).
+///
+/// Parking a new marker for an agent that already has one overwrites it: a
+/// second pause on the same teammate means the first one is stale, and the
+/// operator's next "add credits" should re-issue the LATEST stuck message,
+/// not a queue of every message that ever stalled.
+#[derive(Default)]
+pub struct BudgetPauseSet {
+    by_agent: Mutex<HashMap<String, BudgetPauseMarker>>,
+}
+
+impl BudgetPauseSet {
+    /// Parks a fresh marker for `agent`, replacing whatever was parked
+    /// before, and returns it.
+    pub fn park(
+        &self,
+        agent: impl Into<String>,
+        chat_id: Option<String>,
+        message: impl Into<String>,
+        summary: impl Into<String>,
+        at_millis: u64,
+    ) -> BudgetPauseMarker {
+        let agent = agent.into();
+        let marker = BudgetPauseMarker {
+            id: generate_id(),
+            agent: agent.clone(),
+            chat_id,
+            message: message.into(),
+            summary: summary.into(),
+            at_millis,
+        };
+        self.by_agent
+            .lock()
+            .expect("budget-pause set poisoned")
+            .insert(agent, marker.clone());
+        marker
+    }
+
+    /// Reads the parked marker for `agent` without consuming it, for a
+    /// read-only console status check.
+    pub fn peek(&self, agent: &str) -> Option<BudgetPauseMarker> {
+        self.by_agent
+            .lock()
+            .expect("budget-pause set poisoned")
+            .get(agent)
+            .cloned()
+    }
+
+    /// Takes the parked marker for `agent`, if one exists — single-use, like
+    /// a [`GrantedCall`] redemption.
+    pub fn redeem(&self, agent: &str) -> Option<BudgetPauseMarker> {
+        self.by_agent
+            .lock()
+            .expect("budget-pause set poisoned")
+            .remove(agent)
+    }
+
+    /// Every currently-parked marker, agent-sorted for a stable listing.
+    pub fn list(&self) -> Vec<BudgetPauseMarker> {
+        let mut out: Vec<_> = self
+            .by_agent
+            .lock()
+            .expect("budget-pause set poisoned")
+            .values()
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.agent.cmp(&b.agent));
+        out
+    }
+}
+
+/// Process-wide registry of [`BudgetPauseSet`]s, one per company (issue
+/// #1846) — mirrors [`crate::turn_stream`]'s per-company `REGISTRY`: created
+/// lazily on first use and kept for the process lifetime, since companies are
+/// few and long-lived.
+static BUDGET_PAUSES: LazyLock<Mutex<HashMap<CompanyId, Arc<BudgetPauseSet>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The parked-budget-pause set for `company`, creating an empty one on first
+/// use.
+pub fn budget_pauses_for(company: &CompanyId) -> Arc<BudgetPauseSet> {
+    BUDGET_PAUSES
+        .lock()
+        .expect("budget-pause registry poisoned")
+        .entry(company.clone())
+        .or_insert_with(|| Arc::new(BudgetPauseSet::default()))
+        .clone()
 }
 
 #[cfg(test)]
@@ -1857,5 +1992,69 @@ mod test {
         let listed = set.standing();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, GrantId::new("g1"));
+    }
+
+    // --- budget-pause markers (issue #1846) ----------------------------------
+
+    #[test]
+    fn parking_then_peeking_a_budget_pause_does_not_consume_it() {
+        let set = BudgetPauseSet::default();
+        set.park("ceo", Some("desk-1".to_string()), "hi", "paused", 1_000);
+
+        let first = set.peek("ceo").expect("parked");
+        let second = set.peek("ceo").expect("peek does not consume");
+        assert_eq!(first.id, second.id, "the same marker both times");
+        assert_eq!(first.message, "hi");
+        assert_eq!(first.chat_id.as_deref(), Some("desk-1"));
+    }
+
+    #[test]
+    fn redeeming_a_budget_pause_consumes_it_exactly_once() {
+        let set = BudgetPauseSet::default();
+        set.park("ceo", None, "hi", "paused", 1_000);
+
+        let redeemed = set.redeem("ceo").expect("a marker was parked");
+        assert_eq!(redeemed.agent, "ceo");
+        assert!(
+            set.redeem("ceo").is_none(),
+            "single-use: a second redeem finds nothing"
+        );
+        assert!(set.peek("ceo").is_none());
+    }
+
+    #[test]
+    fn a_second_pause_on_the_same_agent_overwrites_the_first() {
+        let set = BudgetPauseSet::default();
+        set.park("ceo", None, "first stuck message", "paused once", 1_000);
+        set.park("ceo", None, "second stuck message", "paused again", 2_000);
+
+        let marker = set.redeem("ceo").expect("the latest marker");
+        assert_eq!(
+            marker.message, "second stuck message",
+            "the operator's next redeem re-issues the LATEST stalled message, not a queue"
+        );
+    }
+
+    #[test]
+    fn budget_pauses_are_scoped_per_company() {
+        let acme = CompanyId::new("acme");
+        let globex = CompanyId::new("globex");
+        budget_pauses_for(&acme).park("ceo", None, "acme's message", "paused", 1_000);
+
+        assert!(
+            budget_pauses_for(&globex).peek("ceo").is_none(),
+            "a marker parked for one company must not leak into another's set"
+        );
+        assert!(budget_pauses_for(&acme).peek("ceo").is_some());
+    }
+
+    #[test]
+    fn an_unrelated_agent_has_no_parked_marker() {
+        let set = BudgetPauseSet::default();
+        set.park("ceo", None, "hi", "paused", 1_000);
+        assert!(
+            set.peek("engineer").is_none(),
+            "parking for one agent must not be visible under another's key"
+        );
     }
 }
