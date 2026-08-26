@@ -742,6 +742,33 @@ pub fn namespace_denied(filter: &CapabilityFilter, namespace: &str) -> bool {
     }
 }
 
+/// Whether the per-tenant Composio surface may be wired for this agent's
+/// current turn — one predicate shared by both the S1 brief
+/// ([`build::build_agent`](crate::harness::built_in::build::build_agent)) and
+/// the S2 deflection policy
+/// ([`build_roster`](crate::harness::built_in::build_roster)) so the two
+/// cannot drift back out of lockstep the way they did before this fix (PR
+/// #1780 review, issue #1759).
+///
+/// `wired` is the grant+credential outcome each call site already resolved
+/// (an explicit `composio` grant AND a resolved credential with a non-empty
+/// toolkit allowlist) — this function does not re-derive it, only narrows it
+/// by the per-turn capability tier. When [`namespace_denied`] reports
+/// `composio` denied (a `free`/`starter`/`pro` plan's Composio budget is
+/// exhausted, or a fail-closed metering error), `filter_by_capabilities`
+/// strips every `composio_*` tool from the belt — describing the brief or
+/// installing the deflection anyway would ground the agent in a surface it no
+/// longer holds, or point a blocked web call at a tool that is not on the
+/// belt.
+///
+/// Deliberately NOT behind the `composio` feature, like the rest of this
+/// module's namespace plumbing and like `composio_catalog`'s own S1/S2 pair —
+/// pure logic stays outside the gate so CI's fast, always-run `openhuman`
+/// lane exercises it, rather than only the `composio` feature's partial lane.
+pub fn composio_capability_admits(wired: bool, capabilities: &CapabilityFilter) -> bool {
+    wired && !namespace_denied(capabilities, "composio")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1450,5 +1477,39 @@ mod tests {
         // A namespace outside `DenyNamespaces`' set is simply not denied — it
         // is never asked to special-case a name it does not recognize.
         assert!(!namespace_denied(&filter, "web"));
+    }
+
+    /// The grant/credential resolving `wired = true` is not enough: a
+    /// capability tier that has denied `composio` (budget exhausted, or a
+    /// fail-closed metering error) must still turn the predicate off, because
+    /// `filter_by_capabilities` is about to strip every `composio_*` tool from
+    /// the belt. This is the fix for the P1 codex found on PR #1780 — before
+    /// it, the S1 brief and S2 deflection policy were wired from the grant
+    /// alone, exactly the shape `sandbox_brief_flags_withhold_a_capability_denied_namespace`
+    /// (PR #1670) fixed for `shell`/`code`.
+    #[test]
+    fn composio_capability_admits_withholds_when_the_tier_denies_it() {
+        assert!(
+            composio_capability_admits(true, &CapabilityFilter::AllowAll),
+            "wired + no denial must admit"
+        );
+        assert!(
+            !composio_capability_admits(false, &CapabilityFilter::AllowAll),
+            "not wired must never admit, regardless of the tier"
+        );
+
+        let deny_composio = CapabilityFilter::DenyNamespaces(["composio"].into_iter().collect());
+        assert!(
+            !composio_capability_admits(true, &deny_composio),
+            "wired but denied must not admit — the brief/policy must not \
+             describe a surface `filter_by_capabilities` is about to strip"
+        );
+
+        // A denial of an unrelated namespace must not withhold composio.
+        let deny_shell = CapabilityFilter::DenyNamespaces(["shell"].into_iter().collect());
+        assert!(
+            composio_capability_admits(true, &deny_shell),
+            "a denial of another namespace must not withhold composio"
+        );
     }
 }

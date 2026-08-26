@@ -3777,10 +3777,18 @@ pub(crate) fn build_roster(
         // deflected to the Composio route — the same condition S1's
         // `composio_brief` is wired under, one door down (enforcement, not just
         // instruction).
+        //
+        // `toolbelt::composio_capability_admits` (PR #1780 review) keeps this
+        // in lockstep with `build_agent`'s brief gate: `deps.capabilities` is
+        // the per-turn tier, and when it has denied `composio` (budget
+        // exhausted, or a fail-closed metering error) `filter_by_capabilities`
+        // strips every `composio_*` tool from this agent's belt. Installing the
+        // deflection anyway would deny the raw web call AND point the agent at
+        // a tool it no longer has — a dead end, not defense-in-depth.
         #[cfg(feature = "composio")]
         if crate::company::grants_composio_explicit(&grants)
             && let Some(config) = deps.composio.as_ref()
-            && !config.toolkits.is_empty()
+            && toolbelt::composio_capability_admits(!config.toolkits.is_empty(), &deps.capabilities)
         {
             agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
         }
@@ -3857,11 +3865,12 @@ pub(crate) fn build_roster(
         let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
         // Issue #1759 (S2): same Composio deflection wiring as the manifest loop
         // — an overlay teammate that holds the Composio grant is guarded on the
-        // same terms.
+        // same terms, including the `composio_capability_admits` check (PR
+        // #1780 review; see the manifest loop above for why).
         #[cfg(feature = "composio")]
         if crate::company::grants_composio_explicit(&grants)
             && let Some(config) = deps.composio.as_ref()
-            && !config.toolkits.is_empty()
+            && toolbelt::composio_capability_admits(!config.toolkits.is_empty(), &deps.capabilities)
         {
             agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
         }

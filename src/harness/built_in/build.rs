@@ -851,8 +851,17 @@ pub fn build_agent(
     // hold. The brief itself is a pure renderer in `composio_catalog` (not behind
     // the `composio` feature) so CI's `openhuman` test lane exercises it; this
     // call site is feature-gated because the tools it describes are.
+    //
+    // Same `deps.capabilities` check as the `shell`/`code` sandbox brief above
+    // (PR #1780 review): `composio_toolkits` reflects only the GRANT, not the
+    // per-turn capability tier. When a `free`/`starter`/`pro` plan's Composio
+    // budget is exhausted, `filter_by_capabilities` strips every
+    // `composio_*` tool from the belt below — without this check the brief
+    // would still tell the agent to call one.
     #[cfg(feature = "composio")]
-    if let Some(toolkits) = composio_toolkits.as_deref() {
+    if toolbelt::composio_capability_admits(composio_toolkits.is_some(), &deps.capabilities)
+        && let Some(toolkits) = composio_toolkits.as_deref()
+    {
         persona.push_str(&crate::harness::composio_catalog::composio_brief(toolkits));
     }
 
