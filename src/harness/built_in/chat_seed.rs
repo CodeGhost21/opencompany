@@ -229,10 +229,27 @@ pub async fn build_chat_seed(
 /// performs the same drop, but it can only match against the *augmented* message
 /// the runner passes it; the raw operator text is only in scope here, so strip it
 /// here where the match is exact.
+///
+/// `current_message` must be the raw, pre-memory-injection turn text (what
+/// [`ChatSeedRequest::raw_message`] carries) — a `starts_with`, not an exact
+/// match, because an attachment turns it into a *prefix* of what the journal
+/// holds. `HarnessBrain::cycle` composes the wire body operator text passes
+/// through `with_attachment_refs(text, attachments)` before it ever reaches a
+/// turn, appending `"\n\n[Attached file: …]"` markers after the operator's own
+/// words; the journaled `OperatorMessage.text` this seed reads is only the raw
+/// text, with no markers. An exact match therefore missed on any message with
+/// an attachment, leaving the un-stripped duplicate in the seed — `run_single`
+/// then appends the (augmented) current message again, so the model saw the
+/// operator's current request twice (codex review finding). `with_attachment_refs`
+/// only ever *appends* markers — the operator's text always leads the
+/// composition unless the 200k-char wire cap truncated it — so a prefix match
+/// catches the attachment case without needing the pre-augmentation text
+/// plumbed any further than it already is here.
 pub fn strip_current_message(seed: &mut Vec<(String, String)>, current_message: &str) {
     if let Some((role, text)) = seed.last()
         && role == "user"
-        && text.trim() == current_message.trim()
+        && !text.trim().is_empty()
+        && current_message.trim().starts_with(text.trim())
     {
         seed.pop();
     }
@@ -528,6 +545,32 @@ mod tests {
         let mut different = vec![("user".to_string(), "something else".to_string())];
         strip_current_message(&mut different, "current");
         assert_eq!(different.len(), 1, "a non-matching user tail stays");
+    }
+
+    /// Codex review finding: on a message with an attachment, `HarnessBrain`
+    /// passes `with_attachment_refs(text, attachments)` — the raw text plus an
+    /// appended `"\n\n[Attached file: …]"` marker — as the turn's message,
+    /// while the journaled `OperatorMessage` (what the seed reads) carries
+    /// only the raw text. An exact match therefore never drops the duplicate,
+    /// so the operator's current request reached the model twice: once from
+    /// the un-stripped seed tail, once as the augmented current message
+    /// `run_single` appends itself. RED on the old `==` comparison, GREEN with
+    /// the `starts_with` fix.
+    #[test]
+    fn strip_current_message_drops_a_trailing_user_line_augmented_with_an_attachment_marker() {
+        let mut seed = vec![
+            ("user".to_string(), "prior turn".to_string()),
+            ("user".to_string(), "please review this doc".to_string()),
+        ];
+        let augmented_with_attachment =
+            "please review this doc\n\n[Attached file: report.pdf]\nEXTRACTED TEXT";
+        strip_current_message(&mut seed, augmented_with_attachment);
+        assert_eq!(
+            seed,
+            vec![("user".to_string(), "prior turn".to_string())],
+            "the raw journaled text is a prefix of the attachment-augmented \
+             message, so the trailing duplicate must still be dropped"
+        );
     }
 
     // ---- resolve_seed_desk ------------------------------------------------
