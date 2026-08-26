@@ -2078,6 +2078,17 @@ export function AppShell({
   const presence = usePresence(client, company);
   const typing = useTyping(client, company);
   /**
+   * The coarse "near your credit limit" warning (issue #1846), off the live
+   * `budget_proximity` frame. Shell-owned for the same reason presence/typing
+   * are: the SSE subscription lives here, and the banner must outlive a
+   * channel switch (the warning is about the company, not one conversation).
+   * `null` once dismissed or once a fresh dispatch has not re-raised it.
+   */
+  const [budgetProximity, setBudgetProximity] = useState<{
+    message: string;
+    atMillis: number;
+  } | null>(null);
+  /**
    * The company's people, id → label.
    *
    * Presence and typing frames carry a user id and no label — deliberately, so
@@ -2389,6 +2400,10 @@ export function AppShell({
       },
       [typing],
     ),
+    onBudgetProximityEvent: useCallback((event: CompanyStreamEvent) => {
+      if (event.type !== "budget_proximity") return;
+      setBudgetProximity({ message: event.message, atMillis: event.atMillis });
+    }, []),
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive
       // the live canvas. Progress frames are far more frequent than outcomes,
@@ -2643,6 +2658,8 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
+              budgetProximity={budgetProximity}
+              onDismissBudgetProximity={() => setBudgetProximity(null)}
             />
           )}
           {view === "conversation" && (
