@@ -60,6 +60,13 @@ pub enum Silence {
     NotHosted,
     /// Reporting was asked for, but no project token is configured.
     NoToken,
+    /// `OPENCOMPANY_ANALYTICS` was set to something this does not recognise.
+    ///
+    /// A separate reason from [`Self::OptedOut`] on purpose: an operator who
+    /// typed `of` gets the outcome they meant *and* a boot line saying their
+    /// value was not understood, rather than silence they cannot distinguish
+    /// from a working opt-out.
+    Unreadable,
 }
 
 impl Silence {
@@ -69,6 +76,7 @@ impl Silence {
             Self::OptedOut => "operator opted out",
             Self::NotHosted => "not a hosted tenant and no explicit opt-in",
             Self::NoToken => "no project token is configured",
+            Self::Unreadable => "the OPENCOMPANY_ANALYTICS value is not recognised",
         }
     }
 }
@@ -101,22 +109,37 @@ impl Decision {
 /// 1. `OPENCOMPANY_ANALYTICS=off` wins over everything. An operator switching
 ///    it off must not be overruled by a deployment kind, a token, or a future
 ///    default.
-/// 2. Otherwise reporting is on **only** for [`Deployment::HostedTenant`], or
+/// 2. A value that is set but unrecognised resolves to **silence**, whatever
+///    the deployment. The deployment default is reserved for a switch that is
+///    *absent*. Falling an unreadable value through to the default meant a
+///    hosted tenant whose operator typed `OPENCOMPANY_ANALYTICS=of` kept
+///    reporting — a typo in the opt-out direction silently ignored, which is
+///    the one direction that must never be silently ignored.
+/// 3. Otherwise reporting is on **only** for [`Deployment::HostedTenant`], or
 ///    when an operator explicitly sets `OPENCOMPANY_ANALYTICS=on`. Decision 1
 ///    of #1739: silence is the default and reporting is the exception, so a
 ///    self-hosted or desktop install that has said nothing sends nothing.
-/// 3. A token is required. Without one there is nowhere to report to, and
+/// 4. A token is required. Without one there is nowhere to report to, and
 ///    guessing is not an option — see [`TOKEN_ENV`].
 pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
-    let switch = env.get(ENABLE_ENV).map(|v| v.trim().to_ascii_lowercase());
+    // Blank is absent, for the same reason a blank token is: a variable set to
+    // whitespace is a variable nobody meant to set. See [`non_blank`].
+    let switch = env
+        .get(ENABLE_ENV)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
 
     match switch.as_deref() {
         Some("off" | "false" | "0" | "no") => return Decision::Silent(Silence::OptedOut),
         Some("on" | "true" | "1" | "yes") => {}
-        // An unrecognised value is NOT an opt-in. The dangerous direction here
-        // is "a typo turns reporting on", so anything that is not clearly `on`
-        // falls through to the deployment default.
-        _ => {
+        // Set, but not a spelling of yes or no. Both directions of that typo
+        // are now silence: it was never an opt-in, and — since it reached a
+        // hosted tenant's deployment default and kept reporting — it must not
+        // be a failed opt-*out* either. Silence is the safe answer to "I cannot
+        // tell what you asked for", and the boot line says which value it could
+        // not read.
+        Some(_) => return Decision::Silent(Silence::Unreadable),
+        None => {
             if deployment != Deployment::HostedTenant {
                 return Decision::Silent(Silence::NotHosted);
             }
@@ -222,13 +245,67 @@ mod test {
         assert!(resolve(Deployment::SelfHosted, &token_env(&[(ENABLE_ENV, "on")])).reports());
     }
 
-    /// A typo must not opt anybody in. `on` is the only spelling of yes that
-    /// this reads as yes, and everything else falls to the deployment default.
+    /// A typo must not opt anybody in.
     #[test]
     fn a_misspelled_switch_does_not_opt_in() {
         assert_eq!(
             resolve(Deployment::SelfHosted, &token_env(&[(ENABLE_ENV, "onn")])),
+            Decision::Silent(Silence::Unreadable)
+        );
+    }
+
+    /// **And a typo must not fail to opt anybody out.** This is the direction
+    /// that used to leak: an unreadable value fell through to the deployment
+    /// default, so a hosted tenant whose operator meant `off` and typed `of`
+    /// carried on reporting, with a boot line that said "reporting to …" and
+    /// gave them no reason to look again.
+    #[test]
+    fn a_misspelled_opt_out_does_not_keep_a_hosted_tenant_reporting() {
+        for typo in ["of", "offf", "disabled", "0.0", "nope"] {
+            let decision = resolve(Deployment::HostedTenant, &token_env(&[(ENABLE_ENV, typo)]));
+            assert_eq!(
+                decision,
+                Decision::Silent(Silence::Unreadable),
+                "{typo:?} must not leave a hosted tenant reporting"
+            );
+            assert!(!decision.reports(), "{typo:?}");
+        }
+    }
+
+    /// The near-miss control: `off` really is matched case-insensitively and
+    /// after trimming, so the test above is finding typos rather than finding
+    /// every value that is not lowercase and bare.
+    #[test]
+    fn an_off_switch_is_trimmed_and_case_folded() {
+        assert_eq!(
+            resolve(
+                Deployment::HostedTenant,
+                &token_env(&[(ENABLE_ENV, "  ofF\n")])
+            ),
+            Decision::Silent(Silence::OptedOut)
+        );
+    }
+
+    /// The control for the two above: an **absent** switch still falls to the
+    /// deployment default, in both directions. Without this, "everything is
+    /// silent now" would pass the tests above just as well.
+    #[test]
+    fn an_absent_switch_still_falls_to_the_deployment_default() {
+        assert!(resolve(Deployment::HostedTenant, &token_env(&[])).reports());
+        assert_eq!(
+            resolve(Deployment::SelfHosted, &token_env(&[])),
             Decision::Silent(Silence::NotHosted)
+        );
+    }
+
+    /// A whitespace-only switch is an absent switch, not an unreadable one —
+    /// consistent with the token and endpoint, and it must not flip a hosted
+    /// tenant into silence just because a launcher exported an empty variable.
+    #[test]
+    fn a_blank_switch_is_treated_as_absent() {
+        assert!(
+            resolve(Deployment::HostedTenant, &token_env(&[(ENABLE_ENV, "   ")])).reports(),
+            "a blank switch must not read as unreadable"
         );
     }
 
