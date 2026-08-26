@@ -19,6 +19,25 @@ function PopoverTrigger({ ...props }: PopoverPrimitive.Trigger.Props) {
   return <PopoverPrimitive.Trigger data-slot="popover-trigger" {...props} />
 }
 
+/**
+ * The popup's heading. `Popover.Popup` renders `role="dialog"` and reads this
+ * component's generated id back as its own `aria-labelledby` (Base UI wires
+ * the two through the shared store's `titleElementId`) — so a popover with a
+ * heading MUST render it through this component, not a plain element, or the
+ * dialog that opens has no accessible name at all: `aria-labelledby` is only
+ * set when a `Title` is present, and React drops the attribute outright when
+ * it's `undefined` rather than emitting an empty one.
+ */
+function PopoverTitle({ className, ...props }: PopoverPrimitive.Title.Props) {
+  return (
+    <PopoverPrimitive.Title
+      data-slot="popover-title"
+      className={cn("font-medium", className)}
+      {...props}
+    />
+  )
+}
+
 function PopoverContent({
   className,
   side = "bottom",
@@ -56,4 +75,4 @@ function PopoverContent({
   )
 }
 
-export { Popover, PopoverTrigger, PopoverContent }
+export { Popover, PopoverTrigger, PopoverContent, PopoverTitle }
