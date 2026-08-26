@@ -1693,6 +1693,49 @@ impl CompanyRuntime {
         })
     }
 
+    /// Durably banks a blocked-node approval the moment its verdict is known,
+    /// for whichever caller reaches it first (issue #1816 / #1825).
+    ///
+    /// Extracted so `settle_approval` and `settle_approval_amended`
+    /// (`runtime/cycle.rs`) can call it **inline, before returning the
+    /// receipt** — closing a window `continue_turn`'s own call alone could
+    /// not: `resolve_approval_spawned` settles the verdict durably and only
+    /// then spawns the detached follow-up task that used to be the sole
+    /// caller of this bank. A restart between that spawn and the task's first
+    /// poll left the settle durable but the bank never run, and boot rehydrate
+    /// only rearms `blocked_nodes` from `journal.blocked_node_approvals()` —
+    /// so a stash whose approval never reached this call is invisible to
+    /// `reconcile_stranded_blocked_nodes` and stranded exactly as before
+    /// #1816's original fix, just through a different crash window.
+    ///
+    /// Idempotent by construction (`mark_approved` is a flag flip,
+    /// `record_blocked_node_approved` is a journal-backed set insert), so
+    /// every caller — the inline settle paths and `continue_turn`'s own
+    /// defense-in-depth call — can run it unconditionally without needing to
+    /// coordinate who "owns" the bank. A no-op for a denial, an id this
+    /// journal never parked, or a turn that is not a blocked agent node's.
+    pub(crate) async fn bank_blocked_node_approval(&self, id: &ApprovalId, verdict: Verdict) {
+        if verdict != Verdict::Approve {
+            return;
+        }
+        let Some(turn) = self.journal.approval_cycle(id).flatten() else {
+            return;
+        };
+        if !crate::runtime::workflow_resume::is_node_turn(&turn) {
+            return;
+        }
+        self.blocked_nodes.mark_approved(&turn);
+        if let Err(error) = self.journal.record_blocked_node_approved(&turn).await {
+            tracing::warn!(
+                company = %self.id,
+                %turn,
+                %error,
+                "[approval] a blocked node's approval could not be durably banked; a \
+                 restart before this node's last decision may now strand this grant"
+            );
+        }
+    }
+
     /// Runs the continuation a settled verdict owes — **once per turn, not once
     /// per approval** (issue #469).
     ///
@@ -1732,27 +1775,17 @@ impl CompanyRuntime {
         // that is not a workflow run.
         if let Some(turn) = turn.as_deref() {
             self.workflow_gates.decide(turn, &approval_id, verdict);
-            // Issue #1816: bank a blocked-node approval durably the moment it
-            // lands, for the same "before the queue is told" reason as the gate
-            // batch above — except here the loss this guards against is not a
-            // re-ask, it is total. `resume_blocked_agent_node` either spawns the
-            // continuation once or never; if the batch `continuations.decide`
-            // returns below has forgotten this decision to a restart, this is
-            // the only place that fact survives. A no-op for every turn that is
-            // not a blocked agent node's.
-            if verdict == Verdict::Approve && crate::runtime::workflow_resume::is_node_turn(turn) {
-                self.blocked_nodes.mark_approved(turn);
-                if let Err(error) = self.journal.record_blocked_node_approved(turn).await {
-                    tracing::warn!(
-                        company = %self.id,
-                        %turn,
-                        %error,
-                        "[approval] a blocked node's approval could not be durably banked; a \
-                         restart before this node's last decision may now strand this grant"
-                    );
-                }
-            }
         }
+        // Issue #1816/#1825: this is the second place a blocked-node approval
+        // gets banked — `settle_approval`/`settle_approval_amended` (issue
+        // #1825) already did it inline, durably, before this detached follow-up
+        // task was even spawned. Calling it again here is a deliberate,
+        // harmless no-op (`mark_approved` and `record_blocked_node_approved`
+        // are both idempotent) kept as defense-in-depth for exactly the
+        // scenario the first bank exists to close: a crash between the settle
+        // returning and this task's first poll would otherwise leave nobody
+        // having banked the decision at all.
+        self.bank_blocked_node_approval(&approval_id, verdict).await;
         let batch = match &turn {
             Some(turn) => match self.continuations.decide(turn, Some(event)) {
                 Some(batch) => batch,
