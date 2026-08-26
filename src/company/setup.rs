@@ -1506,7 +1506,7 @@ fn role_slug(role: &str) -> String {
 
 /// Truncates a mandate to [`MAX_DESCRIPTION`] on a word boundary where one is
 /// near, so a long answer reads as a sentence rather than a severed word.
-fn clamp_description(description: &str) -> String {
+pub(crate) fn clamp_description(description: &str) -> String {
     let trimmed = description.trim();
     if trimmed.chars().count() <= MAX_DESCRIPTION {
         return trimmed.to_string();
