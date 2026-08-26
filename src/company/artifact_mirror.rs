@@ -80,7 +80,7 @@ use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 use super::workspace_names::{MAX_NAME_BYTES, kebab_name, kebab_name_or};
-use super::workspace_scaffold::ensure_artifact_folder;
+use super::workspace_scaffold::{ensure_artifact_folder_tracked, rollback_empty_minted_folders};
 
 /// One publish, as [`materialize`] needs it.
 ///
@@ -222,13 +222,49 @@ pub async fn materialize(
         });
     }
 
+    // From here a publish may mint folders before the write that justifies
+    // them exists. Track the ones this call freshly created so that a write
+    // which then fails does not leave an empty `artifacts/<agent>/…` skeleton
+    // standing (issue #1801) — the residual, non-race half of the empty folders
+    // the Tidy(#700)/Repair(#759) buttons otherwise have to sweep. The cleanup
+    // runs only on error, and removes only a folder that is still empty, so a
+    // concurrent publisher that adopted one of these is never disturbed.
+    let mut minted: Vec<String> = Vec::new();
+    match materialize_fresh(workspace, company, target, &mut minted).await {
+        Ok(mirrored) => Ok(mirrored),
+        Err(err) => {
+            rollback_empty_minted_folders(workspace, company, &minted).await;
+            Err(err)
+        }
+    }
+}
+
+/// The path-resolving, folder-minting half of [`materialize`], for a deliverable
+/// with no reusable node.
+///
+/// Split out so [`materialize`] can undo the folders it minted when the write
+/// that would have filled them fails (issue #1801). Every freshly created folder
+/// id is pushed onto `minted`: the agent folder here, plus each task or interior
+/// folder [`resolve_task_folder`] and [`resolve_folder`] mint. The caller cleans
+/// them up only on error and only while still empty — see
+/// [`rollback_empty_minted_folders`].
+async fn materialize_fresh(
+    workspace: &dyn WorkspaceStore,
+    company: &CompanyId,
+    target: PublishTarget<'_>,
+    minted: &mut Vec<String>,
+) -> Result<Mirrored> {
     let segments = split_source(target.source)?;
     let (dirs, filename) = segments
         .split_last()
         .map(|(last, rest)| (rest, last.as_str()))
         .expect("split_source rejects an empty path");
 
-    let agent_folder = ensure_artifact_folder(workspace, company, target.agent_id).await?;
+    let (agent_folder, created) =
+        ensure_artifact_folder_tracked(workspace, company, target.agent_id).await?;
+    if created {
+        minted.push(agent_folder.clone());
+    }
 
     // One tree read, then a walk that keeps its own view current: each folder
     // this creates is pushed onto `nodes`, so a `specs/deep/note.md` resolves
@@ -240,6 +276,7 @@ pub async fn materialize(
         workspace,
         company,
         &mut nodes,
+        minted,
         &parent,
         target.task_id,
         target.task_title,
@@ -251,6 +288,7 @@ pub async fn materialize(
             workspace,
             company,
             &mut nodes,
+            minted,
             &parent,
             name,
             target.agent_id,
@@ -724,6 +762,7 @@ async fn resolve_folder(
     workspace: &dyn WorkspaceStore,
     company: &CompanyId,
     nodes: &mut Vec<WorkspaceNode>,
+    minted: &mut Vec<String>,
     parent: &str,
     name: &str,
     agent_id: &str,
@@ -736,11 +775,18 @@ async fn resolve_folder(
              beneath it"
         ))),
         [] => {
-            let node = workspace
+            // Only a genuine mint is a rollback candidate (issue #1801): a
+            // publisher that adopted somebody else's folder must not have it
+            // swept if this publish then fails.
+            let claim = workspace
                 .adopt_or_create_folder(company, Some(parent), name, origin(agent_id))
-                .await?
-                .into_node();
+                .await?;
+            let created = claim.was_created();
+            let node = claim.into_node();
             let id = node.id.clone();
+            if created {
+                minted.push(id.clone());
+            }
             nodes.push(node);
             Ok(id)
         }
@@ -904,10 +950,16 @@ fn task_folder_task_id(name: &str) -> Option<&str> {
 /// adopt-or-create keyed by something other than the name — a new
 /// [`WorkspaceStore`] method across all three backends, which is a change to
 /// the port rather than to this naming rule.
+// The `minted` accumulator (issue #1801) pushes this over clippy's threshold;
+// the args are the cohesive publish context plus the two walk accumulators, so
+// bundling them would trade one honest signature for a struct that exists only
+// to satisfy the lint — the same call the repo's other sites make.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_task_folder(
     workspace: &dyn WorkspaceStore,
     company: &CompanyId,
     nodes: &mut Vec<WorkspaceNode>,
+    minted: &mut Vec<String>,
     parent: &str,
     task_id: &str,
     task_title: Option<&str>,
@@ -935,7 +987,7 @@ async fn resolve_task_folder(
         return Ok((*oldest).to_string());
     }
     let name = task_folder_name(task_id, task_title);
-    resolve_folder(workspace, company, nodes, parent, &name, agent_id).await
+    resolve_folder(workspace, company, nodes, minted, parent, &name, agent_id).await
 }
 
 /// The existing file `name` under `parent`, or `None` when the name is free.
@@ -2889,6 +2941,93 @@ mod test {
             path_of(ws, &co, &second).await,
             format!("{ARTIFACTS_ROOT}/cmo/t-1/timeline.md"),
             "the older of the two folders must win, and win the same way every time"
+        );
+    }
+
+    // -- no empty / duplicate folders (#1801) -------------------------------
+
+    /// Publishing one deliverable twice lands exactly one `artifacts/<agent>/`
+    /// and one task folder beneath it, and leaves no empty folder anywhere —
+    /// the compensating rollback added for the failure path must not fire on a
+    /// publish that succeeds.
+    #[tokio::test]
+    async fn republishing_one_deliverable_leaves_one_folder_chain_and_no_empties() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("launch.md", "v1"))
+            .await
+            .unwrap()
+            .node_id;
+        let second = materialize(ws, &co, target("launch.md", "v2"))
+            .await
+            .unwrap()
+            .node_id;
+        assert_eq!(first, second, "one deliverable, one node");
+
+        let nodes = ws.tree(&co).await.unwrap();
+        assert_eq!(
+            nodes.iter().filter(|n| n.name == "cmo").count(),
+            1,
+            "exactly one agent folder: {nodes:?}"
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|n| n.name == "t-1" || task_folder_task_id(&n.name) == Some("t-1"))
+                .count(),
+            1,
+            "exactly one task folder: {nodes:?}"
+        );
+        for folder in nodes.iter().filter(|n| n.kind == NodeKind::Folder) {
+            assert!(
+                nodes
+                    .iter()
+                    .any(|n| n.parent_id.as_deref() == Some(folder.id.as_str())),
+                "`{}` is an empty folder a successful publish must not leave: {nodes:?}",
+                folder.name
+            );
+        }
+
+        let (_, body) = ws.read(&co, &second).await.unwrap().unwrap();
+        assert_eq!(body, "v2");
+    }
+
+    /// A first publish whose note create is refused **after** its folders were
+    /// minted must leave no empty `artifacts/<agent>/…` skeleton behind — the
+    /// residual, non-race seam this issue is about. `RefusingCreate` mints
+    /// folders but refuses the note, the exact shape a quota refusal takes on a
+    /// first publish.
+    #[tokio::test]
+    async fn a_refused_first_publish_leaves_no_empty_folders() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+        let refusing = RefusingCreate(ops.clone());
+
+        let err = materialize(&refusing, &co, target("launch.md", "# Launch"))
+            .await
+            .expect_err("the refused note create must fail the publish");
+        assert!(
+            err.to_string().contains("over quota"),
+            "the store's refusal must reach the caller: {err}"
+        );
+
+        let nodes = ws.tree(&co).await.unwrap();
+        assert!(
+            !nodes.iter().any(|n| n.name == "cmo"),
+            "the empty agent folder minted for the refused publish must be swept: {nodes:?}"
+        );
+        assert!(
+            !nodes
+                .iter()
+                .any(|n| n.name == "t-1" || task_folder_task_id(&n.name) == Some("t-1")),
+            "and so must the empty task folder: {nodes:?}"
+        );
+        assert!(
+            nodes
+                .iter()
+                .all(|n| n.kind != NodeKind::Folder || n.name == ARTIFACTS_ROOT),
+            "no folder beneath the root should survive a fully-refused publish: {nodes:?}"
         );
     }
 }
