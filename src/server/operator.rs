@@ -538,6 +538,19 @@ async fn create_desk(
             "invalid desk id {id:?} — use lowercase letters, digits, and underscores"
         ))));
     }
+    // Issue #1757: `operator` is reserved for the built-in, read-only Operator
+    // system channel — `desk_exists` alone would miss this, since the system
+    // channel is never a manifest or overlay desk. Without this, a created
+    // overlay desk with this id would collide with the system channel in the
+    // desk list, and every message to it would be refused by the read-only
+    // guard in `chat_and_emit`, which treats any `chat_id == OPERATOR_CHANNEL`
+    // as the system feed regardless of where it came from.
+    if id == crate::runtime::OPERATOR_CHANNEL {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            "the id \"operator\" is reserved for the built-in Operator channel — choose a different id"
+                .to_string(),
+        )));
+    }
     if record.desk_exists(&id) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
             "a desk with id {id:?} already exists"
@@ -5230,7 +5243,10 @@ mode = "full"
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
-    /// manifest desk is 409, and an unknown member is 400.
+    /// manifest desk is 409, an unknown member is 400, and — issue #1757 — an
+    /// id (explicit or name-derived) colliding with the reserved `operator`
+    /// system channel is 409 even though it is not a manifest or overlay desk
+    /// `desk_exists` would otherwise catch.
     #[tokio::test]
     async fn create_desk_validates_name_id_and_members() {
         let home_dir = home();
@@ -5246,6 +5262,11 @@ mode = "full"
                 r#"{"name":"Ghost desk","members":["ghost"]}"#,
                 StatusCode::BAD_REQUEST,
             ),
+            (
+                r#"{"name":"Operator","id":"operator"}"#,
+                StatusCode::CONFLICT,
+            ),
+            (r#"{"name":"operator"}"#, StatusCode::CONFLICT),
         ];
         for (body, want) in cases {
             let response = app
