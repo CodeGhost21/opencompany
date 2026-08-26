@@ -542,3 +542,19 @@ describe("the cancelled-run sentence matches whether a step was actually cut off
     );
   });
 });
+
+describe("the unparkable-only blocked remedy stops naming a policy cause", () => {
+  // Codex review on #1821 (eighth pass, same site as the sixth): `parkFailed`
+  // fires both when the approvals queue refused the write and when this
+  // runtime never wired one at all (`docs/modules/server/workflow-routes.md`)
+  // — neither is a policy-content problem, and the frontend has no field
+  // naming which happened, exactly as the legend definition's own hedge
+  // (tested above) already accounts for. The row body still told the operator
+  // to "change the policy" for the very same run.
+  it("does not tell the operator to change the policy", async () => {
+    await renderHistory(blockedUnparkableRun());
+    const row = container.querySelector('[data-testid="workflow-run-blocked"]');
+    expect(row?.textContent).not.toContain("change the policy");
+    expect(row?.textContent).toContain("approvals queue itself may have refused it");
+  });
+});
