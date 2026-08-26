@@ -39,6 +39,22 @@ interface Props {
    */
   channelMemberIds?: string[];
   /**
+   * Your own avatar reference, so your lines in this thread wear your face
+   * (issue #1729).
+   *
+   * `senderOf` seeds a face off the sender's *name* when it is given none, and
+   * a "you" line's name is the literal string "You" — so without this the panel
+   * drew whatever mascot `avatarFor("You")` hashes to, which is the agent's
+   * green one. Both participants then had the same face and a thread could not
+   * be read at all. The main timeline has always passed it (`buildTimeline`);
+   * only this panel resolved its senders without it.
+   *
+   * Absent until `loadViewer` has resolved who you are, exactly as in the main
+   * timeline — the tile falls back to the name-seeded mascot for that first
+   * render rather than showing nothing.
+   */
+  youAvatar?: string;
+  /**
    * Resolves an attachment's bytes to an object URL for preview/download
    * (issue #1682). Threaded from the parent ChatView like the main timeline's
    * `MessageRow` gets it, so a thread line can render the same chips — a
@@ -95,6 +111,7 @@ export function ThreadPanel({
   sending,
   mentionables,
   channelMemberIds,
+  youAvatar,
   resolveAttachmentUrl,
   onSend,
   onClose,
@@ -119,6 +136,7 @@ export function ThreadPanel({
           channel={channel}
           members={members}
           message={parent}
+          youAvatar={youAvatar}
           resolveAttachmentUrl={resolveAttachmentUrl}
           cognition={cognition}
         />
@@ -134,6 +152,7 @@ export function ThreadPanel({
             channel={channel}
             members={members}
             message={r}
+            youAvatar={youAvatar}
             resolveAttachmentUrl={resolveAttachmentUrl}
             cognition={cognition}
           />
@@ -158,16 +177,21 @@ function Line({
   channel,
   members,
   message,
+  youAvatar,
   resolveAttachmentUrl,
   cognition,
 }: {
   channel: Channel;
   members: TeamMember[];
   message: ChatMessage;
+  youAvatar?: string;
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   cognition?: CognitionState | null;
 }) {
-  const sender = senderOf(message, channel, members);
+  // Four arguments, not three: `youAvatar` is the last parameter, and omitting
+  // it left your own line with no avatar to seed from but the name "You" —
+  // which collided with the agent's face (issue #1729).
+  const sender = senderOf(message, channel, members, youAvatar);
   // Literally the same predicate `MessageRow` uses, not a second copy of it —
   // two spellings of "which rows are the echo brain's" is how this panel came
   // to be missing the marker in the first place.
@@ -187,6 +211,10 @@ function Line({
         avatar={sender.avatar}
         company={sender.kind === "company"}
         className="size-8"
+        // Named by whose line it is, so a spec can assert that your face and
+        // the agent's are two different faces (issue #1729) rather than
+        // counting `img` elements in DOM order.
+        data-testid={`thread-avatar-${sender.kind}`}
       />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
