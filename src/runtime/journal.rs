@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
@@ -314,6 +315,41 @@ enum JournalRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The two facts a blocked agent node's continuation needs — its workflow id
+    /// and the paused run's trigger input — stashed durably at park time so an
+    /// approval can re-dispatch the run **after a restart** (issue #1816,
+    /// Stage 2).
+    ///
+    /// The runtime's in-memory
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue) is
+    /// the fast path; this record is what the builder re-arms it from at boot
+    /// (see [`blocked_stashes`](RuntimeJournal::blocked_stashes)). Written from
+    /// the one place — the runner's block-settle — that holds the workflow id,
+    /// the trigger input and the blocked-node list together, exactly where the
+    /// in-memory stash is armed. The parked tool-call effect itself carries no
+    /// workflow lineage, which is why this is a dedicated record rather than a
+    /// widening of [`ApprovalParked`](Self::ApprovalParked).
+    BlockedNodeStashed {
+        /// The per-(run, node) turn key its parked calls also armed the
+        /// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)
+        /// under, so a released batch and this stash name the same block.
+        turn: String,
+        /// The workflow whose run blocked, to load the graph for the re-run.
+        workflow_id: String,
+        /// The paused run's own trigger input, replayed unchanged — the grant the
+        /// approve minted is what lets the identical gated call pass on the re-run.
+        input: Value,
+        /// Epoch-millis the block was stashed.
+        at_millis: u64,
+    },
+    /// A blocked-node stash whose run has been re-dispatched (or whose block was
+    /// wholly refused): the paired terminator for
+    /// [`BlockedNodeStashed`](Self::BlockedNodeStashed), so a resolved block does
+    /// not rehydrate a duplicate continuation on the next boot (issue #1816).
+    BlockedNodeReleased {
+        /// The turn key whose stash this drops.
+        turn: String,
+    },
 }
 
 impl JournalRecord {
@@ -394,16 +430,15 @@ impl JournalRecord {
             // same trade `GrantConsumed` accepted four arms up: one flush on a
             // record written at operator-decision scale.
             //
-            // **Deliberately NOT extended to an agent node's gated tool call**,
-            // though those park inside a workflow run too and strand it just as
-            // badly. Flushing them would buy nothing: their continuation needs
-            // the workflow id and trigger input, which the tool-call effect does
-            // not carry, so `BlockedNodeQueue` stashes them **in memory** and
-            // — unlike the gate queue — does not rehydrate from the journal at
-            // all (`blocked_nodes`, stated there as the #899 Stage-1 boundary).
-            // A durable record whose continuation died with the process is a
-            // flush that changes nothing, and it would read as a fix. Making
-            // that path survive is #899 Stage 2.
+            // The card for an agent node's gated tool call stays `Process` here,
+            // but the continuation it strands is now made durable a different
+            // way (issue #1816). The tool-call effect carries no workflow id or
+            // trigger input, so host-flushing the *card* would still buy nothing.
+            // Instead the two facts the continuation needs are written at park
+            // time as a dedicated host-durable `BlockedNodeStashed` record and
+            // re-armed into `BlockedNodeQueue` at boot — so a restart between park
+            // and approve re-dispatches the run from that record, and the card
+            // itself needs no stronger durability than every other park.
             //
             // Keyed on the effect kind rather than on `run_id`, which cannot do
             // this job: `run_id` is stamped with a *task attempt* id at the
@@ -446,6 +481,21 @@ impl JournalRecord {
             // host crash, it was.
             Self::CycleStarted { .. } => Durability::Process,
             Self::CycleFinished { .. } => Durability::Process,
+            // Issue #1816: the whole point of the record is to outlive the
+            // process — and, on a hosted tenant whose journal store is the
+            // shared database, the container. `Process` would leave it
+            // page-cache-resident and lost with the pod, which is precisely the
+            // failure that stranded parked tasks on the ~90-min staging cron.
+            // Written at human-approval scale (one per blocked node), so the
+            // flush is invisible — the same trade the workflow-gate park makes
+            // for its own continuation facts one arm up.
+            Self::BlockedNodeStashed { .. } => Durability::Host,
+            // The terminator must be at least as durable as the record it
+            // retires: if the stash survived a crash but its release did not,
+            // the next boot would rehydrate a stash whose run already
+            // re-dispatched and could double-spawn under a boot sweep. Host, to
+            // match `BlockedNodeStashed`.
+            Self::BlockedNodeReleased { .. } => Durability::Host,
         }
     }
 }
@@ -799,6 +849,25 @@ struct State {
     /// live set, so retaining a revoked one would hand back a permission the
     /// operator explicitly took away — on every restart, silently.
     standing_grants: HashMap<GrantId, StandingGrant>,
+    /// Blocked agent-node continuation facts still awaiting re-dispatch, keyed by
+    /// the per-(run, node) turn key (issue #1816, Stage 2).
+    ///
+    /// A [`BlockedNodeStashed`](JournalRecord::BlockedNodeStashed) inserts, its
+    /// paired [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased) removes
+    /// — the same start-inserts / terminator-removes shape
+    /// [`grants`](Self::grants) uses, and for the same reason: a replayed entry is
+    /// handed straight back to the live
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue) at
+    /// boot, so retaining a released one would rehydrate a run that already
+    /// re-dispatched.
+    blocked_stashes: HashMap<String, BlockedStash>,
+}
+
+/// One blocked agent node's durable continuation facts (issue #1816).
+#[derive(Clone, Debug)]
+struct BlockedStash {
+    workflow_id: String,
+    input: Value,
 }
 
 impl State {
@@ -1090,6 +1159,23 @@ impl RuntimeJournal {
             }
             JournalRecord::CycleFinished { cycle_id, .. } => {
                 state.open_cycles.remove(&cycle_id);
+            }
+            // Issue #1816: start inserts, terminator removes — the same shape as
+            // grants. A `BlockedNodeReleased` for a turn this journal never
+            // stashed removes nothing, which is correct: a pre-#1816 line has no
+            // stash to retire, so none can be sitting in the map.
+            JournalRecord::BlockedNodeStashed {
+                turn,
+                workflow_id,
+                input,
+                ..
+            } => {
+                state
+                    .blocked_stashes
+                    .insert(turn, BlockedStash { workflow_id, input });
+            }
+            JournalRecord::BlockedNodeReleased { turn } => {
+                state.blocked_stashes.remove(&turn);
             }
         }
     }
@@ -1408,6 +1494,75 @@ impl RuntimeJournal {
             .values()
             .filter_map(|p| p.cycle.clone())
             .collect()
+    }
+
+    /// Every blocked agent-node stash still awaiting re-dispatch, as
+    /// `(turn, workflow_id, input)` (issue #1816, Stage 2).
+    ///
+    /// The builder folds this at boot into the live
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)
+    /// (via [`rearm`](crate::runtime::blocked_nodes::BlockedNodeQueue::rearm)) so
+    /// an approval landing after a restart finds the run to continue, the way
+    /// [`pending`](Self::pending) feeds the gate queue's re-arm. Only stashes
+    /// whose paired [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased)
+    /// has not replayed are returned — a re-dispatched run does not come back.
+    pub fn blocked_stashes(&self) -> Vec<(String, String, Value)> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_stashes
+            .iter()
+            .map(|(turn, stash)| (turn.clone(), stash.workflow_id.clone(), stash.input.clone()))
+            .collect()
+    }
+
+    /// Stashes a blocked agent node's continuation facts durably (issue #1816).
+    ///
+    /// Called from the runner's block-settle in lockstep with the in-memory
+    /// [`BlockedNodeQueue::arm`](crate::runtime::blocked_nodes::BlockedNodeQueue::arm),
+    /// so the fast path and the durable record carry the same `(turn,
+    /// workflow_id, input)`. Best-effort at the call site: a failed durable write
+    /// leaves the in-memory stash serving the common (no-restart) case, exactly
+    /// as a failed gate journal leaves its live queue in place.
+    pub async fn record_blocked_node_stashed(
+        &self,
+        turn: &str,
+        workflow_id: &str,
+        input: &Value,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_stashes
+            .entry(turn.to_string())
+            // First write wins, mirroring `BlockedNodeQueue::arm`: every gated
+            // call one node parked shares one turn and one input, so a repeat
+            // arm carries identical facts.
+            .or_insert_with(|| BlockedStash {
+                workflow_id: workflow_id.to_string(),
+                input: input.clone(),
+            });
+        self.append(&JournalRecord::BlockedNodeStashed {
+            turn: turn.to_string(),
+            workflow_id: workflow_id.to_string(),
+            input: input.clone(),
+            at_millis: crate::ports::now_millis(),
+        })
+        .await
+    }
+
+    /// Retires a blocked-node stash once its run has re-dispatched (or its block
+    /// was wholly refused), so a later boot does not rehydrate it (issue #1816).
+    pub async fn record_blocked_node_released(&self, turn: &str) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_stashes
+            .remove(turn);
+        self.append(&JournalRecord::BlockedNodeReleased {
+            turn: turn.to_string(),
+        })
+        .await
     }
 
     /// The turn that parked `id`, if it is one this journal recorded
