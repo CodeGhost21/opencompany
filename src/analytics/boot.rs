@@ -94,12 +94,57 @@ pub fn describe(decision: &Decision) -> String {
         Decision::Report { endpoint, .. }
             if crate::analytics::BuildFlags::of_this_build().analytics =>
         {
-            format!("analytics: reporting to {endpoint}")
+            format!("analytics: reporting to {}", loggable_endpoint(endpoint))
         }
         Decision::Report { endpoint, .. } => format!(
-            "analytics: off (reporting to {endpoint} was configured, but this build was \
-             compiled without the `analytics` feature)"
+            "analytics: off (reporting to {} was configured, but this build was \
+             compiled without the `analytics` feature)",
+            loggable_endpoint(endpoint)
         ),
+    }
+}
+
+/// The collector URL with anything credential-shaped removed.
+///
+/// `OPENCOMPANY_ANALYTICS_ENDPOINT` exists so a deployment can front Mixpanel
+/// with its own proxy, and an authenticated proxy carries its key in exactly the
+/// two places a URL can hold one: userinfo (`https://user:pass@host/track`) and
+/// the query string (`https://host/track?key=…`). Printing the raw value writes
+/// that secret verbatim into container logs, which the [`ProjectToken`]
+/// redaction does nothing about — it guards a different string.
+///
+/// So only the scheme, host and path are logged, which is all an operator needs
+/// to answer "where is this going?". When something was removed the line says
+/// so, because a silently shortened URL is its own hour of confusion.
+///
+/// [`ProjectToken`]: crate::analytics::config::ProjectToken
+fn loggable_endpoint(raw: &str) -> String {
+    // Query and fragment first: `?key=…` is at least as common as userinfo.
+    let trimmed = raw.split(['?', '#']).next().unwrap_or(raw);
+
+    // Then userinfo, and only within the authority — a path may legitimately
+    // contain `@`, and truncating there would report the wrong destination.
+    let cleaned = match trimmed.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = match rest.split_once('/') {
+                Some((authority, path)) => (authority, Some(path)),
+                None => (rest, None),
+            };
+            let host = authority
+                .rsplit_once('@')
+                .map_or(authority, |(_userinfo, host)| host);
+            match path {
+                Some(path) => format!("{scheme}://{host}/{path}"),
+                None => format!("{scheme}://{host}"),
+            }
+        }
+        None => trimmed.to_string(),
+    };
+
+    if cleaned == raw {
+        cleaned
+    } else {
+        format!("{cleaned} (credentials redacted)")
     }
 }
 
@@ -191,6 +236,86 @@ mod test {
                  what was intended: {line}"
             );
         }
+    }
+
+    /// **A credential in the endpoint must not reach a log line.**
+    ///
+    /// `OPENCOMPANY_ANALYTICS_ENDPOINT` is there so a deployment can front
+    /// Mixpanel with its own proxy, and an authenticated proxy carries its key
+    /// in userinfo or in the query string. `ProjectToken`'s redaction guards a
+    /// different string entirely and does nothing here.
+    ///
+    /// Asserted case-insensitively: a redaction that merely lowercased the
+    /// secret would still have leaked it, and an exact-case search would read
+    /// that as clean.
+    #[test]
+    fn a_credential_in_the_endpoint_never_reaches_the_boot_line() {
+        for raw in [
+            "https://someone:NotARealCollectorKey@collector.invalid/track",
+            "https://collector.invalid/track?key=NotARealCollectorKey",
+            "https://collector.invalid/track#NotARealCollectorKey",
+            "https://someone:NotARealCollectorKey@collector.invalid/t?k=NotARealCollectorKey",
+        ] {
+            let line = describe(&Decision::Report {
+                endpoint: raw.to_string(),
+                token: crate::analytics::config::ProjectToken::new("not-a-real-token"),
+            });
+            assert!(
+                !line
+                    .to_ascii_lowercase()
+                    .contains(&SECRET.to_ascii_lowercase()),
+                "the boot line leaked the endpoint credential in {raw:?}: {line}"
+            );
+            assert!(
+                line.contains("collector.invalid"),
+                "the destination is still named, or the line is useless: {line}"
+            );
+            assert!(
+                line.contains("credentials redacted"),
+                "a shortened URL must say it was shortened: {line}"
+            );
+        }
+    }
+
+    /// A credential-shaped value that stands in for a collector proxy's key.
+    /// Mixed case on purpose: see the self-check below.
+    const SECRET: &str = "NotARealCollectorKey";
+
+    /// The self-check for the assertion above. A leak guard that cannot find
+    /// the needle in an **unredacted** value proves nothing about the redacted
+    /// one — the needle may simply never have been there, or the comparison may
+    /// be case-sensitive against a value something lowercased on the way
+    /// through. Both have happened on this PR.
+    #[test]
+    fn the_leak_assertion_would_catch_an_unredacted_endpoint() {
+        let unredacted = format!("https://collector.invalid/track?key={SECRET}");
+        assert!(
+            unredacted
+                .to_ascii_lowercase()
+                .contains(&SECRET.to_ascii_lowercase()),
+            "the needle must be findable before redaction, or the guard is vacuous"
+        );
+        assert!(
+            unredacted
+                .to_ascii_lowercase()
+                .contains(&SECRET.to_ascii_uppercase().to_ascii_lowercase()),
+            "and findable whatever case it comes back in"
+        );
+    }
+
+    /// An ordinary endpoint is printed unchanged and says nothing about
+    /// redaction. The control: without it, "redact everything" would pass.
+    #[test]
+    fn an_ordinary_endpoint_is_printed_unchanged() {
+        let line = describe(&Decision::Report {
+            endpoint: crate::analytics::config::DEFAULT_ENDPOINT.to_string(),
+            token: crate::analytics::config::ProjectToken::new("not-a-real-token"),
+        });
+        assert!(
+            line.contains(crate::analytics::config::DEFAULT_ENDPOINT),
+            "{line}"
+        );
+        assert!(!line.contains("credentials redacted"), "{line}");
     }
 
     /// An unreadable switch says so at boot, rather than looking like a
