@@ -822,7 +822,15 @@ export function RunHistoryRow({
             : " before any step finished"}
           .{" "}
           {midFlightNode
-            ? "The steps above completed; the one still running was stopped where it was."
+            ? // Codex review on #1821 (tenth pass): `WorkflowNodeFinished` is
+              // appended best-effort — a failed append is logged and the run
+              // proceeds unaffected (`runner.rs`'s progress collector) — so an
+              // unmatched `startedNodes` entry is not proof the node was cut
+              // off; it is equally consistent with a node that completed
+              // normally but whose own finish record silently failed to
+              // journal. Naming a definitive hard abort overclaimed what a
+              // missing row alone can prove.
+              "The steps above completed; the one still running was either stopped where it was or finished without its own record being saved — its actual outcome isn't confirmed here."
             : knowsStartTrail
               ? // Codex review on #1821 (eighth pass): the legend definition
                 // above was fixed to say the mid-flight step "normally ran to
