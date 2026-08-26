@@ -130,6 +130,22 @@ fn stamp_build_commit(root: &Path) {
             // the working trees of eight nested vendored crates measured
             // 495ms against 27ms here, on a probe that runs on every
             // incremental build.
+            //
+            // So the boundary, stated rather than left to be rediscovered:
+            // this measures **this repository's** tree at the commit being
+            // stamped, and a submodule is part of that tree as a *gitlink*.
+            // Uncommitted edits inside a vendored work tree are not — they
+            // belong to another repository, at another commit, with a dirty
+            // state of its own, and no stamp of one commit id can describe
+            // two trees. Re-measured on 2026-08-26: `--ignore-submodules=`
+            // `untracked` costs 347ms against `dirty`'s 36ms, and probing all
+            // 18 vendored work trees individually costs 356ms. Nor could the
+            // answer be kept fresh, since nothing watches those 11k files —
+            // a probe that is right only on whichever build happened to rerun
+            // for another reason is worse than one whose edge is written down.
+            // The case is a deliberate local act in any event: CI, release and
+            // desktop builds all compile a clean checkout, and the hosted
+            // image is stamped from an injected `OPENCOMPANY_BUILD_COMMIT`.
             git(
                 root,
                 &[
