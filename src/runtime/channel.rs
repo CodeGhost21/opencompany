@@ -464,11 +464,11 @@ mod test {
         }
     }
 
-    /// The durable operator channel carries the `operator` id but journals its
-    /// report onto the operator's main line (the General desk), authored by
-    /// `workflow` — so the owner/no-mailbox fallback lands somewhere the console
-    /// renders and survives a restart, and reads as a workflow report rather than
-    /// an agent's own reply (issue #1757).
+    /// The durable operator channel carries the `operator` id and journals its
+    /// report onto that dedicated Operator line — never the General desk,
+    /// authored by `workflow` — so the owner/no-mailbox fallback lands somewhere
+    /// the console renders and survives a restart, and reads as a workflow
+    /// report rather than an agent's own reply (issue #1757).
     #[tokio::test]
     async fn the_durable_operator_channel_journals_to_the_operator_line() {
         let log = Arc::new(RecordingEventLog::default());
