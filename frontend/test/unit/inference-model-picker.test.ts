@@ -212,6 +212,69 @@ describe("OpenRouter tier model pickers", () => {
   });
 });
 
+describe("raw OpenRouter registry ids vs the proxy's own passthrough shape (issue #1838 follow-up, fifth instance)", () => {
+  it("strips a two-segment OpenRouter-registry id (e.g. openrouter/auto) when Remove Key switches to the proxy", async () => {
+    // OpenRouter's own catalog has ids under the `openrouter/` author too —
+    // `openrouter/auto` is a real two-segment registry id, not the proxy's
+    // three-segment `openrouter/<author>/<slug>` passthrough form. A prefix
+    // check that only tests `startsWith("openrouter/")` mistakes the former
+    // for the latter and leaves it in place; `model_for_tier` then forwards
+    // it to the proxy verbatim, which rejects it.
+    const { client, puts } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "openrouter/auto", "reasoning-v1": "reasoning-v1" },
+        true,
+      ),
+      [{ id: "openrouter/auto", name: "Auto" }],
+    );
+
+    await mount(client);
+
+    const button = container.querySelector('[data-testid="inference-remove-key"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { key?: string; models?: Record<string, string> };
+    expect(body.key).toBe("");
+    expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
+  });
+
+  it("keeps the proxy's genuine three-segment openrouter/<author>/<slug> passthrough id", async () => {
+    // The exemption exists for this shape specifically — an operator who
+    // enabled proxy passthrough and saved its own `openrouter/<author>/<slug>`
+    // form must not have it stripped out from under them by the same fix.
+    const { client, puts } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "openrouter/anthropic/claude-3-opus", "reasoning-v1": "reasoning-v1" },
+        true,
+      ),
+      [{ id: "openrouter/anthropic/claude-3-opus", name: "Claude 3 Opus (passthrough)" }],
+    );
+
+    await mount(client);
+
+    const button = container.querySelector('[data-testid="inference-remove-key"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { key?: string; models?: Record<string, string> };
+    expect(body.models).toEqual({
+      "chat-v1": "openrouter/anthropic/claude-3-opus",
+      "reasoning-v1": "reasoning-v1",
+    });
+  });
+});
+
 describe("proxy-incompatible overrides survive an unready catalog (issue #1838 follow-up)", () => {
   it("strips a raw catalog id from the draft while the registry is still loading, before Save is clicked", async () => {
     // Third instance of the #1838 class: the earlier fix only stripped a

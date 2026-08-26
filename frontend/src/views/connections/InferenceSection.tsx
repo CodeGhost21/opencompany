@@ -196,9 +196,20 @@ function modelItems(models: InferenceModel[]): Record<string, string> {
  * the exact same way a catalog-picked one does. Keying off the shape instead
  * means every caller gets the same, correct answer with no dependency on a
  * network fetch having already resolved.
+ *
+ * The `openrouter/` prefix alone is not enough to confirm the passthrough
+ * shape (issue #1838 follow-up, fifth instance): OpenRouter's own registry
+ * owns two-segment ids under that same author name, such as
+ * `openrouter/auto`, and a plain `startsWith` mistook one for the proxy's
+ * three-segment `openrouter/<author>/<slug>` form. That let `model_for_tier`
+ * forward a raw registry id straight through under the same "already the
+ * proxy's own form" exemption meant for ids the proxy actually accepts.
+ * Counting the segments is what actually distinguishes the two shapes.
  */
 function isRawCatalogId(value: string): boolean {
-  return value.includes("/") && !value.startsWith("openrouter/");
+  if (!value.includes("/")) return false;
+  if (!value.startsWith("openrouter/")) return true;
+  return value.split("/").length < 3;
 }
 
 /**
