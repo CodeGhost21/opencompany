@@ -487,6 +487,98 @@ async fn two_calls_on_one_node_continue_once_after_the_last_decision() {
     );
 }
 
+/// Issue #1816: a restart between the FIRST and SECOND decision on a two-call
+/// node must not lose the first decision's approval.
+///
+/// `ContinuationQueue`'s released batch only carries the verdicts one process
+/// held in memory (see that module's docs on `rearm`); a restart between two
+/// decisions on the same node drops the earlier one from it. If the surviving
+/// decision is a deny, the naive `approved = batch.iter().any(Approve)` this
+/// module used to compute reads false even though the operator did approve
+/// one of the node's two calls — and unlike a workflow gate, which re-parks
+/// whatever its own batch forgets, a blocked node has no re-park fallback: it
+/// either spawns the continuation once or never. On the pre-fix code this test
+/// is red — `runner.started()` stays 1, the approved grant is minted and never
+/// redeemed, and nothing tells the operator anything is wrong.
+#[tokio::test]
+async fn a_restart_between_two_decisions_does_not_lose_the_earlier_approval() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo one" }),
+            },
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo two" }),
+            },
+            Turn::Say("Both were refused, so I stopped."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 2, "the node parked two cards under one batch");
+    assert_eq!(runner.started(), 1);
+
+    // Approve the first call. The turn is still blocked on the second, so
+    // nothing continues yet — but the approve is durably banked the moment it
+    // lands (issue #1816's fix), not only if it happens to survive to release.
+    resolve_and_settle(&rt, &cards[0], Verdict::Approve).await;
+    assert_eq!(runner.started(), 1, "one of two decisions releases nothing");
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+    assert!(
+        rt.blocked_nodes().is_armed(&turn),
+        "precondition: the node's stash is still live before the restart"
+    );
+
+    // Simulate the process/host replacement between the two decisions: a
+    // fresh runtime built over the same home directory, so every in-memory
+    // queue (`ContinuationQueue`, `BlockedNodeQueue`, `WorkflowGateQueue`)
+    // starts empty and comes back only from what the on-disk journal replays
+    // — exactly `a_restart_between_park_and_approve_still_continues_the_run`'s
+    // scenario, but after one of two decisions rather than before either.
+    let (rt2, runner2) = runtime(
+        home.path(),
+        vec![
+            // The continuation replays the node's turn from its original
+            // trigger input: the first call's grant redeems silently, and the
+            // second — genuinely denied below, no grant minted — parks again.
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo one" }),
+            },
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo two" }),
+            },
+            Turn::Say("The remaining call is still refused."),
+        ],
+    )
+    .await;
+    assert_eq!(
+        rt2.blocked_nodes().waiting(),
+        1,
+        "the durable stash rehydrated across the simulated restart"
+    );
+
+    // The second (and last) decision, against the fresh runtime: denied. On
+    // the pre-fix code the batch this releases carries only this deny, so
+    // `approved` reads false and `runner2.started()` stays 0 — the first
+    // call's grant is stranded, unredeemed, with nothing to tell the operator.
+    resolve_and_settle(&rt2, &cards[1], Verdict::Deny).await;
+    assert_eq!(
+        runner2.started(),
+        1,
+        "the earlier approval must still release a continuation, even though \
+         the deciding process never saw it get approved"
+    );
+}
+
 /// Two runs blocked at once do not continue each other — the stash is per
 /// (run, node), so approving one run's card leaves the other's untouched and
 /// starts a continuation for the approved run only.
