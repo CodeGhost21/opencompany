@@ -131,6 +131,10 @@ function headerConsts(body: string): string[] {
  */
 function isJsx(block: string): boolean {
   const after = block
+    // `if (cond) return <Pane />;` is a state like any other. ChatView's
+    // `if (!desks) return <LoadingPane />;` is one, and a check anchored on
+    // `return` at the start of the line could not see it.
+    .replace(/^\s*if \([^\n]*?\)\s*/, "")
     .replace(/^\s*return\s*/, "")
     .replace(/^\(\s*/, "")
     // Leading commentary, in any of the three forms these files use.
@@ -141,18 +145,28 @@ function isJsx(block: string): boolean {
 
 /**
  * Whether this state renders a page heading: the component, the const holding
- * it, or a hand-rolled `<h1>`.
+ * it, a hand-rolled `<h1>`, or a component that is itself held to one.
  *
  * `<h1>` counts because the question here is whether the state has a name at
  * all. *Who* may hand-roll one, and how many, is `HAND_ROLLED`'s business in
  * `page-header-adoption.test.ts` — two rules, one each, rather than both
  * half-enforced in two places.
+ *
+ * `carriers` is what makes a multi-component file checkable. `ChatView`'s
+ * loaded return draws no heading of its own — its title is `ChatHeader`'s
+ * channel name, the `handRolled` leaf enumerated under `chat` — and its three
+ * channel-less returns hand the screen to `LoadingPane` and `EmptyPane`, two
+ * helpers in the same file that each draw a `hidden` header. All four states
+ * are named; none of them says so in its own block. A component that is
+ * *itself* guarded, or that carries a header in its own body, is therefore a
+ * name as much as a literal tag is.
  */
-function hasHeading(block: string, consts: string[]): boolean {
+function hasHeading(block: string, consts: string[], carriers: string[]): boolean {
   return (
     block.includes("<PageHeader") ||
     block.includes("<h1") ||
-    consts.some((name) => block.includes(`{${name}}`))
+    consts.some((name) => block.includes(`{${name}}`)) ||
+    carriers.some((name) => new RegExp(`<${name}[\\s/>]`).test(block))
   );
 }
 
@@ -171,63 +185,116 @@ function hasHeading(block: string, consts: string[]): boolean {
  * time produced the next finding, because the check could not tell the two
  * questions apart.
  *
- * The component is found by walking back from the first header to the nearest
- * top-level declaration, so returns inside helper components defined elsewhere
- * in the file are not counted — they are not this page's states.
+ * # Which components in the file get scanned
+ *
+ * **The one named after the file, plus every helper in it that draws a header
+ * of its own** (codex review, #1785).
+ *
+ * The earlier version anchored on the *first* `<PageHeader` in the file and
+ * walked back to the nearest top-level declaration. That is the routed
+ * component only when the routed component happens to hold the first header,
+ * and in `ChatView.tsx` it does not: the first one is at line 1987, inside the
+ * `LoadingPane` helper at the bottom, so `start` landed on `LoadingPane`, `end`
+ * landed on `EmptyPane`'s declaration 29 lines later, and the scan inspected a
+ * single helper. `ChatView` itself — its loaded return and its three
+ * channel-less returns — and `EmptyPane` were never read at all. Deleting the
+ * header from `EmptyPane` left two states with no `h1` and this suite green.
+ *
+ * A helper that draws a header is a whole-page state by construction: nothing
+ * else has any business drawing one. So the set is decidable without guessing
+ * at what a helper is for, and a helper that owns a page state and draws *no*
+ * header is not silently skipped — it is not a carrier, so the routed
+ * component's return that hands it the screen has no heading in it and is
+ * reported there.
  *
  * `return () =>` is an effect cleanup, and a `return` with no `<` is a value,
  * not a render.
  */
-function returnsWithoutHeader(source: string): { line: number; text: string }[] {
+const TOP_LEVEL = /^(export )?(function|const) ([A-Z][A-Za-z0-9_]*)/;
+
+/**
+ * A `return` that is a state of the component, at its own top level or as the
+ * tail of a one-line `if`. The indent bound keeps the scan out of callbacks
+ * nested deeper than a component's own body.
+ */
+const RETURNS = /^\s{2,6}(if \([^\n]*\) )?return\b/;
+
+/** Every top-level PascalCase declaration in the file, with its line range. */
+function componentBlocks(lines: string[]): { name: string; start: number; end: number }[] {
+  const starts: { name: string; start: number }[] = [];
+  lines.forEach((line, i) => {
+    const match = TOP_LEVEL.exec(line);
+    if (match) starts.push({ name: match[3], start: i });
+  });
+  return starts.map((s, i) => ({
+    ...s,
+    end: i + 1 < starts.length ? starts[i + 1].start : lines.length,
+  }));
+}
+
+/**
+ * The last line of the `return` statement that starts at `start`, by
+ * indentation.
+ *
+ * The earlier version looked for a line matching exactly `\s{indent}\);`, which
+ * is the shape a JSX return closes with and *not* the shape a chained
+ * expression closes with. `ChatView`'s `return Object.values(decidedApprovals)`
+ * at line 980 therefore ran on until it met the `);` closing a *different*
+ * return 112 lines later, swallowing the `desksError` state at 1086 — a whole
+ * page state the scan then never inspected, reported as nothing.
+ *
+ * Indentation is the decidable version of the same question and needs no
+ * parsing of strings or JSX text: the statement owns every line indented
+ * further than the `return`, and ends on the first line that is not — including
+ * that line when it is a closer (`);`, `};`, `/>`), which is where the JSX
+ * actually finishes.
+ */
+function statementEnd(lines: string[], start: number, limit: number): number {
+  if (lines[start].trimEnd().endsWith(";")) return start;
+  const indent = lines[start].length - lines[start].trimStart().length;
+  for (let j = start + 1; j < limit; j++) {
+    if (lines[j].trim() === "") continue;
+    if (lines[j].length - lines[j].trimStart().length > indent) continue;
+    return /^[)\]};,]/.test(lines[j].trim()) ? j : j - 1;
+  }
+  return limit - 1;
+}
+
+function returnsWithoutHeader(source: string, file: string): { line: number; text: string }[] {
   const lines = source.split("\n");
-  const header = lines.findIndex((l) => l.includes("<PageHeader"));
-  if (header < 0) return [];
+  const blocks = componentBlocks(lines);
+  const body = (b: { start: number; end: number }) => lines.slice(b.start, b.end).join("\n");
 
-  let start = 0;
-  for (let i = header; i >= 0; i--) {
-    if (/^(export )?(function|const) [A-Z][A-Za-z0-9_]*/.test(lines[i])) {
-      start = i;
-      break;
-    }
-  }
-  // The component ends where the next top-level declaration begins.
-  let end = lines.length;
-  for (let i = Math.max(start + 1, header + 1); i < lines.length; i++) {
-    if (/^(export )?(function|const) [A-Z][A-Za-z0-9_]*/.test(lines[i])) {
-      end = i;
-      break;
-    }
-  }
+  // A component that draws a header is one this file's states can be named by.
+  const local = blocks
+    .filter((b) => /<PageHeader|<h1[\s>]/.test(body(b)))
+    .map((b) => b.name);
+  const carriers = [...GUARDED_COMPONENTS, ...local];
 
-  const consts = headerConsts(lines.slice(start, end).join("\n"));
+  const owner = file.slice(file.lastIndexOf("/") + 1).replace(/\.tsx$/, "");
+  const scanned = blocks.filter((b) => b.name === owner || local.includes(b.name));
 
-  const found: { line: number; text: string }[] = [];
-  let i = start;
-  while (i < end) {
-    const line = lines[i];
-    if (!/^\s{2,6}return\b/.test(line) || line.includes("return () =>")) {
-      i += 1;
-      continue;
-    }
-    const indent = line.length - line.trimStart().length;
-    const block = [line];
-    let j = i;
-    if (!line.trimEnd().endsWith(";")) {
-      j = i + 1;
-      while (j < end) {
-        block.push(lines[j]);
-        if (new RegExp(`^\\s{${indent}}\\);\\s*$`).test(lines[j])) break;
-        j += 1;
+  return scanned.flatMap(({ start, end }) => {
+    const consts = headerConsts(lines.slice(start, end).join("\n"));
+    const found: { line: number; text: string }[] = [];
+    let i = start;
+    while (i < end) {
+      const line = lines[i];
+      if (!RETURNS.test(line) || line.includes("return () =>")) {
+        i += 1;
+        continue;
       }
+      const j = statementEnd(lines, i, end);
+      const block = lines.slice(i, j + 1);
+      const text = block.join("\n");
+      if (isJsx(text) && !hasHeading(text, consts, carriers) && !delegatesTo(text)) {
+        const first = block.slice(1).find((l) => l.trim()) ?? line;
+        found.push({ line: i + 1, text: first.trim().slice(0, 80) });
+      }
+      i = j + 1;
     }
-    const text = block.join("\n");
-    if (isJsx(text) && !hasHeading(text, consts) && !delegatesTo(text)) {
-      const first = block.slice(1).find((l) => l.trim()) ?? line;
-      found.push({ line: i + 1, text: first.trim().slice(0, 80) });
-    }
-    i = j + 1;
-  }
-  return found;
+    return found;
+  });
 }
 
 describe("every state of a routed view renders a heading (#1785)", () => {
@@ -243,6 +310,32 @@ describe("every state of a routed view renders a heading (#1785)", () => {
     }
   });
 
+  it("finds the component named after each file, so a rename cannot skip the page", () => {
+    // `returnsWithoutHeader` scans the block named after the file plus every
+    // helper in it that draws a header. If the first of those is not there —
+    // a component renamed away from its file — the page's own returns are
+    // silently not scanned, which is the failure this whole file is about.
+    const files = [
+      ...VIEWS.flatMap((v) => NAMED_BY[v].map(headerFile)).filter((f): f is string => f !== null),
+      ...Object.values(SETTINGS_NAMED_BY),
+      ...Object.values(FINANCE_NAMED_BY),
+    ];
+    const missing = files
+      .filter((file) => {
+        const lines = readFileSync(`${VIEWS_DIR}/${file}`, "utf8").split("\n");
+        const owner = file.slice(file.lastIndexOf("/") + 1).replace(/\.tsx$/, "");
+        return !componentBlocks(lines).some((b) => b.name === owner);
+      })
+      .map((file) => `${file} declares no top-level component named after it`);
+
+    expect(
+      missing,
+      `The scan below finds a page's states by the component named after its ` +
+        `file. Rename the component back, or rename the file to match.\n` +
+        missing.join("\n"),
+    ).toEqual([]);
+  });
+
   it("has no routed view returning JSX without a heading in it", () => {
     const offenders = VIEWS.flatMap((view) => {
       if (view in EARLY_RETURN_OK) return [];
@@ -250,7 +343,7 @@ describe("every state of a routed view renders a heading (#1785)", () => {
         const file = headerFile(leaf);
         if (file === null) return [];
         const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
-        return returnsWithoutHeader(source).map(
+        return returnsWithoutHeader(source, file).map(
           (r) => `${view} (${file}:${r.line}) returns with no heading in it: ${r.text}`,
         );
       });
@@ -274,7 +367,7 @@ describe("every state of a routed view renders a heading (#1785)", () => {
     const offenders = SETTINGS_PAGES.flatMap(({ id }) => {
       const file = SETTINGS_NAMED_BY[id];
       const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
-      return returnsWithoutHeader(source).map(
+      return returnsWithoutHeader(source, file).map(
         (r) => `settings/${id} (${file}:${r.line}) returns with no heading in it: ${r.text}`,
       );
     });
@@ -292,7 +385,7 @@ describe("every state of a routed view renders a heading (#1785)", () => {
     const offenders = FINANCE_PAGES.flatMap(({ id }) => {
       const file = FINANCE_NAMED_BY[id];
       const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
-      return returnsWithoutHeader(source).map(
+      return returnsWithoutHeader(source, file).map(
         (r) => `finances/${id} (${file}:${r.line}) returns with no heading in it: ${r.text}`,
       );
     });
@@ -311,7 +404,7 @@ describe("every state of a routed view renders a heading (#1785)", () => {
         const early = NAMED_BY[view as View].flatMap((leaf) => {
           const file = headerFile(leaf);
           if (file === null) return [];
-          return returnsWithoutHeader(readFileSync(`${VIEWS_DIR}/${file}`, "utf8"));
+          return returnsWithoutHeader(readFileSync(`${VIEWS_DIR}/${file}`, "utf8"), file);
         });
         return early.length > 0
           ? null
