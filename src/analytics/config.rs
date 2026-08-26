@@ -122,12 +122,25 @@ impl Decision {
 /// 4. A token is required. Without one there is nowhere to report to, and
 ///    guessing is not an option — see [`TOKEN_ENV`].
 pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
-    // Blank is absent, for the same reason a blank token is: a variable set to
-    // whitespace is a variable nobody meant to set. See [`non_blank`].
-    let switch = env
-        .get(ENABLE_ENV)
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty());
+    // Read through `get_os`, not `get`. [`EnvSource::get`] maps a non-Unicode
+    // value to `None`, which here would read as "the operator said nothing" and
+    // leave a hosted tenant reporting — the same failure as the unreadable
+    // spelling below, arriving by a different route. The trait's own docs point
+    // a reader that must tell *malformed* from *unset* at `get_os` for exactly
+    // this reason.
+    //
+    // Blank is still absent, for the same reason a blank token is: a variable
+    // set to whitespace is a variable nobody meant to set. See [`non_blank`].
+    let switch = match env.get_os(ENABLE_ENV) {
+        Some(raw) => match raw.into_string() {
+            Ok(value) => {
+                let value = value.trim().to_ascii_lowercase();
+                if value.is_empty() { None } else { Some(value) }
+            }
+            Err(_) => return Decision::Silent(Silence::Unreadable),
+        },
+        None => None,
+    };
 
     match switch.as_deref() {
         Some("off" | "false" | "0" | "no") => return Decision::Silent(Silence::OptedOut),
@@ -270,6 +283,40 @@ mod test {
             );
             assert!(!decision.reports(), "{typo:?}");
         }
+    }
+
+    /// **A switch that is set but is not text fails closed too.**
+    ///
+    /// `EnvSource::get` maps a non-Unicode value to `None`, so reading through
+    /// it would have treated `OPENCOMPANY_ANALYTICS=<invalid bytes>` as an
+    /// absent switch and left a hosted tenant reporting — the same leak as the
+    /// unreadable spelling, by a different route.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_switch_is_unreadable_rather_than_absent() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        struct NonUnicodeSwitch;
+        impl EnvSource for NonUnicodeSwitch {
+            fn get_os(&self, key: &str) -> Option<OsString> {
+                match key {
+                    ENABLE_ENV => Some(OsString::from_vec(vec![0xff, 0xfe, 0x6f, 0x6e])),
+                    TOKEN_ENV => Some(OsString::from("not-a-real-token")),
+                    _ => None,
+                }
+            }
+        }
+
+        // The premise: this really is a value `get` cannot see at all.
+        assert_eq!(NonUnicodeSwitch.get(ENABLE_ENV), None);
+        assert!(NonUnicodeSwitch.get_os(ENABLE_ENV).is_some());
+
+        assert_eq!(
+            resolve(Deployment::HostedTenant, &NonUnicodeSwitch),
+            Decision::Silent(Silence::Unreadable),
+            "a switch set to bytes this process cannot read must not read as unset"
+        );
     }
 
     /// The near-miss control: `off` really is matched case-insensitively and
