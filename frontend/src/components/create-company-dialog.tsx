@@ -27,6 +27,7 @@ import {
   buildManifestToml,
   describeProvisionError,
   resetReplacementId,
+  wasAlreadyArchived,
 } from "@/lib/company-manifest";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -166,13 +167,21 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
         setArchived(true);
         didArchive = true;
       } catch (err) {
-        // Nothing was created, and the archive did not take — say so plainly
-        // and leave the operator where they are to try again.
-        setError(
-          `Couldn't archive ${request.name}: ${describeProvisionError(err)} Nothing was changed.`,
-        );
-        setBusy(false);
-        return;
+        if (wasAlreadyArchived(err)) {
+          // Our own earlier attempt already archived it; the response just
+          // never arrived. Proceed to the create leg instead of reporting a
+          // failure that didn't happen.
+          setArchived(true);
+          didArchive = true;
+        } else {
+          // Nothing was created, and the archive did not take — say so
+          // plainly and leave the operator where they are to try again.
+          setError(
+            `Couldn't archive ${request.name}: ${describeProvisionError(err)} Nothing was changed.`,
+          );
+          setBusy(false);
+          return;
+        }
       }
     }
 

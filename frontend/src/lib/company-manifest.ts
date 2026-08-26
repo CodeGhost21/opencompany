@@ -154,3 +154,24 @@ export function resetReplacementId(oldId: string): string {
       : Math.random().toString(36).slice(2, 10);
   return `${oldId}-${suffix}`;
 }
+
+/**
+ * Whether a failed archive attempt means the company is already gone, rather
+ * than that the archive itself was refused.
+ *
+ * `client.lifecycle("archive", …)` is ambiguous by construction on a dropped
+ * connection: `ApiClient.request` throws the same `network_error` whether the
+ * request never reached the host, or it reached the host, archived and
+ * removed the company from the registry, and only the *reply* was lost in
+ * transit — there is no way to tell those apart from the caught exception
+ * alone. A retry of that same archive call then answers `company_not_found`:
+ * the id really is gone, but only because the earlier attempt already
+ * removed it, not because the archive was refused. Without this check the
+ * reset dialog reads that retry as a fresh failure and reports "nothing was
+ * changed" — which is false — leaving the operator stuck retrying an archive
+ * that already took, unable to ever reach the create leg (codex review on
+ * #1828, PR comment 3861770485).
+ */
+export function wasAlreadyArchived(err: unknown): boolean {
+  return err instanceof ApiError && err.code === "company_not_found";
+}
