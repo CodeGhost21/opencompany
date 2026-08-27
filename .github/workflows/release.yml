@@ -101,6 +101,12 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+          # Explicitly OFF. The generator has no dependencies and this job never
+          # runs `npm install`, so there is nothing to cache — but this job also
+          # holds `contents: write` and publishes what users download, which
+          # makes a restored cache a supply-chain surface for no benefit at all.
+          # Saying so here states the intent and clears the zizmor finding.
+          cache: false
 
       # `continue-on-error` plus the fallback below, not `||` inside one step:
       # a failed OpenAI call must still leave a `release-notes.md` behind, and
