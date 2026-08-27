@@ -880,6 +880,25 @@ export class OpenCompanyClient {
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
   }
 
+  /**
+   * Push a parked approval's deadline out to a fresh full TTL window (#1805),
+   * so a stalled run does not default-deny before someone can decide it.
+   *
+   * Returns the approval's **new** default-deny instant (epoch-millis) — the
+   * number the card's countdown will now project — so the caller can redraw the
+   * deadline without re-fetching the whole approvals list. A 404 means there was
+   * nothing to extend: an unknown id, or one that has since resolved or expired,
+   * which the caller should treat by refreshing the list rather than as a
+   * failure to report.
+   */
+  async extendApproval(approvalId: string, company?: string | null): Promise<number> {
+    const answer = await this.request<{ expiresAtMillis: number }>(
+      "POST",
+      `${this.scope(company)}/approvals/${encodeURIComponent(approvalId)}/extend`,
+    );
+    return answer.expiresAtMillis;
+  }
+
   /** The live standing permissions, newest first (#374). */
   listGrants(company?: string | null): Promise<StandingGrant[]> {
     return this.request<StandingGrant[]>("GET", `${this.scope(company)}/grants`);

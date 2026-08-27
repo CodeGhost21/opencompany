@@ -1681,6 +1681,12 @@ fn summarize_event(event: &CompanyEvent) -> String {
             verdict,
             ..
         } => format!("approval {approval_id} {verdict:?}"),
+        // Issue #1805. Structural only, on the same terms as the parked/resolved
+        // arms: the id, and nothing else — `by` is a user id, dropped as every
+        // arm here drops it.
+        CompanyEvent::ApprovalExtended { approval_id, .. } => {
+            format!("approval {approval_id} extended")
+        }
         CompanyEvent::FeedbackFiled { .. } => "feedback filed".to_string(),
         CompanyEvent::PaymentReceived { amount_usd, .. } => format!("payment ${amount_usd:.2}"),
         CompanyEvent::LifecycleChanged { from, to, .. } => format!("lifecycle {from} → {to}"),
