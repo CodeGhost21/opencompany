@@ -57,6 +57,7 @@ import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
+import { PageHeader } from "@/components/page-header";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { TypingLine } from "./chat/TypingLine";
@@ -2257,6 +2258,17 @@ export function ChatView({
 function LoadingPane() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/*
+        `#/chat` has an `h1` in every state (codex review, #1785). The loaded
+        pane's is `ChatHeader`'s channel name; these three channel-less states
+        returned before it ever mounted, leaving a page with an `sr-only`
+        sentence and no heading at all.
+
+        `hidden` for the same reason Chat's own header is: the pane is the
+        content, and this state is a skeleton — there is nothing for a title
+        bar to sit above.
+      */}
+      <PageHeader title="Chat" hidden />
       <div className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
         <Skeleton className="size-4 rounded" />
         <Skeleton className="h-4 w-32 rounded" />
@@ -2286,6 +2298,9 @@ function EmptyPane({
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+      {/* See `LoadingPane`: the page keeps its name in every channel-less
+          state. The `h2` below names the *state*, not the page. */}
+      <PageHeader title="Chat" hidden />
       <div className="max-w-sm space-y-1.5">
         <h2 className="text-base font-semibold tracking-tight">{title}</h2>
         <p className="text-sm text-muted-foreground">{body}</p>

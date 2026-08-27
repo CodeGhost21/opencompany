@@ -378,7 +378,7 @@ export function AgentRuns({
 
   return (
     <Card data-testid="agent-runs">
-      <CardContent className="space-y-3 py-4">
+      <CardContent className="space-y-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
             <h3 className="font-medium">Runs</h3>
@@ -749,7 +749,7 @@ function RunDetailPanel({
 
   return (
     <Card data-testid="agent-run-detail">
-      <CardContent className="space-y-4 py-4">
+      <CardContent className="space-y-4">
         <Button
           variant="ghost"
           size="sm"

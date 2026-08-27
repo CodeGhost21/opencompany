@@ -65,6 +65,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -2423,8 +2424,8 @@ export function WorkflowsView({
           `Run` is the only filled button on the detail screen: two primaries on
           one screen means neither reads as the main action, which is why `New
           workflow` moved to the index rather than being demoted here. */}
-      <div className="border-b px-4 py-3">
-        {detailOpen ? (
+      {detailOpen ? (
+        <div className="border-b px-4 py-3">
           <div className="flex flex-col gap-3" data-testid="workflow-detail-toolbar">
             {/* ── row 1 · identity and state ─────────────────────────────
                 Issue #1110: the heading says where you are — this workflow's
@@ -2757,19 +2758,22 @@ export function WorkflowsView({
               </div>
             </div>
           </div>
-        ) : (
-          /* The index's one row: the tab's own heading, and the controls that
-             act on the list rather than on any workflow in it. */
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="text-sm font-semibold">
-                {indexTab === "runs" ? "Runs" : "Workflows"}
-              </h1>
-              <Badge variant="secondary">
-                {indexTab === "runs" ? indexRuns.length : workflows.length}
-              </Badge>
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+        </div>
+      ) : (
+        /* The index's one row: the tab's own heading, and the controls that
+           act on the list rather than on any workflow in it.
+
+           Issue #1763: this row is the console's page header now. It is the
+           shape the operator named as the reference, so `PageHeader` was
+           derived from it and this page reads as it did — bar, hairline,
+           inline count, actions right-aligned — with the title on the shared
+           scale rather than on the `text-sm` that only this one row used. */
+        <PageHeader
+          title={indexTab === "runs" ? "Runs" : "Workflows"}
+          count={indexTab === "runs" ? indexRuns.length : workflows.length}
+          data-testid="workflow-index-header"
+          actions={
+            <>
               {/* Issue #1697: the graphs, or their runs — the index's other
                   axis, alongside Cards/List. Segmented for the same reason
                   that toggle is: one question, two answers. */}
@@ -2851,10 +2855,10 @@ export function WorkflowsView({
                 <Plus className="mr-1.5 size-4" />
                 New workflow
               </Button>
-            </div>
-          </div>
-        )}
-      </div>
+            </>
+          }
+        />
+      )}
 
       {/* Issue #259: a write refused because the graph moved under us. Distinct
           from `error` on purpose — this one is recoverable, and the recovery is

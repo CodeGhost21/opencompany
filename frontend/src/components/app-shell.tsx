@@ -45,6 +45,7 @@ import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { RouteLoading } from "@/components/route-loading";
 import {
   RESTING_ROW,
   SidebarCollapseButton,
@@ -159,6 +160,30 @@ const WorkspaceView = lazy(() =>
 const FinanceSection = lazy(() =>
   import("@/views/finance/FinanceSection").then((m) => ({ default: m.FinanceSection })),
 );
+
+/**
+ * The `h1` a cold visit to `#/finances/<sub>` announces before the chunk lands.
+ *
+ * On a direct visit — a bookmark, a pasted link — this boundary *is* the whole
+ * page for as long as the chunk takes, so its heading is what a screen reader
+ * announces. A single "Finances" for every subpage told someone who had opened
+ * `#/finances/wallet` that they were somewhere else, and it corrected itself
+ * only once the chunk arrived, which is exactly when they no longer needed it.
+ *
+ * Spelled out here rather than imported from `FinanceSection`: a static import
+ * of anything in that module pulls the chunk eagerly and there is no lazy
+ * boundary left to name. `the finance fallback names every subpage` holds these
+ * to `FINANCE_PAGES`, which a test may import freely.
+ */
+const FINANCE_FALLBACK_TITLES: Readonly<Record<string, string>> = {
+  invoicing: "Invoicing",
+  wallet: "Wallet",
+};
+
+/** The fallback heading for `#/finances/<sub>`, defaulting to the section. */
+export function financeFallbackTitle(sub: string | null): string {
+  return (sub && FINANCE_FALLBACK_TITLES[sub]) || "Finances";
+}
 // Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
 // as the other heavier, less-visited surfaces.
 const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
@@ -2866,13 +2891,7 @@ export function AppShell({
             />
           )}
           {view === "workspace" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading workspace…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Workspace" label="Loading workspace…" />}>
               <WorkspaceView
                 client={client}
                 company={company}
@@ -2914,9 +2933,16 @@ export function AppShell({
           {view === "observatory" && (
           <Suspense
             fallback={
-              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
-                Loading observatory…
-              </div>
+              <RouteLoading
+                // `ObservatoryView` titles itself `runId ? "Run" : "Observatory"`,
+                // and on a cold direct visit to `#/observatory/<runId>` this
+                // boundary is the whole page — so announcing "Observatory" told
+                // someone who had bookmarked a run they were on the index, and
+                // corrected itself only once the chunk landed. Same rule, same
+                // `sub`, as the finance boundary above.
+                title={sub ? "Run" : "Observatory"}
+                label={sub ? "Loading run…" : "Loading observatory…"}
+              />
             }
           >
             <ObservatoryView
@@ -2934,13 +2960,7 @@ export function AppShell({
           </Suspense>
         )}
         {view === "workflows" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading canvas…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Workflows" label="Loading canvas…" />}>
               <WorkflowsView
                 client={client}
                 company={company}
@@ -2980,22 +3000,17 @@ export function AppShell({
             </Suspense>
           )}
           {view === "pages" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading pages…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Pages" label="Loading pages…" />}>
               <PagesView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (
             <Suspense
               fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading finances…
-                </div>
+                <RouteLoading
+                  title={financeFallbackTitle(sub)}
+                  label={`Loading ${financeFallbackTitle(sub).toLowerCase()}…`}
+                />
               }
             >
               <FinanceSection

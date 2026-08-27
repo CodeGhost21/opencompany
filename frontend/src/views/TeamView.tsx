@@ -7,6 +7,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -425,37 +426,42 @@ export function TeamView({
   });
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        {/*
-          Headed "Company", not "Team" (issue #1141). This grid is no longer a
-          page of its own — bare `#/team` redirects to `#/company` — it is the
-          Company page's Cards half, and the org chart beside it heads the same
-          way. Two headings over one page's two halves is how an operator ends
-          up believing they are on two different pages.
-        */}
-        <div className="space-y-1">
-          <div
-            className="flex flex-wrap items-center justify-between gap-3"
-            data-testid="company-header"
-          >
-            <h1 className="text-2xl font-semibold tracking-tight">Company</h1>
-            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-              {onManageDesks && (
-                <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
-                  <Network className="size-4" /> Manage desks
-                </Button>
-              )}
-              <Button onClick={() => setAddOpen(true)}>
-                <UserPlus className="size-4" /> Add teammate
-              </Button>
-            </div>
-          </div>
-          <p className="text-sm text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/*
+        Headed "Company", not "Team" (issue #1141). This grid is no longer a
+        page of its own — bare `#/team` redirects to `#/company` — it is the
+        Company page's Cards half, and the org chart beside it heads the same
+        way. Two headings over one page's two halves is how an operator ends
+        up believing they are on two different pages.
+
+        Issue #1207 put the actions on the heading's row rather than on a row of
+        their own; `PageHeader` is where that shape lives now (issue #1763), and
+        `company-header` still names the row the two share.
+      */}
+      <PageHeader
+        title="Company"
+        width="5xl"
+        rowTestId="company-header"
+        description={
+          <>
             The teammates that make up your company — what each does, and what
             they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
-          </p>
-        </div>
+          </>
+        }
+        actions={
+          <>
+            {onManageDesks && (
+              <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
+                <Network className="size-4" /> Manage desks
+              </Button>
+            )}
+            <Button onClick={() => setAddOpen(true)}>
+              <UserPlus className="size-4" /> Add teammate
+            </Button>
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {/*
           The other half of "blocking but skippable": until somebody has staffed
@@ -636,7 +642,7 @@ function MemberCard({
         onOpen && "cursor-pointer hover:border-primary/40 hover:shadow-sm",
       )}
     >
-      <CardContent className="flex h-full flex-col gap-3 py-4">
+      <CardContent className="flex h-full flex-col gap-3">
         <div className="flex items-start gap-3">
           {/*
             The shared chat avatar, not a hand-rolled tile (issue #1181). This
