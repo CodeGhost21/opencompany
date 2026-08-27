@@ -160,6 +160,32 @@ wants a specific model through the proxy writes the `openrouter/…` form into
 
 ---
 
+## Model catalog
+
+`GET {scope}/inference/models` lists OpenRouter's public model registry for
+the console's picker — the operator-facing complement to `DEFAULT_TIER_MODELS`
+above, used when an operator wants to pick a *specific* model rather than
+accept a tier default.
+
+The route is authenticated like the rest of `{scope}/inference/*` but does not
+read the calling company's own config: the registry is a public, per-process
+resource shared by every tenant on the host, not something scoped per company.
+
+| property | value |
+|---|---|
+| cache lifetime | 1 hour (`MODEL_CATALOG_TTL`) |
+| fetch timeout | 10 seconds (`MODEL_CATALOG_TIMEOUT`) — a console page-load waits at most this long on a cold cache |
+| concurrent misses | coalesced onto a single upstream fetch (`ModelCatalogCache::fetch_lock`) — after startup or a TTL expiry, several console requests arriving together do not each fire their own OpenRouter call |
+| malformed entries | skipped individually rather than failing the whole response, so one bad record does not hide every valid model the registry returned |
+| response ordering | sorted by model id, distinct from the provider order `discover_models` preserves for the local/custom setup probe |
+
+A registry fetch failure (timeout, non-2xx, an empty catalog) surfaces as an
+error on this route rather than silently returning stale or empty data — the
+picker shows a failure state instead of an incomplete list that looks
+complete.
+
+---
+
 ## Outbound headers
 
 | header | when | why |
@@ -236,4 +262,5 @@ different payers, and merging them would tell the operator nothing.
 | resolution, scoping, aliasing | `src/company/inference.rs` |
 | the chat models and request plan | `src/harness/built_in/provider.rs` |
 | read/write plane | `src/server/ops/inference.rs` |
+| model catalog discovery, cache, single-flight | `src/server/inference_models.rs` |
 | the subscription proxy itself | the TinyHumans backend |
