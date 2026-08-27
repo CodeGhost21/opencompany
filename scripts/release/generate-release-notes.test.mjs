@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  buildOpenAiRequest,
   buildReleasePayload,
   collectContributorStats,
   ensureAllPullRequestsLinked,
@@ -217,4 +218,20 @@ test('extractResponseText reads both Responses API shapes', () => {
     'a\nb',
   );
   assert.equal(extractResponseText({}), '');
+});
+
+test('buildOpenAiRequest tells the model that contributor names are not handles', () => {
+  // The first real release cut with this generator credited "@Cyrus Gray" and
+  // "@Jarno de Vries" — the model read `contributors[].name` as a GitHub login
+  // and @-prefixed a display name, producing dead mentions. Only
+  // `pullRequests[].author` is a handle.
+  const request = buildOpenAiRequest({
+    model: 'gpt-5.2',
+    title: 'v0.1.0 to v0.2.0',
+    payload: { contributors: [], pullRequests: [], uncategorizedCommits: [], totals: {}, range: {} },
+  });
+
+  assert.equal(request.model, 'gpt-5.2');
+  assert.match(request.input[1].content, /DISPLAY NAME, not a GitHub handle/);
+  assert.match(request.input[1].content, /Never prefix it with "@"/);
 });
