@@ -435,6 +435,42 @@ pub(crate) mod append_probe {
             .copied()
             .unwrap_or(0)
     }
+
+    /// The order in which [`super::write_atomic_bytes`] publish renames have
+    /// landed, globally, since the process started.
+    ///
+    /// A multi-file save (`FsCompanyStore::save_gated` writes `company.toml`
+    /// then `meta.json`) has a crash-ordering property neither
+    /// [`counts`] nor [`atomic_syncs`] can answer: *which file's publish is
+    /// observable first* if the process dies between the two. Each is
+    /// individually atomic+durable (that is what those two probes prove), but
+    /// nothing about a single path's own counters says anything about a
+    /// **different** path's write landing before or after it. This log does:
+    /// it is one global, append-only sequence of every publish, in the order
+    /// `write_atomic_bytes` actually completed them.
+    static WRITE_ORDER: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+    pub(crate) fn record_write_order(path: &Path) {
+        WRITE_ORDER
+            .lock()
+            .expect("append-probe poisoned")
+            .push(key(path));
+    }
+
+    /// The subsequence of the global publish order restricted to `paths`,
+    /// in the order they actually landed. Tests use their own unique temp
+    /// paths, so restricting to the paths under test is enough to make this
+    /// deterministic even though the log itself is never cleared.
+    pub(crate) fn write_order_for(paths: &[&Path]) -> Vec<PathBuf> {
+        let keys: Vec<PathBuf> = paths.iter().map(|p| key(p)).collect();
+        WRITE_ORDER
+            .lock()
+            .expect("append-probe poisoned")
+            .iter()
+            .filter(|p| keys.contains(p))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Reads a file to a string, returning an empty string if it does not exist.
@@ -701,6 +737,12 @@ pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> 
         // Unconditional: the rename changed this directory whether or not the
         // destination already existed.
         sync_parent_dir(&owned_path)?;
+        // Records the order this publish landed in, relative to any other
+        // `write_atomic` call — see `append_probe::write_order_for`'s doc
+        // comment for why a multi-file save (`FsCompanyStore::save_gated`)
+        // needs this and a per-path counter alone cannot answer it.
+        #[cfg(test)]
+        append_probe::record_write_order(&owned_path);
         Ok::<_, OpenCompanyError>(())
     })
     .await
@@ -854,18 +896,45 @@ impl FsCompanyStore {
         Bundle::new(self.root.clone(), id)
     }
 
-    /// The shared body of `save` and `save_importing`: writes the manifest
-    /// and meta file, stamping `activation_gate_seen` with whatever the
+    /// The shared body of `save` and `save_importing`: writes the meta file
+    /// and manifest, stamping `activation_gate_seen` with whatever the
     /// caller passes rather than always `true`. See
     /// `CompanyStore::save_importing`'s doc comment for why the two callers
     /// need different values.
+    ///
+    /// ## Write order: `meta.json` before `company.toml` (PR #1875 review
+    /// finding)
+    ///
+    /// `FsCompanyStore::load` decides whether a bundle exists **at all** by
+    /// whether `company.toml` is present — `meta.json` is read only once that
+    /// check has already passed. That makes `company.toml` the file whose
+    /// existence *publishes* the bundle, and it is why the gate marker has to
+    /// be durable *before* that publish, not after: if a crash lands between
+    /// the two writes, whichever order they run in decides which
+    /// inconsistent state survives.
+    ///
+    /// Manifest-first (the original order) fails toward the *wrong* state: a
+    /// crash after `company.toml`'s rename but before `meta.json`'s leaves a
+    /// bundle that `load` reports as existing, with `lifecycle == "running"`
+    /// and — because `meta.json` is missing — `activation_gate_seen`
+    /// defaulting to `false`. That is byte-for-byte the shape
+    /// `RuntimeBuilder::build`'s grandfather migration matches on, so a fresh
+    /// company's interrupted first boot gets silently auto-activated, the
+    /// exact bug `activation_gate_seen` exists to prevent (see this struct
+    /// field's own doc comment, and issue #1843).
+    ///
+    /// Meta-first (here) fails toward the *safe* state instead: a crash after
+    /// `meta.json`'s rename but before `company.toml`'s leaves `company.toml`
+    /// still absent (or, on a later save of an already-existing company,
+    /// unchanged), so `load` reports the bundle as not existing yet — or, for
+    /// an existing company, as still on its last fully-published manifest.
+    /// Either way nothing reads a gate marker that outruns the bundle it
+    /// describes; the worst outcome is a save that has to be retried, not a
+    /// company that gets activated without its operator ever seeing the
+    /// funnel.
     async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
         let bundle = self.bundle(&record.id);
         bundle.ensure_dirs().await?;
-
-        let toml_src = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        write_atomic(&bundle.company_toml(), &toml_src).await?;
 
         let meta = Meta {
             lifecycle: record.lifecycle.clone(),
@@ -888,6 +957,10 @@ impl FsCompanyStore {
             activation_gate_seen,
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
+
+        let toml_src = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        write_atomic(&bundle.company_toml(), &toml_src).await?;
         Ok(())
     }
 }
@@ -2753,6 +2826,65 @@ mod test {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// **PR #1875 review finding**: `save_gated` must publish `meta.json`
+    /// (which carries `activation_gate_seen`) before it publishes
+    /// `company.toml` (which is what `load` treats as "this bundle exists").
+    ///
+    /// Reversed, a crash between the two writes leaves a bundle `load`
+    /// reports as an existing `lifecycle == "running"` company whose gate
+    /// marker reads `false` — indistinguishable from a genuine pre-#1843
+    /// legacy record, so `RuntimeBuilder::build`'s grandfather migration
+    /// silently auto-activates a brand-new company on its interrupted first
+    /// boot. This cannot be asserted from the final on-disk bytes (both
+    /// orderings leave the same two files behind once `save` completes) —
+    /// only the *order the publishes landed in* distinguishes a build that
+    /// fails toward the bug from one that fails toward safety, which is
+    /// exactly what `append_probe::write_order_for` records.
+    #[tokio::test]
+    async fn save_publishes_the_gate_marker_before_the_manifest() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: sample_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+
+        let order = append_probe::write_order_for(&[&bundle.meta_json(), &bundle.company_toml()]);
+        assert_eq!(
+            order,
+            vec![bundle.meta_json(), bundle.company_toml()],
+            "meta.json (the gate marker) must land before company.toml (what \
+             `load` treats as the bundle's existence) — reversed, an \
+             interrupted save can auto-activate a fresh company as a legacy \
+             one on its next boot"
         );
     }
 
