@@ -681,6 +681,18 @@ export function ChatView({
   // dead — and a stale answer landing last would replace the current company's
   // channels with the previous one's.
   const desksRun = useRef(0);
+  /**
+   * Whether the current `desks` state is `defaultDesks()` — the fabricated
+   * starter set shown when the host exposes no desks — rather than the host's
+   * own list. `onCreated` below needs the distinction (codex on #1872):
+   * appending the company's first real channel *beside* the fallback would
+   * leave nonexistent channels in the rail until reload, and a channel named
+   * "Strategy" would collide with the fallback row of the same id, so
+   * navigation could land on the fabrication instead of the real thing. The
+   * moment one real desk exists the fallback set has no business rendering —
+   * that is the fallback's own contract (`lib/desks.ts`).
+   */
+  const desksAreFallback = useRef(false);
 
   /**
    * The company's real desks, when the host exposes them — a company with its
@@ -703,10 +715,12 @@ export function ChatView({
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
+      desksAreFallback.current = dtos.length === 0;
       setDesks(dtos.length ? dtos.map(deskFromDto) : defaultDesks());
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
+        desksAreFallback.current = true;
         setDesks(defaultDesks());
         return;
       }
@@ -2008,8 +2022,15 @@ export function ChatView({
           // Fold the new channel into the rail and land the operator in it —
           // the same deskFromDto every fetched desk goes through, so a
           // just-created channel is indistinguishable from a reloaded one.
+          //
+          // REPLACING the fallback set, not appending to it, when the rail was
+          // showing `defaultDesks()`: the company's first real channel is the
+          // event that ends the fallback's mandate, and appending beside it
+          // would keep fabricated rows in the rail — one of which could share
+          // the new channel's very id — until a reload (codex on #1872).
           const desk = deskFromDto(dto);
-          setDesks((prev) => [...(prev ?? []), desk]);
+          setDesks((prev) => (desksAreFallback.current ? [desk] : [...(prev ?? []), desk]));
+          desksAreFallback.current = false;
           selectChannel(desk.id);
         }}
       />

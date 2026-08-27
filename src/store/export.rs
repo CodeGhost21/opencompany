@@ -1677,14 +1677,26 @@ mod test {
             desk_id: "eng".into(),
             agent_id: "designer".into(),
         }];
-        // An operator-created desk the manifest never declared.
-        let desks = vec![OverlayDesk {
-            id: "growth".into(),
-            name: "Growth".into(),
-            description: Some("Marketing pod".into()),
-            members: vec!["ceo".into()],
-            responder: crate::ports::types::ResponderMode::default(),
-        }];
+        // Operator-created desks the manifest never declared — one of each
+        // responder mode, so the round-trip below (whole-vec equality) proves
+        // the `auto` flag survives export→import rather than silently
+        // reverting a leadless channel to a lead desk (issue #1835).
+        let desks = vec![
+            OverlayDesk {
+                id: "growth".into(),
+                name: "Growth".into(),
+                description: Some("Marketing pod".into()),
+                members: vec!["ceo".into()],
+                responder: crate::ports::types::ResponderMode::default(),
+            },
+            OverlayDesk {
+                id: "launch".into(),
+                name: "Launch".into(),
+                description: None,
+                members: vec!["ceo".into(), "cto".into()],
+                responder: crate::ports::types::ResponderMode::Auto,
+            },
+        ];
         // A workflow graph authored at runtime (issue #168). On a hosted tenant
         // this body is the ONLY copy — a bundle that dropped it would lose the
         // workflow outright.

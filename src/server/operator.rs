@@ -535,6 +535,18 @@ async fn create_desk(
         }
     }
 
+    // An `auto` channel with nobody in it is unroutable by construction
+    // (issue #1835, codex review): the selector has no candidates and the
+    // first-member fallback has no first member, so an unmentioned message
+    // there would fall through to the orchestrator — contradicting the
+    // channel's own stated model. A *lead* desk may still start empty and be
+    // staffed from the org chart, exactly as before.
+    if !body.responder.is_lead() && members.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "a channel with per-message routing needs at least one member — with nobody in it, there is nobody to pick"
+                .to_string(),
+        )));
+    }
     let description = body
         .description
         .map(|d| d.trim().to_string())
@@ -5251,6 +5263,55 @@ mode = "full"
             "defaulted create: {desks}"
         );
         assert_eq!(arr[2]["responder"], "auto", "{desks}");
+    }
+
+    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
+    /// the selector would have no candidates and the first-member fallback no
+    /// first member, so its unmentioned messages would silently fall to the
+    /// orchestrator, contradicting the channel's own model. A **lead** desk
+    /// keeps its right to start empty and be staffed from the org chart.
+    /// Revert the guard in `create_desk` and the first assertion answers 201.
+    #[tokio::test]
+    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            body.contains("at least one member"),
+            "the refusal names the reason, not a generic 400: {body}"
+        );
+
+        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
+        assert_eq!(
+            empty_lead.status(),
+            StatusCode::CREATED,
+            "an empty lead desk is still legal — it gains members from the org chart"
+        );
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a

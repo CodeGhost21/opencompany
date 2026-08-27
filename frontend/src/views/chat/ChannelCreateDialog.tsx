@@ -61,10 +61,18 @@ export function ChannelCreateDialog({
   // (issue #1100): the name complaint renders at the name field, the host's
   // refusal of the whole form banners above the footer.
   const [nameError, setNameError] = useState<string | null>(null);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const formId = useId();
   const nameErrorId = `${formId}-name-error`;
+  const membersErrorId = `${formId}-members-error`;
+  // The scope this render belongs to, for the stale-completion guard below —
+  // the same comparison `ChatView`'s send path makes against its `scopeRef`
+  // (CodeRabbit on #1872): a `createDesk` that resolves after the operator
+  // switched company or host must not hand its desk to the new scope's rail.
+  const scopeNow = useRef({ client, company });
+  scopeNow.current = { client, company };
 
   // Reset the draft each time the dialog opens, so a prior attempt never
   // leaks into the next one.
@@ -75,6 +83,7 @@ export function ChannelCreateDialog({
     setChosen([]);
     setMemberFilter("");
     setNameError(null);
+    setMembersError(null);
     setError(null);
   }, [open]);
 
@@ -82,6 +91,7 @@ export function ChannelCreateDialog({
     setChosen((prev) =>
       prev.includes(id) ? prev.filter((m) => m !== id) : [...prev, id],
     );
+    setMembersError(null);
   }
 
   const needle = memberFilter.trim().toLowerCase();
@@ -100,18 +110,41 @@ export function ChannelCreateDialog({
       return;
     }
     setNameError(null);
+    // An empty auto channel is unroutable by construction (codex on #1872):
+    // the selector has no candidates and the first-member fallback no first
+    // member, so the host refuses it — and a control that will be refused is
+    // not offered a hopeful submit here either. A lead desk may start empty;
+    // a conversation with nobody in it is not a conversation.
+    if (chosen.length === 0) {
+      setMembersError("Pick at least one member — a channel with nobody in it has nobody to answer.");
+      setError(null);
+      return;
+    }
+    setMembersError(null);
     setSubmitting(true);
     setError(null);
+    const scopeAtSubmit = scopeNow.current;
     try {
       const created = await client.createDesk(
         {
           name: name.trim(),
           description: description.trim() || undefined,
-          members: chosen.length > 0 ? chosen : undefined,
+          members: chosen,
           responder: "auto",
         },
         company,
       );
+      // The create landed and is journaled — on the company it was submitted
+      // to. If the operator has since moved scope, handing the desk to
+      // `onCreated` would append it to the NEW company's rail and navigate
+      // there, so the completion is dropped and the dialog simply closes.
+      if (
+        scopeNow.current.client !== scopeAtSubmit.client ||
+        scopeNow.current.company !== scopeAtSubmit.company
+      ) {
+        onOpenChange(false);
+        return;
+      }
       onCreated(created);
       onOpenChange(false);
     } catch (e) {
@@ -171,6 +204,8 @@ export function ChannelCreateDialog({
               value={memberFilter}
               onChange={(e) => setMemberFilter(e.target.value)}
               placeholder="Filter teammates"
+              aria-invalid={membersError ? true : undefined}
+              aria-describedby={membersError ? membersErrorId : undefined}
               disabled={submitting}
             />
             <ul className="mt-1 flex max-h-56 flex-col gap-px overflow-y-auto rounded-md border p-1">
@@ -205,6 +240,11 @@ export function ChannelCreateDialog({
                 <li className="px-2 py-1.5 text-xs text-muted-foreground">No teammates match.</li>
               )}
             </ul>
+            {membersError && (
+              <p id={membersErrorId} className="text-xs text-destructive">
+                {membersError}
+              </p>
+            )}
             {chosen.length > 0 && (
               <p className="text-xs text-muted-foreground">
                 {chosen.length} in this channel — no lead; whoever fits each message answers.
