@@ -1821,6 +1821,41 @@ async fn park_pending_gates(
     // run because the run is what gets re-dispatched.
     let turn = crate::runtime::workflow_resume::workflow_turn_key(run_id);
 
+    // Issue #1825 (P1, found by chatgpt-codex-connector): hold this turn's
+    // `ContinuationQueue` counter open across the whole loop below, the same
+    // shape of fix `park_gated_calls`'s fourth follow-up applied in
+    // `workflows::caps` for the identical race.
+    //
+    // The loop below parks this run's gates one at a time, and each successful
+    // `park_and_journal` arms the counter for its own card (issue #469/#978's
+    // per-card mechanism, unchanged, and closed against its OWN in-flight
+    // window by the fifth follow-up above `park_and_journal`). With no hold
+    // here, an operator can resolve an EARLIER card — already parked, already
+    // counted — while a LATER card in this loop is still being attempted. If
+    // that later park then fails, `park_and_journal`'s own error branch
+    // releases the slot it armed for it; when that release happens to be the
+    // batch's last decrement, the batch it hands back — every sibling decided
+    // while this loop was still running — is dropped inside that failure
+    // branch, with no caller left to route it through `resume_workflow_run`.
+    // The already-decided siblings are not lost from the approval journal
+    // (each was resolved and recorded independently of this counter); what is
+    // lost is the automatic re-dispatch, silently, with nothing telling the
+    // operator the run is now stranded.
+    //
+    // The hold pins outstanding at least 1 above the count of decided cards
+    // until every gate here has actually been attempted, so no single card's
+    // own arm/release pair — including a failed one's — can ever be the
+    // batch's last word while a sibling is still in flight. Released below,
+    // once the loop is done.
+    //
+    // Skipped for a single-gate run: there is no "rest of the batch" to
+    // protect against, and holding would only insert an extra decrement
+    // between that lone card's approval and its release.
+    let holds_continuation = pending.len() > 1;
+    if holds_continuation {
+        parking.continuations.arm(&turn);
+    }
+
     for node_id in pending {
         if denied.iter().any(|refused| refused == node_id) {
             tracing::info!(
@@ -1937,6 +1972,42 @@ async fn park_pending_gates(
                  continued"
             ),
         }
+    }
+
+    // Issue #1825 (P1): release the hold armed above, now that every gate in
+    // this run has actually been attempted — whether it parked or failed.
+    // `Some(batch)` back means this release was itself the batch's last
+    // decision: every card this loop parked was already decided by the time
+    // the loop finished attempting the rest, which needs an operator (or an
+    // API caller) faster than this function's own sequential parks.
+    //
+    // `park_pending_gates` runs deep inside the engine with no handle back to
+    // the `CompanyRuntime` that owns `resume_workflow_run` — the only place
+    // that spawns this run's continuation — short of re-entering this run's
+    // own execution while it is still mid-run, which is a worse hazard than
+    // the one this hold exists to close (a duplicate dispatch, just moved).
+    // So, exactly like `park_gated_calls`'s own release in `workflows::caps`,
+    // this rare batch is left exactly as the loop above already left it: every
+    // decision durably recorded in the approval journal, independent of this
+    // counter. Only the automatic re-dispatch is deferred — and unlike a
+    // blocked agent node, a workflow run has no boot-time reconciliation sweep
+    // of its own yet, so nothing recovers this automatically; the operator has
+    // to notice the run is still `Blocked` and re-run it. An empty batch
+    // (every gate below failed to park, so nothing was ever decided) needs no
+    // warning — there is nothing stranded.
+    if holds_continuation
+        && let Some(batch) = parking.continuations.decide(&turn, None)
+        && !batch.is_empty()
+    {
+        tracing::warn!(
+            company = %record.id,
+            workflow = %workflow_id,
+            %run_id,
+            decisions = batch.len(),
+            "workflow: every gate this run parked was already decided before the rest of the \
+             batch finished parking; the approvals are recorded but the run will not \
+             auto-resume — re-run the workflow to pick it back up"
+        );
     }
 }
 
@@ -4687,6 +4758,258 @@ to = "done"
             .filter(|p| p.effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND)
             .count();
         assert_eq!(gates, 2);
+    }
+
+    /// The graph the next test uses: three sibling `requires_approval` gates
+    /// fanning out from one trigger — the run-level analogue of
+    /// `parallel_gate_fanout_test`'s `FANOUT_TOML`, sized to exercise
+    /// `park_pending_gates`'s own loop directly rather than a full
+    /// `CompanyRuntime`.
+    const THREE_GATES: &str = r#"
+id = "three-gate"
+name = "Three Gate"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate1"
+kind = "tool_call"
+name = "Gate1"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "gate2"
+kind = "tool_call"
+name = "Gate2"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "gate3"
+kind = "tool_call"
+name = "Gate3"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "gate1"
+[[edge]]
+from = "start"
+to = "gate2"
+[[edge]]
+from = "start"
+to = "gate3"
+[[edge]]
+from = "gate1"
+to = "done"
+[[edge]]
+from = "gate2"
+to = "done"
+[[edge]]
+from = "gate3"
+to = "done"
+"#;
+
+    /// Issue #1825 (P1, found by chatgpt-codex-connector): "Preserve a
+    /// completed batch when a later park fails."
+    ///
+    /// # The race this closes
+    ///
+    /// `park_pending_gates` parks a run's gates one at a time, and each
+    /// successful `park_and_journal` arms `ContinuationQueue` for the run's
+    /// shared turn key. An operator can resolve an EARLIER card while a
+    /// LATER card in this loop is still being attempted; if that later park
+    /// then fails, `park_and_journal`'s own error branch releases the slot it
+    /// armed for it. Pre-fix, nothing held the counter open across the loop,
+    /// so that release could itself be the batch's last decrement — and the
+    /// batch it got back (every sibling decided while this loop was still
+    /// running) was dropped inside that failure branch: no caller was left to
+    /// route it anywhere, and `ContinuationQueue::decide` discards the turn's
+    /// whole banked state, the already-approved sibling's event included, the
+    /// moment `outstanding` hits zero.
+    ///
+    /// # How this is reproduced deterministically
+    ///
+    /// Three gates share one turn. `RaceThenFail` wraps the approval gate
+    /// `park_pending_gates` parks through: its SECOND `park()` call first
+    /// decides the FIRST card via the SAME `ContinuationQueue` handle
+    /// `park_and_journal` arms — simulating a fast operator racing the loop —
+    /// then fails outright, exactly like a real `park()`/`record_parked()`
+    /// fault. The THIRD gate parks normally, on the same principle as
+    /// `approving_the_first_card_of_a_multi_call_node_does_not_complete_the_batch_early`
+    /// in `workflows::caps::mod`. If the first card's decision survived the
+    /// second card's faulted park, deciding the third (simulating the
+    /// operator's next click) must hand back BOTH events; if it was dropped,
+    /// only the third's.
+    #[tokio::test]
+    async fn a_batch_completed_by_a_failed_park_is_not_silently_dropped() {
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Effect, PolicyDecision, Verdict};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Mutex as AsyncMutex;
+
+        /// Delegates every call to `inner`, except that the SECOND `park` it
+        /// sees first decides the FIRST approval it minted — via the same
+        /// `ContinuationQueue` the real park path arms — then fails,
+        /// simulating an operator racing ahead of `park_pending_gates`'s own
+        /// loop into a park that then errors.
+        struct RaceThenFail {
+            inner: Arc<dyn ApprovalGate>,
+            continuations: crate::runtime::continuation::ContinuationQueue,
+            turn: String,
+            calls: AtomicUsize,
+            first_approval: AsyncMutex<Option<ApprovalId>>,
+            third_approval: AsyncMutex<Option<ApprovalId>>,
+            /// What `ContinuationQueue::decide` returned for the interleaved
+            /// decision on the first card — the assertion this test exists
+            /// for. Outer `Option`: whether the interleave actually ran.
+            early_decide_result: AsyncMutex<Option<Option<Vec<CompanyEvent>>>>,
+        }
+
+        #[async_trait]
+        impl ApprovalGate for RaceThenFail {
+            async fn evaluate(
+                &self,
+                company: &CompanyId,
+                effect: &Effect,
+            ) -> crate::Result<PolicyDecision> {
+                self.inner.evaluate(company, effect).await
+            }
+
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => {
+                        let id = self.inner.park(company, effect).await?;
+                        *self.first_approval.lock().await = Some(id.clone());
+                        Ok(id)
+                    }
+                    1 => {
+                        let first = self
+                            .first_approval
+                            .lock()
+                            .await
+                            .clone()
+                            .expect("the first card must have parked before the second");
+                        let event = CompanyEvent::ApprovalResolved {
+                            approval_id: first,
+                            verdict: Verdict::Approve,
+                            by: Actor {
+                                kind: ActorKind::Operator,
+                                id: "operator".to_string(),
+                            },
+                        };
+                        let result = self.continuations.decide(&self.turn, Some(event));
+                        *self.early_decide_result.lock().await = Some(result);
+                        Err(OpenCompanyError::InvalidRequest(
+                            "simulated park fault".to_string(),
+                        ))
+                    }
+                    2 => {
+                        let id = self.inner.park(company, effect).await?;
+                        *self.third_approval.lock().await = Some(id.clone());
+                        Ok(id)
+                    }
+                    other => panic!("unexpected park call #{other}"),
+                }
+            }
+
+            async fn resolve(
+                &self,
+                id: &ApprovalId,
+                verdict: Verdict,
+                by: Actor,
+            ) -> crate::Result<Option<Effect>> {
+                self.inner.resolve(id, verdict, by).await
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut deps, _journal) = deps_with_parking(dir.path());
+        let file = parse_workflow(THREE_GATES).expect("parses");
+
+        let ctx = WorkflowRunContext::new(false);
+        let turn = crate::runtime::workflow_resume::workflow_turn_key(&ctx.run_id);
+
+        let parking = deps
+            .delivery
+            .as_ref()
+            .and_then(|d| d.parking.clone())
+            .expect("deps_with_parking wires parking");
+        let race = Arc::new(RaceThenFail {
+            inner: parking.approvals.clone(),
+            continuations: parking.continuations.clone(),
+            turn: turn.clone(),
+            calls: AtomicUsize::new(0),
+            first_approval: AsyncMutex::new(None),
+            third_approval: AsyncMutex::new(None),
+            early_decide_result: AsyncMutex::new(None),
+        });
+        deps.delivery
+            .as_mut()
+            .unwrap()
+            .parking
+            .as_mut()
+            .unwrap()
+            .approvals = race.clone();
+
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &tools_record(),
+            &file,
+            serde_json::json!({ "request": "quarterly numbers" }),
+            &ctx,
+        )
+        .await
+        .expect("run pauses cleanly even though one gate's park faulted");
+
+        assert_eq!(
+            run.pending_approvals.len(),
+            3,
+            "the engine pauses on all three gates regardless of parking outcome: {:?}",
+            run.pending_approvals
+        );
+
+        assert_eq!(
+            race.early_decide_result.lock().await.clone(),
+            Some(None),
+            "an earlier card's decision must not complete the batch while a later card is \
+             still being attempted"
+        );
+
+        let third = race
+            .third_approval
+            .lock()
+            .await
+            .clone()
+            .expect("the third gate must have parked cleanly");
+        let final_event = CompanyEvent::ApprovalResolved {
+            approval_id: third,
+            verdict: Verdict::Approve,
+            by: Actor {
+                kind: ActorKind::Operator,
+                id: "operator".to_string(),
+            },
+        };
+        let batch = parking
+            .continuations
+            .decide(&turn, Some(final_event))
+            .expect("deciding the last outstanding card must release the batch");
+        assert_eq!(
+            batch.len(),
+            2,
+            "the first card's decision, banked while the faulted second park was still in \
+             flight, must still be in the batch the last decision releases — not dropped by \
+             the faulted park's own slot release: {batch:?}"
+        );
     }
 
     /// A run an operator stopped parks nothing. They are not asking to be asked
