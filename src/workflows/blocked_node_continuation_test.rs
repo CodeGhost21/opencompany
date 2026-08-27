@@ -2091,3 +2091,103 @@ async fn a_recovered_approval_bank_failure_lands_via_the_background_retry() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
+
+/// Issue #1825 (P2, second follow-up — found by chatgpt-codex-connector): a
+/// background approval-bank retry that lands *after* its own turn's stash was
+/// already released must not leave `turn` resurrected in
+/// `blocked_node_approvals` forever.
+///
+/// This reuses the fixture directly above unchanged, because the race it
+/// closes is not an exotic timing edge — it is the *ordinary* shape of the
+/// sibling test's own recovery. Dispatch never waits on either
+/// `bank_blocked_node_approval` call site (`runner.started()` above already
+/// proves the run launches "regardless of the durable bank"), and it reliably
+/// releases the stash well inside the ~150ms both inline loops burn before a
+/// background retry's first 200ms backoff even elapses. So by the time the
+/// sibling test's poll observes the late write land, the stash is already
+/// gone — precisely the moment `spawn_background_approval_bank_retry`'s
+/// cleanup must fire.
+///
+/// Proven red by reverting only the `record_blocked_node_released` cleanup
+/// call the P2 second follow-up adds (not the write itself, which the sibling
+/// test already pins as required): pre-fix, `blocked_node_approvals()` keeps
+/// `turn` forever once the late write lands, because nothing ever appends a
+/// second `BlockedNodeReleased` to retire the resurrection — and, on a future
+/// boot, replay reaches the identical stale state.
+#[tokio::test]
+async fn a_late_landing_approval_bank_write_retires_its_own_resurrection() {
+    let home = seed_home();
+    let (rt, store, runner) = runtime_with_failing_journal_store(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+        "BlockedNodeApproved",
+        6,
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    let result = rt
+        .resolve_approval(&cards[0], Verdict::Approve, operator())
+        .await;
+    assert!(
+        result.is_ok(),
+        "the resolve itself is unaffected by the bank's durable write failing: {result:?}"
+    );
+    assert_eq!(
+        runner.started(),
+        2,
+        "the live process still dispatches the continuation from its in-memory state, \
+         regardless of the durable bank"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "precondition this test depends on: dispatch already released this turn's stash \
+         before either background retry's own delayed write could have landed — the exact \
+         ordering that makes a late-landing write a resurrection instead of a legitimate bank"
+    );
+
+    // Same poll shape as the sibling test: which retry's backoff lands the
+    // seventh, recovering append is not something to hardcode a timing
+    // assumption about.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if store_durably_has(&store, rt.id(), "BlockedNodeApproved", &turn).await {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the background retry never landed the durable fact within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // The write landed after release (the precondition above already proved
+    // it), so the retry's own cleanup must retire the resurrection. Poll
+    // rather than assert immediately: the cleanup is a second awaited append,
+    // made after the one the loop above just observed.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if !rt.journal().blocked_node_approvals().contains(&turn) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a late-landing approval bank write left `turn` resurrected in \
+             blocked_node_approvals with nothing left to release it — exactly the stale \
+             durable key this fix exists to retire"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}

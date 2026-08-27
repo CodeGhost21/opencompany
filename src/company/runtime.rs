@@ -1872,8 +1872,44 @@ impl CompanyRuntime {
     /// insert, per its own doc), so a write that lands after the bounded
     /// inline loop's own attempts already partially failed cannot
     /// double-record anything.
+    ///
+    /// # Retires a write that lands after its own stash was already released
+    /// (P2, found by chatgpt-codex-connector)
+    ///
+    /// `bank_blocked_node_approval` runs twice per resolve — once inline from
+    /// `settle_approval`, once again as `continue_turn`'s own
+    /// defense-in-depth call — so an inline-exhausted write here can race a
+    /// **second** background retry task for the same turn, spawned by the
+    /// other call site, while the run's own dispatch (which does not wait on
+    /// either) is already releasing the stash
+    /// (`record_blocked_node_released`, which removes `turn` from
+    /// `blocked_node_approvals` along with everything else). A retry that
+    /// lands afterward re-inserts `turn` into `blocked_node_approvals` with
+    /// nothing left to release it — the set is no longer idempotent with
+    /// respect to its own terminal record, and a replay of this exact
+    /// sequence on a future boot reaches the same state: the durable key
+    /// accumulates forever, because nothing ever appends a second
+    /// `BlockedNodeReleased` to retire it. This function's earlier revision
+    /// tried closing the race by checking `blocked_nodes.is_armed` *before*
+    /// each attempt and abandoning the retry outright — proven wrong by
+    /// `a_recovered_approval_bank_failure_lands_via_the_background_retry`,
+    /// which fails every one of the outaged fixture's exhausted appends
+    /// specifically *because* dispatch (which never waits on this write)
+    /// reliably releases the stash before the first 200ms backoff elapses;
+    /// bailing there would make the retry a no-op in the exact outage it
+    /// exists to recover, not only in the race this section closes. So the
+    /// write still runs unconditionally — the fact is real audit history
+    /// either way — and only the resurrected mirror key gets swept: on
+    /// success, if the stash is no longer armed, one more
+    /// `record_blocked_node_released` for the same turn is appended.
+    /// `record_blocked_node_released`'s in-memory removal is already a no-op
+    /// on an absent turn, and on replay this second line reorders correctly
+    /// behind the stray `BlockedNodeApproved` it is retiring, so a future
+    /// boot's replay ends exactly where this process does: nothing left
+    /// behind.
     fn spawn_background_approval_bank_retry(&self, turn: String) {
         let journal = self.journal.clone();
+        let blocked_nodes = self.blocked_nodes.clone();
         let company = self.id.clone();
         tokio::spawn(async move {
             const MAX_ATTEMPTS: u32 = 8;
@@ -1890,6 +1926,19 @@ impl CompanyRuntime {
                             "[approval] a blocked node's approval bank landed on a background \
                              retry, after the inline bounded loop exhausted"
                         );
+                        if !blocked_nodes.is_armed(&turn)
+                            && let Err(error) = journal.record_blocked_node_released(&turn).await
+                        {
+                            tracing::warn!(
+                                company = %company,
+                                %turn,
+                                %error,
+                                "[approval] this write landed after its own stash was already \
+                                 released by another retry or the inline attempt; retiring the \
+                                 resurrected key failed, so a stale entry may linger in \
+                                 blocked_node_approvals until a manual sweep"
+                            );
+                        }
                         return;
                     }
                     Err(error) => {
