@@ -178,6 +178,11 @@ pub async fn notify_dispatch_failed(
     task_id: &str,
     reason: &str,
 ) {
+    // `Notification.title` is documented as one line. `reason` is a free-form
+    // failure text (an error's `Display`, in practice) and is not guaranteed
+    // not to carry `\r`/`\n`, so normalize before interpolating — otherwise a
+    // multiline reason persists a multiline title.
+    let one_line_reason = reason.replace(['\r', '\n'], " ");
     let note = Notification {
         id: crate::ports::generate_id(),
         kind: "dispatch_failed".to_string(),
@@ -186,7 +191,7 @@ pub async fn notify_dispatch_failed(
             id: task_id.to_string(),
         },
         created_at: now_millis(),
-        title: format!("A card's dispatch failed and returned to To-do: {reason}"),
+        title: format!("A card's dispatch failed and returned to To-do: {one_line_reason}"),
         audience: None,
         context: None,
     };
@@ -668,6 +673,129 @@ mod test {
             vec!["a-1".to_string()]
         );
         assert_eq!(column_of(&tasks, &beta, "b-1").await, COLUMN_PLANNING);
+    }
+
+    /// CodeRabbit review (PR #1883): `Notification.title` is documented as
+    /// one line, but `reason` is interpolated unnormalized. A failure reason
+    /// carrying `\r`/`\n` — plausible, since it is an error's `Display` in
+    /// practice — used to persist a multiline title.
+    #[tokio::test]
+    async fn notify_dispatch_failed_keeps_the_title_single_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let notifications: Arc<dyn NotificationStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        notify_dispatch_failed(
+            notifications.as_ref(),
+            &company,
+            "t-1",
+            "boom\nsecond line\r\nthird line",
+        )
+        .await;
+
+        let notes = notifications.list(&company, "anyone").await.unwrap();
+        let filed = notes
+            .iter()
+            .find(|n| n.notification.subject.id == "t-1")
+            .expect("the notification was filed");
+        assert!(
+            !filed.notification.title.contains('\n') && !filed.notification.title.contains('\r'),
+            "the title must stay one line: {:?}",
+            filed.notification.title
+        );
+        assert!(
+            filed
+                .notification
+                .title
+                .contains("boom second line  third line"),
+            "the reason's content must survive, just flattened: {:?}",
+            filed.notification.title
+        );
+    }
+
+    /// CodeRabbit review (PR #1883): the boot-reaper conformance test
+    /// (`runtime::builder::tests::boot_reaper_notifies_a_bounced_card_same_as_the_live_paths`)
+    /// checks only `kind` and `subject.id`. This unit-tests the two things
+    /// that shared assertion never exercised: the title actually names the
+    /// task and carries the reason, and the row is company-wide
+    /// (`audience: None`) — the whole reason this notification exists (issue
+    /// #1865's doc comment) rather than a targeted one only the assignee
+    /// would see.
+    #[tokio::test]
+    async fn notify_dispatch_failed_files_a_company_wide_row_naming_task_and_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let notifications: Arc<dyn NotificationStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        notify_dispatch_failed(
+            notifications.as_ref(),
+            &company,
+            "t-42",
+            "the host vanished",
+        )
+        .await;
+
+        let notes = notifications.list(&company, "anyone-at-all").await.unwrap();
+        let filed = notes
+            .iter()
+            .find(|n| n.notification.subject.id == "t-42")
+            .expect("the notification was filed");
+        assert_eq!(filed.notification.kind, "dispatch_failed");
+        assert_eq!(filed.notification.subject.kind, SubjectKind::Task);
+        assert!(
+            filed.notification.title.contains("the host vanished"),
+            "the title must carry the reason: {:?}",
+            filed.notification.title
+        );
+        assert_eq!(
+            filed.notification.audience, None,
+            "a bounced card has no single decider the way a mention does — this must be \
+             company-wide, not targeted at the assignee alone"
+        );
+    }
+
+    /// A [`NotificationStore`] whose `append` always fails — the "the durable
+    /// row itself could not be recorded" case `notify_dispatch_failed`'s own
+    /// doc comment says is best-effort and logged, never propagated.
+    struct FailingNotifications;
+
+    #[async_trait::async_trait]
+    impl NotificationStore for FailingNotifications {
+        async fn append(&self, _company: &CompanyId, _notification: &Notification) -> Result<()> {
+            Err(crate::error::OpenCompanyError::Store(
+                "notification append always fails in this test".to_string(),
+            ))
+        }
+
+        async fn list(
+            &self,
+            _company: &CompanyId,
+            _user: &str,
+        ) -> Result<Vec<crate::ports::notifications::NotificationView>> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_read(
+            &self,
+            _company: &CompanyId,
+            _user: &str,
+            _ids: Option<&[String]>,
+        ) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// CodeRabbit review (PR #1883): the boot-reaper test never exercises a
+    /// failing store, so nothing proved the append failure stays best-effort.
+    /// This is the whole point of the doc comment on `notify_dispatch_failed`
+    /// — a card that bounced must not un-bounce because the notification
+    /// bookkeeping write happened to fail.
+    #[tokio::test]
+    async fn notify_dispatch_failed_does_not_panic_or_propagate_when_append_fails() {
+        let company = CompanyId::new("acme");
+        // The whole assertion: this returns `()`, not a `Result`, and the call
+        // completes without panicking even though `append` always errors.
+        notify_dispatch_failed(&FailingNotifications, &company, "t-1", "boom").await;
     }
 
     /// The note is append-only: a second block never eats the first.
