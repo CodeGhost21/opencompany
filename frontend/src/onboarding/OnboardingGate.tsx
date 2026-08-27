@@ -14,6 +14,15 @@ import { OAuthView } from "@/views/OAuthView";
 
 // Same reason `app-shell.tsx` lazy-loads it: React Flow is heavy, and it
 // should not tax a screen an operator only sees once.
+// PR #1875 review finding: the name entered here is embedded verbatim into
+// every agent's system prompt (`persona_prompt`, `src/company/prompt.rs`),
+// so an unbounded paste can inflate every model request past its context
+// limit. Mirrors the host's own limit (`COMPANY_NAME_MAX_CHARS`,
+// `src/server/ops/company_profile.rs`) — the API's rejection is the real
+// enforcement point regardless of client, this only avoids a round trip for
+// the common case of a pasted document.
+const COMPANY_NAME_MAX_CHARS = 200;
+
 const WorkflowsView = lazy(() =>
   import("@/views/WorkflowsView").then((m) => ({ default: m.WorkflowsView })),
 );
@@ -213,6 +222,7 @@ function NameStep({
             if (e.key === "Enter") void confirm();
           }}
           placeholder="Acme Inc."
+          maxLength={COMPANY_NAME_MAX_CHARS}
           autoFocus
         />
       </div>
