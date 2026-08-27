@@ -15,8 +15,9 @@ REST because it ships no GraphQL client: the two inbox `GET`s and the three
 workspace `GET`s (tree, file, `search`), the task export
 (`GET …/tasks/{taskId}/export`), the skill-registry browse
 (`GET …/skills/registry`), the agent detail (`GET …/team/{agentId}`), the policy
-read (`GET …/policy`), and the credential status `GET` — every one detailed
-below or in the credential section. Every other console read goes through
+read (`GET …/policy`), the activation read (`GET …/activation`, issue #1843),
+and the credential status `GET` — every one detailed below or in the
+credential section. Every other console read goes through
 GraphQL (see the [read plane](api-graphql.md)). Anything a build doesn't serve
 `404`s — the console treats that as "not wired yet".
 
@@ -57,6 +58,10 @@ POST   …/setup/roster                       propose a starting team from three
 GET    …/policy                              the autonomy tier + spend cap + deadline + always-ask list
 PUT    …/policy                              set the tier, spend cap, deadline, and/or always-ask list
 DELETE …/policy                              reset the policy to the manifest's
+GET    …/activation                          the account-activation funnel (issue #1843)
+GET    …/tools/grants                        the `[tools].allow` in force + what a connect page may grant (#1796)
+PUT    …/tools/grants                        grant one namespace from a connect page  [admin]
+DELETE …/tools/grants                        withdraw one console grant (`?namespace=`) or all of them  [admin]
 POST   …/inboxes/{key}/read                  mark inbox messages read
 POST   …/inboxes/ingest                     HMAC-signed inbound email → inbox
 GET    …/inboxes                            list inboxes + unread counts
@@ -357,6 +362,47 @@ a spend exactly equal to the cap still parks. The override survives a rebuild
 unless the seed's `[policy]` itself changed: version control wins when it
 speaks, so tightening `company.toml` clears a looser setting here, and a
 redeploy that changed nothing does not.
+
+`GET …/activation` (issue #1843) answers the account-activation funnel: three
+booleans (`nameConfirmed`, `integrationConnected`, `workflowRunSucceeded`), the
+overall `isActivated` verdict, and `activationCompletedAtMillis` — omitted from
+the body entirely (not `null`) until the funnel has latched. `nameConfirmed`
+mirrors the record's own field; `workflowRunSucceeded` is true once the
+journal shows one real (non-dry) run reach the `Ok` verdict, the same ladder
+the console's Steps panel uses; `integrationConnected` requires a live Composio
+connection **and** an explicit `composio` grant in `[tools].allow` — except in
+two cases, where the step is waived rather than permanently blocking
+activation. First, when the manifest can never grant that namespace at all
+(several bundled companies drop `composio` on purpose, e.g. `agentic_math_lab`,
+`agentic_product_team`). Second, when the running binary was built without the
+`composio` feature — including the documented default `cargo run --bin
+opencompany -- serve` — because that build has no client with which to hold a
+connection, so no company running under it could ever satisfy the step. In
+that build the step reads true even for a manifest that does grant `composio`
+and holds no connection; a build that compiles the feature still requires a
+live one. Once every step has read
+true simultaneously, the answer **latches**: `isActivated` stays `true`
+forever after even if a live signal later regresses (a connection gets
+disconnected), because the question is "did this operator ever clear
+onboarding", not "is onboarding state currently intact". This GET is not a
+pure read — the first call where every step is true durably **persists** the
+latch before answering, which is why it is a console read exception here
+rather than a GraphQL resolver. It then appends the terminal
+`OnboardingCompleted` event on a **best-effort** basis: the latch has already
+landed by that point, so a journal failure is logged and ignored rather than
+un-activating the company, and the response can report activation with the
+audit entry missing. Every call after the latch is set short-circuits before any
+Composio round trip or journal scan, so polling an already-activated company
+stays cheap. Any member may call it — it decides nothing on the company's
+behalf, only answers a question.
+
+### Tool grants
+
+The three **tool-grant** routes (issue #1796) are the same shape again, applied
+to the field next door — connecting an integration stores a credential, it
+does not grant the tool namespace. Full detail, including the grantable-list
+rationale and the three-answer "when does it take effect" table, is in
+[api-tool-grants.md](api-tool-grants.md).
 
 ### Credential-bearing surfaces (feature-gated)
 
