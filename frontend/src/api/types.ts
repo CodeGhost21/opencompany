@@ -201,6 +201,15 @@ export interface DeskDto {
    */
   overlayMembers?: string[];
   /**
+   * How this desk's unmentioned messages find their answerer (issue #1835):
+   * `"auto"` is a channel with **no lead** — `members[0]` carries no rank, and
+   * the host picks a best-fit member per message — so every lead affordance
+   * (crown, badge, Make lead) is suppressed for it. Omitted means `"lead"`,
+   * which is every manifest desk and every desk created before the field
+   * existed.
+   */
+  responder?: "lead" | "auto";
+  /**
    * Whether the whole desk was operator-created (an overlay desk) rather than
    * declared in the manifest blueprint. The console offers a delete action only
    * for these. Omitted (undefined/false) for blueprint desks.
@@ -218,6 +227,12 @@ export interface CreateDeskInput {
   description?: string;
   id?: string;
   members?: string[];
+  /**
+   * How the desk routes its unmentioned messages (issue #1835). Absent means
+   * `"lead"` — today's model, what the org chart's create sends. `"auto"`
+   * creates a leadless channel whose answerer is picked per message.
+   */
+  responder?: "lead" | "auto";
 }
 
 /**

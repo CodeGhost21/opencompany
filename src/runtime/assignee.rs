@@ -21,7 +21,7 @@
 //! blank card to the orchestrator and still refuse the invalid one.
 
 use crate::ports::types::{CompanyRecord, TeammateResolution};
-use crate::runtime::delegation_tools::desk_lead;
+use crate::runtime::delegation_tools::desk_default_responder;
 
 /// What a card's `assignee` string names on the company roster.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,7 +187,13 @@ pub fn resolve(record: &CompanyRecord, assignee: &str) -> AssigneeResolution {
         return AssigneeResolution::Unassigned;
     }
     if let Some(desk) = record.resolve_desk_id(key) {
-        return match desk_lead(record, &desk) {
+        // `desk_default_responder`, not `desk_lead`: for a lead desk they are
+        // the same teammate, and for an `auto` channel (issue #1835) — where
+        // `desk_lead` is `None` by definition — a card assigned to the channel
+        // still dispatches to its deterministic first member rather than
+        // misreporting a staffed channel as empty. The per-message selector is
+        // a chat-routing rung; a durable card wants a durable owner.
+        return match desk_default_responder(record, &desk) {
             Some(lead) => AssigneeResolution::Desk { desk, lead },
             None => AssigneeResolution::EmptyDesk(desk),
         };
@@ -356,6 +362,30 @@ members = []
             AssigneeResolution::Desk {
                 desk: "empty".into(),
                 lead: "nova".into(),
+            }
+        );
+    }
+
+    /// Issue #1835: a card assigned to an `auto` channel dispatches to the
+    /// channel's deterministic first member, never to `EmptyDesk` — that arm's
+    /// wording ("nobody on it") would be a lie about a staffed channel. The
+    /// per-message selector is a chat-routing rung; a durable card wants a
+    /// durable owner.
+    #[test]
+    fn an_auto_channel_is_assignable_and_dispatches_to_its_first_member() {
+        let mut record = acme();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".into(),
+            name: "Launch week".into(),
+            description: None,
+            members: vec!["engineer".into(), "ceo".into()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        assert_eq!(
+            resolve(&record, "launch"),
+            AssigneeResolution::Desk {
+                desk: "launch".into(),
+                lead: "engineer".into(),
             }
         );
     }

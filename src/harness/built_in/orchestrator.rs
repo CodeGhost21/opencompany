@@ -1562,6 +1562,19 @@ impl Tool for QueryCompanyTool {
                     Some(lead) => md.push_str(&format!(
                         "- **{id}** — lead: {lead} (delegate with `delegate_to_desk` desk=`{id}`)\n"
                     )),
+                    // A leadless answer is two different facts (issue #1835):
+                    // an `auto` channel has members but no lead by design —
+                    // "cannot be handed work" would be a lie about a staffed
+                    // channel — while a desk with nobody on the roster really
+                    // cannot take anything.
+                    None if record
+                        .as_ref()
+                        .is_some_and(|r| !r.desk_responder_mode(id).is_lead()) =>
+                    {
+                        md.push_str(&format!(
+                            "- **{id}** — channel without a lead; who answers is picked per message. `delegate_to_desk` cannot target it — use `delegate_to_teammate` with one of its members\n"
+                        ))
+                    }
                     None => md.push_str(&format!(
                         "- **{id}** — no member on the roster, so it cannot be handed work\n"
                     )),
