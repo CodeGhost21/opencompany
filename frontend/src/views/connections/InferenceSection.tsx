@@ -1019,15 +1019,16 @@ export function InferenceSection({
                       </p>
                     )}
                     {provider === "openrouter" &&
-                      modelCatalog.kind === "ready" &&
+                      modelCatalog.kind !== "idle" &&
+                      modelCatalog.kind !== "loading" &&
                       wouldSaveProxied && (
                         <p
                           className="text-xs text-muted-foreground"
                           data-testid="inference-model-catalog-proxied"
                         >
                           Without an OpenRouter key this runs on the shared subscription, which only
-                          resolves a tier name. Add a key above to pick a specific model, or enter a
-                          tier id directly.
+                          resolves a tier name. A specific model id typed above will be dropped on
+                          Save. Add a key to pick a specific model, or enter a tier id directly.
                         </p>
                       )}
                     <div className="grid gap-2 sm:grid-cols-2">

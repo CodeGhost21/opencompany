@@ -112,10 +112,31 @@ describe("OpenRouter tier model pickers", () => {
     await mount(client);
 
     expect(container.querySelector('[data-testid="inference-model-catalog-fallback"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="inference-model-catalog-proxied"]')).toBeNull();
     expect(container.querySelector("input#inference-model-chat-v1")).toHaveProperty(
       "value",
       "operator/custom-chat",
     );
+  });
+
+  it("also warns a keyless company that a typed model id is dropped when the registry fails to load", async () => {
+    // Companion to the fallback case above: that one has a stored key, so
+    // `wouldSaveProxied` is false and "Enter model ids directly" is accurate
+    // as written — a direct id really is what gets saved. Here there is no
+    // key, so Save resolves proxied and `stripProxyIncompatible` silently
+    // drops any `<author>/<model>` shaped id typed into the field the
+    // fallback copy just pointed the operator at. The proxied clarification
+    // must render alongside the fallback message in this state, not only
+    // once the catalog reaches `ready`.
+    const { client } = clientFor(
+      status("openrouter", { "chat-v1": "reasoning-v1" }, false),
+      new Error("offline"),
+    );
+
+    await mount(client);
+
+    expect(container.querySelector('[data-testid="inference-model-catalog-fallback"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="inference-model-catalog-proxied"]')).not.toBeNull();
   });
 
   it("keeps free-text inputs for a proxied OpenRouter company with no key configured", async () => {
