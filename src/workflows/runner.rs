@@ -1676,14 +1676,45 @@ async fn stash_blocked_agent_nodes(
     // because it is still the only place with the full settled `blocked` list
     // the durable mirror below needs, and `arm`'s first-write-wins semantics
     // make the redundant call free.
+    //
+    // Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector):
+    // "free" stopped being true the moment park time started performing both
+    // arms. Every node reaching this filter has a non-empty `approval_ids`,
+    // which `park_gated_calls` only ever populates *after* its own
+    // unconditional arm has already run for this exact turn — so `is_armed`
+    // being false here cannot mean "never armed"; the only way to get here
+    // is a decision that resolved the node's whole batch and released the
+    // stash before this settle pass got to it (an operator fast enough to
+    // decide the *last* card in the window between the agent returning and
+    // this function running). Re-arming a released turn resurrects it with
+    // no decision left to redeem it, and the durable write two lines down
+    // would then append a `BlockedNodeStashed` *after* the `BlockedNodeReleased`
+    // that already retired it — durable on replay, and a late approval-bank
+    // retry landing on the resurrection can mark it approved and have a
+    // future boot's `reconcile_stranded_blocked_nodes` dispatch the run a
+    // second time. Filtering on `is_armed` here, before either write, is
+    // cheap and catches it before either arm happens rather than sweeping up
+    // after.
     let turns: Vec<_> = blocked
         .iter()
         .filter(|node| !node.approval_ids.is_empty())
-        .map(|node| {
+        .filter_map(|node| {
             let turn =
                 crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
+            if !parking.blocked_nodes.is_armed(&turn) {
+                tracing::info!(
+                    %workflow_id,
+                    %run_id,
+                    node = %node.node_id,
+                    "[approval] skipping this blocked node's settle-time stash: it is no \
+                     longer armed, meaning its whole batch was already decided and released \
+                     before this settle pass ran — re-arming it now would resurrect a turn \
+                     with nothing left to redeem it"
+                );
+                return None;
+            }
             parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
-            (turn, &node.node_id)
+            Some((turn, &node.node_id))
         })
         .collect();
 
@@ -6405,6 +6436,17 @@ to = "done"
     /// landing on the second node in this window finds no stash, consumes the
     /// approval anyway, and the loop's own later arm then writes a stash with
     /// no decision left to release it, permanently stranding the run.
+    ///
+    /// Both turns are pre-armed here, matching what `park_gated_calls` does at
+    /// real park time (issue #1825, P1 second follow-up) — `stash_blocked_agent_nodes`
+    /// now skips (rather than re-arms) any turn `is_armed` reports false for,
+    /// since after that fix the only way a node with non-empty `approval_ids`
+    /// reaches this function unarmed is a released turn (see
+    /// `a_released_turn_is_not_resurrected_by_the_settle_pass` below), and this
+    /// test's whole premise depends on the settle pass actually reaching its
+    /// own durable-mirror loop for both nodes. Pre-arming only touches
+    /// `BlockedNodeQueue`, not the journal's own `blocked_stashes`, so the
+    /// durable append this test gates on still runs for real.
     #[tokio::test]
     async fn every_blocked_node_is_armed_before_the_first_journal_write_is_awaited() {
         let dir = tempfile::tempdir().unwrap();
@@ -6431,8 +6473,17 @@ to = "done"
 
         let run_id = "run-1".to_string();
         let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "first");
         let second_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+        // Simulates what `park_gated_calls` already did at real park time,
+        // for both nodes, before this settle pass ever runs.
+        parking
+            .blocked_nodes
+            .arm(&first_turn, "wf-1", &trigger_input);
+        parking
+            .blocked_nodes
+            .arm(&second_turn, "wf-1", &trigger_input);
 
         let handle = tokio::spawn(async move {
             stash_blocked_agent_nodes(Some(&deps), "wf-1", &run_id, &trigger_input, &blocked).await;
@@ -6460,9 +6511,81 @@ to = "done"
 
         // Both nodes are armed once the settle finishes, and the durable
         // mirror caught up for both too.
-        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "first");
         assert!(parking.blocked_nodes.peek(&first_turn).is_some());
         assert!(parking.blocked_nodes.peek(&second_turn).is_some());
+    }
+
+    /// Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector): a
+    /// turn whose whole batch was already decided and released before this
+    /// settle pass runs must not be resurrected by it.
+    ///
+    /// After the P1 second follow-up, every node with a non-empty
+    /// `approval_ids` was armed by `park_gated_calls` at real park time — so
+    /// if `is_armed` is false for such a node here, the only way that
+    /// happened is a release: an operator decided the node's *last* pending
+    /// card and the run dispatched (`resume_blocked_agent_node` →
+    /// `retire_blocked_stash`) in the window between the agent turn returning
+    /// and this settle pass running. Simulates that ordering directly: arms
+    /// the turn, releases it (as `retire_blocked_stash` would have), then
+    /// runs the settle pass over a `blocked` batch that still names the node
+    /// (the engine's own settled view predates the release). Pre-fix this
+    /// re-arms the released turn and durably re-stashes it, after its own
+    /// `BlockedNodeReleased`; post-fix the settle pass skips it and leaves no
+    /// trace, in memory or in the journal.
+    #[tokio::test]
+    async fn a_released_turn_is_not_resurrected_by_the_settle_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn crate::ports::JournalStore> =
+            Arc::new(crate::ports::journal::MemoryJournalStore::default());
+        let deps = deps_with_parking_over(dir.path(), store);
+        let parking = deps.parking.clone().expect("wired above");
+        let journal = parking.journal.clone();
+
+        let run_id = "run-1825-p2d".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "solo");
+
+        // What `park_gated_calls` already did at real park time.
+        parking
+            .blocked_nodes
+            .arm(&turn, "wf-1825-p2d", &trigger_input);
+        // What deciding this turn's last card already did, in the window
+        // before this settle pass got here: dispatched and retired.
+        parking.blocked_nodes.release(&turn);
+        journal
+            .record_blocked_node_released(&turn)
+            .await
+            .expect("release journals cleanly");
+
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "solo".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-solo".to_string()],
+            unparkable: 0,
+            stranded: 0,
+        }];
+        stash_blocked_agent_nodes(
+            Some(&deps),
+            "wf-1825-p2d",
+            &run_id,
+            &trigger_input,
+            &blocked,
+        )
+        .await;
+
+        assert!(
+            !parking.blocked_nodes.is_armed(&turn),
+            "the settle pass must not resurrect a turn that was already released before it ran"
+        );
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(t, ..)| t != turn),
+            "the settle pass must not durably re-stash an already-released turn either — a \
+             late approval-bank retry landing on the resurrection could make a future boot \
+             dispatch this run a second time"
+        );
     }
 
     // ---- merging harness transcripts into the run-output snapshot ----------
