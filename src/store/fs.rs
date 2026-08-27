@@ -902,36 +902,53 @@ impl FsCompanyStore {
     /// `CompanyStore::save_importing`'s doc comment for why the two callers
     /// need different values.
     ///
-    /// ## Write order: `meta.json` before `company.toml` (PR #1875 review
-    /// finding)
+    /// ## Write order depends on whether the bundle already exists (PR #1875
+    /// review finding)
     ///
     /// `FsCompanyStore::load` decides whether a bundle exists **at all** by
     /// whether `company.toml` is present — `meta.json` is read only once that
     /// check has already passed. That makes `company.toml` the file whose
-    /// existence *publishes* the bundle, and it is why the gate marker has to
-    /// be durable *before* that publish, not after: if a crash lands between
-    /// the two writes, whichever order they run in decides which
-    /// inconsistent state survives.
+    /// existence *publishes* the bundle. A crash between the two writes
+    /// always leaves one of them stale, and which file needs to be the
+    /// stale one flips depending on whether this call is a first-time
+    /// publish or an update to a bundle that is already live:
     ///
-    /// Manifest-first (the original order) fails toward the *wrong* state: a
-    /// crash after `company.toml`'s rename but before `meta.json`'s leaves a
-    /// bundle that `load` reports as existing, with `lifecycle == "running"`
-    /// and — because `meta.json` is missing — `activation_gate_seen`
-    /// defaulting to `false`. That is byte-for-byte the shape
-    /// `RuntimeBuilder::build`'s grandfather migration matches on, so a fresh
-    /// company's interrupted first boot gets silently auto-activated, the
-    /// exact bug `activation_gate_seen` exists to prevent (see this struct
-    /// field's own doc comment, and issue #1843).
+    /// - **First publish** (no `company.toml` yet): `meta.json` first. A
+    ///   crash after `company.toml`'s rename but before `meta.json`'s leaves
+    ///   a bundle `load` reports as existing, with `lifecycle == "running"`
+    ///   and — because `meta.json` is missing — `activation_gate_seen`
+    ///   defaulting to `false`. That is byte-for-byte the shape
+    ///   `RuntimeBuilder::build`'s grandfather migration matches on, so a
+    ///   fresh company's interrupted first boot gets silently auto-activated
+    ///   (issue #1843). Meta-first fails toward the *safe* state instead: a
+    ///   crash after `meta.json`'s rename but before `company.toml`'s leaves
+    ///   `company.toml` still absent, so `load` reports the bundle as not
+    ///   existing yet — worst case a retried save, never an unseen
+    ///   activation.
     ///
-    /// Meta-first (here) fails toward the *safe* state instead: a crash after
-    /// `meta.json`'s rename but before `company.toml`'s leaves `company.toml`
-    /// still absent (or, on a later save of an already-existing company,
-    /// unchanged), so `load` reports the bundle as not existing yet — or, for
-    /// an existing company, as still on its last fully-published manifest.
-    /// Either way nothing reads a gate marker that outruns the bundle it
-    /// describes; the worst outcome is a save that has to be retried, not a
-    /// company that gets activated without its operator ever seeing the
-    /// funnel.
+    /// - **Update to an existing bundle**: `company.toml` first — the
+    ///   opposite order, and load-bearing for `PATCH {scope}`'s name-confirm
+    ///   write (`company_profile::patch_company`, issue #1844), which flips
+    ///   `name_confirmed` and the manifest name in the same save. Meta-first
+    ///   here would durably land `name_confirmed: true` while `company.toml`
+    ///   still carried the pre-rename placeholder name if the process died
+    ///   between the two writes — and because `name_confirmed` is what hides
+    ///   the console's only rename control, that mismatch has no way back
+    ///   through the UI; the next rebuild would carry the *wrong* name
+    ///   forward forever, confirmed. Manifest-first fails toward the
+    ///   recoverable state instead: a crash after `company.toml`'s rename but
+    ///   before `meta.json`'s leaves `load` reading the OLD `meta.json` —
+    ///   `name_confirmed` still `false` — so the console simply re-shows the
+    ///   rename step, and resubmitting it is idempotent by design (see
+    ///   `patch_company`'s own doc comment).
+    ///
+    ///   This does not reopen the first-publish hazard above: that hazard
+    ///   needs a **missing** `meta.json` to make `load` default
+    ///   `activation_gate_seen` to `false` via `Meta::default()`, which can
+    ///   only happen on a bundle's very first save. An update's `meta.json`
+    ///   already exists from a prior save, so if this save's rewrite of it
+    ///   never lands, `load` falls back to that OLD `meta.json` — never a
+    ///   default — and its gate marker is untouched either way.
     async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
         let bundle = self.bundle(&record.id);
         bundle.ensure_dirs().await?;
@@ -956,11 +973,20 @@ impl FsCompanyStore {
             activation_completed_at: record.activation_completed_at,
             activation_gate_seen,
         };
-        write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
-
+        let meta_src = serde_json::to_string(&meta)?;
         let toml_src = toml::to_string(&record.manifest)
             .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        write_atomic(&bundle.company_toml(), &toml_src).await?;
+
+        let updating_existing_bundle = tokio::fs::try_exists(&bundle.company_toml())
+            .await
+            .unwrap_or(false);
+        if updating_existing_bundle {
+            write_atomic(&bundle.company_toml(), &toml_src).await?;
+            write_atomic(&bundle.meta_json(), &meta_src).await?;
+        } else {
+            write_atomic(&bundle.meta_json(), &meta_src).await?;
+            write_atomic(&bundle.company_toml(), &toml_src).await?;
+        }
         Ok(())
     }
 }
@@ -2885,6 +2911,74 @@ mod test {
              `load` treats as the bundle's existence) — reversed, an \
              interrupted save can auto-activate a fresh company as a legacy \
              one on its next boot"
+        );
+    }
+
+    /// **PR #1875 review finding**: the opposite ordering rule from the test
+    /// above, for the opposite case — updating a bundle that is already live
+    /// must publish `company.toml` before `meta.json`.
+    ///
+    /// Reversed (the first-publish order applied to an update too), a crash
+    /// between the two writes during `PATCH {scope}`'s name-confirm save
+    /// (`company_profile::patch_company`) can durably land `name_confirmed:
+    /// true` while `company.toml` still carries the pre-rename placeholder
+    /// name — and since `name_confirmed` is what hides the console's only
+    /// rename control, that mismatched pair has no way back through the UI.
+    /// Same reasoning as the sibling test: only the *order* the publishes
+    /// land in distinguishes the two outcomes, which is what
+    /// `append_probe::write_order_for` records.
+    #[tokio::test]
+    async fn updating_an_existing_bundle_publishes_the_manifest_before_the_gate_marker() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let first_save = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+        // Publish the bundle for the first time — the create-path branch,
+        // unaffected by this test's assertion.
+        store.save(&first_save).await.unwrap();
+
+        // The exact write `patch_company` performs: an existing bundle,
+        // `name_confirmed` flips to `true` alongside the manifest name.
+        let mut second_save = first_save;
+        second_save.manifest.company.name = "Operator Chosen Name".to_string();
+        second_save.name_confirmed = true;
+        store.save(&second_save).await.unwrap();
+
+        let order = append_probe::write_order_for(&[&bundle.meta_json(), &bundle.company_toml()]);
+        // The log is global across both saves; the update's pair is the last
+        // two entries.
+        let update_order = &order[order.len() - 2..];
+        assert_eq!(
+            update_order,
+            vec![bundle.company_toml(), bundle.meta_json()],
+            "an update to an existing bundle must publish company.toml (the \
+             name) before meta.json (name_confirmed) — reversed, an \
+             interrupted rename save can durably confirm the wrong name with \
+             no way back through the console"
         );
     }
 
