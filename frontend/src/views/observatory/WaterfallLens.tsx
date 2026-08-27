@@ -27,6 +27,8 @@ const TONE: Record<SpanState, string> = {
   failed: "bg-[var(--status-failed)]",
   blocked: "bg-[var(--status-blocked)]",
   running: "bg-[var(--status-running)]",
+  // A declined attempt (issue #1809) — neutral, never green.
+  idle: "bg-[var(--status-idle)]",
 };
 
 interface Props {

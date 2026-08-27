@@ -36,6 +36,8 @@ const config = {
   succeeded: { label: "Succeeded", color: "var(--status-done)" },
   failed: { label: "Failed", color: "var(--status-failed)" },
   blocked: { label: "Blocked", color: "var(--status-blocked)" },
+  // A by-design refusal (issue #1809) — never folded into "Succeeded".
+  declined: { label: "Declined", color: "var(--status-idle)" },
   n: { label: "Occurrences", color: "var(--chart-4)" },
 } satisfies ChartConfig;
 
@@ -137,7 +139,9 @@ export function AnalyticsLens({ runs }: { runs: ObservatoryRun[] }) {
           <CardTitle className="text-base">Where runs stop</CardTitle>
           <CardDescription>
             Outcomes per graph node. Blocked is kept apart from failed — a node
-            waiting on a person has not gone wrong.
+            waiting on a person has not gone wrong. Declined is kept apart from
+            succeeded — a node the compiler refused to automate has not
+            succeeded either.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -159,6 +163,7 @@ export function AnalyticsLens({ runs }: { runs: ObservatoryRun[] }) {
                 <ChartLegend content={<ChartLegendContent />} />
                 <Bar dataKey="succeeded" stackId="o" fill="var(--color-succeeded)" />
                 <Bar dataKey="blocked" stackId="o" fill="var(--color-blocked)" />
+                <Bar dataKey="declined" stackId="o" fill="var(--color-declined)" />
                 <Bar dataKey="failed" stackId="o" fill="var(--color-failed)" />
               </BarChart>
             </ChartContainer>

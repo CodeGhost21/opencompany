@@ -1566,6 +1566,19 @@ impl Tool for QueryCompanyTool {
                     Some(lead) => md.push_str(&format!(
                         "- **{id}** — lead: {lead} (delegate with `delegate_to_desk` desk=`{id}`)\n"
                     )),
+                    // A leadless answer is two different facts (issue #1835):
+                    // an `auto` channel has members but no lead by design —
+                    // "cannot be handed work" would be a lie about a staffed
+                    // channel — while a desk with nobody on the roster really
+                    // cannot take anything.
+                    None if record
+                        .as_ref()
+                        .is_some_and(|r| !r.desk_responder_mode(id).is_lead()) =>
+                    {
+                        md.push_str(&format!(
+                            "- **{id}** — channel without a lead; who answers is picked per message. `delegate_to_desk` cannot target it — use `delegate_to_teammate` with one of its members\n"
+                        ))
+                    }
                     None => md.push_str(&format!(
                         "- **{id}** — no member on the roster, so it cannot be handed work\n"
                     )),
@@ -1672,6 +1685,12 @@ fn summarize_event(event: &CompanyEvent) -> String {
             verdict,
             ..
         } => format!("approval {approval_id} {verdict:?}"),
+        // Issue #1805. Structural only, on the same terms as the parked/resolved
+        // arms: the id, and nothing else — `by` is a user id, dropped as every
+        // arm here drops it.
+        CompanyEvent::ApprovalExtended { approval_id, .. } => {
+            format!("approval {approval_id} extended")
+        }
         CompanyEvent::FeedbackFiled { .. } => "feedback filed".to_string(),
         CompanyEvent::PaymentReceived { amount_usd, .. } => format!("payment ${amount_usd:.2}"),
         CompanyEvent::LifecycleChanged { from, to, .. } => format!("lifecycle {from} → {to}"),
@@ -2879,9 +2898,11 @@ pub struct AddAgentTool {
     /// The id of the agent this tool is wired onto — the minter. Named in the
     /// mint log so an operator can see who added a teammate, and with what.
     minter: String,
-    /// The minter's own `tools` line, verbatim. Empty means the minter itself
-    /// holds the company's standard grant, in which case so does the teammate.
-    minter_tools: Vec<String>,
+    /// The minter's own `tools` line, verbatim (issue #1804's three-state
+    /// grant): `None` means the minter inherits the company's standard grant,
+    /// in which case so does the teammate; `Some(globs)` is the minter's own
+    /// explicit scope. `Some(vec![])` (deny-all) never mints anything reachable.
+    minter_tools: Option<Vec<String>>,
     /// The minter's **effective** grant — its line already narrowed by the
     /// company `allow`. The ceiling an explicit `tools` argument is clamped to.
     minter_grants: Vec<String>,
@@ -2907,7 +2928,7 @@ impl AddAgentTool {
         company: CompanyId,
         store: Arc<dyn CompanyStore>,
         minter: String,
-        minter_tools: Vec<String>,
+        minter_tools: Option<Vec<String>>,
         minter_grants: Vec<String>,
     ) -> Self {
         Self {
@@ -2934,7 +2955,7 @@ pub(crate) fn unscoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore
         store,
         "ceo".to_string(),
         // No line of its own — the minter inherits the company grant…
-        Vec::new(),
+        None,
         // …which for these fixtures is the catch-all, so the minter ceiling is
         // wide open and a test about *other* behaviour is not accidentally a
         // test about the #619 clamp. A test that cares about the clamp uses
@@ -3028,23 +3049,29 @@ impl Tool for AddAgentTool {
         // stating one explicitly. Only an unstated grant is filtered for the BYO
         // real-money namespaces below; an explicitly requested billing namespace
         // survives, narrowed to what the minter holds.
-        let (mut tools, unstated) = match requested {
-            // Nothing asked for: copy the minter's own line. Copying the *line*
-            // rather than its resolved grant is deliberate — an unscoped minter
-            // mints an unscoped teammate that keeps tracking `[tools].allow`,
-            // instead of freezing today's allow-list into the record as an
-            // explicit scope a later company-wide narrowing would not reach.
+        // `tools` is the teammate's own three-state grant line (issue #1804):
+        // `None` inherits the standard grant, `Some(vec![])` is an explicit
+        // deny-all, `Some(globs)` narrows. `unstated` marks the inherit path,
+        // the only one the BYO-billing filter below runs on.
+        let (mut tools, unstated): (Option<Vec<String>>, bool) = match requested {
+            // Nothing asked for: copy the minter's own line verbatim. Copying the
+            // *line* (which is itself `None` for an unscoped minter) rather than
+            // its resolved grant is deliberate — an unscoped minter mints an
+            // unscoped teammate that keeps tracking `[tools].allow`, instead of
+            // freezing today's allow-list into the record as an explicit scope a
+            // later company-wide narrowing would not reach.
             None => (self.minter_tools.clone(), true),
-            // An explicitly empty list is the same request as none at all —
-            // "give them what you have" — not "grant everything".
-            Some(globs) if globs.is_empty() => (self.minter_tools.clone(), true),
+            // An explicitly empty list is a deliberate deny-all since #1804 — the
+            // most restrictive scope an agent can hand a new teammate — NOT
+            // "inherit". This is the contract inversion: `[]` no longer means
+            // "give them what you have".
+            Some(globs) if globs.is_empty() => (Some(Vec::new()), false),
             Some(globs) => {
                 // Narrow against what the minter actually holds. An empty result
-                // means nothing asked for was within reach, and storing that
-                // would read back as "inherit the whole company grant" — the
-                // exact inversion #619 exists to remove, reached through the
-                // most deliberate narrowing an agent can ask for.
-                let narrowed = agent_effective_grants(&self.minter_grants, &globs);
+                // means nothing asked for was within reach, so refuse rather than
+                // store `Some(vec![])` — an agent asking for tools it cannot
+                // reach meant to scope, not to mint a powerless teammate.
+                let narrowed = agent_effective_grants(&self.minter_grants, Some(&globs));
                 if narrowed.is_empty() {
                     return Ok(ToolResult::error(format!(
                         "None of the requested tools ({}) are within your own tool grant ({}), so \"{name}\" was not added. Ask for a subset of what you hold, or omit `tools` to give them the same grant you have.",
@@ -3056,7 +3083,7 @@ impl Tool for AddAgentTool {
                         },
                     )));
                 }
-                (narrowed, false)
+                (Some(narrowed), false)
             }
         };
 
@@ -3091,14 +3118,17 @@ impl Tool for AddAgentTool {
         // so nothing changes for the companies that grant none of these, and an
         // explicitly requested billing namespace is untouched too.
         if unstated {
-            let inherited = if tools.is_empty() {
-                &record.manifest.tools.allow
-            } else {
-                &tools
+            // `tools` here is the minter's own line, copied verbatim: `None`
+            // for an unscoped minter (inherit the whole company allow-list),
+            // `Some(line)` for a scoped one (inherit exactly that line). The
+            // BYO-billing filter runs on whichever the teammate would inherit.
+            let inherited: &[String] = match tools.as_deref() {
+                None => &record.manifest.tools.allow,
+                Some(line) => line,
             };
             match crate::company::creation_default_grants(inherited) {
                 crate::company::CreationGrant::Standard => {}
-                crate::company::CreationGrant::Narrowed(narrowed) => tools = narrowed,
+                crate::company::CreationGrant::Narrowed(narrowed) => tools = Some(narrowed),
                 crate::company::CreationGrant::NothingLeft => {
                     return Ok(ToolResult::error(format!(
                         "This company grants only billing namespaces, so \"{name}\" would inherit them. Pass an explicit `tools` list naming what they should hold."
@@ -3155,10 +3185,10 @@ impl Tool for AddAgentTool {
             minter = %self.minter,
             teammate = %id,
             teammate_name = %name,
-            scope = %if tools.is_empty() {
-                "inherited: the minter's own standard grant".to_string()
-            } else {
-                tools.join(", ")
+            scope = %match tools.as_deref() {
+                None => "inherited: the minter's own standard grant".to_string(),
+                Some([]) => "none: an explicit deny-all".to_string(),
+                Some(globs) => globs.join(", "),
             },
             "[add_agent] minted an overlay teammate"
         );
@@ -3171,10 +3201,10 @@ impl Tool for AddAgentTool {
         // The scope is in the result for the same reason it is in the log: the
         // minting agent should see what it handed over, and "the same tools you
         // hold" is a materially different answer from a named list.
-        let scope = if tools.is_empty() {
-            "They hold the same tools you do.".to_string()
-        } else {
-            format!("Their tools are scoped to: {}.", tools.join(", "))
+        let scope = match tools.as_deref() {
+            None => "They hold the same tools you do.".to_string(),
+            Some([]) => "They hold no tools.".to_string(),
+            Some(globs) => format!("Their tools are scoped to: {}.", globs.join(", ")),
         };
         Ok(ToolResult::success(format!(
             "Added {name} (id `{id}`) as {role} to the team. {scope} They'll be reachable as a teammate starting next turn."
@@ -3220,7 +3250,7 @@ pub fn orchestrator_tools(
     workflow_refs: WorkflowRefQueue,
     run_outputs: RunOutputCache,
     minter: String,
-    minter_tools: Vec<String>,
+    minter_tools: Option<Vec<String>>,
     minter_grants: Vec<String>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
@@ -4887,7 +4917,7 @@ mod tests {
             description: None,
             tier: tier.map(str::to_string),
             harness: None,
-            tools: Vec::new(),
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
@@ -6474,7 +6504,7 @@ members = ["legal_counsel"]
             name: "Dana Designer".to_string(),
             role: "Designer".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -6517,7 +6547,7 @@ members = ["legal_counsel"]
                 name: "Dana Designer".to_string(),
                 role: "Designer".to_string(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             });
@@ -7114,7 +7144,7 @@ name = "Morning"
             name: "Fact Fetcher".to_string(),
             role: "Researcher".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -7162,7 +7192,7 @@ name = "Morning"
             name: "Dana Designer".to_string(),
             role: "Designer".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -7319,10 +7349,12 @@ name = "Morning"
             Some("Owns acquisition experiments.")
         );
         assert!(!added.id.is_empty(), "a stable id must be minted");
-        // No `tools` given → the standard company-wide grant (empty list).
+        // No `tools` given → inherit the standard company-wide grant, which for
+        // an unscoped minter is `None` (keeps tracking `[tools].allow`), NOT an
+        // explicit empty list (which since #1804 is a deny-all).
         assert!(
-            added.tools.is_empty(),
-            "an add with no `tools` is the standard grant, not an empty shelf"
+            added.tools.is_none(),
+            "an add with no `tools` inherits the standard grant (None), not an empty deny-all shelf"
         );
     }
 
@@ -7335,7 +7367,7 @@ name = "Morning"
             company,
             store,
             "ceo".to_string(),
-            vec!["workspace".to_string()],
+            Some(vec!["workspace".to_string()]),
             vec!["workspace".to_string()],
         )
     }
@@ -7363,7 +7395,7 @@ name = "Morning"
         let record = store.load(&company).await.unwrap().expect("persisted");
         assert_eq!(
             record.overlay_agents[0].tools,
-            vec!["workspace".to_string()],
+            Some(vec!["workspace".to_string()]),
             "the minted teammate must be bounded by the agent that minted it, \
              not by the company"
         );
@@ -7387,9 +7419,9 @@ name = "Morning"
 
         let record = store.load(&company).await.unwrap().expect("persisted");
         assert!(
-            record.overlay_agents[0].tools.is_empty(),
-            "an empty line means the company's standard grant (#264), and a \
-             minter holding that grant hands on exactly it"
+            record.overlay_agents[0].tools.is_none(),
+            "an absent line (None) means the company's standard grant (#264/#1804), \
+             and an unscoped minter hands on exactly it — None, not an empty deny-all"
         );
     }
 
@@ -7414,7 +7446,7 @@ name = "Morning"
         let record = store.load(&company).await.unwrap().expect("persisted");
         assert_eq!(
             record.overlay_agents[0].tools,
-            vec!["workspace".to_string()],
+            Some(vec!["workspace".to_string()]),
             "`composio` is outside the minter's own grant and must be dropped"
         );
     }
@@ -7472,15 +7504,17 @@ name = "Morning"
         let record = store.load(&company).await.unwrap().expect("record");
         assert_eq!(
             record.overlay_agents[0].tools,
-            vec!["docs.*".to_string(), "email".to_string()],
+            Some(vec!["docs.*".to_string(), "email".to_string()]),
             "blanks are dropped and globs trimmed"
         );
     }
 
-    /// An empty `tools` array is the standard grant, not "no tools" — the same
-    /// as omitting the field entirely.
+    /// Since issue #1804 an explicit empty `tools` array is a deliberate
+    /// **deny-all**, NOT the standard grant — the contract inversion. Omitting
+    /// the field entirely is what inherits the standard grant (`None`); passing
+    /// `[]` deliberately hands the teammate no tools, stored as `Some(vec![])`.
     #[tokio::test]
-    async fn add_agent_tool_empty_tools_is_the_standard_grant() {
+    async fn add_agent_tool_empty_tools_is_an_explicit_deny_all() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
         let tool = unscoped_add_agent(company.clone(), store.clone());
@@ -7490,9 +7524,18 @@ name = "Morning"
             .await
             .expect("execute");
         assert!(!result.is_error, "{}", result.text());
+        assert!(
+            result.text().contains("hold no tools"),
+            "the mint result must state the deny-all plainly: {}",
+            result.text()
+        );
 
         let record = store.load(&company).await.unwrap().expect("record");
-        assert!(record.overlay_agents[0].tools.is_empty());
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            Some(Vec::new()),
+            "an explicit empty array is a deny-all (Some(vec![])), not the standard grant (None)"
+        );
     }
 
     /// A minter whose own line names `chargebee` (the shipped bookkeeper) hands
@@ -7525,7 +7568,7 @@ name = "Morning"
             company.clone(),
             store.clone(),
             "bookkeeper".to_string(),
-            belt.clone(),
+            Some(belt.clone()),
             belt,
         );
 
@@ -7541,12 +7584,13 @@ name = "Morning"
             !added
                 .tools
                 .iter()
+                .flatten()
                 .any(|g| g == "chargebee" || g.starts_with("chargebee.")),
             "an unstated mint must not hand on billing: {:?}",
             added.tools
         );
         assert!(
-            added.tools.contains(&"*".to_string()),
+            added.tools.iter().flatten().any(|g| g == "*"),
             "the rest of the minter's line is still copied verbatim (#619): {:?}",
             added.tools
         );
@@ -7580,7 +7624,7 @@ name = "Morning"
             company.clone(),
             store.clone(),
             "bookkeeper".to_string(),
-            belt.clone(),
+            Some(belt.clone()),
             belt,
         );
 
@@ -7593,7 +7637,7 @@ name = "Morning"
         let record = store.load(&company).await.unwrap().expect("persisted");
         assert_eq!(
             record.overlay_agents[0].tools,
-            vec!["chargebee".to_string()],
+            Some(vec!["chargebee".to_string()]),
             "a stated billing namespace is narrowed to the minter's grant, not dropped"
         );
     }
@@ -7873,7 +7917,7 @@ name = "Morning"
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
             "ceo".to_string(),
-            Vec::new(),
+            None,
             vec!["fs:*".to_string()],
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();

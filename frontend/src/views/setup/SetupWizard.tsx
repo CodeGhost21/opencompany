@@ -45,6 +45,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { OnboardingShell } from "@/components/onboarding-shell";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -506,6 +507,14 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   if (loadError) {
     return (
       <OnboardingShell>
+        {/*
+          The first-run flow is outside the console shell, but "outside the
+          shell" is not "unnamed" (codex review, #1785): these two states run
+          before the wizard's own `h1` exists, so an operator on a host that
+          cannot read its own setup got a screen a reader could not announce.
+          `hidden` — the shell already frames the one thing on screen.
+        */}
+        <PageHeader title="Set up this instance" hidden />
         <Alert variant="destructive">
           <AlertTitle>Can&apos;t read this instance&apos;s setup</AlertTitle>
           <AlertDescription>{loadError}</AlertDescription>
@@ -517,6 +526,8 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   if (!status) {
     return (
       <OnboardingShell>
+        {/* See `loadError` above. */}
+        <PageHeader title="Set up this instance" hidden />
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Reading this instance…
         </div>

@@ -25,6 +25,11 @@ import type { TimelineEntry } from "./tasks";
  * `paused` is currently unreachable from a delegation, so nothing in the UI may
  * *depend* on seeing it — but it is handled everywhere a status is, because a
  * status the console cannot render is worse than one it never meets.
+ *
+ * `declined` is terminal and means the workflow compiler declined *by design* to
+ * automate the work ("better done once than built into a workflow", issue
+ * #1809) — neither an error nor an ordinary success, so it must never render in
+ * a failure tone.
  */
 export type RunStatus =
   | "pending"
@@ -33,7 +38,8 @@ export type RunStatus =
   | "paused"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "declined";
 
 /**
  * The coarse phase of a {@link RunStatus}, projected by the host.
@@ -219,6 +225,7 @@ export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
   succeeded: "Succeeded",
   failed: "Failed",
   cancelled: "Cancelled",
+  declined: "Declined",
 };
 
 /**
