@@ -508,6 +508,16 @@ pub struct AppState {
     /// `restartRequired` and the console still says so, which is the honest
     /// answer when a rebuild is genuinely unavailable.
     rebuilder: Option<Arc<dyn crate::runtime::RuntimeRebuilder>>,
+    /// Where this host reports product analytics, if anywhere (issue #1739).
+    ///
+    /// Held here because it is a **process-wide** decision — one deployment
+    /// kind, one identity, one destination — that every company's builder then
+    /// inherits, and threading it separately to boot, to provisioning and to
+    /// the rebuilder is how one of the three comes to be missed. The default is
+    /// [`NullTracker`](crate::analytics::NullTracker): a state nobody wired
+    /// reports nothing, which is what every test, every desktop build and every
+    /// self-hosted install gets.
+    analytics: Arc<dyn crate::analytics::Tracker>,
     /// Builds the engine for a `transport = "local"` `acp` harness (issue
     /// #1245). `None` — every test host, and any embedder that does not wire
     /// one — leaves every such harness `unavailable`. Only the desktop shell
@@ -569,12 +579,25 @@ impl AppState {
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            analytics: crate::analytics::null_tracker(),
             rebuilder: None,
             acp_agents: None,
             #[cfg(feature = "acp")]
             acp_sessions: Arc::new(crate::server::acp::SessionRegistry::new()),
             boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Wires this host's analytics tracker (issue #1739).
+    pub fn with_analytics(mut self, analytics: Arc<dyn crate::analytics::Tracker>) -> Self {
+        self.analytics = analytics;
+        self
+    }
+
+    /// Where this host reports analytics. A [`NullTracker`](crate::analytics::NullTracker)
+    /// unless something wired one, which is every build but a hosted tenant's.
+    pub fn analytics(&self) -> Arc<dyn crate::analytics::Tracker> {
+        self.analytics.clone()
     }
 
     /// Wires this host's in-place runtime rebuilder (issue #290).

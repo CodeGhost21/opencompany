@@ -190,8 +190,10 @@ pub fn dump(manifest: &CompanyManifest) -> Vec<AgentPrompt> {
 }
 
 fn dump_agent(manifest: &CompanyManifest, agent: &Agent, orchestrator: bool) -> AgentPrompt {
-    let grants =
-        crate::runtime::builder::agent_effective_grants(&manifest.tools.allow, &agent.tools);
+    let grants = crate::runtime::builder::agent_effective_grants(
+        &manifest.tools.allow,
+        agent.tools.as_deref(),
+    );
     let mut sections = Vec::new();
     let mut deferred = Vec::new();
 

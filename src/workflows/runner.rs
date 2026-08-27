@@ -2041,7 +2041,10 @@ mod tests {
                 reply: "Waiting for approval.".to_string(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                // Test fixture, not the ACP fold (PR #1880 review).
+                abnormal_stop: None,
                 halted_for_spend: None,
+                budget_paused: None,
             })
         }
     }
@@ -2196,7 +2199,10 @@ to = "done"
                 reply: self.label.to_string(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                // Test fixture, not the ACP fold (PR #1880 review).
+                abnormal_stop: None,
                 halted_for_spend: None,
+                budget_paused: None,
             })
         }
 
@@ -2254,10 +2260,13 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -2363,10 +2372,13 @@ allow = ["*"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 

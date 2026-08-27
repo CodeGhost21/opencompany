@@ -15,11 +15,19 @@
 //! mocks in tests, real impls when a feature is on); the OAuth write routes are
 //! compiled only under the `oauth` feature and 404 otherwise.
 
+/// `GET {scope}/activation` — the account-activation funnel read projection
+/// (issue #1843). See [`crate::company::activation`] for the derivation.
+pub mod activation;
 pub mod artifacts;
 /// Avatar uploads (`docs/spec/runtime/avatars.md`): the custom-image half of
 /// choosing a face for a teammate or for yourself.
 pub mod avatars;
 pub mod billing;
+/// `GET {scope}/agents/{agent_id}/budget-pause` and
+/// `POST {scope}/agents/{agent_id}/budget-pause/redeem` (issue #1846): read
+/// and redeem the durable re-issue marker a top-level turn parks when it
+/// pauses for lack of inference budget/credits. The console's Add-Credits CTA.
+pub mod budget_pause;
 pub mod capabilities;
 pub mod company_key;
 pub mod composio;
@@ -86,6 +94,7 @@ mod team_agent;
 /// company can grant an agent — built-ins, MCP servers and Composio toolkits —
 /// in one vocabulary. Read-only and openhuman-free.
 pub mod tool_catalog;
+pub mod tool_grants;
 pub mod usage;
 pub mod workflows;
 pub mod workspace;
@@ -190,6 +199,7 @@ pub fn router() -> Router<AppState> {
     let router = Router::new()
         .merge(capabilities::router())
         .merge(harnesses::router())
+        .merge(budget_pause::router())
         .merge(tool_catalog::router())
         .merge(connections_read::router())
         .merge(billing::router())
@@ -226,7 +236,9 @@ pub fn router() -> Router<AppState> {
         .merge(inference::router())
         .merge(team::router())
         .merge(setup::router())
+        .merge(activation::router())
         .merge(policy::router())
+        .merge(tool_grants::router())
         .merge(workflows::router())
         .merge(mail::router());
     #[cfg(feature = "oauth")]

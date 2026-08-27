@@ -240,10 +240,13 @@ fn record(overlays: Vec<OverlayAgent>) -> CompanyRecord {
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 
@@ -441,7 +444,7 @@ async fn an_overlay_teammate_added_at_runtime_writes_on_its_first_turn() {
         name: "Analyst".to_string(),
         role: "Analyst".to_string(),
         description: Some("Reads the numbers.".to_string()),
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     };

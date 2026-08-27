@@ -153,6 +153,7 @@ pub fn is_board_column(column: &str) -> bool {
 /// | [`Paused`](RunStatus::Paused) | [`COLUMN_PAUSED`] | resumed, not approved |
 /// | [`Failed`](RunStatus::Failed) | [`COLUMN_TODO`] | with the run's error on the card |
 /// | [`Cancelled`](RunStatus::Cancelled) | [`COLUMN_TODO`] | with the cancellation reason on the card |
+/// | [`Declined`](RunStatus::Declined) | [`COLUMN_TODO`] | a by-design decline (#1809); reason on the card, now a one-off |
 /// | [`Pending`](RunStatus::Pending) / [`Running`](RunStatus::Running) | — | not settled |
 ///
 /// # `Succeeded` lands in review, **not** in Done
@@ -222,6 +223,11 @@ pub fn column_for_settled_run(status: RunStatus) -> Option<&'static str> {
         // Not reviewable work. Epic #183 §3: a card that cannot proceed returns
         // to To-do carrying the reason, never into a stuck column of its own.
         RunStatus::Failed | RunStatus::Cancelled => Some(COLUMN_TODO),
+        // A by-design decline (issue #1809) also returns the card to To-do: the
+        // builder declined to automate it, the card body carries the reason, and
+        // the deliverable is flipped to `once` so its next dispatch reaches the
+        // assignee to do by hand rather than re-entering the builder.
+        RunStatus::Declined => Some(COLUMN_TODO),
         // Still in flight. Nothing to land.
         RunStatus::Pending | RunStatus::Running => None,
     }
@@ -1197,6 +1203,13 @@ mod test {
             column_for_settled_run(RunStatus::Cancelled),
             Some(COLUMN_TODO)
         );
+        // Issue #1809: a by-design decline returns the card to To-do, same as a
+        // failure or cancel — the reason is on the note and the card becomes a
+        // one-off, never a stuck column of its own.
+        assert_eq!(
+            column_for_settled_run(RunStatus::Declined),
+            Some(COLUMN_TODO)
+        );
         // Not settled — an in-flight attempt has no landing to write.
         assert_eq!(column_for_settled_run(RunStatus::Pending), None);
         assert_eq!(column_for_settled_run(RunStatus::Running), None);
@@ -1224,6 +1237,7 @@ mod test {
             RunStatus::Succeeded,
             RunStatus::Failed,
             RunStatus::Cancelled,
+            RunStatus::Declined,
         ] {
             assert_ne!(
                 column_for_settled_run(status),
@@ -1253,6 +1267,7 @@ mod test {
             RunStatus::Paused,
             RunStatus::Failed,
             RunStatus::Cancelled,
+            RunStatus::Declined,
         ] {
             assert_ne!(
                 column_for_settled_run(status),
@@ -1282,6 +1297,7 @@ mod test {
             RunStatus::Succeeded,
             RunStatus::Failed,
             RunStatus::Cancelled,
+            RunStatus::Declined,
         ] {
             if let Some(column) = column_for_settled_run(status) {
                 assert!(is_board_column(column), "{status} lands in '{column}'");
