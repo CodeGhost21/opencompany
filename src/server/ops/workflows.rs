@@ -740,6 +740,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 requires_approval: n.requires_approval,
                 repeatable: n.repeatable,
                 destination: n.destination,
+                postcondition: None,
             });
         }
         Ok(Self {
@@ -4021,6 +4022,7 @@ mod tests {
                 requires_approval: Some(true),
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: Vec::new(),
         };
@@ -4064,6 +4066,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: Some(false),
                     destination: None,
+                    postcondition: None,
                 },
                 WorkflowNodeDef {
                     id: "read".into(),
@@ -4078,6 +4081,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: Vec::new(),
@@ -4273,6 +4277,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 WorkflowNodeDef {
                     id: "done".into(),
@@ -4287,6 +4292,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: Vec::new(),

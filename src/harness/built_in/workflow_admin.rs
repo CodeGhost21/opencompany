@@ -519,6 +519,7 @@ fn seed_draft(file: &crate::company::WorkflowFile) -> RawWorkflow {
                 // agent reading the workflow.
                 repeatable: n.repeatable,
                 destination: n.destination.clone(),
+                postcondition: None,
             })
             .collect(),
         edges: file

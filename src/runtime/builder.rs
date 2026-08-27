@@ -7556,6 +7556,7 @@ needs_reason = true
             requires_approval: None,
             repeatable: None,
             destination: None,
+            postcondition: None,
         };
         RawWorkflow {
             id: id.to_string(),
