@@ -5276,6 +5276,222 @@ mode = "full"
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
+    /// `set_desk_order` must serialize against `company_write_lock` too — same
+    /// load-modify-save shape and same finding as `add_desk_member`'s own test
+    /// above (PR #1875 review finding, round 9: the earlier fix covered five
+    /// handlers but this coverage only proved it for one).
+    #[tokio::test]
+    async fn set_desk_order_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+        seed_overlay_eng(&app, &cookie).await;
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            put_desk_order(
+                &app_for_task,
+                &cookie_for_task,
+                "studio",
+                r#"{"ordered_member_ids":["eng","ceo"]}"#,
+            )
+            .await
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "set_desk_order completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("set_desk_order never resumed after the lock was released")
+            .expect("set_desk_order task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `remove_desk_member` must serialize against `company_write_lock` too
+    /// (PR #1875 review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn remove_desk_member_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+        seed_overlay_eng(&app, &cookie).await;
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/api/v1/company/desks/studio/members/eng")
+                        .header("cookie", &cookie_for_task)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "remove_desk_member completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("remove_desk_member never resumed after the lock was released")
+            .expect("remove_desk_member task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `create_desk` must serialize against `company_write_lock` too (PR #1875
+    /// review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn create_desk_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie_for_task)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"name":"Growth","members":["eng"]}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "create_desk completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("create_desk never resumed after the lock was released")
+            .expect("create_desk task panicked");
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// `delete_desk` must serialize against `company_write_lock` too (PR #1875
+    /// review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn delete_desk_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        // Create the overlay desk to delete before taking the lock — this
+        // test proves serialization on the delete path, not the create path.
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/api/v1/company/desks/growth")
+                        .header("cookie", &cookie_for_task)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "delete_desk completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("delete_desk never resumed after the lock was released")
+            .expect("delete_desk task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
     /// Removing an overlay member drops it from the merged view; a manifest
     /// member cannot be removed (409), and an unknown overlay member is a 404.
     #[tokio::test]
