@@ -92,7 +92,6 @@ gives up mid-turn. `detach` removes the *wait*; it is not what provides the
 drop-safety. See
 [company-brain/approvals.md](../company-brain/approvals.md#settling-the-verdict-is-not-running-the-follow-up).
 
-<<<<<<< HEAD
 ### The built-in `#general` channel (issue #1743)
 
 Every company has a company-wide line from first boot, and nobody can delete,
@@ -190,7 +189,7 @@ Nothing is deleted to achieve that. Its transcript was already folded into
 `#general` by `is_general_chat`, and that channel's membership is the whole
 roster — a superset of whatever the desk held — so the conversation and the
 people are both still there under the channel that renders them.
-=======
+
 ## Desks and channels: the `responder` mode
 
 A desk row carries `responder: "lead" | "auto"` (issue #1835), **omitted when
@@ -211,7 +210,6 @@ roster member: exactly what a lead desk would have answered, so the worst case
 of the new mode is the old mode. Selection spend is metered under its own
 usage kind (`selectorCall`), charged to the whole-company bucket.
 
->>>>>>> upstream/main
 
 ### Chat attachments (issue #1682)
 
