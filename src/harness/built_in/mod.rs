@@ -40,6 +40,7 @@
 /// that append fails. Pairs with the host-owned, per-agent sink
 /// [`toolbelt::shell_audit`] resolves. See [`audit`].
 pub mod audit;
+pub mod blockers;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;

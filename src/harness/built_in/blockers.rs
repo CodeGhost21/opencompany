@@ -1,0 +1,295 @@
+//! Deciding whether a stop is **answerable by a person** (issue #1861).
+//!
+//! The settle sites in `brain.rs` and `planning.rs` reach this module holding an
+//! error and one question: is this something the operator could fix if we asked
+//! them? [`classify_blocker`] is the single answer, so the three sites cannot
+//! each decide it differently.
+//!
+//! # Matching on the message, and why that is the only option here
+//!
+//! A turn returns `anyhow::Result`, so the typed error is erased long before it
+//! reaches a settle. Every classifier in this crate that needs to know *what
+//! kind* of failure happened therefore matches the flattened error chain —
+//! [`is_transient_empty_response`](super::is_transient_empty_response) and
+//! [`is_wall_clock_ceiling`](super::is_wall_clock_ceiling) both do — and this
+//! follows them rather than inventing a parallel mechanism.
+//!
+//! The known cost is that a provider's response body reaches the chain
+//! verbatim, so a phrase can arrive quoted from a remote service rather than
+//! raised locally. That is why the tables below hold **whole phrases** and not
+//! single words: matching the bare word "credential" would classify any error
+//! whose body happens to mention one.
+//!
+//! # Being wrong costs different things in each direction
+//!
+//! A missed blocker settles `Failed` — exactly today's behaviour, surfaced by
+//! issue #1865's honest verdicts. A *false* blocker parks work and spends an
+//! operator's attention on a question they cannot answer, and it does so
+//! silently until the TTL expires it.
+//!
+//! The asymmetry is why this ships deliberately conservative: a small allowlist
+//! of shapes we can name, and `None` — keep settling `Failed` — for everything
+//! else. Widening the list later is a diff against a known set. Starting wide
+//! and narrowing means walking back parks that already reached people.
+
+use crate::ports::blockers::{BlockerKind, BlockerSource};
+
+/// A recognised stop: what kind of gap it is, where it came from, and what
+/// would unblock it.
+///
+/// The `needed` string is not decoration. A blocker whose payload cannot say
+/// what would unstick it arrives as a question with no answerable content —
+/// which is a failure wearing a question's clothes, and worse than the plain
+/// failure it replaced. Every row below supplies one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockerClass {
+    /// What is missing. Decides whether this parks at all.
+    pub kind: BlockerKind,
+    /// Where the stop came from. Provenance only.
+    pub source: BlockerSource,
+    /// What would unblock it, in the words a person should read.
+    pub needed: &'static str,
+}
+
+/// One row of the allowlist: the phrases that identify a shape, and the class
+/// they mean.
+struct Shape {
+    /// Whole phrases, lowercased. Any one matching claims the error.
+    leaves: &'static [&'static str],
+    class: BlockerClass,
+}
+
+/// The shapes we are willing to name, most specific first.
+///
+/// Order matters: the first match wins, so a phrase that could belong to two
+/// rows must sit under the row that describes it better. Rate limiting is
+/// listed above the generic auth row for exactly that reason — a 429 body
+/// frequently mentions the key it is throttling.
+const SHAPES: &[Shape] = &[
+    // ---- transient: recognised precisely so it does NOT park ----------------
+    Shape {
+        leaves: &[
+            "rate limit",
+            "too many requests",
+            "429",
+            "temporarily unavailable",
+            "connection reset",
+            "connection refused",
+            "timed out",
+            "timeout",
+        ],
+        class: BlockerClass {
+            kind: BlockerKind::Transient,
+            source: BlockerSource::Provider,
+            needed: "nothing — the next attempt may succeed",
+        },
+    },
+    // ---- infrastructure: a person can fix it, but only the operator ---------
+    Shape {
+        leaves: &[
+            "model not found",
+            "unknown model",
+            "invalid model",
+            "does not exist or you do not have access to it",
+            "model_not_found",
+        ],
+        class: BlockerClass {
+            kind: BlockerKind::Infrastructure,
+            source: BlockerSource::Provider,
+            needed: "a model id this provider serves, set on the teammate or the company default",
+        },
+    },
+    Shape {
+        leaves: &[
+            "invalid api key",
+            "incorrect api key",
+            "authentication failed",
+            "unauthorized",
+            "401",
+            "invalid_api_key",
+        ],
+        class: BlockerClass {
+            kind: BlockerKind::Infrastructure,
+            source: BlockerSource::Provider,
+            needed: "a working API key for this provider",
+        },
+    },
+    Shape {
+        leaves: &[
+            "could not connect to mcp server",
+            "mcp server is not connected",
+            "connection is not authorised",
+            "reconnect the app",
+            "oauth token has expired",
+            "invalid_grant",
+        ],
+        class: BlockerClass {
+            kind: BlockerKind::Infrastructure,
+            source: BlockerSource::Tool,
+            needed: "the integration reconnected from Apps",
+        },
+    },
+];
+
+/// Classifies a settle-site error, or `None` when the shape is not one we are
+/// willing to name.
+///
+/// `None` is the ordinary answer and means "settle as before". Callers must not
+/// read it as "not a blocker" in any deeper sense — it means this function does
+/// not recognise the error, which is a statement about the allowlist and not
+/// about the failure.
+///
+/// Note that a [`BlockerKind::Transient`] result is a *recognised* stop that
+/// still must not park; callers gate on
+/// [`BlockerKind::parks`](crate::ports::blockers::BlockerKind::parks) rather
+/// than on `is_some`.
+pub fn classify_blocker(err: &anyhow::Error) -> Option<BlockerClass> {
+    classify_blocker_message(&format!("{err:#}"))
+}
+
+/// [`classify_blocker`] over an already-flattened message.
+///
+/// Split out because two callers have a `String` rather than an
+/// `anyhow::Error`: `planning.rs`'s `settle_blocked`, whose reason is composed
+/// rather than raised, and the tests below.
+pub fn classify_blocker_message(message: &str) -> Option<BlockerClass> {
+    let haystack = message.to_ascii_lowercase();
+    SHAPES
+        .iter()
+        .find(|shape| shape.leaves.iter().any(|leaf| haystack.contains(leaf)))
+        .map(|shape| shape.class)
+}
+
+/// The class a planning pass's missing prerequisite parks as.
+///
+/// Not message-matched: `settle_blocked` already *knows* the card cannot
+/// proceed and why — the pass told it — so there is nothing to infer. Naming it
+/// here rather than inline keeps every blocker class in one file.
+pub const PREREQ_BLOCKER: BlockerClass = BlockerClass {
+    kind: BlockerKind::Information,
+    source: BlockerSource::Prereq,
+    needed: "the missing prerequisite, or a decision to proceed without it",
+};
+
+/// The class an agent's own `escalate_to_human` parks as.
+///
+/// Always [`Information`](BlockerKind::Information): the agent is asking a
+/// question, and the answer is knowledge it does not have. An agent that
+/// escalates a broken integration is still asking a person to supply
+/// something — the routing is the same, and #1866 is where a smarter reading of
+/// the question belongs.
+pub const AGENT_QUESTION_BLOCKER: BlockerClass = BlockerClass {
+    kind: BlockerKind::Information,
+    source: BlockerSource::AgentQuestion,
+    needed: "an answer to the question on this card",
+};
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn class_of(message: &str) -> Option<BlockerClass> {
+        classify_blocker_message(message)
+    }
+
+    #[test]
+    fn a_rejected_model_id_is_infrastructure() {
+        let class = class_of("dispatch failed: the model `gpt-nonexistent` does not exist or you do not have access to it")
+            .expect("a rejected model id is recognised");
+        assert_eq!(class.kind, BlockerKind::Infrastructure);
+        assert_eq!(class.source, BlockerSource::Provider);
+        assert!(class.kind.parks());
+    }
+
+    #[test]
+    fn a_bad_key_is_infrastructure() {
+        let class = class_of("hosted inference returned 401: invalid api key")
+            .expect("an auth failure is recognised");
+        assert_eq!(class.kind, BlockerKind::Infrastructure);
+        assert_eq!(class.source, BlockerSource::Provider);
+    }
+
+    #[test]
+    fn a_disconnected_integration_is_infrastructure_from_a_tool() {
+        let class = class_of("tool call failed: could not connect to mcp server `slack`")
+            .expect("an MCP connection failure is recognised");
+        assert_eq!(class.kind, BlockerKind::Infrastructure);
+        assert_eq!(class.source, BlockerSource::Tool);
+    }
+
+    /// The point of carrying `Transient` in the taxonomy: it is recognised, and
+    /// recognising it is how we know **not** to ask anybody.
+    #[test]
+    fn a_rate_limit_is_recognised_but_does_not_park() {
+        let class = class_of("hosted inference returned 429: rate limit exceeded")
+            .expect("a rate limit is recognised");
+        assert_eq!(class.kind, BlockerKind::Transient);
+        assert!(
+            !class.kind.parks(),
+            "a rate limit resolves itself; asking a person about it wastes their attention"
+        );
+    }
+
+    /// Rate limiting outranks the auth row, because a 429 body routinely names
+    /// the key it is throttling. Getting this backwards would park a
+    /// self-resolving stop as a broken credential.
+    #[test]
+    fn a_throttled_key_reads_as_transient_not_as_bad_auth() {
+        let class = class_of("429 too many requests for this api key").expect("recognised");
+        assert_eq!(class.kind, BlockerKind::Transient);
+    }
+
+    /// The conservative default. An error we cannot name keeps today's
+    /// behaviour rather than guessing at a question for somebody.
+    #[test]
+    fn an_unrecognised_failure_is_not_a_blocker() {
+        assert_eq!(class_of("dispatch failed: index out of bounds"), None);
+        assert_eq!(
+            class_of("hand-off failed: the delegate produced nothing"),
+            None
+        );
+        assert_eq!(class_of(""), None);
+    }
+
+    /// Whole phrases, not loose words — a provider body that merely mentions a
+    /// credential must not be read as a broken one.
+    #[test]
+    fn a_body_that_merely_mentions_a_key_is_not_an_auth_blocker() {
+        assert_eq!(
+            class_of("the document describes how to store an api key safely"),
+            None,
+            "matching the bare word `api key` would park an unrelated failure"
+        );
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        assert!(class_of("HTTP 401 UNAUTHORIZED").is_some());
+    }
+
+    /// Every row promises something a person can act on, including the
+    /// transient row (whose promise is that there is nothing to do).
+    #[test]
+    fn every_shape_says_what_is_needed() {
+        for shape in SHAPES {
+            assert!(
+                !shape.class.needed.trim().is_empty(),
+                "a blocker with nothing in `needed` reaches a person with nothing to do"
+            );
+            assert!(
+                !shape.leaves.is_empty(),
+                "a shape with no phrases can never match"
+            );
+        }
+        assert!(!PREREQ_BLOCKER.needed.is_empty());
+        assert!(!AGENT_QUESTION_BLOCKER.needed.is_empty());
+    }
+
+    /// The two host-declared classes park by construction — they exist because
+    /// something already established a person is needed.
+    #[test]
+    fn declared_classes_park() {
+        assert!(PREREQ_BLOCKER.kind.parks());
+        assert!(AGENT_QUESTION_BLOCKER.kind.parks());
+    }
+}
