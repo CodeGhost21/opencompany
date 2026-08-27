@@ -1063,16 +1063,38 @@ export function ChatView({
   const [budgetPauseMarkerByNotice, setBudgetPauseMarkerByNotice] = useState<
     Map<string, string>
   >(new Map());
+  // Issue #1846 review (Codex #3870014951 / #3870092746): company-scoped,
+  // like `workflowRunEvents`/`openTurns`/`budgetProximity` above — host
+  // message ids (`h<seq>`) are a per-company sequence, so a marker id cached
+  // under company A's message id must not answer for company B's
+  // identically-numbered one. `ChatView` is not remounted on a company
+  // switch, so nothing else clears this map: `transcripts` resetting (in
+  // `AppShell`) does not reach a `ChatView`-local `useState`.
+  useEffect(() => {
+    setBudgetPauseMarkerByNotice((prev) => (prev.size === 0 ? prev : new Map()));
+  }, [client, company]);
   useEffect(() => {
     let live = true;
     for (const [agentId, messageId] of budgetPauseMessageIdByAgent) {
       if (budgetPauseMarkerByNotice.has(messageId)) continue;
-      void client.getBudgetPause(agentId, company).then((marker) => {
-        if (!live || marker == null) return;
-        setBudgetPauseMarkerByNotice((prev) =>
-          mergeBudgetPauseMarkerRead(prev, messageId, marker.id),
-        );
-      });
+      void client
+        .getBudgetPause(agentId, company)
+        .then((marker) => {
+          if (!live || marker == null) return;
+          setBudgetPauseMarkerByNotice((prev) =>
+            mergeBudgetPauseMarkerRead(prev, messageId, marker.id),
+          );
+        })
+        .catch(() => {
+          // Issue #1846 review (Codex #3870092746): best-effort read-back —
+          // every other `client.*` call in this file that is not inside a
+          // try/catch ends with one. `redeemBudgetPause`'s live-read
+          // fallback still covers this notice at click time if the cache
+          // never gets populated (a host that lacks this route, a transient
+          // network failure), so a swallowed rejection here degrades to no
+          // worse than the pre-fix always-live-at-click-time behaviour
+          // rather than an unhandled promise rejection on every effect run.
+        });
     }
     return () => {
       live = false;
