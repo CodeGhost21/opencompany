@@ -1574,6 +1574,40 @@ impl HarnessAgentRunner {
             }
         }
         self.approvals.extend(rows);
+
+        // Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector):
+        // the arm and the durable stash above run unconditionally, before this
+        // loop even attempts a single park — that ordering is the whole point
+        // (it is what closes the race the P1 follow-up fixed). But if every
+        // request in this node's batch then fails to park or journal,
+        // `summary.approval_ids` comes back empty: nothing was ever parked for
+        // an operator to decide, so nothing will ever call `continue_turn` for
+        // this turn, and the stash this function just armed and durably wrote
+        // sits forever — one workflow id and complete trigger payload retained
+        // in memory for the life of the process, and durably on every replay,
+        // per store outage this hits. Retire what was just armed the same way
+        // the background-retry cleanup above does: release the in-memory
+        // stash, then append one `BlockedNodeReleased` so a durable stash (if
+        // the write landed) does not outlive the batch it was for either.
+        if summary.approval_ids.is_empty() {
+            parking.blocked_nodes.release(node_turn);
+            if let Err(error) = parking
+                .journal
+                .record_blocked_node_released(node_turn)
+                .await
+            {
+                tracing::warn!(
+                    company = %self.company,
+                    run_id = %self.run_id,
+                    node_turn,
+                    %error,
+                    "workflow agent node: every gated call for this node failed to park, but \
+                     retiring the stash armed for it also failed durably; a stale entry may \
+                     linger until a manual sweep"
+                );
+            }
+        }
+
         summary
     }
 }
@@ -2807,6 +2841,135 @@ mod tests {
             );
         assert_eq!(stashed.1, "wf-1825-p1b");
         assert_eq!(stashed.2, trigger_input);
+    }
+
+    /// Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector): a
+    /// node whose every gated call fails to park must not leave a stash behind
+    /// with nothing that can ever redeem it.
+    ///
+    /// The arm and the durable stash run unconditionally, before the request
+    /// loop attempts a single park — required, since that ordering is what
+    /// closes the P1 race. But when every request in the batch then fails
+    /// (journal outage), `summary.approval_ids` comes back empty: no approval
+    /// id was ever minted for this turn, so nothing will ever call
+    /// `continue_turn` for it, and the stash this call armed and durably wrote
+    /// would otherwise sit forever — one workflow id and trigger payload
+    /// retained in memory for the process's life, and durably on every replay.
+    ///
+    /// Forces every park to fail by pointing `parking.journal` at a path whose
+    /// parent directory does not exist, so `record_parked` inside
+    /// `park_and_journal` fails for each request — the gate's own `park` stays
+    /// in-memory and always succeeds, so this isolates the journal failure
+    /// without needing a custom `ApprovalGate` double.
+    #[tokio::test]
+    async fn a_node_with_no_successfully_parked_call_leaves_no_stash_behind() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::types::{Effect, EffectGroup};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p2c-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        // `FsJournalStore::append_journal` calls `create_dir_all` on the
+        // parent, so a merely-missing directory would not fail the write — it
+        // would just get created. A regular file standing where the journal's
+        // parent directory needs to be does: `create_dir_all` cannot turn a
+        // file into a directory, so every append genuinely fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+        let broken_journal = Arc::new(crate::runtime::journal::RuntimeJournal::new(
+            blocker.join("journal.jsonl"),
+        ));
+        let delivery = deps
+            .delivery
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires delivery");
+        let parking = delivery
+            .parking
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires parking");
+        parking.journal = broken_journal.clone();
+        let queue = deps.approval_requests.clone();
+        let trigger_input = json!({ "request": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p2c"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1825-p2c"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1825-p2c".to_string(),
+            "run-1825-p2c".to_string(),
+            None,
+            trigger_input.clone(),
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+
+        let claim = queue.claim(ApprovalScope::Run("run-1825-p2c".to_string()));
+        claim
+            .scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "gated".to_string(),
+                    effect: Effect {
+                        kind: "shell".to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: json!({ "cmd": "rm -rf /" }),
+                        agent: Some("ceo".to_string()),
+                        run_id: None,
+                    },
+                });
+            })
+            .await;
+
+        let summary = claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
+
+        assert!(
+            summary.approval_ids.is_empty(),
+            "precondition: the broken journal must fail every park attempt"
+        );
+        assert_eq!(summary.unparkable, 1);
+        assert!(
+            !runner
+                .deps
+                .delivery
+                .as_ref()
+                .expect("delivery wired")
+                .parking
+                .as_ref()
+                .expect("parking wired")
+                .blocked_nodes
+                .is_armed(&node_turn),
+            "a node with zero successfully parked calls must not leave an unredeemable \
+             in-memory stash behind"
+        );
+        assert!(
+            broken_journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(turn, ..)| turn != node_turn),
+            "a node with zero successfully parked calls must not leave a durable stash \
+             behind either"
+        );
     }
 
     /// Queues `count` gated calls in a run's scope, drains them through
