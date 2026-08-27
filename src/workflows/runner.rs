@@ -469,6 +469,9 @@ async fn run_workflow_inner(
             workflow_id: workflow.id.clone(),
             run_id: run_id.clone(),
             scheduled: ctx.scheduled,
+            // Issue #1862 prerequisite: who triggered this run, stamped as a
+            // fact at start rather than guessed later at failure time.
+            started_by: Some(ctx.started_by.clone()),
         };
         if let Err(err) = events.append(&record.id, started).await {
             tracing::warn!(
@@ -3207,6 +3210,7 @@ to = "done"
             id: "bad".to_string(),
             name: "Bad".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "only".to_string(),
                 kind: WorkflowNodeKind::Output,
@@ -5173,10 +5177,16 @@ to = "gate"
                     run_id,
                     workflow_id,
                     scheduled,
+                    started_by,
                 } => {
                     assert_eq!(run_id, &ctx.run_id);
                     assert_eq!(workflow_id, "greet");
                     assert!(!scheduled, "a manual run is not flagged scheduled");
+                    assert_eq!(
+                        started_by,
+                        &Some(ctx.started_by.clone()),
+                        "the runner writes the context's started_by into the journal (issue #1862 prerequisite)"
+                    );
                 }
                 CompanyEvent::WorkflowNodeStarted {
                     run_id,
