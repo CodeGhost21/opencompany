@@ -1511,6 +1511,38 @@ impl HarnessAgentRunner {
             );
         }
 
+        // Issue #1825 (P1, fourth follow-up — found by chatgpt-codex-connector):
+        // for a node parking MORE than one gated call, hold this turn's
+        // `ContinuationQueue` counter open across the whole loop below, so
+        // approving the first card the loop parks cannot complete the batch
+        // before the remaining calls have even been attempted. Each
+        // successful `park_and_journal` call arms this same counter (issue
+        // #469/#978's original mechanism, unchanged): with no hold, that
+        // per-call increment means outstanding briefly equals exactly the
+        // number of calls parked *so far*, not the batch's true size — a
+        // decision on the very first card can zero it out while later
+        // iterations are still awaiting store I/O. `blocked_nodes.arm` above
+        // already makes the workflow id and trigger input available the
+        // instant that first card exists (closing the single-call race this
+        // node's stash used to hit), so a premature zero here does not find
+        // an empty stash and safely fall back to "re-run the workflow" the
+        // way it once did — it finds a real one and re-dispatches, duplicating
+        // whatever the run does next. The hold pins outstanding at least 1
+        // above the count of *decided* cards until every request has been
+        // attempted, released only after the loop below (see there).
+        //
+        // Skipped for a single-call node (the overwhelmingly common case):
+        // there is no "rest of the batch" to protect against, and holding
+        // would only insert an extra decrement between that lone card's
+        // approval and its release — reopening, for the common case, the
+        // exact empty-window this function's first follow-up (above) exists
+        // to close. See the release site for what happens on the rare batch
+        // that is fully decided before this loop finishes attempting it.
+        let holds_continuation = requests.len() > 1;
+        if holds_continuation {
+            parking.continuations.arm(node_turn);
+        }
+
         for request in requests {
             push_tool(&mut summary.tools, &request.tool);
             // The delivery precedent: a workflow run has no board card behind it
@@ -1574,6 +1606,47 @@ impl HarnessAgentRunner {
             }
         }
         self.approvals.extend(rows);
+
+        // Issue #1825 (P1, fourth follow-up): release the hold armed above,
+        // now that every request in this batch has actually been attempted —
+        // whether it parked or failed. From here on, `outstanding` for this
+        // turn again means exactly what `ContinuationQueue::decide` assumes it
+        // means: the count of *real, parked* cards left undecided.
+        //
+        // `Some(batch)` back means this release was itself the batch's last
+        // decision — every card this loop parked was already approved or
+        // denied by the time the loop finished attempting the rest, which
+        // needs an operator (or an API caller) faster than this function's
+        // own sequential parks. `park_gated_calls` runs on `HarnessAgentRunner`,
+        // deep inside the agent's own turn, with no path back to
+        // `CompanyRuntime::resume_blocked_agent_node` — the only place that
+        // spawns a continuation — short of re-entering this run's own
+        // execution while it is still mid-turn, which is a worse hazard than
+        // the one this hold exists to close (double-dispatch again, just
+        // moved). So this rare batch is left exactly as `blocked_nodes.arm`
+        // above already left it: approved and durably stashed. The decisions
+        // themselves are not lost — each was already resolved and journaled
+        // independently of this counter — only the automatic re-dispatch is
+        // deferred, to the next boot's `reconcile_stranded_blocked_nodes`
+        // (see `resume_blocked_agent_node`'s doc for that path). An empty
+        // batch (every request below failed to park, so nothing was ever
+        // decided) is silently fine — the cleanup right after this handles
+        // that case.
+        if holds_continuation
+            && let Some(batch) = parking.continuations.decide(node_turn, None)
+            && !batch.is_empty()
+        {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                node_turn,
+                decisions = batch.len(),
+                "workflow agent node: every gated call this node parked was already decided \
+                 before the rest of the batch finished parking; the approval is recorded but \
+                 the run will not auto-resume until the next boot's stranded-block \
+                 reconciliation"
+            );
+        }
 
         // Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector):
         // the arm and the durable stash above run unconditionally, before this
@@ -2969,6 +3042,201 @@ mod tests {
                 .all(|(turn, ..)| turn != node_turn),
             "a node with zero successfully parked calls must not leave a durable stash \
              behind either"
+        );
+    }
+
+    /// Issue #1825 (P1, fourth follow-up — found by chatgpt-codex-connector):
+    /// approving the first card a multi-call node parks must not complete its
+    /// continuation batch before the rest of the node's calls have even been
+    /// attempted.
+    ///
+    /// # The race this closes
+    ///
+    /// `park_gated_calls` parks a node's gated calls one at a time in a loop,
+    /// and each successful `park_and_journal` arms `ContinuationQueue` for the
+    /// node's turn — issue #469/#978's original per-call mechanism, unchanged.
+    /// With no hold, `outstanding` right after the FIRST call parks is exactly
+    /// 1: a decision on that lone card zeroes it out and
+    /// `ContinuationQueue::decide` hands back a "complete" batch, even though
+    /// the loop has not attempted the node's second call yet.
+    /// `blocked_nodes.arm` (the P1 first follow-up, above) already makes the
+    /// workflow id and trigger input available the instant the first card
+    /// exists, so a premature zero here finds a real stash rather than an
+    /// empty one — pre-fix, that reaches `resume_blocked_agent_node` and
+    /// re-dispatches the run while this node is still parking its remaining
+    /// calls.
+    ///
+    /// # How this is reproduced deterministically
+    ///
+    /// A real timing race needs two concurrent tasks; this test gets the same
+    /// interleaving without one. `RaceGate` wraps the approval gate
+    /// `park_gated_calls` parks through, and its second `park` call — the
+    /// second gated call's — first decides the FIRST card via the SAME
+    /// `ContinuationQueue` handle `park_and_journal` arms, synchronously,
+    /// before that second park even returns. That is exactly where a fast
+    /// operator's decision would land relative to the loop below, reproduced
+    /// on ordering rather than wall-clock luck.
+    #[tokio::test]
+    async fn approving_the_first_card_of_a_multi_call_node_does_not_complete_the_batch_early() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{
+            Actor, ActorKind, ApprovalId, CompanyEvent, Effect, EffectGroup, PolicyDecision,
+            Verdict,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Mutex as AsyncMutex;
+
+        /// Delegates every call to `inner`, except that the SECOND `park` it
+        /// sees first decides the FIRST approval it minted, via the same
+        /// `ContinuationQueue` the real park path arms — simulating an
+        /// operator racing ahead of `park_gated_calls`'s own loop.
+        struct RaceGate {
+            inner: Arc<dyn ApprovalGate>,
+            continuations: crate::runtime::continuation::ContinuationQueue,
+            node_turn: String,
+            calls: AtomicUsize,
+            first_approval: AsyncMutex<Option<ApprovalId>>,
+            /// What `ContinuationQueue::decide` returned for the interleaved
+            /// decision on the first card — the assertion this test exists
+            /// for. Outer `Option`: whether the interleave actually ran.
+            early_decide_result: AsyncMutex<Option<Option<Vec<CompanyEvent>>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalGate for RaceGate {
+            async fn evaluate(
+                &self,
+                company: &CompanyId,
+                effect: &Effect,
+            ) -> crate::Result<PolicyDecision> {
+                self.inner.evaluate(company, effect).await
+            }
+
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let id = self.inner.park(company, effect).await?;
+                if call == 0 {
+                    *self.first_approval.lock().await = Some(id.clone());
+                } else if call == 1 {
+                    let first = self
+                        .first_approval
+                        .lock()
+                        .await
+                        .clone()
+                        .expect("the first card must have parked before the second");
+                    let event = CompanyEvent::ApprovalResolved {
+                        approval_id: first,
+                        verdict: Verdict::Approve,
+                        by: Actor {
+                            kind: ActorKind::Operator,
+                            id: "operator".to_string(),
+                        },
+                    };
+                    let result = self.continuations.decide(&self.node_turn, Some(event));
+                    *self.early_decide_result.lock().await = Some(result);
+                }
+                Ok(id)
+            }
+
+            async fn resolve(
+                &self,
+                id: &ApprovalId,
+                verdict: Verdict,
+                by: Actor,
+            ) -> crate::Result<Option<Effect>> {
+                self.inner.resolve(id, verdict, by).await
+            }
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p1-4-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key("run-1825-p1-4", "work");
+
+        let delivery = deps
+            .delivery
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires delivery");
+        let parking = delivery
+            .parking
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires parking");
+        let race_gate = Arc::new(RaceGate {
+            inner: parking.approvals.clone(),
+            continuations: parking.continuations.clone(),
+            node_turn: node_turn.clone(),
+            calls: AtomicUsize::new(0),
+            first_approval: AsyncMutex::new(None),
+            early_decide_result: AsyncMutex::new(None),
+        });
+        parking.approvals = race_gate.clone();
+
+        let queue = deps.approval_requests.clone();
+        let trigger_input = json!({ "request": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p1-4"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1825-p1-4"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1825-p1-4".to_string(),
+            "run-1825-p1-4".to_string(),
+            None,
+            trigger_input.clone(),
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let claim = queue.claim(ApprovalScope::Run("run-1825-p1-4".to_string()));
+        claim
+            .scoped(async {
+                for tool in ["shell", "http"] {
+                    queue.push(ApprovalRequest {
+                        tool: tool.to_string(),
+                        reason: "gated".to_string(),
+                        effect: Effect {
+                            kind: tool.to_string(),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: json!({ "call": tool }),
+                            agent: Some("ceo".to_string()),
+                            run_id: None,
+                        },
+                    });
+                }
+            })
+            .await;
+
+        let summary = claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
+
+        assert_eq!(summary.approval_ids.len(), 2, "both calls must have parked");
+
+        let early_result = race_gate.early_decide_result.lock().await.clone();
+        assert_eq!(
+            early_result,
+            Some(None),
+            "deciding the first card while the loop was still parking the second must NOT \
+             complete the batch — ContinuationQueue::decide must report 'still waiting' \
+             (None), not hand back a batch the run has not finished parking yet"
         );
     }
 
