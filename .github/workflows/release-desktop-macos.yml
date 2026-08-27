@@ -7,6 +7,14 @@
 # ever attached to a GitHub Release (`create_release`). An unsigned DMG never
 # goes to a public Release.
 #
+# THE RELEASE IS A DRAFT until this workflow finishes. `release.yml` creates it
+# that way on purpose: this repository has immutable releases enabled, so
+# publishing freezes the asset list and no DMG can be added afterwards. The
+# `publish` job at the bottom flips the draft public once BOTH architectures
+# have attached theirs, so a release becomes immutable and public in the same
+# moment — already complete. See the `Create draft release` step in
+# `release.yml` for the full argument.
+#
 # BOTH ARCHITECTURES, issue #1732 phase 2. The job is a matrix over `target`:
 # `aarch64-apple-darwin` and `x86_64-apple-darwin`. Both legs run on
 # `macos-latest`, which is Apple Silicon — the Intel leg CROSS-COMPILES rather
@@ -46,9 +54,11 @@ on:
         default: false
       create_release:
         description:
-          When true, attach the DMG to the GitHub Release named by `tag`. Only a
-          signed DMG may be attached, so this requires `sign` to also be true.
-          When false, upload the DMG as an Actions artifact instead.
+          When true, attach both DMGs to the DRAFT GitHub Release named by `tag`
+          and publish it. Only a signed DMG may be attached, so this requires
+          `sign` to also be true, and the draft must already exist — run
+          `release.yml` for the tag first. When false, upload the DMG as an
+          Actions artifact instead and touch no Release.
         type: boolean
         default: false
 
