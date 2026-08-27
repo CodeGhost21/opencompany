@@ -157,6 +157,20 @@ export interface WorkflowGraph {
   id: string;
   name: string;
   description?: string;
+  /**
+   * The owning desk (issue #1862 prerequisite) — a desk id or name, resolved
+   * against the company's wired desks host-side. `undefined` for a graph with
+   * no owner (every graph saved before this field existed, or one an author
+   * chose not to assign).
+   *
+   * **No control in this dialog edits it yet** — the create/edit form has no
+   * field for it. It is carried on {@link GraphDraft} and round-tripped
+   * verbatim by {@link assembleGraph} purely so a Save never clears it: a
+   * `PUT` replaces the whole graph, so an edit that omitted this field here
+   * would silently wipe whatever desk an operator (or the workflow-proposal
+   * defaulting) had set (issue #1882 review).
+   */
+  ownerDesk?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   /** See {@link WorkflowSummary.editable}. Same "only `false` means no" rule. */
