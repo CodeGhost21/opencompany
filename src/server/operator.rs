@@ -280,6 +280,11 @@ fn operator_system_desk(id: &str) -> DeskDto {
         ),
         members: Vec::new(),
         overlay_members: Vec::new(),
+        // The system desk is read-only and memberless: it has no roster to
+        // route around, and `responder: auto` is rejected for a memberless
+        // desk anyway (see the create guard), so it is lead-routed like a
+        // manifest desk (issue #1835).
+        responder: ResponderMode::Lead,
         overlay_created: false,
         system: true,
     }
