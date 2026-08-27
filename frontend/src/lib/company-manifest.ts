@@ -389,16 +389,35 @@ export const MAX_EXPLICIT_ID_LENGTH = 128;
  * route is collapsed by ordinary URL normalization before it ever reaches
  * the host, making the new company unreachable through its expected
  * `/companies/{id}` route (codex review on #1828, PR comment 3874738990).
- * Only the two literal dot-segments are special path components — anything
- * else typed here (including runs of three or more dots, or a dot beside
- * other characters) is an ordinary, safe filesystem component once slugged.
+ * The two literal dot-segments are refused outright as above; every other
+ * character outside {@link SLUG_SAFE_ID} is refused too, but for a different
+ * reason — not because `slug` fails on it, but because `slug` "succeeds" by
+ * silently folding it to `_`, which breaks the id's own stability rather than
+ * the save that creates it. `Bundle::new` derives the on-disk directory from
+ * `slug(id)`, but `FsCompanyStore::list` reconstructs a company's id FROM
+ * that directory name on every subsequent read (`entry.file_name()`,
+ * `store/fs.rs`) — it never re-reads the original id from anywhere inside the
+ * bundle. So an id containing e.g. a space or `/`, such as `acme corp` or
+ * `acme/ops`, is accepted by provisioning and comes back correctly in that
+ * same request's response, but a restart (or any read that goes through
+ * `list`) reconstructs it as the slugged form, `acme_corp` — a silent identity
+ * change the connection profile this client already saved under the original
+ * id has no way to follow, surfacing as `company_not_found` (codex review on
+ * #1828, PR comment 3875297936). Requiring `slug(candidateId) ===
+ * candidateId` up front is the only way this client can guarantee an id it
+ * sends now still resolves to the same id later.
  */
+const SLUG_SAFE_ID = /^[A-Za-z0-9._-]+$/;
+
 export function explicitIdProblem(candidateId: string): string | null {
   if (candidateId.length > MAX_EXPLICIT_ID_LENGTH) {
     return `That id is too long (${candidateId.length} characters) — keep it under ${MAX_EXPLICIT_ID_LENGTH} characters. Leave the field blank for an auto-generated id.`;
   }
   if (candidateId === "." || candidateId === "..") {
     return `"${candidateId}" isn't a usable id — it's a reserved path segment. Choose a different id, or leave the field blank for an auto-generated one.`;
+  }
+  if (!SLUG_SAFE_ID.test(candidateId)) {
+    return `That id can only use letters, numbers, ".", "_", and "-" — anything else (like a space or "/") is silently replaced with "_" on disk, so the company would come back under a different id after a restart. Choose a different id, or leave the field blank for an auto-generated one.`;
   }
   return null;
 }

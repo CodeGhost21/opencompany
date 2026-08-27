@@ -5,6 +5,7 @@ import {
   buildManifestToml,
   collidesWithArchived,
   describeProvisionError,
+  explicitIdProblem,
 } from "@/lib/company-manifest";
 
 /**
@@ -132,5 +133,49 @@ describe("collidesWithArchived (issue #1807)", () => {
     // is already caught by the exact-match branch above, not this one.
     expect(collidesWithArchived("tenant-a--acme", "tenant-a--acme")).toBe(true);
     expect(collidesWithArchived("tenant-b--acme", "tenant-a--acme")).toBe(false);
+  });
+});
+
+/**
+ * `explicitIdProblem` only checked an operator-typed id's length and the two
+ * reserved dot-segments — anything else was accepted, even though `slug`
+ * (`store/paths.rs`) does not pass every character through unmodified.
+ * `Bundle::new` derives a company's on-disk directory from `slug(id)`, and
+ * `FsCompanyStore::list` reconstructs a company's id FROM that directory
+ * name on every subsequent read (never from anything stored inside the
+ * bundle) — so an id `slug` would silently change, like `acme corp` →
+ * `acme_corp`, provisions and works for the request that created it, then
+ * comes back under the changed id after any restart (codex review on
+ * #1828, PR comment 3875297936).
+ */
+describe("explicitIdProblem — slug-stability (issue #1828 comment 3875297936)", () => {
+  it("accepts every character slug passes through unmodified", () => {
+    expect(explicitIdProblem("acme-corp_2.mk2")).toBeNull();
+    expect(explicitIdProblem("ACME123")).toBeNull();
+  });
+
+  it("rejects a space, which slug silently folds to _", () => {
+    const problem = explicitIdProblem("acme corp");
+    expect(problem).not.toBeNull();
+    expect(problem).toContain("letters, numbers");
+  });
+
+  it("rejects a slash, which slug silently folds to _", () => {
+    const problem = explicitIdProblem("acme/ops");
+    expect(problem).not.toBeNull();
+    expect(problem).toContain("letters, numbers");
+  });
+
+  it("still rejects the reserved dot-segments ahead of the charset check", () => {
+    // "." and ".." are themselves entirely slug-safe characters, so they
+    // need their own, more specific message rather than falling through to
+    // the generic charset one.
+    expect(explicitIdProblem(".")).toContain("reserved path segment");
+    expect(explicitIdProblem("..")).toContain("reserved path segment");
+  });
+
+  it("still enforces the length bound ahead of the charset check", () => {
+    const tooLong = "a".repeat(129);
+    expect(explicitIdProblem(tooLong)).toContain("too long");
   });
 });
