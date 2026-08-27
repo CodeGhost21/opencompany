@@ -168,7 +168,10 @@ pub(crate) async fn openrouter_models() -> Result<Vec<InferenceModel>, String> {
     let mut models = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, fetch)
         .await
         .map_err(|_| {
-            "OpenRouter's model registry did not answer within 10 seconds".to_string()
+            format!(
+                "OpenRouter's model registry did not answer within {} seconds",
+                MODEL_CATALOG_TIMEOUT.as_secs()
+            )
         })??;
     if models.is_empty() {
         return Err("OpenRouter's model registry returned no models".to_string());
