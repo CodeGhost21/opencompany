@@ -602,6 +602,14 @@ pub struct CompanyAgent {
     /// The embedded openhuman session. A [`Mutex`] because a `turn` takes
     /// `&mut self` and one agent must serialise its own turns.
     agent: Mutex<Agent>,
+    /// The curated step labels of this agent's tools, captured from the built
+    /// tool set (see [`StepLabels`](steps::StepLabels) for why the turn loop
+    /// cannot supply them).
+    ///
+    /// Resolved once per agent build rather than per turn: the tool set is fixed
+    /// for the life of a pooled agent, and a rebuild — the only thing that can
+    /// change which search belt is wired — mints a new `CompanyAgent` anyway.
+    step_labels: steps::StepLabels,
     /// The chat/desk thread this pooled agent's in-memory history is currently
     /// bound to (issue #1725).
     ///
@@ -836,6 +844,14 @@ impl CompanyAgent {
         // same turns.
         let turn_company: Option<CompanyId> = stream.as_ref().map(|ctx| ctx.company.clone());
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
+        // This agent's curated step labels, restored onto each tool-call start as
+        // it arrives. The turn loop labels a tool row from its *name* alone and
+        // never asks the tool what it calls itself, so a branded belt would
+        // otherwise render as the generic humanized name on every surface below
+        // (see `steps::StepLabels`). Applied here — once, at the single point the
+        // turn's events enter OpenCompany — so the live stream, the durable run
+        // trace, and the folded timeline cannot disagree about a step's name.
+        let step_labels = self.step_labels.clone();
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
             let mut seq: u64 = 0;
@@ -843,6 +859,7 @@ impl CompanyAgent {
             // emits the same "Thinking" rows the final folded one does.
             let mut thinking_open = false;
             while let Some(event) = rx.recv().await {
+                let event = step_labels.apply(event);
                 if let Some(ctx) = &stream
                     && let Some(frame) = steps::stream_event_from(&event, seq, &mut thinking_open)
                 {
@@ -3031,6 +3048,7 @@ impl HarnessPool {
             return Ok(refusal);
         }
 
+        let confined = confine::build_confined_agent(company, company_name, confinement, deps)?;
         let agent = CompanyAgent {
             agent_id: confine::CONFINED_AGENT_ID.to_string(),
             role: "Workflow copilot".to_string(),
@@ -3038,12 +3056,8 @@ impl HarnessPool {
             // per-agent daily cap to read; the company-wide ceiling above is the
             // one that applies to it.
             budget_usd_daily: None,
-            agent: Mutex::new(confine::build_confined_agent(
-                company,
-                company_name,
-                confinement,
-                deps,
-            )?),
+            step_labels: steps::StepLabels::from_tools(confined.tools()),
+            agent: Mutex::new(confined),
             bound_chat: Mutex::new(None),
         };
 
@@ -4127,6 +4141,7 @@ pub(crate) fn build_roster(
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
+            step_labels: steps::StepLabels::from_tools(agent.tools()),
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
         }));
@@ -4198,6 +4213,7 @@ pub(crate) fn build_roster(
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
+            step_labels: steps::StepLabels::from_tools(agent.tools()),
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
         }));
