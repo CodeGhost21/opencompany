@@ -546,6 +546,9 @@ pub struct Company {
     /// tiny.place `@handle`; only used when `[place].discoverable = true`.
     #[serde(default)]
     pub handle: Option<String>,
+    /// Company logo as a self-contained data:image/... URL (issue: operator-set brand logo).
+    #[serde(default)]
+    pub logo_url: Option<String>,
 }
 
 /// A `[[agent]]` roster entry.
