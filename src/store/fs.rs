@@ -995,9 +995,8 @@ impl CompanyStore for FsCompanyStore {
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
         };
-        // `meta.json` before `company.toml` — the reverse of `load`'s read
-        // order, and deliberately so (issue #1828 review on the durable
-        // collision check this PR added to `provision.rs`).
+        // Write order depends on whether the bundle already exists (issue
+        // #1828 review, second round).
         //
         // `load` treats a missing `company.toml` as "no such company"
         // (`Ok(None)`) but a missing `meta.json` as an *existing* company with
@@ -1005,17 +1004,50 @@ impl CompanyStore for FsCompanyStore {
         // bearing for real bundles written before `meta.json` existed at all).
         // That asymmetry means the two writes below can never be made to look
         // atomic from the read side by ordering alone — but they can be made
-        // to fail safe: whichever file this function writes *last* is the one
-        // a crash or a transient write failure between the two calls leaves
-        // absent. Writing `company.toml` last means that failure window always
-        // reads back as `Ok(None)`, so an interrupted `save` (mid-create or
-        // mid-reset) looks like it never started rather than like a
-        // successfully provisioned company — the provision-path pre-check
-        // that calls `load` before every create/reset can then retry instead
-        // of returning `company_exists` forever over an orphaned bundle it can
-        // never load a usable record from.
-        write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
-        write_atomic(&bundle.company_toml(), &toml_src).await?;
+        // to fail safe. Which order is safe flips depending on whether this
+        // call is a first-time publish or an update to a bundle that is
+        // already live:
+        //
+        // - **First publish** (no `company.toml` yet): `meta.json` first.
+        //   Whichever file this function writes *last* is the one a crash or
+        //   a transient write failure between the two calls leaves absent.
+        //   Writing `company.toml` last means that failure window always
+        //   reads back as `Ok(None)`, so an interrupted `save` (mid-create or
+        //   mid-reset) looks like it never started rather than like a
+        //   successfully provisioned company — the provision-path pre-check
+        //   that calls `load` before every create/reset can then retry
+        //   instead of returning `company_exists` forever over an orphaned
+        //   bundle it can never load a usable record from.
+        //
+        // - **Update to an existing bundle**: `company.toml` first — the
+        //   opposite order. `meta.json` carries the lifecycle and every
+        //   overlay (workflows, budgets, policy, tool grants, …), so
+        //   meta-first would let a save whose *second* write fails still
+        //   durably commit those changes even though `save` returns `Err` to
+        //   the caller: a resume can land `lifecycle == "running"` and then
+        //   report a 500 and skip appending its audit event, and the same
+        //   ambiguity reaches workflow and policy updates. `company.toml`
+        //   first avoids that: if the second write (`meta.json`) then fails,
+        //   `meta.json` is simply left as it was — old lifecycle, old
+        //   overlays — so the update fails toward "nothing changed" instead
+        //   of "changed anyway, but the caller was told it didn't." This does
+        //   not reopen the first-publish hazard above: that hazard needs a
+        //   *missing* `meta.json` to make `load` fall back to
+        //   `Meta::default()`, which only happens on a bundle's very first
+        //   save. An update's `meta.json` already exists from a prior save,
+        //   so if this save's rewrite of it never lands, `load` falls back to
+        //   that OLD `meta.json` — never a default.
+        let updating_existing_bundle = tokio::fs::try_exists(&bundle.company_toml())
+            .await
+            .unwrap_or(false);
+        let meta_src = serde_json::to_string(&meta)?;
+        if updating_existing_bundle {
+            write_atomic(&bundle.company_toml(), &toml_src).await?;
+            write_atomic(&bundle.meta_json(), &meta_src).await?;
+        } else {
+            write_atomic(&bundle.meta_json(), &meta_src).await?;
+            write_atomic(&bundle.company_toml(), &toml_src).await?;
+        }
         Ok(())
     }
 
@@ -2855,6 +2887,102 @@ mod test {
             .await
             .expect("retry succeeds once the fault is no longer armed");
         assert!(store.load(&id).await.unwrap().is_some());
+    }
+
+    /// **Issue #1828 review, second round**: the sibling window the test
+    /// above never exercised. `meta.json` carries the lifecycle and every
+    /// overlay; the original fix (this file's prior revision) wrote it
+    /// *first*, unconditionally, for every save — first publish and update
+    /// alike. That order is safe for a first publish (see the test above),
+    /// but for an update it means a fault on `company.toml`'s write — the
+    /// *second* write under that old, unconditional order — still leaves the
+    /// lifecycle change durably on disk in `meta.json` even though `save`
+    /// returns `Err` to the caller: a resume that reports a 500 while
+    /// `lifecycle` already reads back `"running"`, with the audit event the
+    /// caller only appends after a successful `save` never written.
+    ///
+    /// The fix makes the order conditional: an update to an already-existing
+    /// bundle writes `company.toml` *first*, so the same fault — on
+    /// `company.toml`'s write — now fails the update's *first* write instead,
+    /// before `meta.json` is touched at all. This proves that directly:
+    /// publish a bundle, then arm the fault on `company.toml` for an update
+    /// save, and assert the lifecycle read back afterward is still the *old*
+    /// value, never the new one — the update fails toward "nothing changed,"
+    /// not "changed anyway, but the caller was told it didn't." It then
+    /// retries without the fault and asserts the new lifecycle *does* land.
+    #[tokio::test]
+    async fn an_update_interrupted_on_the_second_write_does_not_persist_the_lifecycle_change() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = |lifecycle: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: lifecycle.to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        // Publish the bundle for the first time — the create-path branch,
+        // unaffected by this test's assertion.
+        store
+            .save(&record("provisioning"))
+            .await
+            .expect("first publish succeeds");
+
+        // The update save this test exercises: a resume, flipping lifecycle
+        // to "running". Under the old, unconditional order this fault landed
+        // on the *second* write, after `meta.json` (the new lifecycle) had
+        // already committed — the untested window the review flagged. Under
+        // the fix, `save` writes `company.toml` first for an update, so this
+        // same fault now fails the update's *first* write, before
+        // `meta.json` is ever touched.
+        fault_probe::fail_next_write(&bundle.company_toml());
+
+        let err = store.save(&record("running")).await;
+        assert!(
+            err.is_err(),
+            "the injected failure must propagate out of save"
+        );
+
+        let loaded = store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the bundle still exists — only the update failed");
+        assert_eq!(
+            loaded.lifecycle, "provisioning",
+            "a failed company.toml write during an update must leave \
+             meta.json — and the lifecycle it carries — exactly as it was \
+             before the update; the caller was told the resume failed, so \
+             nothing about it may have taken effect"
+        );
+
+        // `fail_next_write` is one-shot, so the retry hits the real write
+        // path and the lifecycle change lands normally.
+        store
+            .save(&record("running"))
+            .await
+            .expect("retry succeeds once the fault is no longer armed");
+        assert_eq!(store.load(&id).await.unwrap().unwrap().lifecycle, "running");
     }
 
     #[tokio::test]
