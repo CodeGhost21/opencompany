@@ -164,6 +164,18 @@ pub struct WorkflowFile {
     /// wrote came from. It changes no behaviour here: precedence is decided by
     /// id, in [`load_workflow_union`] and [`list_workflows_union`].
     pub global: bool,
+    /// The desk that **owns** this workflow (issue #1862 prerequisite) — a
+    /// desk id or name, resolved against the company's wired desks at author
+    /// time by `workflow_create::validate_draft_against_record`.
+    ///
+    /// Ownership, not delivery: distinct from the `owner` entry in
+    /// [`WORKFLOW_DESTINATION_KINDS`], which names a **destination** an
+    /// `output` node reports to (the company's Admin users / operator
+    /// channel). This field says who is *responsible* for the graph — the
+    /// fallback a parked blocker's DM attributes to when no triggering agent
+    /// is on record. `None` for every graph saved before this field existed,
+    /// and for one an author chose not to assign.
+    pub owner_desk: Option<String>,
 }
 
 impl WorkflowFile {
@@ -483,6 +495,12 @@ pub(crate) struct RawWorkflow {
     pub(crate) name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
+    /// The owning desk (issue #1862 prerequisite) — see
+    /// [`WorkflowFile::owner_desk`]. `#[serde(default)]` like every other
+    /// field on this raw shape, so an omitted `owner_desk` (every graph saved
+    /// before this field existed) parses as `None` rather than a hard error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_desk: Option<String>,
     #[serde(default, rename = "node")]
     pub(crate) nodes: Vec<RawNode>,
     #[serde(default, rename = "edge")]
@@ -759,6 +777,12 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
         // Set by whoever merges the baseline in; this parser reads company
         // graphs and global ones through the same path.
         global: false,
+        // Issue #1862 prerequisite: carried through unvalidated here on
+        // purpose — this is the LENIENT load path (see the comment above on
+        // `validate(&raw, false)`), so a saved graph whose desk was since
+        // removed must still load. The desk existence check is strict/
+        // author-time only, in `workflow_create::validate_draft_against_record`.
+        owner_desk: raw.owner_desk,
         nodes: raw
             .nodes
             .into_iter()
@@ -1922,6 +1946,30 @@ mod tests {
         to = "done"
     "#;
 
+    /// Issue #1862 prerequisite: a workflow TOML with no `owner_desk` key —
+    /// every graph saved before this field existed — parses to `None` rather
+    /// than failing. `LOADABLE_WORKFLOW` has no `owner_desk` line by
+    /// construction, so this is the back-compat case.
+    #[test]
+    fn a_workflow_toml_with_no_owner_desk_parses_to_none() {
+        let file = parse_workflow(LOADABLE_WORKFLOW).expect("parses");
+        assert_eq!(file.owner_desk, None);
+    }
+
+    /// A workflow TOML that DOES carry `owner_desk` round-trips it — the
+    /// lenient load path (`validate(&raw, false)`) carries the value through
+    /// unvalidated; desk existence is checked only at author time.
+    #[test]
+    fn a_workflow_toml_with_owner_desk_parses_it_through() {
+        let with_owner = LOADABLE_WORKFLOW.replacen(
+            "id = \"valid\"",
+            "id = \"valid\"\n        owner_desk = \"engineering\"",
+            1,
+        );
+        let file = parse_workflow(&with_owner).expect("parses");
+        assert_eq!(file.owner_desk.as_deref(), Some("engineering"));
+    }
+
     /// The filename is the id-based lookup key. A different id inside the body
     /// must never leak into a list as a row that `GET /workflows/{id}` cannot
     /// open, while a valid sibling continues to load.
@@ -1967,6 +2015,7 @@ mod tests {
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: Some("A test graph.".to_string()),
+            owner_desk: None,
             nodes: vec![
                 RawNode {
                     id: "start".to_string(),
@@ -2022,6 +2071,7 @@ mod tests {
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![RawNode {
                 id: "only".to_string(),
                 kind: "output".to_string(),
@@ -3441,6 +3491,7 @@ to = "to_channel"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 RawNode {
                     id: "start".to_string(),
@@ -3496,6 +3547,7 @@ to = "to_channel"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![RawNode {
                 id: "start".to_string(),
                 kind: "trigger".to_string(),
@@ -3526,6 +3578,7 @@ to = "to_channel"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 RawNode {
                     id: "start".to_string(),
@@ -3758,6 +3811,7 @@ to = "to_channel"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: Some("Legacy.".to_string()),
+            owner_desk: None,
             nodes: vec![RawNode {
                 id: "start".to_string(),
                 kind: "trigger".to_string(),
@@ -3788,6 +3842,7 @@ to = "to_channel"
             id: file.id.clone(),
             name: file.name.clone(),
             description: file.description.clone(),
+            owner_desk: file.owner_desk.clone(),
             nodes: file
                 .nodes
                 .iter()
