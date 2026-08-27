@@ -1700,15 +1700,31 @@ export function AwaitingApprovalRow({
   );
   const blocking = useMemo(() => blockingTaskApprovals(rows), [rows]);
   /**
-   * Pending approvals the host counts that the queue has not delivered.
+   * Pending approvals the host counts that this screen can neither show nor
+   * account for.
    *
    * The honest residual, and the reason it is stated rather than swallowed: the
    * two reads land separately, so for a poll this screen can hold four pending
    * approvals and three decidable rows. Deciding those three would leave the
    * card stopped, and a surface that said nothing would have just told the
    * operator they were finished.
+   *
+   * **A set difference, not a subtraction** (#1895 review). Counting
+   * `pending.count - blocking.length` mixes two clocks: `pending` refreshes on
+   * this screen's own 4s poll while `blocking` drops a row the instant a
+   * verdict is witnessed, so for up to a poll after the operator decides the
+   * last approval the arithmetic said one was undelivered and the screen
+   * announced "still loading it" about a request that had just been settled by
+   * the person reading it. Naming the ids instead cannot drift: an approval is
+   * unaccounted for only if the host still calls it pending, this screen has no
+   * row for it, **and** this console has not decided it.
    */
-  const undelivered = Math.max(0, (pending?.count ?? 0) - blocking.length);
+  const undelivered = useMemo(() => {
+    const shown = new Set(rows.map((r) => r.approval.id));
+    return approvals.filter(
+      (a) => a.status === "pending" && !shown.has(a.id) && !decided[a.id],
+    ).length;
+  }, [approvals, rows, decided]);
   if (!pending) return null;
   const { waited } = pending;
   const href = `#/approvals/${encodeURIComponent(taskId)}`;

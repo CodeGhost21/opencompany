@@ -171,11 +171,7 @@ export function TaskItem({
   onOpen: () => void;
   onResume: () => void;
 }) {
-  // What is *still* stopping the card, as opposed to what stopped it a moment
-  // ago. Resume keys on this, not on `rows`: a card whose last approval the
-  // operator just decided is no longer blocked, and leaving the button dead
-  // until the next poll would be the console disagreeing with the click it
-  // just accepted.
+  // What the card is still *asking* about — the rows that keep their buttons.
   const blocking = blockingTaskApprovals(rows);
   return (
     <div
@@ -290,9 +286,20 @@ export function TaskItem({
             // clearly right for it: since #469 the last verdict continues the
             // turn on its own, so Approve *is* the resume. Pressing this
             // instead would re-run the work from the start and park it again.
-            disabled={blocking.length > 0}
+            //
+            // Keyed on `rows`, not on `blocking` (#1895 review). An Approve
+            // this console has just witnessed empties `blocking` at once, while
+            // the host is only *starting* the continuation the verdict
+            // released — the resolve detaches (#391), so its answer comes back
+            // before the follow-up cycle runs. Re-enabling Resume there would
+            // put a live re-dispatch under the operator's finger at the exact
+            // moment they had finished deciding, duplicating the work the
+            // decision had already set going. The queue still holds the row
+            // until the host drops it, so this stays down across that window
+            // and lifts on its own.
+            disabled={rows.length > 0}
             title={
-              blocking.length > 0
+              rows.length > 0
                 ? "Blocked — decide its approvals first; resuming re-runs the work from the start."
                 : undefined
             }

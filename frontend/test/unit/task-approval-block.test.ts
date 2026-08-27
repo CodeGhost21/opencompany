@@ -141,14 +141,35 @@ describe("taskApprovalRows", () => {
   });
 
   /**
-   * The witnessed half. The queue has already dropped this row, and without
-   * folding it back in the operator's own decision would blink out from under
-   * their cursor instead of settling in place.
+   * The live queue is the only source of rows (#1895 review). The shell holds
+   * `decided` for the whole company session, so a card that is re-dispatched
+   * and parks one new approval next week must not find last week's verdicts
+   * folded back in beside it — `ApprovalRow` would report "3 of 4 decided"
+   * over a batch of one, and the count would grow with every repeat run.
+   *
+   * This is where the run drawer's shape does not transfer: a workflow run is
+   * one-shot, so every verdict witnessed for it belongs to it. A task is not.
    */
-  it("keeps a decided approval the queue has already dropped", () => {
+  it("does not resurrect a verdict the queue has already dropped", () => {
     const a1 = MINE("a1", T0);
     const rows = taskApprovalRows([], { a1: { verdict: "approve", approval: a1 } }, "task-1");
-    expect(rows.map((r) => [r.approval.id, r.verdict])).toEqual([["a1", "approve"]]);
+    expect(rows).toEqual([]);
+  });
+
+  it("does not let a re-dispatched card inherit its own earlier verdicts", () => {
+    const old1 = MINE("old-1", T0);
+    const old2 = MINE("old-2", T0 + 1_000);
+    const fresh = MINE("fresh", T0 + 900_000);
+    const rows = taskApprovalRows(
+      [fresh],
+      {
+        "old-1": { verdict: "approve", approval: old1 },
+        "old-2": { verdict: "deny", approval: old2 },
+      },
+      "task-1",
+    );
+    expect(rows.map((r) => r.approval.id)).toEqual(["fresh"]);
+    expect(taskApprovalVerdicts(rows)).toEqual({});
   });
 
   /** `decided` is console-wide. Another card's settled row is not this card's
@@ -159,11 +180,20 @@ describe("taskApprovalRows", () => {
     expect(rows).toEqual([]);
   });
 
+  /**
+   * What the annotation is actually for: between the resolve's answer and the
+   * feed's next poll the queue still holds a row that has already been decided,
+   * and offering its buttons again there would invite a second decision on a
+   * settled request.
+   */
   it("marks a still-queued row with the verdict this console witnessed", () => {
     const a1 = MINE("a1", T0);
     const rows = taskApprovalRows([a1], { a1: { verdict: "deny", approval: a1 } }, "task-1");
     expect(rows[0].verdict).toBe("deny");
     expect(blockingTaskApprovals(rows)).toEqual([]);
+    // Still a row, though — which is what keeps Resume down while the host is
+    // only just starting the continuation the verdict released.
+    expect(rows).toHaveLength(1);
   });
 });
 

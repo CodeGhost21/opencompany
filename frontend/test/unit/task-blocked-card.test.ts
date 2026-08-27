@@ -282,6 +282,8 @@ describe("a paused card with approvals outstanding", () => {
   it("subtracts an approval already decided elsewhere", async () => {
     const a1 = parked("a1", "web_fetch");
     const a2 = parked("a2", "shell", T0 + 1_000);
+    // Both still in the queue — the decision landed a moment ago and the feed
+    // has not dropped `a1` yet, which is the only window the annotation covers.
     await render([a1, a2], {
       decided: { a1: { verdict: "approve", approval: a1 } },
     });
@@ -381,13 +383,31 @@ describe("a paused card with nothing outstanding", () => {
 });
 
 /**
- * The card stops being blocked the moment the operator's own click lands, not
- * on the feed's next poll. Leaving Resume dead for those seconds would be the
- * console disagreeing with a decision it has already accepted.
+ * The window between the click and the continuation (#1895 review).
+ *
+ * The resolve detaches (#391), so its answer comes back *before* the follow-up
+ * cycle the verdict released has run. The decided row therefore has to stop
+ * asking — its buttons are spent — while Resume stays down, because
+ * re-dispatching there would duplicate work the decision had already set going,
+ * with the operator's finger in exactly the right place to do it.
  */
 describe("a paused card whose last approval was just decided", () => {
-  it("drops the blocked row and re-enables Resume", async () => {
+  it("stops asking, but keeps Resume down until the host clears the queue", async () => {
     const a1 = parked("a1", "web_fetch");
+    await render([a1], { decided: { a1: { verdict: "approve", approval: a1 } } });
+    // Nothing left to decide: no second Approve on a settled request.
+    expect(
+      Array.from(container.querySelectorAll("button")).some((b) =>
+        b.textContent?.includes("Approve"),
+      ),
+    ).toBe(false);
+    expect(resumeButton().disabled).toBe(true);
+  });
+
+  it("re-enables Resume once the host has dropped it from the queue", async () => {
+    const a1 = parked("a1", "web_fetch");
+    // The feed has refreshed and no longer carries the approval. The witnessed
+    // verdict must not resurrect a row — see `task-approval-block.test.ts`.
     await render([], { decided: { a1: { verdict: "approve", approval: a1 } } });
     expect(blockedRow()).toBeNull();
     expect(resumeButton().disabled).toBe(false);

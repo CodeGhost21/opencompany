@@ -146,48 +146,50 @@ export interface TaskApprovalRow {
 /**
  * Every approval one card is blocked on, decidable, in a stable order (#1891).
  *
- * The task-board twin of `runApprovals` in `@/views/workflows/run-approvals`,
- * and deliberately the same shape: the run drawer had exactly this problem
- * first (#1002) — it *told* an operator their run had parked and gave them
- * nowhere to act — and the board is that fix arriving at the surface an
- * operator actually works from. Two sources, both needed:
+ * The task-board answer to the problem the run drawer had first (#1002): it
+ * *told* an operator their run had parked and gave them nowhere to act, and the
+ * board is that fix arriving at the surface an operator actually works from.
  *
- * - the **live queue**, which is the point. A card decided anywhere leaves it,
- *   so the board stops calling this card blocked without a reload;
- * - the shell's **witnessed decisions**, which keep the last-seen summary of an
- *   approval the queue has already dropped, so the operator's own decision
- *   settles in place instead of blinking out from under their cursor.
+ * **The live queue is the only source of rows.** `decided` annotates them; it
+ * never adds one. That is the difference from `runApprovals` in
+ * `@/views/workflows/run-approvals`, which this otherwise mirrors, and copying
+ * its second pass here was wrong (#1895 review): a workflow *run* is one-shot,
+ * so every verdict the console has ever witnessed for it belongs to it, while a
+ * **task is re-dispatched**. The shell holds `decided` for the whole company
+ * session — it is cleared on a company switch and never pruned — so folding in
+ * every historical verdict for a task id would mean a card that parks one new
+ * approval next week reporting "3 of 4 decided", the count growing with every
+ * repeat run. A card that looks completely normal while saying the wrong thing,
+ * which is the failure this module exists to keep out of the views.
+ *
+ * What the annotation still buys is the whole reason it is here: between the
+ * resolve's answer and the feed's next poll the queue still holds an approval
+ * that has already been decided, and a row that offered its buttons again in
+ * that window would invite a second decision on a settled request. Once the
+ * queue drops it, it is gone from here — which is correct, because it is no
+ * longer something this card is waiting on.
  *
  * Ordered oldest park first, then by id — stable across a refresh, because the
  * queue hands back a fresh array on every poll and a list that reordered under
  * a pointer mid-click would be its own bug. Same ordering
  * {@link taskApprovalBlock} uses, so the row the card measures its wait from is
  * the row it draws first.
- *
- * A witnessed decision is only folded back in when it belongs to **this** card,
- * by the same `{link: "task"}` rule {@link approvalsForTask} applies — a
- * decision taken on some other card's row is not this card's business, and
- * `decided` is a console-wide map covering every surface that resolves.
  */
 export function taskApprovalRows(
   approvals: readonly ApprovalSummary[],
   decided: Readonly<Record<string, DecidedApproval>>,
   taskId: string,
 ): TaskApprovalRow[] {
-  const byId = new Map<string, TaskApprovalRow>();
-  for (const approval of approvalsForTask(approvals, taskId)) {
-    byId.set(approval.id, { approval, verdict: decided[approval.id]?.verdict ?? null });
-  }
-  for (const [id, d] of Object.entries(decided)) {
-    if (byId.has(id)) continue;
-    if (d.approval.task?.link !== "task" || d.approval.task.id !== taskId) continue;
-    byId.set(id, { approval: d.approval, verdict: d.verdict });
-  }
-  return [...byId.values()].sort(
-    (a, b) =>
-      a.approval.at_millis - b.approval.at_millis ||
-      (a.approval.id < b.approval.id ? -1 : a.approval.id > b.approval.id ? 1 : 0),
-  );
+  return approvalsForTask(approvals, taskId)
+    .map((approval) => ({
+      approval,
+      verdict: decided[approval.id]?.verdict ?? null,
+    }))
+    .sort(
+      (a, b) =>
+        a.approval.at_millis - b.approval.at_millis ||
+        (a.approval.id < b.approval.id ? -1 : a.approval.id > b.approval.id ? 1 : 0),
+    );
 }
 
 /** The subset still waiting on somebody — what the card is actually stopped behind. */

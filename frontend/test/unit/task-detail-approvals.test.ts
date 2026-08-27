@@ -214,6 +214,42 @@ describe("the task detail's blocked section", () => {
     expect(rows()).toHaveLength(0);
   });
 
+  /**
+   * The residual must not count what the operator has just settled (#1895
+   * review). `approvals` is this screen's own 4s poll and `rows` follows the
+   * queue, so straight after a decision the host still calls the approval
+   * pending while nothing is left to show — and the arithmetic version
+   * announced "still loading it" about a request the reader had just decided.
+   */
+  it("says nothing is outstanding when the only approval was just decided", async () => {
+    const a1 = queued("a1");
+    await render([hostPending("a1")], [a1], {
+      decided: { a1: { verdict: "approve", approval: a1 } },
+    });
+    expect(container.textContent).not.toContain("Still loading");
+    expect(container.textContent).not.toContain("not loaded yet");
+  });
+
+  /** And still says nothing once the queue has dropped it, while the host's own
+   *  read is a poll behind. */
+  it("stays quiet after the queue drops an approval this console decided", async () => {
+    const a1 = queued("a1");
+    await render([hostPending("a1")], [], {
+      decided: { a1: { verdict: "approve", approval: a1 } },
+    });
+    expect(container.textContent).not.toContain("Still loading");
+    expect(container.textContent).not.toContain("not loaded yet");
+  });
+
+  /** A decision on *another* card's approval accounts for nothing here. */
+  it("still reports an undelivered approval that nobody has decided", async () => {
+    const other = queued("b1", { task: { link: "task", id: "task-2" } });
+    await render([hostPending("a1")], [], {
+      decided: { b1: { verdict: "approve", approval: other } },
+    });
+    expect(container.textContent).toContain("Still loading it");
+  });
+
   /** No handler, no controls — never live buttons that do nothing. */
   it("renders the wait and no controls when the surface cannot decide", async () => {
     await render([hostPending("a1")], [queued("a1")], { canDecide: false });
