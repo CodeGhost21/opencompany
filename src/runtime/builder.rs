@@ -154,7 +154,7 @@ pub(crate) fn agent_effective_grants(
         // Absent → inherit the company's standard grant (every allowed tool).
         None => allow.to_vec(),
         // Explicit empty → no tools. The state that used to be unrepresentable.
-        Some(globs) if globs.is_empty() => Vec::new(),
+        Some([]) => Vec::new(),
         // Listed globs → narrow, intersected with the allow-list (narrow-only).
         Some(globs) => narrow(allow, globs),
     };
