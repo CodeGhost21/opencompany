@@ -752,6 +752,16 @@ impl RunBlocks {
 /// it back and relabels the matching row [`WorkflowNodeStatus::Error`], the
 /// same host-side move `reclassify_blocked` makes for a parked node.
 ///
+/// PR #1883 review: also carries a budget-paused node's id, for the same
+/// reason — `outcome.budget_paused` settles the attempt row `Failed` right
+/// beside `hit_iteration_cap` a few lines below, and the engine's boundary
+/// cannot tell that turn apart from a finished one any more than it can a
+/// capped one. One channel, one reconciliation pass; the name stayed
+/// `RunCappedNodes` rather than widening to something like
+/// `RunDegradedNodes` because renaming a `pub` type mid-fix is its own
+/// review surface and every caller already reads it as "this row disagrees
+/// with its attempt," not literally "hit the iteration cap."
+///
 /// Cheap to clone; every clone appends to the same list.
 #[derive(Clone, Default)]
 pub struct RunCappedNodes {
@@ -759,7 +769,9 @@ pub struct RunCappedNodes {
 }
 
 impl RunCappedNodes {
-    /// Records that `node_id`'s turn truncated at the iteration cap.
+    /// Records that `node_id`'s turn truncated at the iteration cap, or (PR
+    /// #1883) paused for lack of inference budget — either way, a turn whose
+    /// row must be relabeled to agree with its `Failed` attempt.
     pub fn push(&self, node_id: String) {
         self.inner
             .lock()
@@ -1918,6 +1930,19 @@ impl HarnessAgentRunner {
                 Some("agent stopped at the max_tool_iterations cap before finishing".to_string()),
             )
         } else if let Some(pause) = &outcome.budget_paused {
+            // PR #1883 review (Codex #3874941288): the same disagreement
+            // #1865 closes for a capped turn exists here too.
+            // `tinyflows::observability` reports `StepStatus::Success` for a
+            // budget-paused turn exactly as it does for a capped one — the
+            // engine already routes both through the identical `LimitStop`
+            // envelope (see `AgentRunner::run` below) — so the row lands `Ok`
+            // while this settle marks the attempt `Failed`. Feed the same
+            // `RunCappedNodes` channel `reclassify_capped_nodes` reads,
+            // rather than leave this arm as a second, unreconciled failure
+            // mode: a `capped` node id is a "the row and the attempt must
+            // agree" signal, not literally "hit the iteration cap", and a
+            // budget pause makes the identical partial-checkpoint claim.
+            self.capped.push(lineage_node.clone());
             (
                 crate::ports::RunStatus::Failed,
                 Some(format!(
@@ -2729,6 +2754,96 @@ mod tests {
         assert_eq!(
             attempts[0].error.as_deref(),
             Some("agent stopped at the max_tool_iterations cap before finishing")
+        );
+    }
+
+    /// PR #1883 review (Codex #3874941288): the sibling of
+    /// `a_capped_turn_settles_failed_and_feeds_run_capped_nodes` for the OTHER
+    /// signal that settles this attempt row `Failed` — `outcome.budget_paused`.
+    /// Before this fix, only `hit_iteration_cap` fed `RunCappedNodes`, so
+    /// `reclassify_capped_nodes` never saw a budget-paused node's id and its
+    /// row stayed `Ok` even though the attempt was `Failed` — the exact
+    /// disagreement #1865 exists to close, just via the other cap.
+    #[tokio::test]
+    async fn a_budget_paused_turn_settles_failed_and_feeds_run_capped_nodes() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1883-budget-paused-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "paused — out of budget".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: "researcher".to_string(),
+                summary: "acme is out of inference credits".to_string(),
+            }),
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1883"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1883"));
+        let capped = RunCappedNodes::default();
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1883".to_string(),
+            "run-1883".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            capped.clone(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let (_, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({ "node_id": "spend_step", "prompt": "keep going" }),
+            )
+            .await
+            .expect("a budget-paused turn is still Ok — the reply is a real, partial checkpoint");
+        assert!(outcome.budget_paused.is_some());
+
+        // Half 1: the sideways channel `reclassify_capped_nodes` reads. This
+        // is the assertion that failed before the fix — `capped.take()` came
+        // back empty because only `hit_iteration_cap` pushed to it.
+        assert_eq!(
+            capped.take(),
+            vec!["spend_step".to_string()],
+            "the budget-paused node's id must reach the channel the runner reconciles \
+             against, the same as a capped node's"
+        );
+
+        // Half 2: the attempt row this run's Observatory/task-detail surfaces
+        // read, pinned here so it cannot drift from the #1865 signal above.
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1883".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1, "one attempt for one node turn");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+        assert_eq!(
+            attempts[0].error.as_deref(),
+            Some(
+                "agent paused for lack of inference budget/credits: acme is out of inference credits"
+            )
         );
     }
 
