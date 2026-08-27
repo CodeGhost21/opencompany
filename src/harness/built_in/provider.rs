@@ -2118,6 +2118,35 @@ mod tests {
         assert!(resp.message.tool_calls.is_empty());
     }
 
+    /// The sibling fallback field: some providers emit the reasoning-only
+    /// text under `reasoning_content` (array-of-parts shape) instead of
+    /// `reasoning`, with `reasoning` itself absent. `extract_content_text`
+    /// handles the array shape and `model_response_from_payload` only tries
+    /// `reasoning_content` once `reasoning` comes back empty — this test
+    /// exercises that second fallback specifically, which the existing
+    /// `reasoning`-field and `content_filter`-error tests do not cover
+    /// (CodeRabbit nitpick on #1779, comment ed359cf20f434c7f7f83c058).
+    #[test]
+    fn reasoning_only_turn_falls_back_to_array_shaped_reasoning_content() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": [
+                        { "type": "text", "text": "The answer is " },
+                        { "type": "text", "text": "42." }
+                    ]
+                }
+            }]
+        });
+        let resp =
+            model_response_from_payload(payload).expect("reasoning_content-only turn parses");
+        assert_eq!(resp.text(), "The answer is 42.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
     /// A genuinely empty turn truncated by `finish_reason: "length"` (max_tokens
     /// hit) is still an error — but the message must name the finish reason so
     /// the truncation is diagnosable rather than hidden behind a generic string.
