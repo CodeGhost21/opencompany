@@ -1803,6 +1803,34 @@ impl HarnessAgentRunner {
             return Err(EngineError::Capability(diagnosis));
         }
 
+        // PR #1880 review: an ACP turn that stopped abnormally — a `refusal`,
+        // a `cancelled` turn, or an unrecognized `stopReason` — is not a cap
+        // pause (there is no resumable checkpoint to report, unlike
+        // `hit_iteration_cap` below) and is not a clean finish either.
+        // `hit_iteration_cap` alone could not say so: it stays `false` on
+        // every one of these, and until `abnormal_stop` existed this method
+        // read only that flag, so the node settled `Succeeded` here and
+        // `run` below reported `StopReason::Finished` — indistinguishable
+        // from the agent having actually answered, letting a declined or
+        // interrupted turn's reply advance the workflow graph as if it were
+        // the deliverable. `Err`, the same channel the #881 block above
+        // uses, rather than folding into the `LimitStop` shape below: a
+        // `LimitStop` still lets the engine bind the node's output
+        // downstream (with a warning) because a capped turn's checkpoint is
+        // real, partial work — there is no equivalent partial-but-real
+        // claim to make about a refusal or a cancellation, so `on_error`'s
+        // default "stop" is the honest outcome, not a tagged pass-through.
+        if let Some(reason) = &outcome.abnormal_stop {
+            let message = format!("harness agent '{agent_ref}': {reason}");
+            self.settle_attempt(
+                run_sink.as_ref(),
+                crate::ports::RunStatus::Failed,
+                Some(message.clone()),
+            )
+            .await;
+            return Err(EngineError::Capability(message));
+        }
+
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves. A
         // workflow node carries no chat bubble, so the turn's steps are dropped
@@ -2466,6 +2494,112 @@ mod tests {
                 ),
             ],
             "a node with no graph id resolves lineage to the agent ref"
+        );
+    }
+
+    /// A [`RunTurn`] that always answers with a scripted outcome — standing in
+    /// for an ACP-backed harness whose turn stopped abnormally, without
+    /// needing a real ACP subprocess to produce one.
+    struct ScriptedTurn(crate::harness::TurnOutcome);
+
+    #[async_trait]
+    impl RunTurn for ScriptedTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(self.0.clone())
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(self.0.clone())
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// PR #1880 review: "Propagate abnormal ACP stops beyond step notes." The
+    /// gap was that `HarnessAgentRunner::run_turn` read only
+    /// `hit_iteration_cap`, which stays `false` on an ACP `refusal`,
+    /// `cancelled`, or unrecognized `stopReason` — so the node settled
+    /// `Succeeded` here and `run` (the `AgentRunner` impl below) reported
+    /// `StopReason::Finished`, indistinguishable from the agent having
+    /// actually answered.
+    ///
+    /// Asserted on the **outcome**, not on whether a `Note` step exists —
+    /// `harness::acp::run_turn::fold` already put a note on the timeline
+    /// before this fix, and the finding was explicitly that the note alone
+    /// does not stop the workflow graph from advancing as if the turn
+    /// succeeded. This is that stronger claim: the node call itself must
+    /// fail.
+    #[tokio::test]
+    async fn an_abnormal_acp_stop_fails_the_workflow_node() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1880-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "I can't help with that.".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: Some("[stopped: the agent declined to continue]".to_string()),
+            halted_for_spend: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1880"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1880"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1880".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn("responder", json!({ "prompt": "do the thing" }))
+            .await;
+
+        let err = result.expect_err(
+            "a refused/cancelled/unrecognized ACP stop must fail the node, \
+             not settle it Succeeded/Finished",
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("the agent declined to continue"),
+            "the error must carry the abnormal-stop reason, not a generic failure: {message}"
         );
     }
 
