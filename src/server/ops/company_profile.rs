@@ -114,7 +114,7 @@ async fn patch_company(
         // rejection must not describe the same requirement differently.
         return Err(refusal("`name` cannot be empty — give your company a name.").into());
     }
-    if name.len() > COMPANY_NAME_MAX_CHARS {
+    if name.chars().count() > COMPANY_NAME_MAX_CHARS {
         return Err(refusal(&format!(
             "a company name can be at most {COMPANY_NAME_MAX_CHARS} characters."
         ))
@@ -296,6 +296,33 @@ mod tests {
         let (status, body) = call(&state, &at_limit).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["name"], at_limit);
+    }
+
+    /// PR #1875 review finding: the limit must count characters, not UTF-8
+    /// bytes. `COMPANY_NAME_MAX_CHARS` (200) is what the API error message
+    /// and the console `maxLength` both advertise to the operator, so a
+    /// name made of 200 multibyte characters — well within what both surfaces
+    /// promise — must be accepted even though it is 600 bytes on the wire.
+    #[tokio::test]
+    async fn a_multibyte_name_at_the_char_limit_is_accepted() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        // "あ" is 3 UTF-8 bytes; 200 of them is 200 chars / 600 bytes.
+        let at_limit = "あ".repeat(COMPANY_NAME_MAX_CHARS);
+        let (status, body) = call(&state, &at_limit).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], at_limit);
+    }
+
+    /// The same limit still refuses a name one character past it, even when
+    /// every character is multibyte.
+    #[tokio::test]
+    async fn a_multibyte_name_over_the_char_limit_is_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let over_limit = "あ".repeat(COMPANY_NAME_MAX_CHARS + 1);
+        let (status, _) = call(&state, &over_limit).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
