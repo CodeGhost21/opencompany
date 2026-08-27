@@ -122,6 +122,10 @@ function statusIcon(status: RunStatus) {
     case "failed":
       return <XCircle className="size-4" />;
     case "cancelled":
+    // A by-design decline (issue #1809) is terminal and neutral, so it takes the
+    // same quiet icon as a cancel — never the spinning `default`, which would
+    // paint a settled attempt as still running.
+    case "declined":
       return <Ban className="size-4" />;
     case "waiting_approval":
     case "paused":

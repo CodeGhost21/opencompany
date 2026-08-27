@@ -206,6 +206,10 @@ pub struct HarnessBrain {
     /// record read; `OnceLock` because it is immutable once built and the cost
     /// is a clone of two `Arc`s, not a model call.
     triage: std::sync::OnceLock<crate::harness::triage::MeteredTriage>,
+    /// The per-message responder selection for `auto` channels, built on first
+    /// use (issue #1835). Lazy and `OnceLock` for exactly [`Self::triage`]'s
+    /// reasons — it needs the company id, and once built it is immutable.
+    selector: std::sync::OnceLock<crate::harness::selector::MeteredSelector>,
     /// The company's record, **re-read from the store at the top of every
     /// cycle** (issue #707).
     ///
@@ -373,6 +377,7 @@ impl HarnessBrain {
             responder,
             runs: None,
             triage: std::sync::OnceLock::new(),
+            selector: std::sync::OnceLock::new(),
         }
     }
 
@@ -2762,6 +2767,137 @@ impl HarnessBrain {
             crate::harness::triage::MeteredTriage::from_deps(&self.deps, company.clone())
         })
     }
+
+    /// The company's responder selection, built once (issue #1835).
+    fn selector_pass(
+        &self,
+        company: &crate::ports::types::CompanyId,
+    ) -> &crate::harness::selector::MeteredSelector {
+        self.selector.get_or_init(|| {
+            crate::harness::selector::MeteredSelector::from_deps(&self.deps, company.clone())
+        })
+    }
+
+    /// The per-message pick for a message addressed to an `auto` channel — or
+    /// `None` wherever the deterministic answer should stand (issue #1835).
+    ///
+    /// `None` covers every case, deliberately in one place: the chat key names
+    /// no desk, the desk is lead-routed, the channel has fewer than two roster
+    /// members (a pick over one candidate is the fallback with extra latency),
+    /// or the selection failed — unreachable, slow, unparseable, or an id
+    /// outside the membership. The caller falls back to
+    /// [`responder_for`](Self::responder_for), whose desk arm answers the
+    /// channel's first roster member; **the worst case of this rung is the old
+    /// rung**.
+    ///
+    /// Takes the operator's raw `text`, not the attachment-composed wire body:
+    /// routing is judged on what was said, and a 200k-char extracted-file block
+    /// would drown the one line the selection is about.
+    ///
+    /// A member's role and description come from the same halves the Team page
+    /// renders — [`CompanyRecord::effective_agent`] for a manifest teammate
+    /// (edits applied), the overlay row plus its stored edit for a
+    /// console-created one — so the selector judges fit by what an operator
+    /// reads on the members pane.
+    async fn auto_channel_responder(&self, chat: Option<&str>, text: &str) -> Option<String> {
+        let chat = chat?;
+        let (company, desk_id, candidates) = {
+            let record = self.record();
+            let desk_id = record.resolve_desk_id(chat)?;
+            if record.desk_responder_mode(&desk_id).is_lead() {
+                return None;
+            }
+            let candidates: Vec<crate::harness::selector::SelectorCandidate> = record
+                .effective_desk_members(&desk_id)
+                .into_iter()
+                .filter(|m| record.is_roster_agent(m))
+                .filter_map(|id| selector_candidate(&record, &id))
+                .collect();
+            (record.id.clone(), desk_id, candidates)
+        };
+        match candidates.len() {
+            // Every member has left the roster since the channel was created —
+            // `POST …/desks` refuses an empty auto channel, but `DELETE
+            // …/team/{id}` can empty one later (codex on #1872). There is
+            // nobody to pick, so this defers to the caller's fallback ladder
+            // and the orchestrator answers, exactly as it does for any desk
+            // whose members have all gone. Refusing the deletion instead would
+            // be worse — a teammate you cannot remove because a channel names
+            // them — so the gap is closed by saying so rather than by
+            // pretending the channel still routes.
+            0 => {
+                tracing::warn!(
+                    company = %company,
+                    chat = %desk_id,
+                    "[selector] this channel has no roster members left, so there is nobody to \
+                     pick; the orchestrator is answering a message addressed to the channel"
+                );
+                None
+            }
+            1 => Some(candidates[0].id.clone()),
+            // The plan-level total-token ceiling gates the selection too, not
+            // only the responder turn it precedes (codex on #1872). Selection
+            // runs *before* a responder exists, so `total_ceiling_refusal` has
+            // no agent to refuse as — but it is a real model call, and without
+            // this a tenant past its hard ceiling could keep paying to route
+            // by posting into an auto channel, one selector call per message,
+            // after the ceiling that is supposed to permit no model calls at
+            // all. Falling through to the deterministic first member costs
+            // nothing and is the same answer a lead desk would give.
+            _ if crate::harness::HarnessPool::total_ceiling_spent(&company, &self.deps).await => {
+                tracing::info!(
+                    company = %company,
+                    chat = %desk_id,
+                    "[selector] total token ceiling reached; routing to the channel's first \
+                     member without a selection call"
+                );
+                None
+            }
+            _ => match self.selector_pass(&company).select(text, &candidates).await {
+                crate::harness::selector::SelectorVerdict::Member(id) => {
+                    tracing::info!(
+                        company = %company,
+                        chat = %desk_id,
+                        picked = %id,
+                        "[selector] routed an unmentioned channel message to its best-fit member"
+                    );
+                    Some(id)
+                }
+                crate::harness::selector::SelectorVerdict::Unavailable => None,
+            },
+        }
+    }
+}
+
+/// One channel member as [`HarnessBrain::auto_channel_responder`] hands it to
+/// the selection: the manifest half through
+/// [`CompanyRecord::effective_agent`] (stored edits applied), the overlay half
+/// from its row with any stored edit's role/description preferred — the same
+/// two halves the Team page folds, so the selector and the members pane
+/// describe a teammate identically.
+fn selector_candidate(
+    record: &CompanyRecord,
+    id: &str,
+) -> Option<crate::harness::selector::SelectorCandidate> {
+    if let Some(agent) = record.effective_agent(id) {
+        return Some(crate::harness::selector::SelectorCandidate {
+            id: agent.id.clone(),
+            role: agent.role.clone(),
+            description: agent.description.clone(),
+        });
+    }
+    let agent = record.overlay_agents.iter().find(|a| a.id == id)?;
+    let edit = record.overlay_agent_edits.iter().find(|e| e.agent_id == id);
+    Some(crate::harness::selector::SelectorCandidate {
+        id: agent.id.clone(),
+        role: edit
+            .and_then(|e| e.role.clone())
+            .unwrap_or_else(|| agent.role.clone()),
+        description: edit
+            .and_then(|e| e.description.clone())
+            .filter(|d| !d.is_empty())
+            .or_else(|| agent.description.clone()),
+    })
 }
 
 /// The turn instruction for a dispatched card: its title, plus its note when it
@@ -2996,8 +3132,22 @@ impl HarnessBrain {
                     // which is every message journaled before mentions existed,
                     // so routing is unchanged byte-for-byte for them.
                     let responder =
-                        crate::runtime::mentions::mention_responder(&self.record(), mentions)
-                            .unwrap_or_else(|| self.responder_for(chat.as_deref()));
+                        match crate::runtime::mentions::mention_responder(&self.record(), mentions)
+                        {
+                            Some(responder) => responder,
+                            // Issue #1835: below a mention, above the deterministic
+                            // answer, an `auto` channel picks its best-fit member
+                            // for this message. Every way the pick cannot happen —
+                            // not an auto channel, one member, selection failed —
+                            // is `None`, and the ladder continues exactly where it
+                            // always stood.
+                            None => {
+                                match self.auto_channel_responder(chat.as_deref(), text).await {
+                                    Some(responder) => responder,
+                                    None => self.responder_for(chat.as_deref()),
+                                }
+                            }
+                        };
                     // Everyone else the message named, for the answering turn's
                     // context. A list, not a fan-out: one operator message still
                     // spawns exactly one turn, and this teammate spreads the
@@ -5757,7 +5907,7 @@ members = ["engineer"]
                 name: "Nova".into(),
                 role: "Growth".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             })
@@ -6434,7 +6584,7 @@ members = ["eng1", "eng2"]
                 name: "Cto".to_string(),
                 role: "CTO".to_string(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             }],
@@ -8703,6 +8853,335 @@ members = ["eng1", "eng2"]
         );
     }
 
+    /// A provider for the selection rung (issue #1835): a request opening with
+    /// the selector's own system prompt gets the scripted reply; anything else
+    /// echoes. Keyed on the prompt's opening sentence for the reason
+    /// [`is_triage_request`] documents, and pinned the same way below.
+    struct SelectingProvider {
+        reply: String,
+        selector_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    fn is_selection_request(request: &ModelRequest) -> bool {
+        request
+            .messages
+            .first()
+            .map(|m| {
+                m.text()
+                    .contains("You route one message in a group channel")
+            })
+            .unwrap_or(false)
+    }
+
+    #[async_trait]
+    impl ChatModel<()> for SelectingProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
+            if is_selection_request(&request) {
+                self.selector_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(ModelResponse::assistant(self.reply.clone()));
+            }
+            let message = request
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, Message::User(_)))
+                .map(|m| m.text())
+                .unwrap_or_default();
+            Ok(ModelResponse::assistant(format!("mock: {message}")))
+        }
+    }
+
+    impl HarnessModel for SelectingProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "selecting".to_string()
+        }
+    }
+
+    #[test]
+    fn a_selection_request_is_recognised_as_one() {
+        let selection = ModelRequest {
+            messages: vec![
+                tinyagents::harness::message::Message::system(
+                    crate::harness::selector::system_prompt_for_test(),
+                ),
+                tinyagents::harness::message::Message::user("who owns login?".to_string()),
+            ],
+            ..ModelRequest::default()
+        };
+        assert!(
+            is_selection_request(&selection),
+            "the fixture must recognise the real prompt, or it silently starts \
+             eating scripted turns"
+        );
+    }
+
+    /// A brain whose provider answers every selection request with `reply`.
+    /// The record is [`record_with_desk`] — `engineer` + `chief`, a lead
+    /// `eng_desk` — plus an `auto` overlay channel `launch` holding both.
+    fn brain_that_selects(
+        dir: &std::path::Path,
+        reply: &str,
+    ) -> (HarnessBrain, Arc<SelectingProvider>) {
+        brain_that_selects_with(dir, reply, None, None)
+    }
+
+    /// [`brain_that_selects`], plus an optional plan and usage meter, so a
+    /// test can place the company past its plan-level total-token ceiling.
+    fn brain_that_selects_with(
+        dir: &std::path::Path,
+        reply: &str,
+        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
+        meter: Option<Arc<dyn crate::ports::usage::UsageMeter>>,
+    ) -> (HarnessBrain, Arc<SelectingProvider>) {
+        let provider = Arc::new(SelectingProvider {
+            reply: reply.to_string(),
+            selector_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: provider.clone(),
+            provider_slug: "selecting".to_string(),
+            serves: None,
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter,
+            workspace_root: dir.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: InflightRegistry::new(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
+        };
+        let mut record = record_with_desk();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["engineer".to_string(), "chief".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        (
+            HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
+            provider,
+        )
+    }
+
+    /// Issue #1835, the rung itself: an unmentioned message addressed to an
+    /// `auto` channel is routed to the selector's pick — a member the
+    /// deterministic fallback (`engineer`, the first member) would never have
+    /// chosen — and the pick is clamped to the channel.
+    #[tokio::test]
+    async fn an_auto_channel_routes_by_the_selectors_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_selects(dir.path(), "chief");
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "which strategy are we running?")
+                .await
+                .as_deref(),
+            Some("chief"),
+            "the selection overrides the first-member fallback"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    /// The worst case of the new rung is the old rung: a pick outside the
+    /// channel's membership answers `None`, and the caller keeps the
+    /// deterministic fallback. Revert the clamp in `SelectorVerdict::parse`
+    /// and this routes a turn to a teammate the channel does not contain.
+    #[tokio::test]
+    async fn a_failed_selection_keeps_the_deterministic_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_selects(dir.path(), "somebody_else");
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "which strategy are we running?")
+                .await,
+            None,
+            "an out-of-membership pick must fall back, never route"
+        );
+    }
+
+    /// Issue #1872 (codex P1): the plan-level total-token ceiling gates the
+    /// **selection**, not only the responder turn it precedes.
+    ///
+    /// Selection runs before a responder exists, so `total_ceiling_refusal`
+    /// has no agent to refuse as and never fired for it — meaning a tenant
+    /// past its hard ceiling could keep paying to route, one selector call per
+    /// message, after the ceiling that is supposed to permit no model calls at
+    /// all. Remove the `total_ceiling_spent` arm in `auto_channel_responder`
+    /// and this spends a call and answers `chief`.
+    #[tokio::test]
+    async fn an_exhausted_total_ceiling_routes_without_paying_for_a_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let meter = Arc::new(SpentMeter);
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: Default::default(),
+            total_budget: Some(10),
+        };
+        let (brain, provider) =
+            brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "which strategy are we running?")
+                .await,
+            None,
+            "past the ceiling the deterministic fallback answers, not a selection"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a company past its hard ceiling must not pay to route"
+        );
+    }
+
+    /// Issue #1872 (codex P2): a channel emptied *after* creation.
+    ///
+    /// `POST …/desks` refuses an empty auto channel, but `DELETE …/team/{id}`
+    /// can retire its last roster-backed member later. There is then nobody to
+    /// pick, so this defers to the caller's ladder — the orchestrator answers,
+    /// as it does for any desk whose members have all gone — and spends
+    /// nothing doing it. Refusing the deletion instead would mean a teammate
+    /// you cannot remove because a channel names them.
+    #[tokio::test]
+    async fn a_channel_emptied_by_deletion_falls_back_without_paying() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_selects(dir.path(), "chief");
+        brain.mutate_record(|r| {
+            r.overlay_retired_agents = vec!["engineer".to_string(), "chief".to_string()];
+        });
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "who owns the retry logic?")
+                .await,
+            None,
+            "no candidates left: fall back rather than route to a retired teammate"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    /// A meter whose every query reports spend past any ceiling a test sets.
+    struct SpentMeter;
+
+    #[async_trait]
+    impl crate::ports::usage::UsageMeter for SpentMeter {
+        async fn record(
+            &self,
+            _company: &CompanyId,
+            _sample: &crate::ports::usage::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since: u64,
+        ) -> crate::Result<Vec<crate::ports::usage::UsageSample>> {
+            Ok(vec![crate::ports::usage::UsageSample {
+                at_millis: 0,
+                agent: "someone".to_string(),
+                provider: "test".to_string(),
+                input_tokens: 10_000,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                cost_usd: 0.0,
+                kind: crate::ports::usage::SampleKind::Inference,
+                run_id: None,
+                model: None,
+            }])
+        }
+    }
+
+    /// The short-circuits spend nothing: a lead desk never reaches the
+    /// selector at all, and a single-member channel is its member without a
+    /// model call — a pick over one candidate is the fallback with latency.
+    #[tokio::test]
+    async fn lead_desks_and_single_member_channels_never_pay_for_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_selects(dir.path(), "chief");
+        // The lead desk from `record_with_desk` is not an auto channel.
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("eng_desk"), "hello")
+                .await,
+            None
+        );
+        // Shrink the channel to one member: it answers without the model.
+        brain.mutate_record(|r| {
+            r.overlay_desks[0].members = vec!["chief".to_string()];
+        });
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "hello")
+                .await
+                .as_deref(),
+            Some("chief")
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "neither path may spend a selection call"
+        );
+    }
+
     struct DelegatingProvider {
         queue: orchestrator::DelegationQueue,
         pushes: StdMutex<VecDeque<Vec<Delegation>>>,
@@ -9558,6 +10037,8 @@ members = ["eng1", "eng2"]
                 reply: self.label.clone(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                // Test fixture, not the ACP fold (PR #1880 review).
+                abnormal_stop: None,
                 halted_for_spend: None,
                 budget_paused: None,
             })
@@ -9839,6 +10320,8 @@ agent = "claude"
             reply: "here is what that node does".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            // Test fixture, not the ACP fold (PR #1880 review).
+            abnormal_stop: None,
             halted_for_spend: None,
             budget_paused: None,
         });
@@ -9877,6 +10360,7 @@ agent = "claude"
             reply: "Paused — copilot's turn ran out of inference budget/credits.".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            abnormal_stop: None,
             halted_for_spend: None,
             budget_paused: Some(crate::harness::BudgetPause {
                 agent: confine::CONFINED_AGENT_ID.to_string(),

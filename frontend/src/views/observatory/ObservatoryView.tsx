@@ -399,7 +399,13 @@ function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
               ? "blocked"
               : own.some((r) => runState(r) === "running")
                 ? "running"
-                : "done";
+                // A declined attempt (issue #1809) keeps the group's dot out
+                // of "done" green even when nothing failed — the workflow
+                // refused part of its own work, which is not the same claim
+                // as every attempt succeeding.
+                : own.some((r) => runState(r) === "idle")
+                  ? "idle"
+                  : "done";
           const started = Math.min(
             ...own.map((r) => r.startedAtMillis ?? r.createdAtMillis),
           );
@@ -415,6 +421,7 @@ function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
                     worst === "failed" && "bg-[var(--status-failed)]",
                     worst === "blocked" && "bg-[var(--status-blocked)]",
                     worst === "running" && "bg-[var(--status-running)]",
+                    worst === "idle" && "bg-[var(--status-idle)]",
                     worst === "done" && "bg-[var(--status-done)]",
                   )}
                 />

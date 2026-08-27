@@ -4196,6 +4196,9 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
                 // These fixtures script delegation shapes, not cap behaviour;
                 // the cap path is proved end-to-end in `cap_turn_test`.
                 hit_iteration_cap: false,
+                // Scripted delegation fixture, not the ACP fold — the only
+                // path that produces an abnormal stop (PR #1880 review).
+                abnormal_stop: None,
                 // Issue #1032: scripted, for the same reason — the real hook
                 // needs a real model turn to fire, which is proved end-to-end
                 // in `spend_halt_turn_test`. What these fixtures can prove, and

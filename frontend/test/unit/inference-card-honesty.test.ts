@@ -28,6 +28,7 @@ function status(over: Partial<InferenceStatus> = {}): InferenceStatus {
     slug: "managed",
     baseUrl: "https://openrouter.ai/api/v1",
     models: {},
+    defaultTierModels: {},
     source: "runtime",
     keyConfigured: true,
     cognition: "echo",
@@ -50,7 +51,7 @@ function stubClient(replies: InferenceStatus[], mutation?: InferenceStatus) {
   return {
     scopeFor: (company: string | null) =>
       company ? `/api/v1/companies/${company}` : "/api/v1/company",
-    get: async () => read(),
+    get: async (path: string) => (path.endsWith("/inference/models") ? [] : read()),
     put: async () => ({ status: settled(), note: "" }),
     del: async () => ({ status: settled(), note: "" }),
     post: async () => ({ status: settled(), note: "" }),

@@ -342,6 +342,36 @@ impl ManifestApprovalGate {
         );
     }
 
+    /// Re-anchors a parked approval's TTL window to `now`, giving the operator a
+    /// fresh full deadline on it (issue #1805). Returns whether an entry was
+    /// actually moved — `false` for an id that is not (or no longer) parked, so a
+    /// caller can answer 404 rather than pretend it extended something.
+    ///
+    /// # Why a full fresh window, not "+N hours"
+    ///
+    /// The parked entry carries a single `parked_at_millis`, and both the sweeper
+    /// and the console's deadline are `parked_at + ttl`. Moving that instant to
+    /// `now` is therefore the *whole* of an extension: the sweep that would have
+    /// retired it no longer sees it expired, and the projected deadline moves in
+    /// lockstep, with no second knob that could disagree. An additive "+N" would
+    /// need its own stored offset and a second place computing the deadline — the
+    /// exact fork [`ttl_millis`](Self::ttl_millis) exists to avoid.
+    ///
+    /// The durable half lives in the journal (`record_extended`): this moves the
+    /// **live** anchor the sweeper reads, and boot replay re-applies the move by
+    /// rehydrating from the journal's extended anchor, so an extension survives a
+    /// redeploy rather than reverting to the original park instant.
+    pub fn extend(&self, id: &ApprovalId, now_millis: u64) -> bool {
+        let mut map = self.parked.lock().expect("parked map poisoned");
+        match map.get_mut(id) {
+            Some(parked) => {
+                parked.parked_at_millis = now_millis;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Removes every parked approval older than the TTL relative to `now`,
     /// returning the ids that expired (they resolve to deny).
     pub fn sweep_expired(&self, now_millis: u64) -> Vec<ApprovalId> {
@@ -1540,6 +1570,26 @@ mod test {
         let expired = gate.sweep_expired(now_millis() + 1);
         assert_eq!(expired, vec![id]);
         assert!(gate.parked_ids().is_empty());
+    }
+
+    /// Issue #1805: extending re-anchors the TTL window, so an entry that was
+    /// one tick from expiry survives the sweep that would have retired it and
+    /// only expires on the fresh window.
+    #[test]
+    fn extend_keeps_a_near_expiry_entry_out_of_the_sweep() {
+        let gate = ManifestApprovalGate::new(policy("supervised", None)).with_ttl_millis(1_000);
+        let id = ApprovalId::from("appr-extend".to_string());
+        gate.rehydrate(id.clone(), effect("filing.submit", EffectGroup::Sign), 0);
+        // Just before the original deadline (0 + 1000) the operator extends it.
+        assert!(gate.extend(&id, 900));
+        // Past the ORIGINAL deadline the sweep now leaves it: its window runs
+        // from 900, so 1500 - 900 = 600 < 1000.
+        assert!(gate.sweep_expired(1_500).is_empty());
+        assert_eq!(gate.parked_ids(), vec![id.clone()]);
+        // It still expires, on the NEW window: 1901 - 900 = 1001 >= 1000.
+        assert_eq!(gate.sweep_expired(1_901), vec![id]);
+        // Extending an id that is not parked reports it rather than pretending.
+        assert!(!gate.extend(&ApprovalId::from("ghost".to_string()), 0));
     }
 
     // -- Emergency stop (issue #86) -----------------------------------------

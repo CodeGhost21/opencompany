@@ -278,7 +278,7 @@ mod tests {
             description: None,
             tier: tier.map(str::to_string),
             harness: None,
-            tools: Vec::new(),
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,

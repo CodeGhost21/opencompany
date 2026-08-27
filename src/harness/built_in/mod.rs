@@ -127,6 +127,11 @@ pub mod search_byo;
 /// responses are scripted. Test-only.
 #[cfg(test)]
 mod search_turn_test;
+/// The per-message responder selection for `auto` channels (issue #1835): the
+/// tool-less model call that picks which member of a leadless channel answers
+/// an unmentioned message, falling back to the channel's first roster member
+/// wherever it cannot run.
+pub mod selector;
 pub mod skills;
 pub mod steer;
 pub mod steps;
@@ -602,6 +607,14 @@ pub struct CompanyAgent {
     /// The embedded openhuman session. A [`Mutex`] because a `turn` takes
     /// `&mut self` and one agent must serialise its own turns.
     agent: Mutex<Agent>,
+    /// The curated step labels of this agent's tools, captured from the built
+    /// tool set (see [`StepLabels`](steps::StepLabels) for why the turn loop
+    /// cannot supply them).
+    ///
+    /// Resolved once per agent build rather than per turn: the tool set is fixed
+    /// for the life of a pooled agent, and a rebuild — the only thing that can
+    /// change which search belt is wired — mints a new `CompanyAgent` anyway.
+    step_labels: steps::StepLabels,
     /// The chat/desk thread this pooled agent's in-memory history is currently
     /// bound to (issue #1725).
     ///
@@ -751,6 +764,33 @@ pub struct TurnOutcome {
     /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
     /// would tell the operator to reply "continue" to a turn that never ran.
     pub hit_iteration_cap: bool,
+    /// A fixed, host-authored notice when this turn stopped for a reason that
+    /// is neither a clean finish nor a resumable cap (PR #1880 review) — on
+    /// the ACP fold, an agent-issued `refusal`, a `cancelled` turn, or a
+    /// `stopReason` this fold does not recognise.
+    ///
+    /// `None` on every other path, including [`hit_iteration_cap`] pauses,
+    /// which already have their own distinct, resumable-checkpoint signal and
+    /// must keep it — this field is for the opposite case, where there is no
+    /// checkpoint to resume. Before this field existed,
+    /// [`HarnessAgentRunner`](crate::workflows::caps::HarnessAgentRunner)
+    /// read only `hit_iteration_cap` to decide whether a workflow agent node
+    /// finished; it stayed `false` for all three of these stops too, so a
+    /// refused or cancelled turn settled the node `Succeeded` and reported
+    /// `StopReason::Finished` — indistinguishable from the agent actually
+    /// answering, and a declined or interrupted reply advanced the workflow
+    /// graph as if it were the deliverable.
+    ///
+    /// Always a short, host-authored string, **never** the raw
+    /// `stopReason`/error text an external agent sent (same reasoning as the
+    /// `Other` arm of `stop_reason_note` in `harness::acp::run_turn`, which
+    /// this field's message is drawn from): it ends up in
+    /// `EngineError::Capability`, a developer/operator-facing message, and an
+    /// unbounded wire string has no more business there than in a persisted
+    /// [`TurnStep`].
+    ///
+    /// [`hit_iteration_cap`]: Self::hit_iteration_cap
+    pub abnormal_stop: Option<String>,
     /// The in-turn **spend halt**, when one stopped this turn (issue #1032).
     ///
     /// `Some` exactly when the teammate declared a `budget_usd_daily`, the
@@ -951,6 +991,14 @@ impl CompanyAgent {
         // same turns.
         let turn_company: Option<CompanyId> = stream.as_ref().map(|ctx| ctx.company.clone());
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
+        // This agent's curated step labels, restored onto each tool-call start as
+        // it arrives. The turn loop labels a tool row from its *name* alone and
+        // never asks the tool what it calls itself, so a branded belt would
+        // otherwise render as the generic humanized name on every surface below
+        // (see `steps::StepLabels`). Applied here — once, at the single point the
+        // turn's events enter OpenCompany — so the live stream, the durable run
+        // trace, and the folded timeline cannot disagree about a step's name.
+        let step_labels = self.step_labels.clone();
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
             let mut seq: u64 = 0;
@@ -958,6 +1006,7 @@ impl CompanyAgent {
             // emits the same "Thinking" rows the final folded one does.
             let mut thinking_open = false;
             while let Some(event) = rx.recv().await {
+                let event = step_labels.apply(event);
                 if let Some(ctx) = &stream
                     && let Some(frame) = steps::stream_event_from(&event, seq, &mut thinking_open)
                 {
@@ -1454,6 +1503,9 @@ impl CompanyAgent {
                 reply,
                 steps,
                 hit_iteration_cap,
+                // This is the built_in harness, not the ACP fold — the only
+                // path that produces an abnormal stop (PR #1880 review).
+                abnormal_stop: None,
                 halted_for_spend,
                 budget_paused,
             },
@@ -3209,6 +3261,40 @@ impl HarnessPool {
         .await
     }
 
+    /// Whether the plan-level total-token ceiling is already spent — the bare
+    /// predicate behind [`total_ceiling_refusal`](Self::total_ceiling_refusal),
+    /// for callers that make a model call the refusal shape does not describe.
+    ///
+    /// The responder-selection pass (issue #1835) is the first: it runs
+    /// *before* a responder is chosen, so it has no agent to refuse as and no
+    /// `TurnOutcome` to hand back — but it is a real model call, and a tenant
+    /// past its ceiling must not keep paying for routing (codex on #1872).
+    /// One predicate, so "is the ceiling spent" cannot answer differently for
+    /// the gate and for the turn it gates.
+    ///
+    /// **Answers `false` wherever the ceiling cannot be evaluated** — no plan,
+    /// no total budget, no meter, or a failed spend query — which is exactly
+    /// what `total_ceiling_refusal` does with the same cases: it declines to
+    /// hard-refuse and defers to the per-namespace fail-closed roster. A gate
+    /// that instead blocked on an unreadable meter would take routing down on
+    /// a metering hiccup.
+    pub(crate) async fn total_ceiling_spent(company: &CompanyId, deps: &HarnessDeps) -> bool {
+        let Some(plan) = deps.plan.as_ref() else {
+            return false;
+        };
+        if plan.total_budget.is_none() {
+            return false;
+        }
+        let Some(meter) = deps.meter.as_deref() else {
+            return false;
+        };
+        let since = plan.period.period_start_millis(crate::ports::now_millis());
+        match meter.query(company, since).await {
+            Ok(samples) => plan.total_exhausted(capability_budget::tokens_in(&samples)),
+            Err(_) => false,
+        }
+    }
+
     /// The plan-level total-token ceiling, as a refusal or nothing.
     ///
     /// Extracted from [`run_inner`](Self::run_inner) so the confined turn
@@ -3271,6 +3357,12 @@ impl HarnessPool {
                                 // No model call ran, so no cap was reached
                                 // (issue #926). A refusal is not a pause.
                                 hit_iteration_cap: false,
+                                // This pre-turn refusal is its own, older
+                                // signal (the reply text itself names the
+                                // cap) — not the PR #1880 `abnormal_stop`,
+                                // which is scoped to the ACP fold's
+                                // refusal/cancelled/unrecognized stops.
+                                abnormal_stop: None,
                                 // And no in-turn hook fired, because no turn
                                 // ran (issue #1032). The reply already IS the
                                 // budget notice; labelling this as a halt too
@@ -3339,6 +3431,7 @@ impl HarnessPool {
             return Ok(refusal);
         }
 
+        let confined = confine::build_confined_agent(company, company_name, confinement, deps)?;
         let agent = CompanyAgent {
             agent_id: confine::CONFINED_AGENT_ID.to_string(),
             role: "Workflow copilot".to_string(),
@@ -3346,12 +3439,8 @@ impl HarnessPool {
             // per-agent daily cap to read; the company-wide ceiling above is the
             // one that applies to it.
             budget_usd_daily: None,
-            agent: Mutex::new(confine::build_confined_agent(
-                company,
-                company_name,
-                confinement,
-                deps,
-            )?),
+            step_labels: steps::StepLabels::from_tools(confined.tools()),
+            agent: Mutex::new(confined),
             bound_chat: Mutex::new(None),
         };
 
@@ -3559,6 +3648,10 @@ impl HarnessPool {
                                     // No model call ran, so no cap was reached
                                     // (issue #926). A refusal is not a pause.
                                     hit_iteration_cap: false,
+                                    // Same reasoning as the total-ceiling
+                                    // refusal above: this is its own signal,
+                                    // not the PR #1880 ACP-only field.
+                                    abnormal_stop: None,
                                     // Same teammate cap, refused BEFORE the
                                     // turn (issue #1032). The in-turn brake
                                     // never armed, and the reply above already
@@ -4576,7 +4669,7 @@ pub(crate) fn build_roster(
         // its desk exactly as a manifest one is.
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
-        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
+        let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -4596,6 +4689,7 @@ pub(crate) fn build_roster(
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
+            step_labels: steps::StepLabels::from_tools(agent.tools()),
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
         }));
@@ -4647,7 +4741,7 @@ pub(crate) fn build_roster(
         // half its members would not be a ceiling.
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
-        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
+        let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -4667,6 +4761,7 @@ pub(crate) fn build_roster(
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
+            step_labels: steps::StepLabels::from_tools(agent.tools()),
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
         }));
@@ -4975,36 +5070,37 @@ mod tests {
             name: "Scoped".into(),
             role: "Researcher".into(),
             description: None,
-            tools: vec!["docs.*".into(), "payment.send".into()],
+            tools: Some(vec!["docs.*".into(), "payment.send".into()]),
             model: None,
             harness: None,
         };
         let manifest = overlay_agent_to_manifest(&scoped);
         assert_eq!(
             manifest.tools,
-            vec!["docs.*".to_string(), "payment.send".to_string()],
+            Some(vec!["docs.*".to_string(), "payment.send".to_string()]),
             "the overlay's own grant must reach the manifest shape"
         );
         assert_eq!(
-            agent_effective_grants(&allow, &manifest.tools),
+            agent_effective_grants(&allow, manifest.tools.as_deref()),
             vec!["docs.*".to_string()],
             "narrow-only: the un-allowed `payment.send` is intersected out"
         );
 
-        // An empty overlay grant is the standard company-wide grant, unchanged.
+        // An absent (`None`) overlay grant is the standard company-wide grant.
+        // Since #1804 this is `None`, NOT an empty list (which is a deny-all).
         let standard = OverlayAgent {
             id: "std".into(),
             name: "Std".into(),
             role: "Generalist".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         };
         let manifest = overlay_agent_to_manifest(&standard);
-        assert!(manifest.tools.is_empty());
+        assert!(manifest.tools.is_none());
         assert_eq!(
-            agent_effective_grants(&allow, &manifest.tools),
+            agent_effective_grants(&allow, manifest.tools.as_deref()),
             allow,
             "an empty grant falls back to the full company allow-list"
         );
@@ -5021,7 +5117,7 @@ mod tests {
             name: "Alex".into(),
             role: "Content Writer".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         };
@@ -5042,7 +5138,7 @@ mod tests {
     /// restarted, the same staleness the tier/skill fingerprints guard against.
     #[test]
     fn overlay_fingerprint_moves_on_a_tools_only_edit() {
-        let one = |tools: Vec<String>| {
+        let one = |tools: Option<Vec<String>>| {
             vec![OverlayAgent {
                 id: "a".into(),
                 name: "A".into(),
@@ -5053,9 +5149,10 @@ mod tests {
                 harness: None,
             }]
         };
-        let standard = one(Vec::new());
-        let scoped = one(vec!["docs.*".into()]);
-        let scoped_more = one(vec!["docs.*".into(), "email".into()]);
+        // `None` = standard grant, `Some(list)` = narrowed (issue #1804).
+        let standard = one(None);
+        let scoped = one(Some(vec!["docs.*".into()]));
+        let scoped_more = one(Some(vec!["docs.*".into(), "email".into()]));
 
         assert_ne!(
             overlay_fingerprint(&standard, &[], &[]),
@@ -5070,7 +5167,7 @@ mod tests {
         // Identical grants → identical fingerprint (no spurious rebuild).
         assert_eq!(
             overlay_fingerprint(&scoped, &[], &[]),
-            overlay_fingerprint(&one(vec!["docs.*".into()]), &[], &[])
+            overlay_fingerprint(&one(Some(vec!["docs.*".into()])), &[], &[])
         );
     }
 
@@ -5087,7 +5184,7 @@ mod tests {
                 name: "A".into(),
                 role: "r".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: model.map(str::to_string),
                 harness: harness.map(str::to_string),
             }]
@@ -5862,7 +5959,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: Some("Owns acquisition experiments.".into()),
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -5931,7 +6028,7 @@ description = "Builds the product."
             name: "Impostor".into(),
             role: "Shadow CEO".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -6057,7 +6154,7 @@ description = "Builds the product."
             name: "Dana".into(),
             role: "Designer".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -8682,7 +8779,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -10102,7 +10199,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -10322,7 +10419,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             harness: None,
-            tools: Vec::new(),
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
@@ -10447,7 +10544,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             harness: None,
-            tools: Vec::new(),
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
