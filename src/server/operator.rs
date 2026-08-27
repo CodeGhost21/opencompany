@@ -32,6 +32,7 @@ use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventStreamItem;
+use crate::ports::store::company_write_lock;
 use crate::ports::types::{
     Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq,
     OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
@@ -334,6 +335,16 @@ async fn add_desk_member(
     Json(body): Json<AddDeskMember>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -399,6 +410,16 @@ async fn set_desk_order(
     Json(body): Json<SetDeskOrder>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -463,6 +484,16 @@ async fn remove_desk_member(
     Path(DeskMemberPath { desk_id, agent_id }): Path<DeskMemberPath>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -597,6 +628,16 @@ async fn create_desk(
     Json(body): Json<CreateDesk>,
 ) -> Result<(StatusCode, Json<DeskDto>), ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -709,6 +750,16 @@ async fn delete_desk(
     Path(DeskPath { desk_id }): Path<DeskPath>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -5163,6 +5214,66 @@ mode = "full"
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
         assert_eq!(desks[0]["overlayMembers"][0], "eng");
+    }
+
+    /// `add_desk_member` must serialize its load-modify-save cycle against
+    /// `company_write_lock`, exactly like every other console load-modify-save
+    /// write (`put_logo`, `set_lifecycle`, `patch_company`) — otherwise it can
+    /// silently revert a concurrent rename: `patch_company` is guarded by
+    /// `company_write_lock` alone, so a desk write racing in on only the
+    /// unrelated `serial` cycle lock can load the pre-rename record and save
+    /// the whole thing back after the rename lands (PR #1875 review finding).
+    /// Proven the same way `put_logo_serializes_against_the_company_write_lock`
+    /// proves it: hold the lock externally, drive the real handler through the
+    /// router, and demand it cannot finish while the lock is held.
+    #[tokio::test]
+    async fn add_desk_member_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks/studio/members")
+                        .header("cookie", &cookie_for_task)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"agent_id":"eng"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        // The handler must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "add_desk_member completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("add_desk_member never resumed after the lock was released")
+            .expect("add_desk_member task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest
