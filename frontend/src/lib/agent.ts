@@ -278,15 +278,21 @@ export interface ToolGrantSummary {
    */
   dropped: string[];
   /**
-   * Whether the agent lists no tools of its own and therefore inherits the
-   * company's whole allow-list.
+   * Whether the agent lists no tools of its own (`requested === null`) and
+   * therefore inherits the company's whole allow-list.
    *
-   * The case worth naming: an empty `requested` reads like "no tools" and means
-   * the opposite. A screen that showed an empty list here would tell an
-   * operator their agent is powerless when it holds everything the company
-   * allows.
+   * Since issue #1804 this is `requested === null`, NOT an empty list: an empty
+   * `requested` (`[]`) is now the *opposite* — a deliberate deny-all — so the
+   * two states must never be conflated. A screen that read `[]` as the standard
+   * grant would tell an operator their locked-down agent holds everything.
    */
   standardGrant: boolean;
+  /**
+   * Whether the agent was handed an **explicit** empty grant (`requested === []`)
+   * — a deliberate deny-all, distinct from `standardGrant`. The teammate holds
+   * nothing; the screen must say so rather than fall back to "standard grant".
+   */
+  deniedAll: boolean;
 }
 
 /**
@@ -447,10 +453,15 @@ export function toolGlobsDiffer(before: string[], after: string[]): boolean {
 }
 
 export function summarizeGrants(tools: AgentToolsDto): ToolGrantSummary {
+  // Three-state `requested` (issue #1804): `null` inherits the standard grant,
+  // `[]` is a deliberate deny-all, a non-empty array narrows. Only a narrowing
+  // list has globs that can be dropped by the intersection.
+  const requested = tools.requested ?? [];
   return {
     effective: tools.effective,
-    dropped: tools.requested.filter((glob) => !tools.effective.includes(glob)),
-    standardGrant: tools.requested.length === 0,
+    dropped: requested.filter((glob) => !tools.effective.includes(glob)),
+    standardGrant: tools.requested === null,
+    deniedAll: tools.requested !== null && tools.requested.length === 0,
   };
 }
 
