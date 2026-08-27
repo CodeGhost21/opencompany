@@ -317,6 +317,7 @@ mod tests {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                overlay_tool_grants: None,
             })
             .await
             .unwrap();
