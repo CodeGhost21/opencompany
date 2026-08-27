@@ -215,15 +215,23 @@ export interface DeskDto {
    * for these. Omitted (undefined/false) for blueprint desks.
    */
   overlayCreated?: boolean;
-  /**
-   * Whether this is the built-in **Operator** system channel (issue #1757) — a
-   * read-only "what happened" feed aggregating workflow-run reports and the
-   * owner/no-mailbox fallback, not a real, mutable desk. The console renders it
-   * like a channel but offers no member management, reorder, or delete for it,
-   * and no send box (it is read-only in v1). Omitted (undefined/false) for real
-   * desks.
-   */
-  system?: boolean;
+}
+
+/**
+ * `GET {scope}/operator-channel` — the identity of the company's
+ * always-present, durable Operator feed (issue #1757 rework): a read-only
+ * "what happened" feed aggregating workflow-run reports and the owner/
+ * no-mailbox fallback. Its own surface, not a desk — the console pins it
+ * below a divider in the chat rail instead of folding it into `GET
+ * {scope}/desks`. Mirrors `OperatorChannelDto` in `src/server/operator.rs`.
+ */
+export interface OperatorChannelDto {
+  /** The channel id — the `desk` query param `chat/history` reads through. */
+  id: string;
+  /** Always "Operator" — the console's pinned-row label. */
+  name: string;
+  /** The channel's purpose line, shown under the name in the pinned row. */
+  description: string;
 }
 
 /**

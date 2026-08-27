@@ -47,6 +47,7 @@ import {
   type HarnessDto,
   type InboxDto,
   type InboxMessageDto,
+  type OperatorChannelDto,
   type PageManifestDto,
   type ResolveReceipt,
   type SetBudgetInput,
@@ -566,6 +567,16 @@ export class OpenCompanyClient {
    */
   listDesks(company?: string | null): Promise<DeskDto[]> {
     return this.request<DeskDto[]>("GET", `${this.scope(company)}/desks`);
+  }
+
+  /**
+   * The identity of the company's always-present, durable Operator feed
+   * (issue #1757 rework) — its own surface, not a desk. The console pins it
+   * below a divider in the chat rail rather than folding it into
+   * {@link listDesks}.
+   */
+  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
+    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
   }
 
   /**
