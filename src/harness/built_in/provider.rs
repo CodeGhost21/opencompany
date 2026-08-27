@@ -890,61 +890,47 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             "inference response requested a tool call that failed to parse{detail}"
         )));
     }
-    // An array-shaped `content` refusal part can coexist with a `"text"`-typed
-    // part in the *same* array — e.g. a short lead-in sentence followed by
-    // `{"type":"refusal",…}`. `extract_content_text` only concatenates the
-    // text part, so `content` is already nonempty by the time we get here;
-    // gating the whole refusal-precedence block on `content.is_empty()`
-    // would skip it entirely and let the turn "succeed" with just the
-    // leaked text fragment, silently discarding the provider's actual
-    // safety response instead of surfacing it (Codex review on #1779,
-    // comment 3875001349). Detect the array refusal independent of whether
-    // `content` is empty so it can still override already-nonempty leaked
-    // text, not just leaked reasoning.
-    let array_refusal = extract_array_refusal_text(payload.pointer("/choices/0/message/content"));
-    // Array-shaped `content` can also carry only a `"text"` part — no
-    // `{"type":"refusal",…}` part at all — while the refusal lives in the
-    // scalar sibling `message.refusal` field, same as the plain-string-
-    // content case this block was originally written for. `array_refusal`
-    // is `None` in that shape (there is no refusal-typed part to find), so
-    // gating on `content.is_empty() || array_refusal.is_some()` alone still
-    // skips the whole block — and with it, the scalar `message.refusal`
-    // lookup a few lines below — leaking the text fragment instead of the
-    // refusal. Check for a nonempty scalar refusal independently too, so
-    // its presence alone is enough to enter the block regardless of what
-    // shape `content` took (Codex review on #1779, comment 3875101974).
-    let scalar_refusal_present = payload
+    // Resolve the refusal, independent of `content`'s shape, ONCE: a
+    // provider can express it as the scalar sibling `message.refusal` field,
+    // or — some providers/gateways normalize a Responses-API-style refusal
+    // this way — as a `{"type":"refusal","refusal":"…"}` part inside
+    // array-shaped `content` itself. `extract_content_text` only
+    // concatenates `"text"`-typed parts, so a refusal-typed part (alone or
+    // alongside a text part) never reaches `content` and `content` can
+    // already be nonempty (a leaked lead-in sentence) by the time this runs.
+    // The scalar field wins when a payload somehow carries both; either one
+    // alone is still the provider's own visible safety response and must be
+    // detected regardless of what shape `content` took (Codex reviews on
+    // #1779, comments 3874381270, 3875001349, 3875101974).
+    let refusal_text = payload
         .pointer("/choices/0/message/refusal")
         .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty());
-    if tool_calls.is_empty()
-        && !raw_tool_call_requested
-        && genuinely_finished
-        && (content.is_empty() || array_refusal.is_some() || scalar_refusal_present)
-    {
-        // A nonempty `message.refusal` is the provider's own visible safety
-        // response — it wins over any `reasoning`/`reasoning_content` the
-        // model emitted before declining. Promoting the reasoning instead
-        // would expose exactly the content the refusal was withholding
-        // (CodeRabbit review on #1779, comment 3872084054). Some
-        // providers/gateways instead normalize a Responses-API-style
-        // refusal into the array-shaped `content` field itself, as a
-        // `{"type":"refusal","refusal":"…"}` part — `extract_content_text`
-        // only concatenates `"text"`-typed parts, so that part contributes
-        // nothing on its own; without this fallback the scalar lookup below
-        // would also find nothing and let the reasoning promotion (or, in
-        // the mixed-array case above, the leaked text) leak the same
-        // withheld content instead of the refusal (Codex review on #1779,
-        // comment 3874381270).
-        let refusal = payload
-            .pointer("/choices/0/message/refusal")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or(array_refusal);
-        if let Some(refusal) = refusal {
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| extract_array_refusal_text(payload.pointer("/choices/0/message/content")));
+
+    if tool_calls.is_empty() && !raw_tool_call_requested {
+        if let Some(refusal) = refusal_text {
+            // A refusal is a *completed* decision, not a partial one — unlike
+            // the reasoning fallback below, its precedence must not depend on
+            // `finish_reason`. Gating it on `genuinely_finished` let a
+            // refusal that ends with e.g. `finish_reason: "content_filter"`
+            // (arguably the *more* likely finish reason for an actual
+            // content-policy refusal) fall through untouched, leaving
+            // whatever text or reasoning leaked alongside it to win instead
+            // and silently discard the refusal (Codex review on #1779,
+            // comment 3875167298). It always wins over leaked text/reasoning,
+            // independent of how the turn finished.
             content = refusal;
-        } else {
+        } else if genuinely_finished && content.is_empty() {
+            // Reasoning-model fallback: a reasoning-only turn returns
+            // `content: null` with the visible text under `reasoning` /
+            // `reasoning_content` (string or array-of-parts). Only promote it
+            // when the model actually finished — a truncated (`length`),
+            // filtered (`content_filter`), failed, or otherwise-unfinished
+            // chain of thought is not a final answer, and promoting it here
+            // would hand downstream consumers a partial or incorrect thought
+            // as if it were.
             content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
             if content.is_empty() {
                 content =
@@ -2317,6 +2303,37 @@ mod tests {
                         { "type": "text", "text": "Sure, here's a start: " }
                     ],
                     "refusal": "I can't help with that."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// The mixed-array refusal case above (Codex review comment 3875001349)
+    /// only reproduced with `finish_reason: "stop"`. The refusal-precedence
+    /// block was gated on `genuinely_finished`, so the identical payload with
+    /// `finish_reason: "content_filter"` — arguably the *more* likely finish
+    /// reason a real content-policy refusal ends with — skipped the block
+    /// entirely: `content` was already nonempty from the leaked text part,
+    /// so the empty-response check at the bottom accepted it and returned
+    /// the leaked lead-in as if it were the whole answer, silently
+    /// discarding the refusal. A refusal is a completed decision, not a
+    /// partial one, so its precedence must not depend on `finish_reason` the
+    /// way the reasoning fallback's does (Codex review on #1779, comment
+    /// 3875167298).
+    #[test]
+    fn a_refusal_wins_over_leaked_text_regardless_of_finish_reason() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Sure, here's a start: " },
+                        { "type": "refusal", "refusal": "I can't help with that." }
+                    ]
                 }
             }]
         });
