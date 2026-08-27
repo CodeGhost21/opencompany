@@ -76,8 +76,24 @@ pub fn router() -> Router<AppState> {
         "/inference",
         get(get_status).put(set_config).delete(revert_config),
     )
+    .merge(scoped("/inference/models", get(list_models)))
     .merge(scoped("/inference/test", post(test_config)))
     .merge(scoped("/inference/restart", post(restart_runtime)))
+}
+
+/// `GET …/inference/models` — the cached public OpenRouter model registry.
+async fn list_models(
+    company: ScopedCompany,
+) -> Result<Json<Vec<crate::server::inference_models::InferenceModel>>, ApiError> {
+    let _ = company;
+    crate::server::inference_models::openrouter_models()
+        .await
+        .map(Json)
+        .map_err(|error| {
+            ApiError(OpenCompanyError::Store(format!(
+                "OpenRouter model registry unavailable: {error}"
+            )))
+        })
 }
 
 /// The company's effective inference status as the console renders it. **Never**
@@ -97,6 +113,17 @@ struct InferenceStatusDto {
     base_url: String,
     /// Abstract-tier → concrete model id.
     models: BTreeMap<String, String>,
+    /// The shipped tier → model defaults ([`inference::DEFAULT_TIER_MODELS`]),
+    /// independent of `provider`/`models` above.
+    ///
+    /// The console's OpenRouter preset used to hard-code its own copy of these
+    /// four ids so switching to OpenRouter had something to prefill the form
+    /// with before an operator typed an override — duplicated data that could
+    /// silently drift from this host's actual defaults the moment
+    /// `DEFAULT_TIER_MODELS` changed. Carrying the live values on every status
+    /// read means the preset is never more than one request stale, on a route
+    /// the console already polls.
+    default_tier_models: BTreeMap<String, String>,
     /// Where the effective config came from: `default` / `manifest` / `runtime`,
     /// or `managed` when nothing tenant-specific is configured.
     source: String,
@@ -440,12 +467,19 @@ async fn effective_status_with(
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
+    // Independent of `decl`: the shipped defaults are the same regardless of
+    // what (if anything) this company has configured.
+    let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
+        .iter()
+        .map(|(tier, model)| (tier.to_string(), model.to_string()))
+        .collect();
     Ok(match decl {
         Some(d) => InferenceStatusDto {
             provider: d.provider.clone(),
             slug: d.telemetry_slug().to_string(),
             base_url,
             models: d.models.clone(),
+            default_tier_models: default_tier_models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
             cognition: cognition.path.to_string(),
@@ -459,6 +493,7 @@ async fn effective_status_with(
             slug: "managed".to_string(),
             base_url,
             models: BTreeMap::new(),
+            default_tier_models,
             source: "managed".to_string(),
             key_configured: false,
             cognition: cognition.path.to_string(),
@@ -1203,6 +1238,28 @@ base_url = "https://byo.example/v1"
         (status, value, raw)
     }
 
+    #[tokio::test]
+    async fn model_catalog_route_returns_cached_openrouter_models() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+        crate::server::inference_models::openrouter_cache().store(
+            vec![crate::server::inference_models::InferenceModel {
+                id: "provider/real-model".to_string(),
+                name: Some("Real Model".to_string()),
+                context_length: Some(128_000),
+            }],
+            std::time::Instant::now(),
+        );
+
+        let (status, body, raw) =
+            send(&state, "GET", "/api/v1/company/inference/models", None).await;
+
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(body[0]["id"], "provider/real-model");
+        assert_eq!(body[0]["name"], "Real Model");
+        assert_eq!(body[0]["contextLength"], 128_000);
+    }
+
     // ---------------------------------------------------------------------
     // Issue #597 — the card must report the endpoint requests actually reach,
     // not the built-in production constant.
@@ -1493,6 +1550,19 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "managed");
         assert_eq!(dto["keyConfigured"], false);
         assert!(dto.get("key").is_none(), "status DTO must not carry a key");
+        // `defaultTierModels` must actually be on the wire, not just the DTO
+        // struct — the frontend preset (issue #1838) reads it off this exact
+        // response, so a field that only exists in Rust and never serializes
+        // would leave the console silently falling back to a stale local copy.
+        let expected_chat_v1 = inference::DEFAULT_TIER_MODELS
+            .iter()
+            .find(|(tier, _)| *tier == "chat-v1")
+            .map(|(_, model)| *model)
+            .expect("chat-v1 must have a documented default");
+        assert_eq!(
+            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
+            "defaultTierModels must be present on the managed-default status response: {dto}"
+        );
 
         // Switch to OpenRouter with a write-only key + a tier→model map.
         let (status, resp, raw) = send(
@@ -1524,6 +1594,13 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "runtime");
         assert_eq!(dto["keyConfigured"], true);
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
+        // defaultTierModels is independent of the tenant's own `models` map —
+        // it must still be the shipped default here even though this company
+        // now has a runtime override with its own chat-v1/reasoning-v1 entries.
+        assert_eq!(
+            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
+            "defaultTierModels must not follow the tenant's own model override: {dto}"
+        );
     }
 
     #[tokio::test]

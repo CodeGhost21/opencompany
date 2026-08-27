@@ -2446,7 +2446,7 @@ mod tests {
         )
         .await
         .expect("plan");
-        assert_eq!(defaulted.model, "deepseek/deepseek-v4-pro");
+        assert_eq!(defaulted.model, "openai/gpt-5.6-sol-pro");
 
         // A concrete slug is still forwarded untouched, so a caller can name any
         // model in OpenRouter's catalog.
