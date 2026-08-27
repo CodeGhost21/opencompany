@@ -824,6 +824,7 @@ pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
         workflow_id: "wf".to_string(),
         run_id: format!("run-{n}"),
         scheduled: false,
+        started_by: None,
     };
     let audit = |n: u64| CompanyEvent::LifecycleChanged {
         from: "running".to_string(),
