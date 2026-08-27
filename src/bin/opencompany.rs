@@ -500,6 +500,22 @@ async fn register_company(
     Ok((id, name, schedules))
 }
 
+/// Whether `OPENCOMPANY_SKIP_ACTIVATION_GATE` enables the account-activation
+/// funnel's blocking-gate bypass (issue #1844) for a company that has never
+/// booted before.
+///
+/// Pulled out of [`company_builder`]'s inline `== Ok("1")` comparison so the
+/// exact-match contract — only the literal `"1"` enables it; unset, `"true"`,
+/// and `"0"` all stay disabled — is a unit test instead of something only a
+/// full e2e boot exercises. The one setter today is the e2e host script,
+/// which sets it so its shared fixture company does not gate ~100 unrelated
+/// specs that know nothing about the funnel; every other value (including a
+/// truthy-looking `"true"`) staying disabled means a typo in that script
+/// fails closed onto the real gate rather than silently bypassing it.
+fn activation_gate_bypass_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 /// Assembles the `RuntimeBuilder` for one company with this host's full boot
 /// wiring: the OpenHuman RPC transport, the harness pool and its managed
 /// backends, feedback routing, the opened storage backend and memory overlay,
@@ -562,7 +578,11 @@ fn company_builder(
     // comment. Absent (the default) is a no-op; the one setter today is the
     // e2e host script, which sets it so its shared fixture company does not
     // gate ~100 unrelated specs that know nothing about the funnel.
-    .skip_activation_gate(std::env::var("OPENCOMPANY_SKIP_ACTIVATION_GATE").as_deref() == Ok("1"))
+    .skip_activation_gate(activation_gate_bypass_enabled(
+        std::env::var("OPENCOMPANY_SKIP_ACTIVATION_GATE")
+            .ok()
+            .as_deref(),
+    ))
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
         builder = builder.with_seed_dir(source_dir);
@@ -2460,6 +2480,31 @@ async fn async_main() -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    // PR #1875 review finding: `activation_gate_bypass_enabled` guards
+    // whether a company's activation-funnel gate is bypassed at first boot
+    // (issue #1844). Only the literal `"1"` may enable it — unset, and
+    // anything that merely *looks* truthy, must stay disabled so a typo in
+    // the e2e host script's env fails closed onto the real gate.
+    #[test]
+    fn activation_gate_bypass_disabled_when_unset() {
+        assert!(!activation_gate_bypass_enabled(None));
+    }
+
+    #[test]
+    fn activation_gate_bypass_enabled_on_literal_one() {
+        assert!(activation_gate_bypass_enabled(Some("1")));
+    }
+
+    #[test]
+    fn activation_gate_bypass_disabled_on_truthy_lookalike() {
+        assert!(!activation_gate_bypass_enabled(Some("true")));
+    }
+
+    #[test]
+    fn activation_gate_bypass_disabled_on_zero() {
+        assert!(!activation_gate_bypass_enabled(Some("0")));
+    }
 
     #[tokio::test]
     async fn openhuman_desktop_dry_run_rejects_passthrough_args() {
