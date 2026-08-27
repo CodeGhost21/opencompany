@@ -9,10 +9,18 @@
 //! first agent when none is tagged (so a company without an orchestrator behaves
 //! exactly as before).
 //!
-//! It reaches eight tools, all wired only onto the orchestrator agent:
+//! It reaches sixteen tools, all wired only onto the orchestrator agent:
 //!
-//! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`] and
-//!   recent [`EventLog`] history.
+//! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`],
+//!   recent [`EventLog`] history, and (issue #1859) a `## Board` summary of
+//!   open task cards.
+//! * [`ListTasksTool`] / [`ReadTaskTool`] / [`ReadRunTool`] (issue #1859) —
+//!   the execution-state read trio: `list_tasks` answers "what are you
+//!   working on?" with real cards and statuses, `read_task` reads one card's
+//!   full attempt history and output, and `read_run` reads one recorded
+//!   run's outcome (an agent attempt, or a workflow run folded out of the
+//!   journal). Where the board tools below are write-only, this trio is how
+//!   an agent reads back what it — or the board — already did.
 //! * [`SpawnTaskTool`] / [`DelegateToDeskTool`] — delegation tools that push a
 //!   [`Delegation`] onto a shared [`DelegationQueue`]. They perform no work
 //!   themselves; the [`HarnessBrain`](crate::harness::HarnessBrain) drains the
@@ -77,10 +85,15 @@ use crate::company::{
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
 use crate::harness::workflow_refs::WorkflowRefQueue;
+use crate::ports::artifacts::ArtifactStore;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::notifications::NotificationStore;
-use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
+use crate::ports::runs::{RunFilter, RunRecord, RunStore};
+use crate::ports::tasks::{
+    BOARD_COLUMNS, COLUMN_DONE, TaskOutputAction, TaskOutputWorkflow, TaskRecord, TaskStore,
+    column_label, is_board_column,
+};
 use crate::ports::types::{
     CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent, WorkflowNodeStatus,
 };
@@ -160,6 +173,18 @@ pub const CREATE_WORKFLOW_TOOL: &str = "create_workflow";
 pub const ASSIGN_TASK_TOOL: &str = "assign_task";
 /// The `review_task` tool name (issue #186 — orchestrator lifecycle authority).
 pub const REVIEW_TASK_TOOL: &str = "review_task";
+/// The `list_tasks` tool name (issue #1859 — execution-state read surface).
+pub const LIST_TASKS_TOOL: &str = "list_tasks";
+/// The `read_task` tool name (issue #1859).
+pub const READ_TASK_TOOL: &str = "read_task";
+/// The `read_run` tool name (issue #1859).
+pub const READ_RUN_TOOL: &str = "read_run";
+/// How many cards [`ListTasksTool`] renders before truncating with an honest
+/// marker (issue #1859) — the same silent-cut discipline
+/// [`QueryCompanyTool`]'s `FACT_LIMIT` already applies: a company with more
+/// open cards than this must not read as though nothing is happening past
+/// card N.
+const LIST_TASKS_LIMIT: usize = 40;
 
 /// The id of the orchestrator agent for a roster: the first agent tagged
 /// `tier = "orchestrator"`, else the first roster agent, else `None` (empty
@@ -1259,17 +1284,25 @@ pub struct QueryCompanyTool {
     /// agents + operator-added overlay teammates) and the manifest's enabled
     /// workflow ids. `None` on builds with no store wired.
     store: Option<Arc<dyn CompanyStore>>,
+    /// The company's task board, so the insight document's `## Board` section
+    /// (issue #1859) can summarize open work by column instead of the
+    /// orchestrator having to reach for the separate `list_tasks` tool just to
+    /// answer "is anything blocked?" as part of a broader question. `None`
+    /// renders the section as unavailable rather than failing the whole tool.
+    tasks: Option<Arc<dyn TaskStore>>,
 }
 
 impl QueryCompanyTool {
     /// Builds the tool over the company's read ports. Any handle may be `None`;
     /// the tool reports whatever surface is wired.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         company: CompanyId,
         facts: Option<Arc<dyn FactStore>>,
         events: Option<Arc<dyn EventLog>>,
         workflow_source_dir: Option<PathBuf>,
         store: Option<Arc<dyn CompanyStore>>,
+        tasks: Option<Arc<dyn TaskStore>>,
     ) -> Self {
         Self {
             company,
@@ -1277,6 +1310,7 @@ impl QueryCompanyTool {
             events,
             workflow_source_dir,
             store,
+            tasks,
         }
     }
 }
@@ -1288,7 +1322,7 @@ impl Tool for QueryCompanyTool {
     }
 
     fn description(&self) -> &str {
-        "Read the company's durable facts, recent activity, saved workflows, team roster, and desks to ground an answer in whole-company context — use this to answer \"what workflows do we have?\", \"who is on the team?\", or \"which desks can take work?\" instead of guessing, and to get the exact desk id `delegate_to_desk` needs. Optionally pass a `query` to filter facts by a case-insensitive substring."
+        "Read the company's durable facts, recent activity, saved workflows, team roster, desks, and a board summary to ground an answer in whole-company context — use this to answer \"what workflows do we have?\", \"who is on the team?\", \"which desks can take work?\", or \"what's in flight?\" instead of guessing, and to get the exact desk id `delegate_to_desk` needs. For a specific card's full attempt history and output, use `list_tasks` / `read_task` instead. Optionally pass a `query` to filter facts by a case-insensitive substring."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1591,6 +1625,71 @@ impl Tool for QueryCompanyTool {
             }
         }
 
+        // Board summary (issue #1859): open cards grouped by column, so a
+        // whole-company query surfaces execution state alongside facts and
+        // roster instead of forcing a second `list_tasks` call for "what's in
+        // flight?" as part of a broader question.
+        //
+        // **LAST section, deliberately.** Every section above it (Facts,
+        // Recent activity, Saved workflows, Team, Desks) is inside the outer
+        // tool-result byte budget the harness enforces
+        // (`TOOL_RESULT_BUDGET_BYTES`), and a company with an unusually large
+        // board must never be able to push that cut back far enough to drop
+        // the Desks list `delegate_to_desk` depends on. Unlike Facts (which
+        // has `query` to narrow with) this section has no narrowing argument
+        // of its own — `list_tasks` is the fallback for a board too big to
+        // fit here, exactly as its own truncation marker below says.
+        let mut board_open_count = 0usize;
+        md.push_str("\n## Board\n");
+        match &self.tasks {
+            Some(tasks) => {
+                let cards = tasks.list(&self.company).await.unwrap_or_default();
+                let total_open = cards.iter().filter(|c| c.column != COLUMN_DONE).count();
+                if total_open == 0 {
+                    md.push_str("_No open cards._\n");
+                } else {
+                    let mut shown = 0usize;
+                    for column in BOARD_COLUMNS {
+                        if column == COLUMN_DONE {
+                            continue;
+                        }
+                        let in_column: Vec<&TaskRecord> =
+                            cards.iter().filter(|c| c.column == column).collect();
+                        if in_column.is_empty() {
+                            continue;
+                        }
+                        let mut titles: Vec<&str> = Vec::new();
+                        for c in &in_column {
+                            if shown >= LIST_TASKS_LIMIT {
+                                break;
+                            }
+                            titles.push(c.title.as_str());
+                            shown += 1;
+                        }
+                        md.push_str(&format!(
+                            "- **{}** ({}): {}\n",
+                            column_label(column),
+                            in_column.len(),
+                            if titles.is_empty() {
+                                "…".to_string()
+                            } else {
+                                titles.join("; ")
+                            }
+                        ));
+                    }
+                    if shown < total_open {
+                        md.push_str(&format!(
+                            "\n[TRUNCATED — {} more open card(s) not shown here. Use \
+                             `{LIST_TASKS_TOOL}` to page through the rest.]\n",
+                            total_open - shown
+                        ));
+                    }
+                }
+                board_open_count = total_open;
+            }
+            None => md.push_str("_Board unavailable._\n"),
+        }
+
         Ok(ToolResult::success_with_markdown(
             json!({
                 "facts": facts.len(),
@@ -1599,7 +1698,547 @@ impl Tool for QueryCompanyTool {
                 "workflows": workflows.len(),
                 "team": roster.len(),
                 "desks": desks.len(),
+                "board_open": board_open_count,
             }),
+            md,
+        ))
+    }
+}
+
+/// Renders `attempt N status` for the newest row in `runs`, or `None` when
+/// `runs` is empty — a card nobody has attempted yet gets no attempt clause
+/// rather than a fabricated one (issue #1859, the same rule
+/// [`inject_handed_task_awareness`](crate::runtime::cycle::CycleRunner) follows
+/// for the chat-side briefing). `runs` is assumed newest-first, the
+/// [`RunStore::list_runs`] ordering, so the first row is the latest attempt.
+///
+/// Deliberately never reads [`RunRecord::usage`] — no run's cost reaches any
+/// of the three read tools this backs.
+fn latest_attempt_label(runs: &[RunRecord]) -> Option<String> {
+    let run = runs.first()?;
+    Some(format!("attempt {} {}", run.attempt, run.status.as_str()))
+}
+
+/// A read-only surface over the company's task board (issue #1859): every
+/// open card, grouped by column, with its assignee and latest attempt status
+/// — the surface an agent queries directly to answer "what are you working
+/// on?" or "what's in review?" truthfully, on the same terms
+/// [`OPEN_WORK_ANNOTATION`](crate::runtime::cycle::OPEN_WORK_ANNOTATION)
+/// already briefs into an addressed chat message, but reachable from any turn
+/// rather than only one already addressed to a desk with open work.
+///
+/// Fail-closed by construction: this tool reads only [`TaskStore`] and
+/// [`RunStore`], neither of which carries a run's USD cost, a raw tool-call
+/// argument, or a step's full trace — so none of those can leak here no
+/// matter what the rendering does with them.
+pub struct ListTasksTool {
+    company: CompanyId,
+    tasks: Option<Arc<dyn TaskStore>>,
+    runs: Option<Arc<dyn RunStore>>,
+}
+
+impl ListTasksTool {
+    /// Builds the tool over the company's board ports. Either may be `None`;
+    /// the tool reports the surface unavailable rather than failing.
+    pub fn new(
+        company: CompanyId,
+        tasks: Option<Arc<dyn TaskStore>>,
+        runs: Option<Arc<dyn RunStore>>,
+    ) -> Self {
+        Self {
+            company,
+            tasks,
+            runs,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ListTasksTool {
+    fn name(&self) -> &str {
+        LIST_TASKS_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "List task cards on the company board, grouped by column, with each card's id, assignee, and latest attempt status — use this to answer \"what are you working on?\", \"what's in review?\", or \"is anything stuck?\" instead of guessing. Excludes Done cards unless `column` explicitly asks for them. Pass a card's id to `read_task` for its full history and output."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "column": {
+                    "type": "string",
+                    "description": "Only cards in this column (todo, planning, in_progress, paused, in_review, done). Omit to see every not-done column."
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "Only cards assigned to this desk/teammate id (case-insensitive exact match)."
+                }
+            },
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn supports_markdown(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let Some(tasks) = &self.tasks else {
+            return Ok(ToolResult::error(
+                "No task board wired to this company build; `list_tasks` cannot answer.",
+            ));
+        };
+        let column_filter = args
+            .get("column")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(col) = column_filter
+            && !is_board_column(col)
+        {
+            return Ok(ToolResult::error(format!(
+                "Unknown column `{col}`. Valid columns: {}.",
+                BOARD_COLUMNS.join(", ")
+            )));
+        }
+        let assignee_filter = args
+            .get("assignee")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let mut cards = tasks.list(&self.company).await.unwrap_or_default();
+        cards.retain(|c| match column_filter {
+            Some(col) => c.column == col,
+            None => c.column != COLUMN_DONE,
+        });
+        if let Some(assignee) = assignee_filter {
+            cards.retain(|c| c.assignee.eq_ignore_ascii_case(assignee));
+        }
+        let total = cards.len();
+
+        let mut md = String::from("# Task board\n");
+        if total == 0 {
+            md.push_str("_No matching cards._\n");
+        } else {
+            let mut shown = 0usize;
+            for column in BOARD_COLUMNS {
+                let in_column: Vec<&TaskRecord> =
+                    cards.iter().filter(|c| c.column == column).collect();
+                if in_column.is_empty() {
+                    continue;
+                }
+                md.push_str(&format!("\n## {}\n", column_label(column)));
+                for c in in_column {
+                    if shown >= LIST_TASKS_LIMIT {
+                        continue;
+                    }
+                    let attempt = match &self.runs {
+                        Some(runs) => latest_attempt_label(
+                            &runs
+                                .list_runs(
+                                    &self.company,
+                                    &RunFilter::for_task(c.id.as_str()).with_limit(1),
+                                )
+                                .await
+                                .unwrap_or_default(),
+                        ),
+                        None => None,
+                    };
+                    md.push_str(&format!(
+                        "- `{}` {} — {}{}\n",
+                        c.id,
+                        c.title,
+                        c.assignee,
+                        attempt.map(|a| format!(" — {a}")).unwrap_or_default()
+                    ));
+                    shown += 1;
+                }
+            }
+            if shown < total {
+                md.push_str(&format!(
+                    "\n[TRUNCATED — {} more card(s) not shown. Narrow with `column` or \
+                     `assignee` before concluding a card is absent.]\n",
+                    total - shown
+                ));
+            }
+        }
+
+        Ok(ToolResult::success_with_markdown(
+            json!({ "shown": total.min(LIST_TASKS_LIMIT), "total": total }),
+            md,
+        ))
+    }
+}
+
+/// A read-only surface over one task card's full record (issue #1859): its
+/// header, every attempt's status, and what it produced — so an agent can
+/// discuss a finished task, explain why one is stuck, or answer a follow-up
+/// about its output instead of inventing an answer.
+///
+/// Deliberately **not** built over [`crate::server::ops::ScopedCompany`] or
+/// the console's `assemble_detail` / task-export renderer (`task_export.rs`):
+/// those exist to serve an operator's browser through a redaction pipeline
+/// shaped for that surface, and fabricating a `ScopedCompany` outside a
+/// request would be reaching for state this tool has no business holding.
+/// This tool is fail-closed on its own, narrower terms instead — it holds
+/// only [`TaskStore`], [`RunStore`] and [`ArtifactStore`], none of which
+/// carries a run's USD cost, a raw tool-call argument, or a step's full
+/// trace, so none of those can leak here no matter what the rendering does.
+pub struct ReadTaskTool {
+    company: CompanyId,
+    tasks: Option<Arc<dyn TaskStore>>,
+    runs: Option<Arc<dyn RunStore>>,
+    artifacts: Option<Arc<dyn ArtifactStore>>,
+}
+
+impl ReadTaskTool {
+    /// Builds the tool over the company's board ports. Any may be `None`; the
+    /// tool reports whatever surface is wired and falls back where it can
+    /// (see the `## Output` section in [`Self::execute`]).
+    pub fn new(
+        company: CompanyId,
+        tasks: Option<Arc<dyn TaskStore>>,
+        runs: Option<Arc<dyn RunStore>>,
+        artifacts: Option<Arc<dyn ArtifactStore>>,
+    ) -> Self {
+        Self {
+            company,
+            tasks,
+            runs,
+            artifacts,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadTaskTool {
+    fn name(&self) -> &str {
+        READ_TASK_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Read one task card in full: its column, assignee, note, every attempt's status, and what it produced — use this to discuss a finished task, explain why one is stuck, or answer a follow-up about its output. Pass the card's `task_id`, from `list_tasks` or a board reference."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The card's id, from `list_tasks` or a board reference."
+                }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn supports_markdown(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let Some(tasks) = &self.tasks else {
+            return Ok(ToolResult::error(
+                "No task board wired to this company build; `read_task` cannot answer.",
+            ));
+        };
+        let task_id = args
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(task_id) = task_id else {
+            return Ok(ToolResult::error(
+                "`task_id` is required: pass the card's id from `list_tasks`.",
+            ));
+        };
+
+        let cards = tasks.list(&self.company).await.unwrap_or_default();
+        let Some(card) = cards.into_iter().find(|c| c.id == task_id) else {
+            return Ok(ToolResult::error(format!(
+                "No card `{task_id}` on this board. Call `{LIST_TASKS_TOOL}` for the current ids."
+            )));
+        };
+
+        let mut md = format!("# {}\n", card.title);
+        md.push_str(&format!(
+            "- **Column**: {}\n- **Priority**: {}\n- **Assignee**: {}\n",
+            column_label(&card.column),
+            card.priority,
+            card.assignee
+        ));
+        if let Some(note) = card.note.as_deref().map(str::trim)
+            && !note.is_empty()
+        {
+            md.push_str(&format!("- **Note**: {}\n", truncate_chars(note, 400)));
+        }
+
+        md.push_str("\n## Attempts\n");
+        let mut attempt_count = 0usize;
+        match &self.runs {
+            Some(runs) => {
+                let mut attempts = runs
+                    .list_runs(&self.company, &RunFilter::for_task(task_id))
+                    .await
+                    .unwrap_or_default();
+                attempt_count = attempts.len();
+                if attempts.is_empty() {
+                    md.push_str("_No attempts yet._\n");
+                } else {
+                    // `list_runs` is newest-first; render the timeline oldest-first.
+                    attempts.reverse();
+                    for run in &attempts {
+                        md.push_str(&format!(
+                            "- attempt {} — {}",
+                            run.attempt,
+                            run.status.as_str()
+                        ));
+                        if let Some(err) = &run.error {
+                            md.push_str(&format!(" — {}", truncate_chars(err, 200)));
+                        }
+                        md.push('\n');
+                    }
+                }
+            }
+            None => md.push_str("_Run history unavailable._\n"),
+        }
+
+        md.push_str("\n## Output\n");
+        match &self.artifacts {
+            Some(artifacts) => {
+                let published = artifacts
+                    .list(&self.company, Some(task_id))
+                    .await
+                    .unwrap_or_default();
+                if published.is_empty() {
+                    md.push_str("_Nothing published yet._\n");
+                } else {
+                    for artifact in &published {
+                        let preview = artifact
+                            .latest()
+                            .map(|v| truncate_chars(v.body.trim(), 400))
+                            .unwrap_or_default();
+                        md.push_str(&format!(
+                            "- **{}** ({}): {}\n",
+                            artifact.title,
+                            artifact.kind.as_str(),
+                            preview
+                        ));
+                    }
+                }
+            }
+            // No artifact store wired: fall back to the card's own recorded
+            // output stamp rather than reaching for the journal — see
+            // `TaskRecord::output`'s docs for what it means for a card to
+            // carry one.
+            None => match &card.output {
+                Some(output) => match output.source.run_id() {
+                    Some(run_id) => md.push_str(&format!(
+                        "_No artifact store wired; this card's last successful attempt was run \
+                         `{run_id}`{}. Use `read_run` for that attempt's outcome._\n",
+                        output
+                            .source
+                            .attempt()
+                            .map(|a| format!(" (attempt {a})"))
+                            .unwrap_or_default()
+                    )),
+                    None => md.push_str(
+                        "_No artifact store wired; this card's output came from an operator \
+                         chat turn, not an attempt._\n",
+                    ),
+                },
+                None => md.push_str("_Nothing produced yet._\n"),
+            },
+        }
+
+        Ok(ToolResult::success_with_markdown(
+            json!({
+                "task_id": card.id,
+                "column": card.column,
+                "attempts": attempt_count,
+            }),
+            md,
+        ))
+    }
+}
+
+/// A read-only surface over one recorded run (issue #1859): an agent-attempt
+/// row from [`RunStore`] when one exists, else a workflow run folded straight
+/// out of the journal — so "why isn't X done?" or "what happened on run X?"
+/// can be answered from the same two sources the console's Attempts list and
+/// workflow history panel already read, instead of guessing.
+///
+/// **Summarizes, never dumps.** A run's [`RunStepRecord`](crate::ports::runs::RunStepRecord)
+/// trace and a workflow node's raw output are deliberately never read here —
+/// this tool answers with the run's status/verdict and, for a workflow run,
+/// each node's terminal status and the pending-approval/blocked counts. No
+/// step trace, no tool-call argument, no cost reaches the rendering, because
+/// none of those are read off the ports this tool holds in the first place.
+pub struct ReadRunTool {
+    company: CompanyId,
+    runs: Option<Arc<dyn RunStore>>,
+    events: Option<Arc<dyn EventLog>>,
+}
+
+impl ReadRunTool {
+    /// Builds the tool over the company's run ports. Either may be `None`;
+    /// the tool reports whichever half of its dual-source lookup is missing
+    /// rather than failing outright, as long as the other half can answer.
+    pub fn new(
+        company: CompanyId,
+        runs: Option<Arc<dyn RunStore>>,
+        events: Option<Arc<dyn EventLog>>,
+    ) -> Self {
+        Self {
+            company,
+            runs,
+            events,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadRunTool {
+    fn name(&self) -> &str {
+        READ_RUN_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Read one run's status and outcome — an agent-attempt run id (from `list_tasks` / `read_task`) or a workflow run id (from a `run_workflow` summary) — use this to explain why a run is stuck, failed, or blocked. Summarizes the verdict and node/approval state; does not dump the full step trace."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run id — an agent-attempt id or a workflow run id."
+                }
+            },
+            "required": ["run_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn supports_markdown(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let run_id = args
+            .get("run_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(run_id) = run_id else {
+            return Ok(ToolResult::error(
+                "`run_id` is required: pass an agent-attempt id or a workflow run id.",
+            ));
+        };
+
+        // Agent-attempt path first — the common case (`list_tasks` /
+        // `read_task` both surface this id).
+        if let Some(runs) = &self.runs
+            && let Ok(Some(run)) = runs.get_run(&self.company, run_id).await
+        {
+            let mut md = format!("# Attempt {} — {}\n", run.attempt, run.status.as_str());
+            if let Some(task_id) = &run.task_id {
+                md.push_str(&format!("- **Task**: `{task_id}`\n"));
+            }
+            md.push_str(&format!("- **Agent**: {}\n", run.agent_id));
+            if let Some(err) = &run.error {
+                md.push_str(&format!("- **Error**: {}\n", truncate_chars(err, 300)));
+            }
+            return Ok(ToolResult::success_with_markdown(
+                json!({ "run_id": run.id, "kind": "attempt", "status": run.status.as_str() }),
+                md,
+            ));
+        }
+
+        // Workflow-run path: fold the journal, the same fold the console's
+        // run-history route reads (`fold_run_events`) — reading the whole
+        // company journal once, on the same terms `QueryCompanyTool` already
+        // does for its recent-activity section, rather than the paged,
+        // live-run-cross-checked walk `list_runs` does for an unbounded
+        // history page (this tool answers about ONE run, not a page of them).
+        let Some(events) = &self.events else {
+            return Ok(ToolResult::error(format!(
+                "No run `{run_id}` found, and no event log wired to check workflow runs."
+            )));
+        };
+        let rows = events
+            .read_from(&self.company, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap_or_default();
+        let (folded, _read_through) = crate::server::ops::workflows::fold_run_events(rows, None);
+        let Some(outcome) = folded
+            .into_iter()
+            .find(|o| o.run_id.as_deref() == Some(run_id))
+        else {
+            return Ok(ToolResult::error(format!(
+                "No run `{run_id}` found — not an agent attempt and not a workflow run in this \
+                 company's history."
+            )));
+        };
+
+        // `outcome.verdict` is only ever the fold's placeholder (`Running`,
+        // never resolved by `fold_run_events` itself — see
+        // `WorkflowRunOutcome::derive_verdict`'s doc comment) unless something
+        // calls `derive_verdict` after the fold, which the console's
+        // `list_runs` route does and this tool must too.
+        let verdict = outcome.derive_verdict();
+        let mut md = format!("# Workflow run — {}\n", verdict.as_str());
+        md.push_str(&format!("- **Workflow**: {}\n", outcome.workflow_id));
+        md.push_str(&format!(
+            "- **Status**: {}\n",
+            if outcome.running {
+                "still running"
+            } else {
+                "settled"
+            }
+        ));
+        if let Some(err) = &outcome.error {
+            md.push_str(&format!("- **Error**: {}\n", truncate_chars(err, 300)));
+        }
+        if !outcome.nodes.is_empty() {
+            md.push_str("\n## Nodes\n");
+            for node in &outcome.nodes {
+                md.push_str(&format!("- {} — {:?}\n", node.node_id, node.status));
+            }
+        }
+        if !outcome.pending_approvals.is_empty() {
+            md.push_str(&format!(
+                "\n{} pending approval(s).\n",
+                outcome.pending_approvals.len()
+            ));
+        }
+        if !outcome.blocked_nodes.is_empty() {
+            md.push_str(&format!(
+                "{} node(s) blocked on a person.\n",
+                outcome.blocked_nodes.len()
+            ));
+        }
+
+        Ok(ToolResult::success_with_markdown(
+            json!({ "run_id": run_id, "kind": "workflow", "verdict": verdict.as_str() }),
             md,
         ))
     }
@@ -3233,7 +3872,11 @@ impl Tool for AddAgentTool {
 /// the company source directory (`companies/<name>`) whose `workflows/` subtree
 /// holds the graphs; `workflow_runner` is the shared handle the runtime builder
 /// fills once the runner is built. `store` is the company store the `add_agent`
-/// tool writes through.
+/// tool writes through. `tasks` / `runs` / `artifacts` (issue #1859) back the
+/// `list_tasks`, `read_task` and `read_run` execution-state read trio, plus
+/// `query_company`'s `## Board` section — any of the three may be `None`, in
+/// which case the surface it backs answers that it is unavailable rather than
+/// failing the call.
 // One more dependency than clippy's threshold, and each is a distinct wired
 // port the orchestrator's tools need. Bundling them into a struct would only
 // relocate the surface — the same call is made from exactly one place
@@ -3243,6 +3886,11 @@ pub fn orchestrator_tools(
     company: CompanyId,
     facts: Option<Arc<dyn FactStore>>,
     events: Option<Arc<dyn EventLog>>,
+    // Issue #1859: the board + run-history read surface. See the doc comment
+    // above for why any of the three may be `None`.
+    tasks: Option<Arc<dyn TaskStore>>,
+    runs: Option<Arc<dyn RunStore>>,
+    artifacts: Option<Arc<dyn ArtifactStore>>,
     queue: &DelegationQueue,
     workflow_source_dir: Option<PathBuf>,
     workflow_runner: WorkflowRunnerHandle,
@@ -3268,7 +3916,29 @@ pub fn orchestrator_tools(
         events.clone(),
         workflow_source_dir.clone(),
         Some(store.clone()),
+        tasks.clone(),
     ))];
+    // Issue #1859: the board/run-history read trio, grouped right after
+    // `query_company` — all four answer "what does the company know?" rather
+    // than acting on it. `list_tasks` and `read_task` share the board ports;
+    // `read_run` additionally needs the event log to fold a workflow run's
+    // outcome when the id names no agent-attempt row.
+    tools.push(Box::new(ListTasksTool::new(
+        company.clone(),
+        tasks.clone(),
+        runs.clone(),
+    )));
+    tools.push(Box::new(ReadTaskTool::new(
+        company.clone(),
+        tasks,
+        runs.clone(),
+        artifacts,
+    )));
+    tools.push(Box::new(ReadRunTool::new(
+        company.clone(),
+        runs,
+        events.clone(),
+    )));
     tools.extend(delegation_tools(queue, company.clone(), store.clone()));
     tools.push(Box::new(RunWorkflowTool::new(
         company.clone(),
@@ -5077,6 +5747,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    use crate::ports::runs::RunStatus;
     use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
 
     fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
@@ -6927,7 +7598,7 @@ members = ["legal_counsel"]
         });
 
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(history));
-        let tool = QueryCompanyTool::new(company, None, Some(log), None, None);
+        let tool = QueryCompanyTool::new(company, None, Some(log), None, None, None);
         let out = tool
             .execute(json!({}))
             .await
@@ -7010,7 +7681,7 @@ members = ["legal_counsel"]
         // off, the notice sits at the top, and the JSON summary counts them.
         let over: Vec<StoredEvent> = (0..(RECENT_EVENTS as u64 + 5)).map(dispatch).collect();
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(over));
-        let tool = QueryCompanyTool::new(company.clone(), None, Some(log), None, None);
+        let tool = QueryCompanyTool::new(company.clone(), None, Some(log), None, None, None);
         let result = tool.execute(json!({})).await.expect("execute");
         let md = result.output_for_llm(true);
         let activity = md
@@ -7032,7 +7703,7 @@ members = ["legal_counsel"]
         // (b) Exactly the tail width: nothing was dropped, so nothing is said.
         let exact: Vec<StoredEvent> = (0..RECENT_EVENTS as u64).map(dispatch).collect();
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(exact));
-        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None, None)
             .execute(json!({}))
             .await
             .expect("execute");
@@ -7073,7 +7744,7 @@ members = ["legal_counsel"]
         // total = 3 posts + (RECENT_EVENTS + 2) dispatches; the tail holds
         // RECENT_EVENTS dispatches, so 2 dispatches + 3 posts = 5 fall off.
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(mixed));
-        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None, None)
             .execute(json!({}))
             .await
             .expect("execute");
@@ -7136,16 +7807,17 @@ members = ["legal_counsel"]
 
         // Exactly at the cap: complete, so no notice.
         let exact: Arc<dyn FactStore> = Arc::new(ManyFacts(FACT_LIMIT));
-        let out = QueryCompanyTool::new(CompanyId::new("acme"), Some(exact), None, None, None)
-            .execute(json!({}))
-            .await
-            .expect("execute")
-            .output_for_llm(true);
+        let out =
+            QueryCompanyTool::new(CompanyId::new("acme"), Some(exact), None, None, None, None)
+                .execute(json!({}))
+                .await
+                .expect("execute")
+                .output_for_llm(true);
         assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
 
         // Past the cap: the cut is announced, counted, and points at `query`.
         let many: Arc<dyn FactStore> = Arc::new(ManyFacts(FACT_LIMIT + 7));
-        let out = QueryCompanyTool::new(CompanyId::new("acme"), Some(many), None, None, None)
+        let out = QueryCompanyTool::new(CompanyId::new("acme"), Some(many), None, None, None, None)
             .execute(json!({}))
             .await
             .expect("execute")
@@ -7200,7 +7872,7 @@ members = ["legal_counsel"]
         };
         let render = |facts: Vec<FactRecord>| async move {
             let store: Arc<dyn FactStore> = Arc::new(Facts(facts));
-            QueryCompanyTool::new(CompanyId::new("acme"), Some(store), None, None, None)
+            QueryCompanyTool::new(CompanyId::new("acme"), Some(store), None, None, None, None)
                 .execute(json!({}))
                 .await
                 .expect("execute")
@@ -7272,7 +7944,7 @@ members = ["legal_counsel"]
 
     #[tokio::test]
     async fn query_company_tool_reports_no_data_when_unwired() {
-        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None);
+        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, None);
         let result = tool.execute(json!({})).await.expect("execute");
         // The insight surface lives in the markdown; `output()` is the summary.
         let out = result.output_for_llm(true);
@@ -7327,6 +7999,7 @@ name = "Morning"
             None,
             Some(dir.path().to_path_buf()),
             Some(store),
+            None,
         );
         let out = tool
             .execute(json!({}))
@@ -7369,11 +8042,12 @@ name = "Morning"
         });
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record.clone()));
 
-        let out = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, Some(store))
-            .execute(json!({}))
-            .await
-            .expect("execute")
-            .output_for_llm(true);
+        let out =
+            QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, Some(store), None)
+                .execute(json!({}))
+                .await
+                .expect("execute")
+                .output_for_llm(true);
 
         let line = out
             .lines()
@@ -7408,7 +8082,7 @@ name = "Morning"
     async fn query_company_tool_lists_the_desks_delegation_accepts() {
         let company = CompanyId::new("acme");
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(desks_record(&company)));
-        let tool = QueryCompanyTool::new(company, None, None, None, Some(store));
+        let tool = QueryCompanyTool::new(company, None, None, None, Some(store), None);
         let out = tool
             .execute(json!({}))
             .await
@@ -8094,13 +8768,16 @@ name = "Morning"
     }
 
     #[test]
-    fn orchestrator_tools_includes_all_thirteen() {
+    fn orchestrator_tools_includes_all_sixteen() {
         use crate::harness::workflow_admin::{
             DELETE_WORKFLOW_TOOL, READ_WORKFLOW_TOOL, UPDATE_WORKFLOW_TOOL,
         };
         let queue = DelegationQueue::default();
         let tools = orchestrator_tools(
             CompanyId::new("acme"),
+            None,
+            None,
+            None,
             None,
             None,
             &queue,
@@ -8119,8 +8796,9 @@ name = "Morning"
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
         // `read_run_output` makes nine; #661's read/update/delete_workflow
-        // trio makes twelve; #884's `delegate_to_teammate` makes thirteen.
-        assert_eq!(names.len(), 13, "got {names:?}");
+        // trio makes twelve; #884's `delegate_to_teammate` makes thirteen;
+        // #1859's `list_tasks` / `read_task` / `read_run` trio makes sixteen.
+        assert_eq!(names.len(), 16, "got {names:?}");
         assert!(names.contains(&DELEGATE_TO_TEAMMATE_TOOL), "got {names:?}");
         assert!(names.contains(&RUN_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&READ_RUN_OUTPUT_TOOL), "got {names:?}");
@@ -8134,6 +8812,9 @@ name = "Morning"
         assert!(names.contains(&DELEGATE_TO_DESK_TOOL), "got {names:?}");
         assert!(names.contains(&ASSIGN_TASK_TOOL), "got {names:?}");
         assert!(names.contains(&REVIEW_TASK_TOOL), "got {names:?}");
+        assert!(names.contains(&LIST_TASKS_TOOL), "got {names:?}");
+        assert!(names.contains(&READ_TASK_TOOL), "got {names:?}");
+        assert!(names.contains(&READ_RUN_TOOL), "got {names:?}");
         // `read_run_output` sits immediately after `run_workflow`.
         let run_at = names.iter().position(|n| *n == RUN_WORKFLOW_TOOL).unwrap();
         assert_eq!(names[run_at + 1], READ_RUN_OUTPUT_TOOL, "got {names:?}");
@@ -8150,6 +8831,14 @@ name = "Morning"
                 UPDATE_WORKFLOW_TOOL,
                 DELETE_WORKFLOW_TOOL
             ],
+            "got {names:?}"
+        );
+        // #1859's read trio sits immediately after `query_company`: all four
+        // answer "what does the company know?" rather than acting on it.
+        let query_at = names.iter().position(|n| *n == QUERY_COMPANY_TOOL).unwrap();
+        assert_eq!(
+            &names[query_at + 1..query_at + 4],
+            &[LIST_TASKS_TOOL, READ_TASK_TOOL, READ_RUN_TOOL],
             "got {names:?}"
         );
     }
@@ -10824,5 +11513,488 @@ name = "Morning"
         .map(|r| r.as_str());
         let unique: std::collections::BTreeSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len(), "{labels:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1859: the execution-state read trio (`list_tasks` / `read_task` /
+    // `read_run`) and `query_company`'s `## Board` section.
+    // -----------------------------------------------------------------------
+
+    /// A minimal board card, for fixtures below. Named `task_card` rather than
+    /// `card` — that name is already the `Delegation` fixture above.
+    fn task_card(id: &str, title: &str, column: &str, assignee: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: title.to_string(),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: assignee.to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tasks_filters_by_column_and_assignee_and_excludes_done_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Draft the memo",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "maya",
+                ),
+            )
+            .await
+            .unwrap();
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-2",
+                    "Fix the flaky test",
+                    crate::ports::tasks::COLUMN_PAUSED,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+        tasks
+            .upsert(
+                &company,
+                &task_card("t-3", "Ship the release", COLUMN_DONE, "maya"),
+            )
+            .await
+            .unwrap();
+
+        let tool = ListTasksTool::new(company, Some(tasks), None);
+
+        let default_view = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        assert!(default_view.contains("Draft the memo"), "{default_view}");
+        assert!(
+            default_view.contains("Fix the flaky test"),
+            "{default_view}"
+        );
+        assert!(
+            !default_view.contains("Ship the release"),
+            "done cards must be excluded by default: {default_view}"
+        );
+
+        let by_column = tool
+            .execute(json!({ "column": "paused" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(by_column.contains("Fix the flaky test"), "{by_column}");
+        assert!(!by_column.contains("Draft the memo"), "{by_column}");
+
+        let by_assignee = tool
+            .execute(json!({ "assignee": "MAYA" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(
+            by_assignee.contains("Draft the memo"),
+            "case-insensitive assignee match: {by_assignee}"
+        );
+        assert!(!by_assignee.contains("Fix the flaky test"), "{by_assignee}");
+
+        let done_explicit = tool
+            .execute(json!({ "column": "done" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(
+            done_explicit.contains("Ship the release"),
+            "an explicit `column: done` must still answer: {done_explicit}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tasks_truncates_with_an_honest_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        for n in 0..(LIST_TASKS_LIMIT + 5) {
+            tasks
+                .upsert(
+                    &company,
+                    &task_card(
+                        &format!("t-{n}"),
+                        &format!("Card {n}"),
+                        crate::ports::tasks::COLUMN_TODO,
+                        "maya",
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+
+        let tool = ListTasksTool::new(company, Some(tasks), None);
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        assert!(out.contains("TRUNCATED"), "{out}");
+        assert!(out.contains("5 more card"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_reports_unavailable_when_the_board_is_unwired() {
+        let tool = ListTasksTool::new(CompanyId::new("acme"), None, None);
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(
+            result.is_error,
+            "no task board wired must be a refusal, not an empty board"
+        );
+        assert!(
+            result.output_for_llm(true).contains("No task board wired"),
+            "{:?}",
+            result.output_for_llm(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_renders_header_every_attempt_and_falls_back_to_the_cards_output_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Investigate the outage",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.note = Some("check the load balancer first".to_string());
+        card.output = Some(crate::ports::tasks::TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-2".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 5,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let mut r1 = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        r1.status = RunStatus::Failed;
+        r1.error = Some("timed out".to_string());
+        runs.put_run(&company, &r1).await.unwrap();
+        let mut r2 = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-2", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        r2.status = RunStatus::Succeeded;
+        runs.put_run(&company, &r2).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(out.contains("Investigate the outage"), "{out}");
+        assert!(out.contains("check the load balancer first"), "{out}");
+        assert!(out.contains("attempt 1"), "{out}");
+        assert!(out.contains("attempt 2"), "{out}");
+        assert!(out.contains("timed out"), "{out}");
+        // No artifact store wired: falls back to the card's own recorded
+        // output stamp rather than fabricating anything.
+        assert!(out.contains("run `r-2`"), "{out}");
+        assert!(out.contains("attempt 2)"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn read_task_errors_on_an_unknown_id_instead_of_fabricating_a_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), Some(tasks), None, None);
+        let result = tool.execute(json!({ "task_id": "nope" })).await.unwrap();
+        assert!(result.is_error, "an unknown task_id must error");
+        let text = result.output_for_llm(true);
+        assert!(text.contains("nope"), "{text}");
+        assert!(text.contains("list_tasks"), "{text}");
+    }
+
+    /// Fail-closed by construction (issue #1859's approved redaction posture):
+    /// `read_task` never reads [`RunRecord::usage`], so a run's USD cost cannot
+    /// reach its rendering no matter what that run cost.
+    #[tokio::test]
+    async fn read_task_never_renders_a_runs_usd_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Send the invoice",
+                    crate::ports::tasks::COLUMN_IN_PROGRESS,
+                    "finance",
+                ),
+            )
+            .await
+            .unwrap();
+        let mut run = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "finance"),
+            )
+            .await
+            .unwrap();
+        run.status = RunStatus::Succeeded;
+        run.usage = crate::ports::types::TokenUsage {
+            input: 500,
+            output: 200,
+            cached_input: 0,
+            cost_usd: 4.20,
+        };
+        runs.put_run(&company, &run).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("4.2") && !out.to_lowercase().contains("cost") && !out.contains("usd"),
+            "a run's USD cost must never reach read_task: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_run_reads_an_agent_attempt_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs: Arc<dyn RunStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let mut run = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        run.status = RunStatus::Failed;
+        run.error = Some("connection refused".to_string());
+        runs.put_run(&company, &run).await.unwrap();
+
+        let tool = ReadRunTool::new(company, Some(runs), None);
+        let out = tool
+            .execute(json!({ "run_id": "r-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(out.contains("failed"), "{out}");
+        assert!(out.contains("connection refused"), "{out}");
+        assert!(out.contains("t-1"), "{out}");
+    }
+
+    /// The dual-source lookup's second half: no [`RunStore`] row named
+    /// `run_id`, so `read_run` folds it out of the journal via
+    /// [`crate::server::ops::workflows::fold_run_events`] instead — the same
+    /// fold the console's run-history route reads.
+    #[tokio::test]
+    async fn read_run_folds_a_workflow_run_out_of_the_journal_when_no_attempt_row_exists() {
+        use crate::ports::types::{StoredEvent, WorkflowNodeStatus};
+        use futures::stream::{self, BoxStream};
+
+        struct FixedLog(Vec<StoredEvent>);
+
+        #[async_trait]
+        impl EventLog for FixedLog {
+            async fn append(
+                &self,
+                _id: &CompanyId,
+                _event: CompanyEvent,
+            ) -> crate::Result<EventSeq> {
+                unreachable!("read_run only reads")
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                Ok(self
+                    .0
+                    .iter()
+                    .filter(|e| e.seq.value() >= seq.value())
+                    .take(limit)
+                    .cloned()
+                    .collect())
+            }
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let history = vec![
+            StoredEvent {
+                seq: EventSeq::new(0),
+                company: company.clone(),
+                event: CompanyEvent::WorkflowRunStarted {
+                    workflow_id: "demo".to_string(),
+                    run_id: "wf-run-1".to_string(),
+                    scheduled: false,
+                },
+                at_millis: 1,
+            },
+            StoredEvent {
+                seq: EventSeq::new(1),
+                company: company.clone(),
+                event: CompanyEvent::WorkflowNodeFinished {
+                    workflow_id: "demo".to_string(),
+                    run_id: "wf-run-1".to_string(),
+                    node_id: "fetch".to_string(),
+                    status: WorkflowNodeStatus::Ok,
+                    elapsed_ms: 10,
+                    diagnostics: Vec::new(),
+                    agent_run_id: None,
+                },
+                at_millis: 2,
+            },
+            StoredEvent {
+                seq: EventSeq::new(2),
+                company: company.clone(),
+                event: CompanyEvent::WorkflowRunFinished {
+                    workflow_id: "demo".to_string(),
+                    scheduled: false,
+                    run_id: Some("wf-run-1".to_string()),
+                    deliveries: Vec::new(),
+                    pending_approvals: vec!["gate-1".to_string()],
+                    error: None,
+                    cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                },
+                at_millis: 3,
+            },
+        ];
+        let events: Arc<dyn EventLog> = Arc::new(FixedLog(history));
+
+        let tool = ReadRunTool::new(company, None, Some(events));
+        let out = tool
+            .execute(json!({ "run_id": "wf-run-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(out.contains("demo"), "{out}");
+        assert!(out.contains("fetch"), "{out}");
+        assert!(out.contains("1 pending approval"), "{out}");
+        // Summarized, never dumped: no step trace, no node output/argument text
+        // rides this fold in the first place (see `WorkflowNodeFinished`'s own
+        // doc comment), so there is nothing here to assert absent beyond what
+        // the fixture itself never supplied.
+    }
+
+    #[tokio::test]
+    async fn read_run_errors_on_an_id_that_is_neither_an_attempt_nor_a_workflow_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs: Arc<dyn RunStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tool = ReadRunTool::new(CompanyId::new("acme"), Some(runs), None);
+        let result = tool.execute(json!({ "run_id": "nope" })).await.unwrap();
+        assert!(result.is_error, "an unknown run_id must error");
+        assert!(result.output_for_llm(true).contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn query_company_board_section_groups_open_cards_by_column_and_omits_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Draft the memo",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "maya",
+                ),
+            )
+            .await
+            .unwrap();
+        tasks
+            .upsert(
+                &company,
+                &task_card("t-2", "Ship the release", COLUMN_DONE, "maya"),
+            )
+            .await
+            .unwrap();
+
+        let tool = QueryCompanyTool::new(company, None, None, None, None, Some(tasks));
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+
+        assert!(out.contains("## Board"), "{out}");
+        assert!(out.contains("Draft the memo"), "{out}");
+        assert!(
+            !out.contains("Ship the release"),
+            "the Board section must exclude Done, like `list_tasks`: {out}"
+        );
+        // Desks stays present AND after Board never gets to run — Board is the
+        // LAST section, so this just pins Desks is still there at all.
+        assert!(out.contains("## Desks"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn query_company_board_section_is_unavailable_when_the_board_is_unwired() {
+        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, None);
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        assert!(out.contains("## Board"), "{out}");
+        assert!(out.contains("Board unavailable"), "{out}");
+    }
+
+    /// The ordering guarantee the byte-budget reasoning depends on: Board is
+    /// the LAST section, so a company with an oversized board can never push
+    /// the Desks list — which `delegate_to_desk` needs to ground a hand-off —
+    /// out of the tool result ahead of it.
+    #[tokio::test]
+    async fn query_company_desks_section_still_renders_after_the_board_section() {
+        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, None);
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        let desks_at = out.find("## Desks").expect("Desks section present");
+        let board_at = out.find("## Board").expect("Board section present");
+        assert!(
+            board_at > desks_at,
+            "Board must render after Desks, never before: {out}"
+        );
     }
 }
