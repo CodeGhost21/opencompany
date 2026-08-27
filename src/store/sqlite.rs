@@ -813,6 +813,30 @@ impl CompanyStore for SqliteStore {
         Ok(())
     }
 
+    /// PR #1875 review finding: `overlay_json` is the same blob `save` above
+    /// always stamps `activation_gate_seen: true` into (via
+    /// `OverlayBlob::from_record`), so reading it back here — rather than
+    /// inheriting the trait's always-`false` default — is what lets a
+    /// sqlite-backed company's second boot tell itself apart from a genuine
+    /// pre-#1843 legacy record. A row that has never been saved at all reads
+    /// `false`, matching `FsCompanyStore::activation_gate_seen`'s own "no
+    /// bundle written yet" case.
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
+        let conn = self.conn();
+        let overlay_json: Option<String> = conn
+            .query_row(
+                "SELECT overlay_json FROM company WHERE company_id = ?1",
+                params![id.as_ref()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(overlay_json) = overlay_json else {
+            return Ok(false);
+        };
+        Ok(OverlayBlob::parse(&overlay_json)?.activation_gate_seen)
+    }
+
     async fn list(&self) -> Result<Vec<CompanySummary>> {
         let conn = self.conn();
         let mut stmt = conn

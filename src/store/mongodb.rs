@@ -874,6 +874,31 @@ impl CompanyStore for MongoStore {
         Ok(())
     }
 
+    /// PR #1875 review finding: the hosted platform selects this backend for
+    /// tenant storage (`OPENCOMPANY_STORAGE=mongodb`), so inheriting the
+    /// trait's always-`false` default here — rather than reading the same
+    /// `overlay_json` field `save` above always stamps `activation_gate_seen:
+    /// true` into (via `OverlayBlob::from_record`) — would let a genuinely
+    /// new tenant's *second* boot go unnoticed as a legacy pre-#1843 record
+    /// and get silently auto-activated, defeating the fix `save` above
+    /// exists to carry. A company with no document at all reads `false`,
+    /// matching `FsCompanyStore::activation_gate_seen`'s own "no bundle
+    /// written yet" case.
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
+        let Some(company) = self
+            .collection("companies")
+            .find_one(doc! {"company_id": id.as_ref()})
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Ok(false);
+        };
+        match company.get_str("overlay_json") {
+            Ok(json) => Ok(OverlayBlob::parse(json)?.activation_gate_seen),
+            Err(_) => Ok(false),
+        }
+    }
+
     async fn list(&self) -> Result<Vec<CompanySummary>> {
         let mut cursor = self
             .collection("companies")
