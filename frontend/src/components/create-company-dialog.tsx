@@ -25,6 +25,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyStatus } from "@/api/types";
 import { adminEmailProblem } from "@/lib/company-setup";
 import {
+  MAX_EXPLICIT_ID_LENGTH,
   autoCompanyId,
   buildManifestToml,
   collidesWithArchived,
@@ -283,12 +284,26 @@ export function CreateCompanyDialog({
       // so testing blankness here would tell an operator who never typed
       // anything to "leave the field blank", when it already is and that
       // changes nothing.
+      //
+      // Only the length bound is re-worded below into a fallback-specific
+      // message — `autoCompanyId`/`resetReplacementId` only ever land over
+      // that bound (both derive from a name or an existing id via a slug
+      // function that already restricts itself to `[a-z0-9-]`, so they can
+      // never trip `explicitIdProblem`'s charset check). The one case that
+      // still could is `resetReplacementId` inheriting an unsafe id from a
+      // company that predates the charset check (created before this
+      // client enforced it, or provisioned outside this client entirely) —
+      // for that, `idProblem` itself is shown rather than a hardcoded
+      // length message that would misdescribe the actual problem.
+      const lengthProblem = id.length > MAX_EXPLICIT_ID_LENGTH;
       setError(
         !selfGenerated
           ? idProblem
-          : request.kind === "reset"
-            ? `Couldn't generate a short enough replacement id for ${request.company} (would be ${id.length} characters) — type a shorter id in Advanced before continuing.`
-            : `Couldn't generate a short enough id for "${trimmedName}" (would be ${id.length} characters) — type a shorter id in Advanced before continuing.`,
+          : !lengthProblem
+            ? idProblem
+            : request.kind === "reset"
+              ? `Couldn't generate a short enough replacement id for ${request.company} (would be ${id.length} characters) — type a shorter id in Advanced before continuing.`
+              : `Couldn't generate a short enough id for "${trimmedName}" (would be ${id.length} characters) — type a shorter id in Advanced before continuing.`,
       );
       return;
     }

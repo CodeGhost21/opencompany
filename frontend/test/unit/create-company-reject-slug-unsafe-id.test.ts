@@ -185,3 +185,42 @@ describe.each(["acme corp" as const, "acme/ops" as const])(
     });
   },
 );
+
+/**
+ * `resetReplacementId` derives the fallback id from the OLD company's own id
+ * (`${oldId}-${randomIdSuffix()}`), not from a name — so a legacy company
+ * whose id predates this charset check (created before it existed, or
+ * provisioned outside this client entirely) can still hand the dialog a
+ * self-generated fallback that fails it. Before this fix, that landed on the
+ * dialog's `selfGenerated` branch, which unconditionally showed a "couldn't
+ * generate a short enough id" message — accurate for the length check this
+ * branch was written for, wrong for a charset problem it did not anticipate.
+ */
+describe("resetting a company whose OWN id is already slug-unsafe (legacy)", () => {
+  it("shows the actual charset problem, not a hardcoded length message", async () => {
+    const lifecycle = vi.fn(() => Promise.resolve());
+    const provisionCompany = vi.fn((_body: ProvisionBody) =>
+      Promise.resolve({ id: "whatever" } as unknown as CompanyStatus),
+    );
+    await open(stubClient({ lifecycle, provisionCompany }), {
+      kind: "reset",
+      company: "acme corp",
+      name: "Acme Robotics",
+    });
+
+    await fillAdminEmail();
+    // Advanced is never opened — the id field is left on its
+    // `resetReplacementId("acme corp")` default, so this is the
+    // self-generated path, not an operator-typed one.
+    await submit();
+
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(provisionCompany).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+
+    const error = document.querySelector('[data-testid="create-company-error"]');
+    expect(error, "no error shown").toBeTruthy();
+    expect(error!.textContent).toContain("letters, numbers");
+    expect(error!.textContent).not.toContain("short enough");
+  });
+});
