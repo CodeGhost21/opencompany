@@ -213,9 +213,27 @@ function assertRefExists(ref, label) {
   }
 }
 
+// TWO merge styles, because this repository uses both.
+//
+// A squash merge leaves the number in the subject as `(#1234)`. A REGULAR merge
+// commit leaves `Merge pull request #1234 from owner/branch` and no parentheses
+// at all — and that is the style most PRs into `main` land in here: 25 of the
+// last 200 subjects are merge commits, and matching only the parenthesized form
+// dropped every one of them. Those PRs were then never fetched, never linked,
+// and their authors never credited, in a document whose entire purpose is to
+// link and credit them.
+//
+// Merge matches are appended AFTER the parenthesized ones so that when a
+// subject somehow carries both, the merge number is last and therefore wins as
+// `primaryPrNumber` — the merge is the PR; a `(#12)` inside it is the issue the
+// branch referenced.
 export function extractPullRequestNumbers(subject) {
-  const matches = [...String(subject || '').matchAll(/\(#(\d+)\)/g)];
-  return [...new Set(matches.map((match) => Number(match[1])).filter(Number.isInteger))];
+  const text = String(subject || '');
+  const numbers = [
+    ...[...text.matchAll(/\(#(\d+)\)/g)],
+    ...[...text.matchAll(/\bMerge pull request #(\d+)\b/g)],
+  ].map((match) => Number(match[1]));
+  return [...new Set(numbers.filter(Number.isInteger))];
 }
 
 // `%x1f` between fields and `%x1e` between records: both are ASCII separators
@@ -362,7 +380,15 @@ function collectPullRequests(repo, commits) {
       number,
       title: detail.title || fallbackTitle,
       url: detail.url || `https://github.com/${repo}/pull/${number}`,
-      author: detail.author?.login || commitsForPr.at(-1)?.authorName || null,
+      // A LOGIN OR NOTHING. `formatHandleList` prefixes whatever lands here
+      // with "@", so falling back to the commit's display name — as this did —
+      // publishes dead mentions like "@Jarno de Vries". The fallback fires
+      // exactly when `gh pr view` failed, which is the rate-limit and
+      // deleted-fork case this function is built to survive, so it is not rare.
+      // `authorName` below keeps the human-readable name for anything that
+      // wants to show it without pretending it is a handle.
+      author: detail.author?.login || null,
+      authorName: commitsForPr.at(-1)?.authorName || null,
       mergedAt: detail.mergedAt || commitsForPr.at(-1)?.authoredAt || null,
       labels: (detail.labels || []).map((label) => label.name || label).filter(Boolean),
       body: trimBody(detail.body),
@@ -569,6 +595,14 @@ async function summarizeWithOpenAi(request) {
     throw new Error(`OpenAI Responses API failed (${response.status}): ${json?.error?.message || body}`);
   }
 
+  // A 2xx that is not JSON — a proxy's HTML error page is the usual one.
+  // Without this, `extractResponseText(null)` throws "Cannot read properties of
+  // null", the raw body never reaches the log, and the release run reports a
+  // TypeError instead of what the API actually sent back.
+  if (!json) {
+    throw new Error(`OpenAI Responses API returned a non-JSON body (${response.status}): ${body.slice(0, 500)}`);
+  }
+
   const text = extractResponseText(json);
   if (!text) {
     throw new Error('OpenAI response did not contain output text');
@@ -694,9 +728,19 @@ export function groupPullRequestsByHighlight(pullRequests) {
     },
   ];
 
+  // Anchored to a WORD START, not a bare substring. `includes` put anything
+  // saying "support", "important" or "export" under Ledgers (via `port`), and
+  // anything saying "efficient" or "precision" under Desktop (via `ci`) — a PR
+  // filed under a heading that has nothing to do with it. Anchoring only the
+  // start keeps prefix keywords (`notariz`) and plurals (`skill` → `skills`)
+  // working, which a full `\b…\b` on both ends would break.
   for (const pr of pullRequests) {
     const haystack = `${pr.title} ${(pr.labels || []).join(' ')}`.toLowerCase();
-    const group = groups.find((candidate) => candidate.keywords.some((keyword) => haystack.includes(keyword)));
+    const group = groups.find((candidate) =>
+      candidate.keywords.some((keyword) =>
+        new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(keyword)}`).test(haystack),
+      ),
+    );
     (group || groups.at(-1)).pullRequests.push(pr);
   }
 
