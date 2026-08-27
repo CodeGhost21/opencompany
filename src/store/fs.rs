@@ -1073,10 +1073,27 @@ impl CompanyStore for FsCompanyStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        // Every ordinary `save` call is, by definition, made by code that
-        // understands the activation funnel — see
-        // `CompanyStore::activation_gate_seen`'s doc comment.
-        self.save_gated(record, true).await
+        // Every ordinary `save` call against a `running` company is, by
+        // definition, made by code that understands the activation funnel —
+        // see `CompanyStore::activation_gate_seen`'s doc comment. That
+        // reasoning does NOT extend to a `paused`/`archived` record still
+        // waiting on its own first `running` boot to decide the marker (PR
+        // #1875 review finding, third round — mongodb.rs/sqlite.rs already
+        // carry this): `RuntimeBuilder::build`'s "existing but not running"
+        // arm carries the marker forward untouched for exactly this reason,
+        // but a write that reaches this method directly — bypassing `build`
+        // entirely, e.g. `company_logo::put_logo`'s plain load-modify-save,
+        // which never checks lifecycle — would stamp `true` regardless and
+        // poison the grandfather arm's `!gate_already_seen` guard before the
+        // record's own migration boot ever runs. So: stamp `true` only once
+        // the record itself says `running`; otherwise preserve whatever is
+        // already on file, same as `build`'s own "not running" arm does.
+        if record.lifecycle == "running" {
+            self.save_gated(record, true).await
+        } else {
+            let gate_seen = self.activation_gate_seen(&record.id).await?;
+            self.save_gated(record, gate_seen).await
+        }
     }
 
     async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
@@ -2394,6 +2411,16 @@ mod test {
             Arc::new(FsMemoryStore::new(&root)),
             Arc::new(FsContextStore::new(&root)),
         )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn conformance_paused_ordinary_save_preserves_activation_gate() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_paused_ordinary_save_preserves_activation_gate(Arc::new(
+            FsCompanyStore::new(&root),
+        ))
         .await;
     }
 
