@@ -7927,7 +7927,11 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message("chief", "ship the API", Some("general"))
+            .handle_operator_message(
+                "chief",
+                "ship the API",
+                ChatTarget::channel(Some("general")),
+            )
             .await
             .expect("operator message handled");
 
