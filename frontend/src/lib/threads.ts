@@ -19,14 +19,7 @@ export interface Thread {
   /** Short blurb shown under the name when the thread has no messages yet. */
   blurb: string;
   messages: ChatMessage[];
-  /**
-   * Whether this thread is the built-in **Operator** system channel (issue
-   * #1757): a durable, read-only feed the server refuses to post to. Set from
-   * the desk's own `system` flag so the legacy `#/conversation` route — which
-   * builds its thread list straight from `/desks` rather than through
-   * {@link resolveDesks} — still knows to disable its composer instead of
-   * letting the operator type and submit before the server's guard refuses it.
-   */
+  /** Whether the composer for this thread is disabled. */
   readOnly?: boolean;
 }
 
@@ -68,7 +61,7 @@ export function defaultThreads(): Thread[] {
   ];
 }
 
-/** One `Thread` for a single `/desks` entry, desk or system channel alike. */
+/** One `Thread` for a single `/desks` entry. */
 function deskThread(desk: DeskDto, i: number): Thread {
   return {
     id: desk.id,
@@ -79,36 +72,17 @@ function deskThread(desk: DeskDto, i: number): Thread {
     },
     blurb: desk.description ?? "A desk of your company",
     messages: [],
-    readOnly: desk.system,
   };
 }
 
 /**
  * Build the chat list from the company's real desks (issue #53): the main line
  * (the orchestrator) first, then one thread per desk keyed by its id. Falls back
- * to {@link defaultThreads} when the company defines no *real* desks — the fetch
- * failed and returned an empty list, or every entry is a system channel — so the
- * console always renders something.
- *
- * The fallback is keyed on non-system desk count, the same distinction
- * {@link resolveDesks} (`views/chat/model.ts`) makes for the Chat route, and for
- * the same reason: the always-present Operator system channel (issue #1757)
- * means a desk-less company's `/desks` answer is never actually `[]`, so the
- * plain `desks.length === 0` this function used to check never fired for a
- * desk-less company — the legacy `#/conversation` route this function backs
- * lost its main/strategy/creative/front-desk lines (and everything journaled
- * under them) the moment Operator shipped, while the Chat route kept them.
- * Any system desks the host did send are still threaded in either way, so
- * falling back never drops that feed — the same rule `782772aad` already
- * applied to `readOnly` here; twice missing the same host behavior on this
- * route is why the fallback belongs beside it rather than only in `resolveDesks`.
+ * to {@link defaultThreads} when the company defines none, so the console
+ * always renders something.
  */
 export function threadsFromDesks(desks: DeskDto[]): Thread[] {
-  const real = desks.filter((d) => !d.system);
-  if (real.length === 0) {
-    const system = desks.filter((d) => d.system).map(deskThread);
-    return [...defaultThreads(), ...system];
-  }
+  if (desks.length === 0) return defaultThreads();
   return [mainThread(), ...desks.map(deskThread)];
 }
 

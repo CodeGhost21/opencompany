@@ -29,12 +29,6 @@ export interface Desk {
    */
   overlayMembers?: string[];
   /**
-   * Whether this is the built-in **Operator** system channel (issue #1757): a
-   * read-only aggregation feed of workflow reports, not a real desk. The chat
-   * view renders it but disables its composer and offers no membership editing.
-   */
-  system?: boolean;
-  /**
    * How the desk routes its unmentioned messages (issue #1835). `"auto"` is a
    * leadless channel — `members[0]` carries no rank and the host picks a
    * best-fit member per message. Absent means `"lead"`, today's model.

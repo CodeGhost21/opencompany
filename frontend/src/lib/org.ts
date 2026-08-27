@@ -147,10 +147,7 @@ export function buildOrgTree(
   const members = roster.map(fromDto);
   const byId = new Map(members.map((m) => [m.id, m]));
 
-  // Issue #1757: the Operator system channel is a read-only report feed, not a
-  // real org desk — it has no members and no place in the chart.
-  const realDesks = desks.filter((desk) => !desk.system);
-  const orgDesks: OrgDesk[] = realDesks.map((desk) => {
+  const orgDesks: OrgDesk[] = desks.map((desk) => {
     // `overlayMembers` is omitted rather than empty when there are none, which
     // is why this reads through `?? []` instead of trusting the field.
     const overlay = new Set(desk.overlayMembers ?? []);

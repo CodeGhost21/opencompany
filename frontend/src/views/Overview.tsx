@@ -240,16 +240,7 @@ export function Overview({ client, company, companyName }: Props) {
       const tasks = tasksResult.status === "fulfilled" ? tasksResult.value : ([] as Task[]);
       const roster = rosterResult.status === "fulfilled" ? rosterResult.value : null;
       const desksRead = desksResult.status === "fulfilled";
-      // The always-present Operator channel (issue #1757) is a synthetic,
-      // membership-less system feed `/desks` appends — never a declared
-      // manifest/overlay desk a company organised itself around. Filtered out
-      // here, at the one place `sources.desks` is built, so it can neither draw
-      // a bogus empty pillar (`deskDepartments`/`adapt` below) nor mask a
-      // genuinely desk-less company from the "No desks yet" empty state, which
-      // checks this same list's length.
-      const desks = desksRead
-        ? desksResult.value.filter((d) => !d.system)
-        : ([] as DeskDto[]);
+      const desks = desksRead ? desksResult.value : ([] as DeskDto[]);
       const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
       const memories =
         memoriesResult.status === "fulfilled"
