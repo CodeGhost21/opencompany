@@ -300,9 +300,9 @@ async fn runtime_with_run_limit(
 /// the marker write is attempted: on the fix, it cannot have been (the write
 /// happens first), so `RecordingRunner::run` must not have been entered; on
 /// the ordering this fix replaces, the run was already launched before this
-/// write was ever attempted, so — freezing this task here starves nothing
-/// else the single-threaded test runtime needs, and it drives the
-/// already-launched detached run to completion while this one waits.
+/// write was ever attempted — so freezing this task here starves nothing
+/// else the single-threaded test runtime needs, and the already-launched
+/// detached run keeps running to completion while this one waits.
 struct GatedJournalStore {
     inner: MemoryJournalStore,
     match_substr: &'static str,
@@ -1320,7 +1320,7 @@ async fn reconciliation_does_not_fire_early_on_a_node_still_awaiting_a_sibling_d
 /// Proven by freezing the resolve inside `spawn_blocked_node_continuation`'s
 /// own `store().load(...)` await — the one genuine suspension point between
 /// "committed to continuing" and the run being registered, since the actual
-/// graph run is hand off to a task `WorkflowSpawn::spawn` does not await, so
+/// graph run is handed off to a task `WorkflowSpawn::spawn` does not await, so
 /// nothing past that point is observably synchronous with the caller. On
 /// `main` the stash is already gone by the time this point is reached —
 /// release fired before `spawn_blocked_node_continuation` was ever called.
