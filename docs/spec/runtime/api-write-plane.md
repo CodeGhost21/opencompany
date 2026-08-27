@@ -59,6 +59,9 @@ GET    …/policy                              the autonomy tier + spend cap + d
 PUT    …/policy                              set the tier, spend cap, deadline, and/or always-ask list
 DELETE …/policy                              reset the policy to the manifest's
 GET    …/activation                          the account-activation funnel (issue #1843)
+GET    …/tools/grants                        the `[tools].allow` in force + what a connect page may grant (#1796)
+PUT    …/tools/grants                        grant one namespace from a connect page  [admin]
+DELETE …/tools/grants                        withdraw one console grant (`?namespace=`) or all of them  [admin]
 POST   …/inboxes/{key}/read                  mark inbox messages read
 POST   …/inboxes/ingest                     HMAC-signed inbound email → inbox
 GET    …/inboxes                            list inboxes + unread counts
@@ -392,6 +395,14 @@ audit entry missing. Every call after the latch is set short-circuits before any
 Composio round trip or journal scan, so polling an already-activated company
 stays cheap. Any member may call it — it decides nothing on the company's
 behalf, only answers a question.
+
+### Tool grants
+
+The three **tool-grant** routes (issue #1796) are the same shape again, applied
+to the field next door — connecting an integration stores a credential, it
+does not grant the tool namespace. Full detail, including the grantable-list
+rationale and the three-answer "when does it take effect" table, is in
+[api-tool-grants.md](api-tool-grants.md).
 
 ### Credential-bearing surfaces (feature-gated)
 

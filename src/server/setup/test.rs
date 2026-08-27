@@ -82,6 +82,7 @@ async fn with_company(state: &AppState, home: &std::path::Path) -> CompanyId {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_tool_grants: None,
             overlay_desk_tools: std::collections::BTreeMap::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),

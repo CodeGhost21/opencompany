@@ -1569,6 +1569,21 @@ pub struct HarnessPool {
     /// declare no ceilings keeps a stable fingerprint and never rebuilds on this
     /// axis.
     desk_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the `[tools].allow` a roster's belts are wired
+    /// from — the seed's grants **plus** the namespaces an operator granted from
+    /// a connect surface (issue #1796).
+    ///
+    /// Needed for the same reason as [`Self::desk_fingerprints`], and it is what
+    /// makes the one-click grant mean anything: a belt is wired once per roster,
+    /// so without this axis an operator who connected Chargebee and granted it
+    /// would watch the page flip to "Connected" while every teammate kept the
+    /// belt built before the grant — until the process restarted. That is the
+    /// same "Connected and reaching nobody" the grant was clicked to end.
+    ///
+    /// A company with no console grants keeps a stable fingerprint (it hashes
+    /// the effective list, which is then just the seed's) and never rebuilds on
+    /// this axis.
+    grants_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Per-company fingerprint of the routed workspace documents — hashed over
     /// their **bodies**, not merely their names.
     ///
@@ -1688,6 +1703,7 @@ impl HarnessPool {
             policy_fingerprints: RwLock::new(HashMap::new()),
             pinned_policies: std::sync::Mutex::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
+            grants_fingerprints: RwLock::new(HashMap::new()),
             context_fingerprints: RwLock::new(HashMap::new()),
             memory_engine: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
@@ -1898,6 +1914,34 @@ impl HarnessPool {
         // desk — would not reach the roster until a restart.
         let desk_fp =
             desk_scope_fingerprint(&overlay.desks, &overlay.desk_members, &overlay.desk_tools);
+        // Issue #1796: the company grant list itself joins the staleness check.
+        // Hashed over the EFFECTIVE list — the record's `[tools].allow` folded
+        // with the live override read above — rather than over the override
+        // alone, so this axis also catches a seed `[tools]` edit that arrived
+        // with no override at all, and does not move when a redundant override
+        // is carried and later cleared. That is the shape `policy_fp` settled
+        // on, for the same reason.
+        //
+        // One asymmetry with `policy_fp` worth naming, since it is not obvious
+        // from the symmetry of the two lines. The policy axis reads BOTH halves
+        // live: `overlay.policy` from the store read above, and the manifest's
+        // `[policy]`, which no runtime write touches. This axis reads the
+        // override live but takes the base from `company.manifest.tools.allow`,
+        // and that field IS runtime-mutable now — the fold makes it so. A
+        // `DELETE …/tools/grants` landing after the caller snapshotted `company`
+        // therefore moves the override half but not the base, and the withdrawal
+        // reaches the belt a cycle later than a grant would.
+        //
+        // Bounded and safe rather than clean: it delays a revocation by one
+        // cycle, never a grant, and every axis here has some version of that
+        // window. It is recorded because the obvious reading of these two lines
+        // — "the grant axis works exactly like the policy axis" — is not quite
+        // true, and the next person to touch either should know which half is
+        // live.
+        let grants_fp = tool_grants_fingerprint(&crate::ports::types::effective_tool_allow(
+            &company.manifest.tools.allow,
+            overlay.tool_grants.as_ref(),
+        ));
 
         // Re-resolve + fingerprint the tenant's capability filter (issue #108):
         // a per-tenant, per-period, fail-closed budget read from the meter. With
@@ -1989,6 +2033,7 @@ impl HarnessPool {
             let override_fingerprints = self.override_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
+            let grants_fingerprints = self.grants_fingerprints.read().await;
             let context_fingerprints = self.context_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
@@ -2001,6 +2046,7 @@ impl HarnessPool {
                 && override_fingerprints.get(&company.id) == Some(&override_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
                 && desk_fingerprints.get(&company.id) == Some(&desk_fp)
+                && grants_fingerprints.get(&company.id) == Some(&grants_fp)
                 && context_fingerprints.get(&company.id) == Some(&context_fp)
             {
                 return Ok(());
@@ -2059,6 +2105,20 @@ impl HarnessPool {
         fresh_company.overlay_desks = overlay.desks;
         fresh_company.overlay_desk_members = overlay.desk_members;
         fresh_company.overlay_desk_tools = overlay.desk_tools;
+        // Issue #1796: same treatment for the company grant list. `build_roster`
+        // reads `[tools].allow` off the manifest rather than through an
+        // accessor — some three dozen sites do — so the live effective list is
+        // installed onto the manifest the roster is built from, which is the
+        // one place that has to be right for a console grant to reach a belt.
+        //
+        // `company` may be a stale boot-time snapshot (`HarnessBrain::record`),
+        // so this reads the freshly-loaded override rather than the snapshot's,
+        // exactly as the overlay fields above do.
+        fresh_company.overlay_tool_grants = overlay.tool_grants.clone();
+        fresh_company.manifest.tools.allow = crate::ports::types::effective_tool_allow(
+            &company.manifest.tools.allow,
+            overlay.tool_grants.as_ref(),
+        );
         // Issue #562: same treatment for the policy override — `build_roster`
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
@@ -2141,6 +2201,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), desk_fp);
+        self.grants_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), grants_fp);
         self.context_fingerprints
             .write()
             .await
@@ -2211,6 +2275,7 @@ impl HarnessPool {
         self.override_fingerprints.write().await.remove(company);
         self.policy_fingerprints.write().await.remove(company);
         self.desk_fingerprints.write().await.remove(company);
+        self.grants_fingerprints.write().await.remove(company);
         self.context_fingerprints.write().await.remove(company);
         self.memory_engine.write().await.remove(company);
     }
@@ -2550,6 +2615,7 @@ impl HarnessPool {
                 policy: record.overlay_policy,
                 desks: record.overlay_desks,
                 desk_members: record.overlay_desk_members,
+                tool_grants: record.overlay_tool_grants,
                 desk_tools: record.overlay_desk_tools,
             },
             _ => EffectiveOverlay {
@@ -2560,6 +2626,7 @@ impl HarnessPool {
                 policy: company.overlay_policy.clone(),
                 desks: company.overlay_desks.clone(),
                 desk_members: company.overlay_desk_members.clone(),
+                tool_grants: company.overlay_tool_grants.clone(),
                 desk_tools: company.overlay_desk_tools.clone(),
             },
         }
@@ -2617,6 +2684,15 @@ impl HarnessPool {
             .await
             .get(company)
             .copied()
+    }
+
+    /// The current grant fingerprint for a company (test-only), so a
+    /// grant-freshness test can assert the roster was actually rebuilt after a
+    /// console tool grant rather than inferring it (issue #1796). This is the
+    /// observable that makes "no restart" testable.
+    #[cfg(test)]
+    pub async fn grants_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.grants_fingerprints.read().await.get(company).copied()
     }
 
     /// The current policy fingerprint for a company (test-only), so a
@@ -3573,6 +3649,8 @@ pub(crate) struct EffectiveOverlay {
     pub policy: Option<PolicyOverride>,
     pub desks: Vec<OverlayDesk>,
     pub desk_members: Vec<OverlayDeskMember>,
+    /// The namespaces an operator granted from a connect surface (issue #1796).
+    pub tool_grants: Option<crate::ports::types::ToolGrantsOverride>,
     pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
 }
 
@@ -3650,6 +3728,23 @@ fn desk_scope_fingerprint(
         ceiling.hash(&mut hasher);
     }
 
+    hasher.finish()
+}
+
+/// A stable fingerprint of the `[tools].allow` a roster's belts are wired from
+/// (issue #1796).
+///
+/// Order-**sensitive**, unlike its neighbours: `[tools].allow` is an ordered
+/// list an operator authored, `effective_tool_allow` appends to it
+/// deterministically, and two grant lists that differ only in order are two
+/// different manifests. Sorting here would hide a reordering that
+/// `allow_covers` can genuinely read differently.
+fn tool_grants_fingerprint(allow: &[String]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    allow.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -4886,6 +4981,7 @@ description = "Builds the product."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -7324,6 +7420,7 @@ description = "Sets direction."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -7907,6 +8004,97 @@ description = "Builds the product."
         assert!(
             ok.contains("hello-marker"),
             "one teammate's exhausted budget must not stop the company: {ok:?}"
+        );
+    }
+
+    // --- Console tool grants, live (issue #1796) -----------------------------
+
+    /// **The no-restart proof for the one-click grant.** A namespace granted
+    /// through the company store — the exact path `PUT …/tools/grants` writes
+    /// through — moves the grant fingerprint, so `ensure` rebuilds the roster in
+    /// place and the belt the next turn runs with actually has the tools.
+    ///
+    /// Without this axis every other fingerprint stays stable across a grant,
+    /// the fast path returns the cached roster, and the operator watches the
+    /// connect page flip to "Connected" while no teammate receives anything
+    /// until the process restarts — which is the same "Connected and reaching
+    /// nobody" the grant was clicked to end, with a delay attached.
+    ///
+    /// One pool throughout, never reconstructed (`resident_companies()` stays
+    /// 1), so nothing here can be smuggling in a restart.
+    #[tokio::test]
+    async fn a_tool_grant_written_through_the_store_rebuilds_the_roster_in_place() {
+        use crate::ports::types::{Actor, ActorKind, ToolGrantsOverride};
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        // A catch-all company: `*` covers shell/code/web and confers none of the
+        // five namespaces this route deals in, which is the manifest shape the
+        // issue was reported against.
+        let mut rec = capped_record();
+        rec.manifest.tools.allow = vec!["*".to_string()];
+
+        let live_store = Arc::new(LiveStore::default());
+        live_store.save(&rec).await.unwrap();
+        let mut deps = deps_with_plan(dir.path(), context.clone(), None, None);
+        deps.store = live_store.clone();
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure before");
+        let before = pool
+            .grants_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // An admin grants `chargebee` from the connect page.
+        let mut granted = rec.clone();
+        granted.overlay_tool_grants = Some(ToolGrantsOverride {
+            added: vec!["chargebee".to_string()],
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-admin".to_string(),
+            },
+            at_millis: crate::ports::now_millis(),
+        });
+        granted.manifest.tools.allow = granted.effective_tool_allow();
+        live_store.save(&granted).await.unwrap();
+
+        // Deliberately re-`ensure` with the STALE record the caller is holding.
+        // A boot-time snapshot is what `HarnessBrain::record` hands in, so the
+        // grant must be picked up from the live store read rather than from the
+        // record passed in — otherwise this works only for callers that happen
+        // to have reloaded.
+        pool.ensure(&rec, &deps).await.expect("ensure after");
+        let after = pool
+            .grants_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            before, after,
+            "granting a namespace must move the grant fingerprint, or the cached \
+             roster is reused and no teammate ever receives the tools"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "the same company, rebuilt in place — not a new process"
+        );
+
+        // Withdrawing it returns the fingerprint to where it started: the axis
+        // tracks the effective list, so a revoked grant is as visible as a
+        // granted one.
+        pool.ensure(&rec, &deps).await.expect("ensure idempotent");
+        assert_eq!(
+            pool.grants_fingerprint_of(&rec.id).await,
+            Some(after),
+            "an unchanged grant set must not churn the roster"
+        );
+        live_store.save(&rec).await.unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure cleared");
+        assert_eq!(
+            pool.grants_fingerprint_of(&rec.id).await,
+            Some(before),
+            "withdrawing the grant must move the fingerprint back"
         );
     }
 

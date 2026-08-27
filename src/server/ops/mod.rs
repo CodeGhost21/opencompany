@@ -89,6 +89,7 @@ mod team_agent;
 /// company can grant an agent — built-ins, MCP servers and Composio toolkits —
 /// in one vocabulary. Read-only and openhuman-free.
 pub mod tool_catalog;
+pub mod tool_grants;
 pub mod usage;
 pub mod workflows;
 pub mod workspace;
@@ -231,6 +232,7 @@ pub fn router() -> Router<AppState> {
         .merge(setup::router())
         .merge(activation::router())
         .merge(policy::router())
+        .merge(tool_grants::router())
         .merge(workflows::router())
         .merge(mail::router());
     #[cfg(feature = "oauth")]

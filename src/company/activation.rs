@@ -431,6 +431,7 @@ mod test {
             overlay_agent_edits: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),

@@ -3571,6 +3571,172 @@ pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverr
     }
 }
 
+/// The namespaces a connect surface in the console may grant (issue #1796).
+///
+/// Deliberately a **closed list**, and deliberately not "every namespace an
+/// operator could type". Each of these is a namespace the catch-all `*`
+/// refuses to confer (see `grants_composio_explicit` and its siblings in
+/// [`crate::company::types`]), which is exactly why connecting one currently
+/// dead-ends: `*` will never pick it up, and the manifest is a read-only boot
+/// snapshot on a hosted tenant.
+///
+/// What every entry has in common, and what a candidate has to have to join
+/// them: the console holds a **credential form for it**, so granting is the
+/// second half of an action the operator already took deliberately, against an
+/// account they already proved they hold. `shell`, `code` and `web` have no
+/// such form — granting those from a settings page would turn the console into
+/// a general capability-widening surface, which is the thing the seed-wins rule
+/// on `[tools]` exists to prevent. `media` is absent for the same reason: it
+/// spends real money and has no connect page to be dead-ended on.
+///
+/// Sorted, so the console's own ordering is not a second source of truth.
+pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 5] =
+    ["chargebee", "composio", "hosting", "paypal", "search"];
+
+/// Whether `namespace` is one the console is allowed to grant.
+pub fn console_grantable(namespace: &str) -> bool {
+    CONSOLE_GRANTABLE_NAMESPACES.contains(&namespace)
+}
+
+/// The operator's console-added `[tools].allow` grants (issue #1796).
+///
+/// # Why this exists at all
+///
+/// Connecting an integration stores a credential; it does not grant the tool
+/// namespace. Those are separate steps and only the first one had a write path,
+/// so five connect surfaces (chargebee, paypal, hosting, search, composio) all
+/// ended in the same dead end: the page said **Connected**, no teammate
+/// received the tools, and the page's own copy said it "cannot be fixed from
+/// this page" — accurately, because nothing in the console could write
+/// `[tools].allow`.
+///
+/// # Why an overlay and not a manifest write
+///
+/// Exactly the reason [`PolicyOverride`] is one. A rebuild re-persists
+/// `record.manifest` from the seed, merging only `[workflows].enabled`; *"every
+/// other manifest field is seed-authoritative, and for `[tools]` / `[policy]`
+/// that is a security property"* (`runtime::builder`). A manifest write would
+/// be wiped by the next rebuild **and** would contradict that invariant. This
+/// is not a merge into the blueprint: it is a durable, attributed operator
+/// decision resolved *ahead* of the manifest by
+/// [`CompanyRecord::effective_tool_allow`].
+///
+/// # Version control still wins when it speaks
+///
+/// `runtime::builder::carry_tool_grants_override` drops the whole override when
+/// the seed's `[tools]` changes, on the reasoning
+/// `carry_desk_tool_overrides` gives for desks and with more force: this layer
+/// only ever *widens*, so an override outliving a seed edit would be a runtime
+/// grant surviving the operator revoking it in version control — the named harm
+/// the seed-wins rule exists to prevent. `DELETE …/tools/grants` is how an
+/// operator clears their own grant without touching version control.
+///
+/// # Additive only, and only over the closed list
+///
+/// [`added`](Self::added) can only widen, never narrow: a namespace the seed
+/// grants cannot be revoked here, because a console that could quietly withdraw
+/// a capability version control confers would be a second, invisible authority
+/// over the same field. Narrowing already has a home — the per-desk ceiling in
+/// [`CompanyRecord::overlay_desk_tools`], which is bounded by the allow-list
+/// rather than competing with it.
+///
+/// Entries are checked against [`CONSOLE_GRANTABLE_NAMESPACES`] at the write
+/// route *and again* in [`CompanyRecord::effective_tool_allow`], so a value
+/// that reached the store some other way (version skew, a hand-edited row) can
+/// never confer `shell`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolGrantsOverride {
+    /// The namespaces the operator granted from a connect surface, on top of
+    /// whatever the seed's `[tools].allow` already says.
+    ///
+    /// Bare namespace words (`"chargebee"`), never globs: the console grants a
+    /// whole integration or nothing, and admitting a pattern here would make
+    /// this field a second grant *language* to keep in step with the manifest's.
+    #[serde(default)]
+    pub added: Vec<String>,
+    /// Who granted it. A capability that can be widened anonymously is not much
+    /// of a boundary — the same reason [`PolicyOverride::set_by`] exists.
+    pub set_by: Actor,
+    /// When it was set (epoch millis).
+    pub at_millis: u64,
+}
+
+impl ToolGrantsOverride {
+    /// Does this override actually confer anything?
+    ///
+    /// An override whose list is empty carries only attribution, and resolving
+    /// it is a no-op. The write route stores `None` rather than a row that says
+    /// nothing but that the console would render as "granted from here".
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+    }
+}
+
+/// Resolves a manifest `[tools].allow` against an operator's console grants —
+/// the merge [`CompanyRecord::effective_tool_allow`] applies, factored out so
+/// the runtime builder can resolve grants without constructing a whole record.
+///
+/// The seed's list comes first and verbatim: this layer appends, so a company
+/// reading its own grants sees version control's answer in version control's
+/// order with the console's additions after it. A namespace the seed already
+/// covers is not appended twice, and one outside
+/// [`CONSOLE_GRANTABLE_NAMESPACES`] is dropped rather than trusted.
+pub(crate) fn effective_tool_allow(
+    manifest_allow: &[String],
+    override_: Option<&ToolGrantsOverride>,
+) -> Vec<String> {
+    let mut allow = manifest_allow.to_vec();
+    let Some(override_) = override_ else {
+        return allow;
+    };
+    for namespace in &override_.added {
+        if !console_grantable(namespace) {
+            continue;
+        }
+        if allow.iter().any(|grant| grant == namespace) {
+            continue;
+        }
+        allow.push(namespace.clone());
+    }
+    allow
+}
+
+/// Recovers the **seed's** `[tools].allow` from a materialised one by removing
+/// the grants a held override put there — the inverse of [`effective_tool_allow`].
+///
+/// A record's `[tools].allow` is seed-plus-console-grants (the fold in
+/// `runtime::builder`), so anything that needs version control's *own* answer
+/// has to subtract first. Three callers do, and they must agree:
+///
+/// - the rebuild's carry rule, which asks "did the seed change?" — comparing the
+///   materialised list would report an edit on every rebuild of a company that
+///   has a grant at all, and the override would be dropped immediately;
+/// - `GET …/tools/grants`, which reports `manifestAllow` — reporting the
+///   materialised list would tell an operator version control grants something
+///   it does not, and a `DELETE` would then look like it had done nothing;
+/// - the export bundle, whose `company.toml` **becomes the seed** for the
+///   restored company — writing the folded list there would silently promote a
+///   console grant to a seed grant, losing its attribution and putting it beyond
+///   the reach of `DELETE …/tools/grants` forever.
+///
+/// A namespace present in both the seed and the override is removed here too.
+/// For the carry rule that is deliberate and safe (the seed looks changed, the
+/// override is dropped, and the seed confers the namespace on its own anyway);
+/// the write route refuses to create that state in the first place.
+pub(crate) fn seed_tool_allow(
+    materialised_allow: &[String],
+    override_: Option<&ToolGrantsOverride>,
+) -> Vec<String> {
+    let Some(override_) = override_ else {
+        return materialised_allow.to_vec();
+    };
+    materialised_allow
+        .iter()
+        .filter(|grant| !override_.added.contains(grant))
+        .cloned()
+        .collect()
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
@@ -3620,6 +3786,12 @@ pub struct OverlayBlob {
     /// the pre-#562 behaviour exactly.
     #[serde(default)]
     pub policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants (issue #1796).
+    /// Absent on rows written before a connect surface could grant a namespace,
+    /// and `#[serde(default)]` reads that absence as `None` — "the manifest's
+    /// `[tools]` still decides", which is the pre-#1796 behaviour exactly.
+    #[serde(default)]
+    pub tool_grants: Option<ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings. Absent on rows written before
     /// desks could scope tools, and `#[serde(default)]` reads that absence as
     /// "no desk overrides a ceiling" — which leaves the manifest in charge,
@@ -3672,6 +3844,7 @@ impl OverlayBlob {
             agent_edits: record.overlay_agent_edits.clone(),
             retired_agents: record.overlay_retired_agents.clone(),
             policy: record.overlay_policy.clone(),
+            tool_grants: record.overlay_tool_grants.clone(),
             desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
@@ -3703,6 +3876,7 @@ impl OverlayBlob {
                     agent_edits: Vec::new(),
                     retired_agents: Vec::new(),
                     policy: None,
+                    tool_grants: None,
                     desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     provenance: None,
@@ -3833,6 +4007,15 @@ pub struct CompanyRecord {
     /// approval gate and the console cannot disagree about which tier is live.
     #[serde(default)]
     pub overlay_policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants (issue #1796).
+    ///
+    /// `None` — the manifest's `[tools].allow` applies, exactly as before this
+    /// existed. Read through [`Self::effective_tool_allow`], never directly, so
+    /// the harness that wires the tools and the console that reports them
+    /// "Connected" cannot disagree about whether a teammate actually gets them
+    /// — the disagreement #1796 is about.
+    #[serde(default)]
+    pub overlay_tool_grants: Option<ToolGrantsOverride>,
     /// Per-desk tool ceilings the operator has set from the console, keyed on
     /// desk id — the runtime override of a desk's manifest
     /// [`tools`](crate::company::GroupChat::tools).
@@ -4525,6 +4708,31 @@ impl CompanyRecord {
             .collect()
     }
 
+    /// The `[tools].allow` actually in force: the manifest's grants plus the
+    /// namespaces an operator granted from a connect surface (issue #1796).
+    ///
+    /// **The single source of truth for "what does this company grant"**, in
+    /// the shape of [`Self::effective_policy`]. The roster build, the workflow
+    /// capability bundle, every `grants_*_explicit` check in the harness and
+    /// every console status route read through here, so a namespace granted in
+    /// the console cannot be honoured by one and ignored by another — which is
+    /// the precise shape of the #1796 complaint: a page saying **Connected**
+    /// over a harness that wired nothing.
+    ///
+    /// Returns an owned `Vec` rather than a borrow because the effective value
+    /// may not exist anywhere to borrow from — it is the concatenation of two
+    /// sources.
+    ///
+    /// Additive only, and only over [`CONSOLE_GRANTABLE_NAMESPACES`]: a stored
+    /// entry outside that list is dropped here rather than trusted, so a row
+    /// that reached the store under version skew can never confer `shell`.
+    pub fn effective_tool_allow(&self) -> Vec<String> {
+        effective_tool_allow(
+            &self.manifest.tools.allow,
+            self.overlay_tool_grants.as_ref(),
+        )
+    }
+
     /// The `[policy]` actually in force: the operator's override where it sets a
     /// field, the manifest's `[policy]` everywhere else (issue #562).
     ///
@@ -4876,6 +5084,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -6156,6 +6365,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,

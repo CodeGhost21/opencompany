@@ -25,6 +25,7 @@ import {
   type GridProvider,
 } from "@/lib/provider-grid";
 import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
+import { grantNamespace } from "@/components/grant-namespace";
 import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
@@ -124,6 +125,11 @@ export function OAuthView({ client, company }: Props) {
   // with it: connecting a second Gmail is exactly when that section appears,
   // and releasing one is exactly when it stops being a choice (issue #820).
   const [connectionsGeneration, setConnectionsGeneration] = useState(0);
+
+  // Issue #1796: whether the `composio` grant is in flight. The grid renders the
+  // control, this owns the write — the grid is presentational by design, and
+  // giving it host state back is how the page came to have two provider lists.
+  const [grantingComposio, setGrantingComposio] = useState(false);
 
   const refresh = useCallback(async () => {
     // Both reads, together: the page's status and the accounts behind it are one
@@ -610,6 +616,24 @@ export function OAuthView({ client, company }: Props) {
           openMode={status?.openMode === true}
           degraded={status ? catalogWarning(status) : null}
           loading={load === "loading" || !reachSettled}
+          granting={grantingComposio}
+          onGrant={() => {
+            void (async () => {
+              setGrantingComposio(true);
+              try {
+                // Both generations bump: the grant changes what the page's
+                // status says about `granted`, and `ComposioSection` reads the
+                // same flag one card up. Refreshing one and not the other is
+                // the two-surfaces-disagreeing failure #582 is about.
+                if (await grantNamespace(client, company, "composio")) {
+                  setCredentialGeneration((n) => n + 1);
+                  await refresh();
+                }
+              } finally {
+                setGrantingComposio(false);
+              }
+            })();
+          }}
           onConnect={(p) => void connect(p)}
           onDisconnect={(p) => void disconnect(p)}
           onOpen={(p) => setOpened(p.slug)}
