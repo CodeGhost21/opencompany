@@ -210,3 +210,57 @@ describe("explicitIdProblem — trailing period (issue #1828 comment 3875745309)
     expect(explicitIdProblem("acme.corp")).toBeNull();
   });
 });
+
+/**
+ * `slug` (`store/paths.rs`) allowlists letters, digits, `.`, `_`, and `-`, and
+ * folds everything else to `_` — a Windows reserved device name like `con` is
+ * already entirely within that charset, so none of the earlier checks (length,
+ * dot-segments, trailing period, charset) catch it. Win32 reserves `CON`,
+ * `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, and `LPT1`-`LPT9` as device names —
+ * case-insensitively, and regardless of any extension appended after them,
+ * because the reservation is on the base name, not the full filename — so
+ * `FsCompanyStore` can't create the corresponding company directory on a
+ * Windows-backed host at all. Caught here, before the archive leg runs, for
+ * the same reason the other checks in this file are: an id this client could
+ * have refused for free is otherwise discovered only after the old company
+ * has already been archived (codex review on #1828, PR comment 3876096427).
+ */
+describe("explicitIdProblem — Windows reserved device names (issue #1828 comment 3876096427)", () => {
+  it("rejects a bare reserved device name", () => {
+    const problem = explicitIdProblem("con");
+    expect(problem).not.toBeNull();
+    expect(problem).toContain("reserved");
+  });
+
+  it("rejects reserved names case-insensitively", () => {
+    expect(explicitIdProblem("CON")).toContain("reserved");
+    expect(explicitIdProblem("Aux")).toContain("reserved");
+    expect(explicitIdProblem("Com1")).toContain("reserved");
+  });
+
+  it("rejects a reserved name with an extension appended", () => {
+    // Win32 reserves the device name itself, not the full filename — slug's
+    // "." passthrough doesn't help here.
+    expect(explicitIdProblem("con.txt")).toContain("reserved");
+    expect(explicitIdProblem("lpt1.log")).toContain("reserved");
+  });
+
+  it("covers every reserved base name", () => {
+    for (const name of ["CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9"]) {
+      expect(explicitIdProblem(name)).toContain("reserved");
+    }
+  });
+
+  it("does not reject a name that merely starts with a reserved prefix", () => {
+    // "console" and "comet" aren't reserved — only the exact device name
+    // (optionally followed by an extension) is.
+    expect(explicitIdProblem("console")).toBeNull();
+    expect(explicitIdProblem("comet")).toBeNull();
+    expect(explicitIdProblem("auxiliary")).toBeNull();
+  });
+
+  it("does not reject COM0 or LPT0, which are not reserved", () => {
+    expect(explicitIdProblem("com0")).toBeNull();
+    expect(explicitIdProblem("lpt0")).toBeNull();
+  });
+});

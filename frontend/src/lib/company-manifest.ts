@@ -425,6 +425,26 @@ export const MAX_EXPLICIT_ID_LENGTH = 128;
  */
 const SLUG_SAFE_ID = /^[A-Za-z0-9._-]+$/;
 
+/**
+ * Windows reserved device names — `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+ * and `LPT1`-`LPT9` — matched case-insensitively and regardless of any
+ * extension appended after the name (e.g. `con.txt`, `lpt1.log`): Win32
+ * reserves the base name itself, not the full filename, so an extension
+ * doesn't help. `COM0` and `LPT0` are deliberately excluded — Windows does
+ * not reserve them.
+ *
+ * Every character in these names is already inside {@link SLUG_SAFE_ID}'s
+ * allowlist, so `slug` (`store/paths.rs`) passes one through unchanged —
+ * none of the checks above this one catch it. `FsCompanyStore` can't create
+ * the corresponding company directory on a Windows-backed host at all, so a
+ * reset that sends one archives the existing company and only then fails
+ * while creating its replacement — the same "discovered only after the
+ * archive already ran" failure mode {@link MAX_EXPLICIT_ID_LENGTH}'s doc
+ * comment describes, just reached through an OS-reserved name instead of an
+ * over-length one (codex review on #1828, PR comment 3876096427).
+ */
+const WINDOWS_RESERVED_DEVICE_NAME = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
+
 export function explicitIdProblem(candidateId: string): string | null {
   if (candidateId.length > MAX_EXPLICIT_ID_LENGTH) {
     return `That id is too long (${candidateId.length} characters) — keep it under ${MAX_EXPLICIT_ID_LENGTH} characters. Leave the field blank for an auto-generated id.`;
@@ -434,6 +454,9 @@ export function explicitIdProblem(candidateId: string): string | null {
   }
   if (candidateId.endsWith(".")) {
     return `An id can't end with a period — Windows silently drops a trailing "." from the folder name, so the company could come back under a different id after a restart there. Choose a different id, or leave the field blank for an auto-generated one.`;
+  }
+  if (WINDOWS_RESERVED_DEVICE_NAME.test(candidateId)) {
+    return `"${candidateId}" is a reserved Windows device name and can't be used as a folder name there. Choose a different id, or leave the field blank for an auto-generated one.`;
   }
   if (!SLUG_SAFE_ID.test(candidateId)) {
     return `That id can only use letters, numbers, ".", "_", and "-" — anything else (like a space or "/") is silently replaced with "_" on disk, so the company would come back under a different id after a restart. Choose a different id, or leave the field blank for an auto-generated one.`;
