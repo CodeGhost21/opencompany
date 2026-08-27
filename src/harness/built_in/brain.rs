@@ -4150,11 +4150,14 @@ description = "Runs Acme."
             reply: "checkpoint".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: true,
+            // Test fixture, not the ACP fold (PR #1880 review).
+            abnormal_stop: None,
             halted_for_spend: Some(crate::harness::SpendHalt {
                 agent: "ceo".to_string(),
                 spent_usd: 1.25,
                 cap_usd: 1.0,
             }),
+            budget_paused: None,
         };
         let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
             .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
@@ -4212,7 +4215,10 @@ description = "Runs Acme."
                     reply: "checkpoint".to_string(),
                     steps: Vec::new(),
                     hit_iteration_cap: false,
+                    // Test fixture, not the ACP fold (PR #1880 review).
+                    abnormal_stop: None,
                     halted_for_spend: None,
+                    budget_paused: None,
                 },
                 approval_requests: Some(requests.clone()),
             })));
