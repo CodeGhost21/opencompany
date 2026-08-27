@@ -251,58 +251,6 @@ async fn redeem_budget_pause(
         // `Attachment` values.
         attachments: marker.attachments.clone(),
     };
-    // Issue #1846 review (Codex #3869369474): journal the event HERE,
-    // synchronously, and notify its mentions — mirroring exactly what
-    // `accept_chat_turn` (`src/server/operator.rs`) does for an ordinary
-    // `/chat` send — rather than handing the raw, unjournaled event to
-    // `run_cycle` below, which journals it internally but has no notion of
-    // "notify the people this message names" (that is the CALLER's job on
-    // every other path: `accept_chat_turn` for a chat send,
-    // `CompanyRuntime::publish_continuation` for an approval-continuation
-    // reply). Before this, a redeemed message's `@user`/`@everyone` mentions
-    // still rendered as chips (`mentions` survives onto the journaled
-    // `AgentReply`/`OperatorMessage` and the console resolves chips from
-    // that) but nobody was ever notified: an operator offline when the
-    // resend happened had no badge and no way to know they'd been named.
-    //
-    // Reserved via `redeem`/`redeem_matching` above, so a failed append here
-    // must restore the marker exactly like a failed redispatch does below —
-    // the operator's saved re-issue payload must not be lost to a journal
-    // hiccup any more than to a `run_cycle` one.
-    let message_seq = match company
-        .runtime
-        .events()
-        .append(company.id(), event.clone())
-        .await
-    {
-        Ok(seq) => seq,
-        Err(err) => {
-            pauses.restore_if_absent(marker);
-            return Err(err.into());
-        }
-    };
-    if let CompanyEvent::OperatorMessage { mentions, .. } = &event
-        && !mentions.is_empty()
-    {
-        // `marker.chat_id` (folded into `event.chat` above) is `None` for an
-        // unaddressed original message, the same "default → orchestrator"
-        // thread `accept_chat_turn`'s own `desk` fallback resolves to
-        // elsewhere in this file's sibling routes.
-        let notify_desk = marker
-            .chat_id
-            .as_deref()
-            .unwrap_or(crate::server::ops::language::DEFAULT_DESK);
-        company
-            .runtime
-            .notify_mentions(
-                company.id(),
-                mentions,
-                &message_seq,
-                company.actor.as_ref(),
-                notify_desk,
-            )
-            .await;
-    }
     // Issue #1846 review (Codex #3865812411): spawned, not awaited directly
     // in this handler's own future. This host is plain
     // `axum::serve(listener, router(state))`; hyper drops a handler's future
@@ -337,18 +285,83 @@ async fn redeem_budget_pause(
     // three ways `run_cycle` can end without earning the marker back —  and
     // is a no-op once `disarm`ed on success. None of that depends on this
     // handler's own future still being polled.
+    //
+    // Issue #1846 review (Codex #3869369474 / #3870112629 / #3870168362):
+    // the journal append, the mention notification, the redispatch AND the
+    // journaling of ITS replies all live inside this SAME spawned task now,
+    // for the SAME disconnect-safety reason spelled out above — an earlier
+    // pass of this fix ran the append+notify synchronously in the handler's
+    // own future, BEFORE this spawn, which reintroduced exactly the
+    // drop-loses-the-reservation bug #3865812411/#3866802276 closed: a
+    // disconnect during that `.await` would abandon the append/notify with
+    // no `RestoreGuard` in scope to put the already-reserved marker back.
+    // Folding everything into one guarded task closes that the same way
+    // `run_cycle` itself was already closed.
+    //
+    // The reply side (Codex #3870168362): `run_journaled_cycle`'s returned
+    // `CycleReport` used to be discarded outright (the `Ok(Ok(_report))` arm
+    // below never read it) — unlike `accept_chat_turn`'s callers, which
+    // explicitly journal every reply via `journal_chat_replies` after the
+    // cycle. Without that, a redeemed turn's answer executed (side effects
+    // and all) but never appeared in the transcript or over SSE — the
+    // console showed only the OLD marker DTO this route returns, and the
+    // reply was invisible until some OTHER event happened to refresh
+    // history. `journal_chat_replies` is `pub(crate)` in `operator.rs`
+    // specifically for this call — it is the ONE other caller outside that
+    // file, and it is what keeps a redeemed reply's journaling on the exact
+    // same terms as an ordinary chat reply's (same desk, same mention
+    // notification path) rather than a second, drifting implementation.
     let runtime = Arc::clone(&company.runtime);
+    let company_id = company.id().clone();
+    let actor = company.actor.clone();
     let redispatch = tokio::spawn({
         let pauses = Arc::clone(&pauses);
         let marker = marker.clone();
         async move {
-            let mut guard = RestoreGuard::new(pauses, marker);
+            let mut guard = RestoreGuard::new(pauses, marker.clone());
+            let message_seq = runtime.events().append(&company_id, event.clone()).await?;
+            if let CompanyEvent::OperatorMessage { mentions, .. } = &event
+                && !mentions.is_empty()
+            {
+                // `marker.chat_id` (folded into `event.chat` above) is
+                // `None` for an unaddressed original message, the same
+                // "default → orchestrator" thread `accept_chat_turn`'s own
+                // `desk` fallback resolves to elsewhere in this file's
+                // sibling routes.
+                let notify_desk = marker
+                    .chat_id
+                    .as_deref()
+                    .unwrap_or(crate::server::ops::language::DEFAULT_DESK);
+                runtime
+                    .notify_mentions(
+                        &company_id,
+                        mentions,
+                        &message_seq,
+                        actor.as_ref(),
+                        notify_desk,
+                    )
+                    .await;
+            }
             // `run_journaled_cycle`, not `run_cycle`: `event` is ALREADY
-            // appended above (that's what `message_seq` is), so handing it
-            // to the plain `run_cycle` here would journal it a SECOND time.
-            let result = runtime
+            // appended above, so handing it to the plain `run_cycle` here
+            // would journal it a SECOND time.
+            let mut result = runtime
                 .run_journaled_cycle(vec![(message_seq, event)], None)
                 .await;
+            if let Ok(report) = result.as_mut() {
+                let desk = marker
+                    .chat_id
+                    .clone()
+                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+                crate::server::operator::journal_chat_replies(
+                    &runtime,
+                    &company_id,
+                    &desk,
+                    marker.parent,
+                    report,
+                )
+                .await;
+            }
             if result.is_ok() {
                 guard.disarm();
             }
@@ -549,6 +562,47 @@ mod tests {
         }
     }
 
+    /// As [`RecordingBrain`], but also answers with one real reply bubble —
+    /// for a test that needs to see the redeemed turn's ANSWER actually
+    /// land, not just prove which event the brain saw (issue #1846 review,
+    /// Codex #3870168362).
+    #[derive(Default)]
+    struct ReplyingBrain {
+        last: std::sync::Mutex<Option<CompanyEvent>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for ReplyingBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            if let Some(event) = req
+                .events
+                .into_iter()
+                .find(|e| matches!(e, CompanyEvent::OperatorMessage { .. }))
+            {
+                *self.last.lock().unwrap() = Some(event);
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses: vec![crate::ports::types::OutboundMessage {
+                    message_id: None,
+                    task_id: None,
+                    channel: "general".to_string(),
+                    agent: Some("ceo".to_string()),
+                    text: "the API shipped".to_string(),
+                    steps: Vec::new(),
+                    reply_to: None,
+                    mentions: Vec::new(),
+                }],
+                new_traces: Vec::new(),
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
     /// Issue #1846 review (Codex #3865812419/#3865812423/#3865812432): a
     /// redeem replays the marker's parent/deliverable/mentions onto the
     /// redispatched `OperatorMessage` instead of the empty defaults this
@@ -724,6 +778,55 @@ mod tests {
             1,
             "redeeming a marker whose original message named a user must file that user's \
              mention notification, not just the chip"
+        );
+    }
+
+    /// Issue #1846 review (Codex #3870168362) — **the regression.** The
+    /// redispatch's `CycleReport` used to be discarded (`Ok(Ok(_report))`
+    /// never read it) — unlike `accept_chat_turn`'s callers, which always
+    /// journal a cycle's `responses` via `journal_chat_replies`. The
+    /// redeemed turn's own answer therefore executed but never appeared in
+    /// the transcript or over SSE.
+    #[tokio::test]
+    async fn redeem_journals_the_redispatched_turns_reply() {
+        let home = home();
+        let company = "acme-redeem-journals-reply";
+        let replying = Arc::new(ReplyingBrain::default());
+        let state = state_with_brain(home.path(), company, replying.clone()).await;
+        let id = CompanyId::new(company);
+        let runtime = state.registry().get(&id).expect("company is registered");
+
+        budget_pauses_for(&id).park(
+            "ceo",
+            Some("general".to_string()),
+            "ship the API",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
+
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            "/api/v1/company/agents/ceo/budget-pause/redeem",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let events = runtime
+            .events()
+            .read_from(&id, crate::ports::EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let reply = events.iter().find_map(|e| match &e.event {
+            CompanyEvent::AgentReply { text, .. } if text == "the API shipped" => Some(text),
+            _ => None,
+        });
+        assert!(
+            reply.is_some(),
+            "the redeemed turn's reply must be journaled as an AgentReply — the transcript and \
+             SSE feed have no other way to learn the turn answered at all: {events:?}"
         );
     }
 
