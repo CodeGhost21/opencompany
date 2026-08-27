@@ -137,7 +137,7 @@ What goes on the wire differs by path, and sending the wrong one fails
 | path | wire value | why |
 |---|---|---|
 | proxied | the tier name (`chat-v1`) | the platform's registry routes on it, pinning each tier to a sub-provider so its rate card stays exact |
-| direct | a concrete slug (`deepseek/deepseek-v4-flash`) | OpenRouter has never heard of `chat-v1` |
+| direct | a concrete slug (`anthropic/claude-sonnet-5`) | OpenRouter has never heard of `chat-v1` |
 
 On the direct path an unmapped tier takes `DEFAULT_TIER_MODELS`, which mirrors
 the platform's own OpenRouter bindings — so both paths reach the same models and
