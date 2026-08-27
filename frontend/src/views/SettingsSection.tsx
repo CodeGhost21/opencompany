@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { RouteLoading } from "@/components/route-loading";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
 import { InferenceView } from "@/views/InferenceView";
@@ -145,13 +146,7 @@ export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
         {page === "skills" && <SkillsView client={client} company={company} />}
         {page === "brain" && <MemoryView client={client} company={company} />}
         {page === "usage" && (
-          <Suspense
-            fallback={
-              <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                Loading usage…
-              </div>
-            }
-          >
+          <Suspense fallback={<RouteLoading title="Usage" label="Loading usage…" />}>
             <UsageView client={client} company={company} />
           </Suspense>
         )}

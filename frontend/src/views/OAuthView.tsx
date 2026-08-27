@@ -13,6 +13,7 @@ import {
   type ComposioStatus,
 } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
@@ -530,21 +531,23 @@ export function OAuthView({ client, company }: Props) {
   const connectedCount = connectedProviderCount(providers);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">OAuth</h1>
-            <p className="text-sm text-muted-foreground">
-              The third-party accounts your company signs in to and acts through. It only uses
-              what you connect.
-            </p>
-          </div>
-          {load === "ready" && connectedCount > 0 && (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="OAuth"
+        width="5xl"
+        description={
+          <>
+            The third-party accounts your company signs in to and acts through. It only uses
+            what you connect.
+          </>
+        }
+        trailing={
+          load === "ready" && connectedCount > 0 ? (
             <Badge variant="secondary">{connectedCount} connected</Badge>
-          )}
-        </div>
-
+          ) : null
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {load === "unavailable" && (
           <Alert>
             <Info className="size-4" />

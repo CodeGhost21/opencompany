@@ -188,6 +188,24 @@ enum JournalRecord {
         #[serde(default)]
         reason: ExpiryReason,
     },
+    /// An operator pushed a parked approval's deadline out to a fresh full TTL
+    /// window (issue #1805).
+    ///
+    /// The durable half of the extend lever. It carries the new anchor rather
+    /// than an offset, because the anchor is exactly what the sweeper and the
+    /// projected deadline both read (`ParkedApproval::deadline_anchor_millis`),
+    /// so replay re-applies the move by rehydrating the gate from it — an
+    /// extension survives a redeploy instead of reverting to the original park
+    /// instant. Deliberately separate from `ApprovalParked::at_millis`, which
+    /// dates the PAYLOAD (issue #1024) and must not shift when a deadline does.
+    ApprovalExtended {
+        /// The extended approval's id.
+        id: ApprovalId,
+        /// Epoch-millis the TTL window was re-anchored to (the extension time).
+        at_millis: u64,
+        /// Who extended it.
+        by: Actor,
+    },
     /// A parked approval the operator approved with an amended effect payload.
     ///
     /// Audit-only: the queue removal is recorded by the paired
@@ -542,6 +560,13 @@ impl JournalRecord {
             // Recomputed: the parked record carries the deadline, so replay
             // re-expires it.
             Self::ApprovalExpired { .. } => Durability::Process,
+            // An operator's extension (issue #1805). `Process`, like the park it
+            // moves: losing it on host death reverts the deadline to the original
+            // window — the approval simply expires on its first schedule, the same
+            // "one default-deny sooner" tolerance a lost park has. A redeploy
+            // (process restart) keeps the page-cached record and replays the move,
+            // which is the case the lever has to survive.
+            Self::ApprovalExtended { .. } => Durability::Process,
             // Audit-only. The queue removal rides on the paired
             // `ApprovalResolved`, and the original effect stays recoverable from
             // the earlier `ApprovalParked`.
@@ -603,6 +628,12 @@ pub struct PendingApproval {
     pub effect: Effect,
     /// Epoch-millis the effect was parked.
     pub at_millis: u64,
+    /// Epoch-millis this approval's deadline is measured from (issue #1805) —
+    /// `at_millis` for a fresh park, the extension time once an operator has
+    /// extended it. The projected `expires_at_millis` is this plus the gate's
+    /// TTL, so a card's deadline reflects an extension. Distinct from
+    /// `at_millis` (payload age, issue #1024) on purpose.
+    pub deadline_anchor_millis: u64,
     /// Which board task this approval was parked for (issue #333). `None` only
     /// for a journal line written before the link existed — see [`TaskLink`].
     pub task: Option<TaskLink>,
@@ -764,6 +795,15 @@ pub struct ApprovalConversation {
 struct ParkedApproval {
     effect: Effect,
     at_millis: u64,
+    /// Epoch-millis this approval's TTL window is measured from (issue #1805).
+    ///
+    /// Starts equal to `at_millis` — a fresh park's deadline is `at_millis +
+    /// ttl` — and moves to the extension time when an operator extends it. Held
+    /// separately from `at_millis` because that one dates the PAYLOAD (issue
+    /// #1024) and a deadline extension must not make the content look fresher.
+    /// This is the anchor the gate is rehydrated from at boot, so both the live
+    /// sweeper and the projected deadline stay in step across a redeploy.
+    deadline_anchor_millis: u64,
     /// `None` only for a journal line written before #333.
     task: Option<TaskLink>,
     /// The chat thread that parked it (issue #379); `None` when no conversation
@@ -1230,6 +1270,10 @@ impl RuntimeJournal {
                     ParkedApproval {
                         effect,
                         at_millis,
+                        // Reset each replay to the park instant, then moved by
+                        // any later `ApprovalExtended` line below — the log order
+                        // is what makes the last extension win (issue #1805).
+                        deadline_anchor_millis: at_millis,
                         task,
                         thread,
                         cycle,
@@ -1241,6 +1285,14 @@ impl RuntimeJournal {
             }
             JournalRecord::ApprovalExpired { id, .. } => {
                 state.parked.remove(&id);
+            }
+            // Issue #1805: re-anchor the deadline window. A no-op for an id no
+            // longer parked (already resolved/expired earlier in the log), which
+            // is correct — an extension of something since decided moves nothing.
+            JournalRecord::ApprovalExtended { id, at_millis, .. } => {
+                if let Some(parked) = state.parked.get_mut(&id) {
+                    parked.deadline_anchor_millis = at_millis;
+                }
             }
             // Audit-only for the queue: the paired `ApprovalResolved`
             // handles removal. The amended effect does supersede the parked
@@ -1608,6 +1660,8 @@ impl RuntimeJournal {
                 ParkedApproval {
                     effect: effect.clone(),
                     at_millis,
+                    // A fresh park's deadline runs from when it was parked.
+                    deadline_anchor_millis: at_millis,
                     task: Some(task.clone()),
                     thread: thread.clone(),
                     cycle: cycle.clone(),
@@ -1968,6 +2022,32 @@ impl RuntimeJournal {
         .await
     }
 
+    /// Records that an operator extended a parked approval's deadline, moving
+    /// the live entry's TTL anchor to `at_millis` (issue #1805).
+    ///
+    /// Updates the in-memory queue so the very next `pending()` projects the new
+    /// deadline, and appends the durable line so a redeploy replays the move. A
+    /// no-op against the in-memory state for an id that is not parked — the
+    /// caller (`CompanyRuntime::extend_approval`) has already asked the gate and
+    /// refused with a 404 in that case, so this is only reached for a live entry.
+    pub async fn record_extended(&self, id: &ApprovalId, at_millis: u64, by: Actor) -> Result<()> {
+        if let Some(parked) = self
+            .state
+            .lock()
+            .expect("journal state poisoned")
+            .parked
+            .get_mut(id)
+        {
+            parked.deadline_anchor_millis = at_millis;
+        }
+        self.append(&JournalRecord::ApprovalExtended {
+            id: id.clone(),
+            at_millis,
+            by,
+        })
+        .await
+    }
+
     /// Records an operator-amended approval (an approve-with-edit) for the audit
     /// trail. Removal from the queue is recorded separately by
     /// [`record_resolved`](Self::record_resolved).
@@ -2243,6 +2323,7 @@ impl RuntimeJournal {
                 id: id.clone(),
                 effect: parked.effect.clone(),
                 at_millis: parked.at_millis,
+                deadline_anchor_millis: parked.deadline_anchor_millis,
                 task: parked.task.clone(),
                 thread: parked.thread.clone(),
                 // Issue #842: the turn key the entry already carries for #469's
@@ -3605,6 +3686,65 @@ mod test {
             "the single-use path replays byte-identically"
         );
         assert!(reloaded.replayed_standing_grants(2_000).is_empty());
+    }
+
+    /// Issue #1805: an `ApprovalExtended` line moves the deadline anchor, and the
+    /// move replays on reload — so an operator's extension survives a redeploy
+    /// rather than reverting to the original park window. The payload timestamp
+    /// (`at_millis`, issue #1024) is deliberately left where it was: extending a
+    /// deadline does not make the content fresher.
+    #[tokio::test]
+    async fn an_extension_replays_and_moves_only_the_deadline_anchor() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        let id = ApprovalId::new("appr-extend");
+        journal
+            .record_parked(
+                &id,
+                &effect(),
+                1_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        // A fresh park's anchor is the park instant.
+        assert_eq!(journal.pending()[0].deadline_anchor_millis, 1_000);
+
+        journal
+            .record_extended(
+                &id,
+                9_000,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::User,
+                    id: "operator".into(),
+                },
+            )
+            .await
+            .unwrap();
+        // The live queue moved immediately.
+        assert_eq!(journal.pending()[0].deadline_anchor_millis, 9_000);
+
+        // And a reload replays the move rather than the bare park.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        let pending = reloaded.pending();
+        assert_eq!(
+            pending.len(),
+            1,
+            "the approval is still parked after reload"
+        );
+        assert_eq!(
+            pending[0].deadline_anchor_millis, 9_000,
+            "the extension survived the reload"
+        );
+        assert_eq!(
+            pending[0].at_millis, 1_000,
+            "the payload timestamp is untouched by an extension"
+        );
     }
 
     /// The grant records must not disturb the approval-queue fold they share a

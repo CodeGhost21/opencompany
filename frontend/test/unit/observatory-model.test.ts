@@ -64,6 +64,20 @@ describe("runState", () => {
     expect(runState(run({ status: "succeeded" }))).toBe("done");
     expect(runState(run({ status: "running" }))).toBe("running");
   });
+
+  it("keeps a declined refusal out of the success tone (issue #1809)", () => {
+    // A by-design decline is neither a failure nor a success — `RunTimeline`
+    // and `AgentRuns` already paint it the same neutral tone `cancelled`
+    // gets, never green. Folding it into "done" here would paint an
+    // AttemptCard, the waterfall span and a workflow-run's summary dot green
+    // for a run that was refused, not completed — and would count it in
+    // `byNode`'s `succeeded` column. "idle" is the closed vocabulary's own
+    // neutral word (docs/design-system/color.md), the one `stopped` and
+    // `stranded` already wear for "nothing is happening, nothing went
+    // wrong" — not a sixth colour invented for this one status.
+    expect(runState(run({ status: "declined" }))).toBe("idle");
+    expect(runState(run({ status: "declined" }))).not.toBe("done");
+  });
 });
 
 describe("spansFromRuns", () => {
@@ -181,7 +195,27 @@ describe("byNode", () => {
       run({ id: "b", nodeId: "check", status: "waiting_approval" }),
       run({ id: "c", nodeId: "check", status: "succeeded" }),
     ]);
-    expect(rows[0]).toEqual({ nodeId: "check", succeeded: 1, failed: 1, blocked: 1 });
+    expect(rows[0]).toEqual({
+      nodeId: "check",
+      succeeded: 1,
+      failed: 1,
+      blocked: 1,
+      declined: 0,
+    });
+  });
+
+  it("keeps a declined refusal out of the succeeded column (issue #1809)", () => {
+    const rows = byNode([
+      run({ id: "a", nodeId: "gate", status: "declined" }),
+      run({ id: "b", nodeId: "gate", status: "succeeded" }),
+    ]);
+    expect(rows[0]).toEqual({
+      nodeId: "gate",
+      succeeded: 1,
+      failed: 0,
+      blocked: 0,
+      declined: 1,
+    });
   });
 
   it("ranks the node that stops runs most, first", () => {

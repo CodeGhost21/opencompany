@@ -108,7 +108,7 @@ export function ConnectionPanel({
 
   return (
     <Card data-testid={`${testId}-panel`}>
-      <CardContent className="space-y-4 py-4">
+      <CardContent className="space-y-4">
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"

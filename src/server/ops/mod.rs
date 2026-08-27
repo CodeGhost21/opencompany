@@ -23,8 +23,15 @@ pub mod artifacts;
 /// choosing a face for a teammate or for yourself.
 pub mod avatars;
 pub mod billing;
+/// `GET {scope}/agents/{agent_id}/budget-pause` and
+/// `POST {scope}/agents/{agent_id}/budget-pause/redeem` (issue #1846): read
+/// and redeem the durable re-issue marker a top-level turn parks when it
+/// pauses for lack of inference budget/credits. The console's Add-Credits CTA.
+pub mod budget_pause;
 pub mod capabilities;
 pub mod company_key;
+/// Operator-set company logo, stored in the company manifest.
+pub mod company_logo;
 pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
@@ -194,11 +201,13 @@ pub fn router() -> Router<AppState> {
     let router = Router::new()
         .merge(capabilities::router())
         .merge(harnesses::router())
+        .merge(budget_pause::router())
         .merge(tool_catalog::router())
         .merge(connections_read::router())
         .merge(billing::router())
         .merge(hosting::router())
         .merge(search::router())
+        .merge(company_logo::router())
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
