@@ -129,6 +129,11 @@ pub struct RunContext<'a> {
     pub board: RunBoard,
     /// Where an agent node records that it blocked on a human (issue #881).
     pub blocks: RunBlocks,
+    /// Where an agent node records that its turn truncated at the
+    /// `max_tool_iterations` cap (issue #1865), so the runner can relabel that
+    /// node's row `Error` and agree with the attempt, which already settles
+    /// `Failed` for exactly this signal.
+    pub capped: RunCappedNodes,
     /// Where an agent node records the approvals its turn parked (issue #880).
     pub approvals: RunApprovals,
     /// Files agent nodes wrote during this run, keyed by node for durable output.
@@ -200,6 +205,7 @@ pub async fn build_capabilities(
         notices,
         board,
         blocks,
+        capped,
         approvals,
         artifacts,
         runs,
@@ -390,6 +396,7 @@ pub async fn build_capabilities(
                 notices,
                 board,
                 blocks,
+                capped,
                 approvals,
                 artifacts,
                 board_claim,
@@ -567,6 +574,9 @@ pub struct HarnessAgentRunner {
     board: RunBoard,
     /// Where this node records that it blocked on a human (issue #881).
     blocks: RunBlocks,
+    /// Where this node records that its turn truncated at the
+    /// `max_tool_iterations` cap (issue #1865).
+    capped: RunCappedNodes,
     /// Where this node records the approvals its turn parked (issue #880).
     approvals: RunApprovals,
     /// Run-scoped files captured after each node turn, including failed turns.
@@ -725,6 +735,44 @@ impl RunBlocks {
     }
 }
 
+/// Where an agent node records that its turn truncated at the
+/// `max_tool_iterations` cap (issue #1865).
+///
+/// [`RunBlocks`]' shape, and for a sibling reason: `tinyflows::observability`
+/// reports a capped turn's step as `Success` — the model produced a reply,
+/// [`HarnessAgentRunner::run`](AgentRunner::run) returned `Ok`, the edge
+/// fired — so nothing at that boundary can tell a finished answer from a
+/// truncated one apart. `run_turn` is the one place that already tells them
+/// apart, on the exact signal (`outcome.hit_iteration_cap`) that settles this
+/// node's attempt row [`RunStatus::Failed`](crate::ports::RunStatus::Failed)
+/// a few lines above where this is pushed — so this collector carries that
+/// SAME fact sideways to the runner rather than a second detector re-deriving
+/// its own reading of the same turn, which is exactly the kind of disagreement
+/// issue #1865 exists to close. The runner's `reclassify_capped_nodes` reads
+/// it back and relabels the matching row [`WorkflowNodeStatus::Error`], the
+/// same host-side move `reclassify_blocked` makes for a parked node.
+///
+/// Cheap to clone; every clone appends to the same list.
+#[derive(Clone, Default)]
+pub struct RunCappedNodes {
+    inner: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RunCappedNodes {
+    /// Records that `node_id`'s turn truncated at the iteration cap.
+    pub fn push(&self, node_id: String) {
+        self.inner
+            .lock()
+            .expect("run capped-nodes poisoned")
+            .push(node_id);
+    }
+
+    /// Takes everything recorded so far, leaving the collector empty.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inner.lock().expect("run capped-nodes poisoned"))
+    }
+}
+
 /// Which attempt each `agent` node ran as.
 ///
 /// The fourth channel in the [`RunNotices`] / [`RunBoard`] / [`RunBlocks`]
@@ -852,6 +900,7 @@ impl HarnessAgentRunner {
         notices: RunNotices,
         board: RunBoard,
         blocks: RunBlocks,
+        capped: RunCappedNodes,
         approvals: RunApprovals,
         artifacts: RunArtifacts,
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
@@ -871,6 +920,7 @@ impl HarnessAgentRunner {
             notices,
             board,
             blocks,
+            capped,
             approvals,
             artifacts,
             board_claim,
@@ -1813,6 +1863,14 @@ impl HarnessAgentRunner {
         // answer. Keep the engine's typed `LimitStop` outcome below, but do not
         // let the durable attempt claim that this node finished successfully.
         let (status, error) = if outcome.hit_iteration_cap {
+            // Issue #1865: the SAME signal that settles this attempt row
+            // `Failed` also tells the runner which node's row to relabel —
+            // see `RunCappedNodes` for why this must not be a second detector
+            // re-deriving the same fact from somewhere else. `lineage_node` is
+            // the resolved node id this whole turn ran as (the graph node id
+            // when there is one, else the agent ref), the same id `nodes`
+            // carries its row under.
+            self.capped.push(lineage_node.clone());
             (
                 crate::ports::RunStatus::Failed,
                 Some("agent stopped at the max_tool_iterations cap before finishing".to_string()),
@@ -2416,6 +2474,7 @@ mod tests {
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
+            RunCappedNodes::default(),
             RunApprovals::default(),
             RunArtifacts::default(),
             board_claim,
@@ -2465,6 +2524,149 @@ mod tests {
                 ),
             ],
             "a node with no graph id resolves lineage to the agent ref"
+        );
+    }
+
+    /// A turn double that answers every call by reporting it truncated at the
+    /// iteration cap (issue #1865) — the one signal `reclassify_capped_nodes`
+    /// keys off, so a fake this narrow is enough to drive the arm under test
+    /// without a scripted model.
+    struct CappedWorkflowTurn;
+
+    #[async_trait]
+    impl RunTurn for CappedWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            _workflow_run_id: &str,
+            _node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "partial answer, still going".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: true,
+                halted_for_spend: None,
+            })
+        }
+    }
+
+    /// Issue #1865: the two halves of the disagreement the issue reports —
+    /// closed at their source. `run_turn` settles the attempt row `Failed` for
+    /// a capped turn (issue #926); this pins that the SAME turn also feeds
+    /// `RunCappedNodes`, the one channel `reclassify_capped_nodes` reads to
+    /// bring the run-level node row into agreement.
+    ///
+    /// Not an end-to-end `run_workflow` proof (that would need the scripted
+    /// HTTP model `iteration_cap_turn_test` documents as the only way to
+    /// genuinely spend `max_tool_iterations`) — this pins the host-side HALF
+    /// of the mechanism this module owns: given the engine already told the
+    /// host "this turn was capped", both the attempt row and the sideways
+    /// channel agree about it. `runner::reclassify_capped_nodes`'s own test
+    /// pins the other half — that the channel's contents actually flip a
+    /// node's row from `Ok` to `Error`.
+    #[tokio::test]
+    async fn a_capped_turn_settles_failed_and_feeds_run_capped_nodes() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1865-capped-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(CappedWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1865"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1865"));
+        let capped = RunCappedNodes::default();
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1865".to_string(),
+            "run-1865".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            capped.clone(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let (_, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({ "node_id": "loop_step", "prompt": "keep going" }),
+            )
+            .await
+            .expect("a capped turn is still Ok — the reply is a real, partial checkpoint");
+        assert!(outcome.hit_iteration_cap);
+
+        // Half 1: the sideways channel `reclassify_capped_nodes` reads.
+        assert_eq!(
+            capped.take(),
+            vec!["loop_step".to_string()],
+            "the capped node's id must reach the channel the runner reconciles against"
+        );
+
+        // Half 2: the attempt row this run's Observatory/task-detail surfaces
+        // read — issue #926's pre-existing settle, pinned here so a future
+        // change cannot decouple it from the #1865 signal above without a
+        // test noticing.
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1865".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1, "one attempt for one node turn");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+        assert_eq!(
+            attempts[0].error.as_deref(),
+            Some("agent stopped at the max_tool_iterations cap before finishing")
         );
     }
 
@@ -2557,6 +2759,7 @@ mod tests {
             notices.clone(),
             RunBoard::default(),
             RunBlocks::default(),
+            RunCappedNodes::default(),
             RunApprovals::default(),
             RunArtifacts::default(),
             board_claim,
@@ -2623,6 +2826,7 @@ mod tests {
             notices.clone(),
             RunBoard::default(),
             RunBlocks::default(),
+            RunCappedNodes::default(),
             RunApprovals::default(),
             RunArtifacts::default(),
             board_claim,
@@ -3174,6 +3378,7 @@ mod tests {
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
                 blocks: Default::default(),
+                capped: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -3225,6 +3430,7 @@ mod tests {
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
                 blocks: Default::default(),
+                capped: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -3393,6 +3599,7 @@ mod tests {
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
                 blocks: Default::default(),
+                capped: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -3451,6 +3658,7 @@ mod tests {
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
                 blocks: Default::default(),
+                capped: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
