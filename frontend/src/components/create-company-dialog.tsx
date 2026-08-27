@@ -62,8 +62,7 @@ import {
  * its id (to archive) and name (to prefill and to name in the copy).
  */
 export type CreateCompanyRequest =
-  | { kind: "create" }
-  | { kind: "reset"; company: string; name: string };
+  { kind: "create" } | { kind: "reset"; company: string; name: string };
 
 /** The host default the form starts on; the host injects this when omitted. */
 const DEFAULT_POLICY_MODE = "auto";
@@ -98,6 +97,13 @@ interface Props {
    * or company it is showing in that case: the company the picker or console
    * still displays is the one this reset just removed, and nothing else
    * tells it that (codex review on #1828, PR comment 3863028405).
+   *
+   * Also true when a provisioning attempt (reset or plain create) answered
+   * ambiguously and this dialog could not safely reconcile it — see
+   * `createMaybe` below. The company may already exist under the id this
+   * attempt sent, even though the dialog is closing on an error: the parent
+   * must refresh its roster so the operator can find it by hand (codex
+   * review on #1828, PR comment 3874553506).
    */
   onClose: (archived: boolean) => void;
   /**
@@ -107,7 +113,12 @@ interface Props {
   onCreated: (status: CompanyStatus) => void;
 }
 
-export function CreateCompanyDialog({ client, request, onClose, onCreated }: Props) {
+export function CreateCompanyDialog({
+  client,
+  request,
+  onClose,
+  onCreated,
+}: Props) {
   const [name, setName] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
   const [policyMode, setPolicyMode] = useState(DEFAULT_POLICY_MODE);
@@ -134,6 +145,21 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
   // refresh — a spurious refresh is cheap; a missed one leaves the console
   // scoped to an archived company.
   const [archiveMaybe, setArchiveMaybe] = useState(false);
+  // Whether a provisioning attempt answered ambiguously
+  // (`wasAmbiguousProvisionOutcome`) and the dialog reaches `submit`'s
+  // ordinary error path anyway — either because the id was operator-typed
+  // (reconciliation is deliberately skipped for those, see the comment at
+  // the reconciliation lookup below) or because the self-generated id's own
+  // reconciliation lookup also failed. Either way the company may already
+  // exist under the id this attempt sent; the error shown ("already in
+  // use", or the reset's "couldn't create") reads as a definite refusal, but
+  // isn't necessarily one. Same treatment as `archiveMaybe` above: OR'd into
+  // every `onClose` call so the parent refreshes its roster regardless,
+  // letting the operator find the company by hand if it did land (codex
+  // review on #1828, PR comment 3874553506) — a spurious refresh is cheap;
+  // a missed one strands the operator on a stale roster with no way back
+  // into a company that was, in fact, created.
+  const [createMaybe, setCreateMaybe] = useState(false);
   // Whether the operator has directly edited the id field since the dialog
   // opened, as opposed to it merely holding the value `resetReplacementId`
   // pre-filled it with. Distinct from "is `explicitId` non-blank": a reset's
@@ -164,12 +190,15 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // field is still empty at this point, so there is nothing yet to derive
     // an id from. `submit` generates one (`autoCompanyId`) once a name
     // exists, same as the reset default, if the operator never fills this in.
-    setExplicitId(request.kind === "reset" ? resetReplacementId(request.company) : "");
+    setExplicitId(
+      request.kind === "reset" ? resetReplacementId(request.company) : "",
+    );
     setAdvanced(false);
     setBusy(false);
     setError(null);
     setArchived(false);
     setArchiveMaybe(false);
+    setCreateMaybe(false);
     setIdTouched(false);
   }, [request]);
 
@@ -276,7 +305,10 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // just before provisioning, so a bad id never leaves the operator with
     // the old company already gone and no way to retry cleanly (codex review
     // on #1828, PR comments 3861770475 and 3862711330).
-    if (request.kind === "reset" && collidesWithArchived(explicit, request.company)) {
+    if (
+      request.kind === "reset" &&
+      collidesWithArchived(explicit, request.company)
+    ) {
       setError(
         `The replacement id can't be ${request.company} — that's the company being archived. Leave the field blank for an auto-generated id, or choose a different one.`,
       );
@@ -469,6 +501,23 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
           }
         }
       }
+      // Reaching this point with an ambiguous outcome means reconciliation
+      // either never ran (an operator-typed id — see the comment above) or
+      // ran and came up empty (a self-generated id whose own lookup, and
+      // its tenant-namespaced fallback, both failed). Either way the
+      // company may already exist under the id just sent, unbeknownst to
+      // this dialog: `register_and_report_status` on the host registers a
+      // company before reading back its status for the response
+      // (`server/provision.rs`), so a transient failure in that read still
+      // leaves the company live, and a retry against the same id then
+      // answers `company_exists` for a request that, from the operator's
+      // side, looks like it never succeeded at all (issue #1828 comment
+      // 3874553506). `setCreateMaybe` forces `onClose` to report `true`
+      // regardless of how the operator closes from here, so the parent
+      // refreshes its roster and the operator can find the company by hand.
+      if (wasAmbiguousProvisionOutcome(err)) {
+        setCreateMaybe(true);
+      }
       // `!selfGenerated` — a `company_exists` refusal at this point is about
       // whatever the operator typed into the Advanced id field, not the name
       // field, and the message needs to point at the right one (see
@@ -505,7 +554,12 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // writes its warning into a hidden dialog, and a late success still calls
     // `onCreated`, navigating the operator into a company they thought they
     // had cancelled out of.
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose(archived || archiveMaybe)}>
+    <Dialog
+      open
+      onOpenChange={(open) =>
+        !open && !busy && onClose(archived || archiveMaybe || createMaybe)
+      }
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
@@ -563,7 +617,9 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
                 <Label htmlFor="create-company-policy">Approval tier</Label>
                 <Select
                   value={policyMode}
-                  onValueChange={(v) => setPolicyMode((v as string) ?? DEFAULT_POLICY_MODE)}
+                  onValueChange={(v) =>
+                    setPolicyMode((v as string) ?? DEFAULT_POLICY_MODE)
+                  }
                   disabled={busy}
                 >
                   <SelectTrigger id="create-company-policy">
@@ -604,11 +660,17 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onClose(archived || archiveMaybe)} disabled={busy}>
+          <Button
+            variant="outline"
+            onClick={() => onClose(archived || archiveMaybe || createMaybe)}
+            disabled={busy}
+          >
             Cancel
           </Button>
           <Button
-            variant={isReset ? "destructive" : name.trim() ? "default" : "secondary"}
+            variant={
+              isReset ? "destructive" : name.trim() ? "default" : "secondary"
+            }
             onClick={() => void submit()}
             disabled={busy || !name.trim()}
           >
