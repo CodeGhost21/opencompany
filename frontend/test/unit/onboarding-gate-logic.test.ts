@@ -249,7 +249,7 @@ describe("shouldPollActivationForRole", () => {
 // interactive shell, for the whole outage in the second case. `retrying`
 // (from `useActivationGate`) is what tells these two apart.
 describe("shouldHoldShellPending", () => {
-  const pendingBase = { ...base, retrying: false };
+  const pendingBase = { ...base, retrying: false, setupChecked: true };
 
   it("does not hold once the first read has landed, even if a later poll starts retrying", () => {
     expect(
@@ -279,6 +279,56 @@ describe("shouldHoldShellPending", () => {
   it("does not hold while setup/staffing is still open — the gate could not show yet either way", () => {
     expect(
       shouldHoldShellPending({ ...pendingBase, checked: false, retrying: true, setupOpen: true }),
+    ).toBe(false);
+  });
+
+  // PR #1875 review finding, round 12: `setupOpen` starts `true` in `AppShell`
+  // from mount — "until `SetupController` has read the roster we do not know
+  // whether setup is about to open" (its own doc comment) — and only flips
+  // once that async `listTeam` read lands. The guard just above (`setupOpen`
+  // alone) cannot tell that starting value apart from a roster read that
+  // already landed and found the company genuinely unstaffed; both read as
+  // `true`. Round 8 copied that single-field check verbatim into this
+  // function without asking whether `setupOpen`'s own unresolved substate
+  // needed the same treatment as `checked`'s (round 8), `isAdmin`'s (round 9)
+  // and the pre-`checked` window's (round 10) — so a staffed, incompletely
+  // activated admin got the ordinary interactive shell for the entire roster
+  // read (any duration — it is a full `listTeam` call, not a cached flag),
+  // then had it abruptly replaced by the pending loader or the gate the
+  // instant that unrelated read finally landed and flipped `setupOpen` to
+  // `false`. `setupChecked` — mirroring `checked` on the activation side —
+  // is what tells the two `setupOpen: true` cases apart.
+  it("holds the shell pending while setup's own roster read has not landed yet — indistinguishable from a genuinely open dialog until it does (PR #1875 review finding, round 12)", () => {
+    expect(
+      shouldHoldShellPending({
+        ...pendingBase,
+        checked: true,
+        status: incomplete,
+        setupChecked: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not hold once setup's roster read has landed and the company turns out staffed — falls through to the activation checks exactly as before", () => {
+    expect(
+      shouldHoldShellPending({
+        ...pendingBase,
+        checked: true,
+        status: incomplete,
+        setupChecked: true,
+        setupOpen: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not hold for a confirmed non-admin even while setup's roster read is unresolved — the gate could never block them, so there is nothing to wait for", () => {
+    expect(
+      shouldHoldShellPending({
+        ...pendingBase,
+        checked: false,
+        isAdmin: false,
+        setupChecked: false,
+      }),
     ).toBe(false);
   });
 

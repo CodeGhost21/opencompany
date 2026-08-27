@@ -153,15 +153,44 @@ export function shouldShowOnboardingGate(input: GateDecisionInput): boolean {
  * branch: any unresolved first read holds, whether it is still in flight or
  * has already failed once and is retrying — the caller cannot tell those
  * two states apart from the outside, so neither should this predicate.
+ *
+ * The `setupOpen` branch below has the same class of bug once more (PR #1875
+ * review finding, round 12): round 8 copied it verbatim from
+ * `shouldShowOnboardingGate` — see this file's own `setupOpen` doc — on the
+ * premise that "setup is open or the company is unstaffed" is a settled
+ * answer whenever it reads `true`. It is not: `AppShell`'s `setupOpen` state
+ * *starts* `true` "until `SetupController` has read the roster we do not
+ * know whether setup is about to open" (its own doc comment), and only
+ * flips once that async `listTeam` call lands — indistinguishable here from
+ * a roster read that already landed and found the company genuinely
+ * unstaffed. A staffed, incompletely-activated admin therefore got the
+ * ordinary interactive shell for the entire roster read (a real network
+ * call, not a cached flag — no bound on how long), then had it abruptly
+ * replaced by this pending loader or the gate the instant that unrelated
+ * read finally landed and flipped `setupOpen` to `false` — the exact
+ * failure this predicate exists to close, just triggered by the setup read
+ * instead of the activation read. `setupChecked` names whether that read has
+ * landed, mirroring `checked` on the activation side; only once it has can
+ * `setupOpen`'s value be trusted to mean "genuinely open" rather than "no
+ * answer yet".
  */
 export function shouldHoldShellPending(
-  input: GateDecisionInput & { retrying: boolean },
+  input: GateDecisionInput & { retrying: boolean; setupChecked: boolean },
 ): boolean {
   if (input.skippedThisSession) return false;
-  if (input.setupOpen) return false;
   // A confirmed non-admin can never see the gate (`shouldShowOnboardingGate`'s
-  // own guard) — nothing to hold the shell pending for.
+  // own guard) — nothing to hold the shell pending for, regardless of what
+  // either read below is still resolving.
   if (input.isAdmin === false) return false;
+
+  if (!input.setupChecked) {
+    // Setup's own roster read has not landed — `setupOpen` cannot yet be
+    // trusted (see this function's own doc); hold rather than let the
+    // ordinary shell render on what might turn out to be an unstaffed,
+    // not-yet-activated company.
+    return true;
+  }
+  if (input.setupOpen) return false;
 
   if (!input.checked) {
     // The first read has not landed at all yet — still in flight, or it has

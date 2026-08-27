@@ -583,6 +583,27 @@ export function AppShell({
   // whether setup is about to open, and an unheld tour would flash its welcome
   // over it.
   const [setupOpen, setSetupOpen] = useState(true);
+  /**
+   * Whether `SetupController`'s own roster read has landed (PR #1875 review
+   * finding, round 12).
+   *
+   * `setupOpen` starting `true` and a roster read that already landed with
+   * the company genuinely unstaffed are indistinguishable to anything that
+   * only reads `setupOpen` — `shouldHoldShellPending` needs to tell them
+   * apart (see its own doc). `SetupController`'s `onOpenChange` only ever
+   * fires once its internal `checked` is true, so its firing at all is
+   * itself the signal; `handleSetupOpenChange` below turns that into state
+   * the gate predicate can read. A separate flag rather than folding into
+   * `setupOpen` itself: `setupOpen` must stay a plain "is setup on screen or
+   * blocking" boolean for every other reader (`TourController`'s `hold`,
+   * `shouldShowOnboardingGate`), and conflating "resolved" into its value is
+   * exactly the bug this fixes.
+   */
+  const [setupChecked, setSetupChecked] = useState(false);
+  const handleSetupOpenChange = useCallback((open: boolean) => {
+    setSetupChecked(true);
+    setSetupOpen(open);
+  }, []);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
   // `#/setup` is an intentional, manual recovery path. It is a route rather
@@ -2781,6 +2802,7 @@ export function AppShell({
       status: activationGate.status,
       checked: activationGate.checked,
       setupOpen,
+      setupChecked,
       skippedThisSession: gateSkipped,
       isAdmin: isGateAdmin,
       retrying: activationGate.retrying,
@@ -3324,7 +3346,7 @@ export function AppShell({
         routeOpen={view === "setup"}
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
-        onOpenChange={setSetupOpen}
+        onOpenChange={handleSetupOpenChange}
         onCompleted={() => {
           // Keep these together: Company mounts with the new refresh key, and
           // setup's payoff is the roster rather than the Overview graph.
