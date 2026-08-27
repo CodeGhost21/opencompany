@@ -35,6 +35,7 @@ use crate::ports::types::{
     AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
     ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
     OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
+    ToolGrantsOverride,
 };
 use crate::store::select::MemoryScopes;
 
@@ -154,6 +155,18 @@ struct BundleMeta {
     /// `None` — the manifest's `[policy]` decides, exactly as before.
     #[serde(default)]
     overlay_policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants at export time
+    /// (issue #1796). Preserved so an export→import does not silently revoke an
+    /// integration the operator granted from a connect surface, leaving the
+    /// restored company "Connected" and reaching nobody. `#[serde(default)]`
+    /// for back-compat with older bundles, which read as `None`: the manifest's
+    /// `[tools]` decides, exactly as before.
+    ///
+    /// Carries the **seed's** list beside it, not the record's materialised one
+    /// — see `read_via_ports` for why the bundle's `company.toml` must not name
+    /// what the console added.
+    #[serde(default)]
+    overlay_tool_grants: Option<ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings at export time. Preserved so an
     /// export→import does not silently widen a desk back to the company's full
     /// grant — the same class of loss `overlay_policy` above is carried to
@@ -246,6 +259,10 @@ struct BundleContents {
     /// silently re-tightening (or re-loosening) the approval gate on import —
     /// the same class of loss #343 fixed for spend caps.
     overlay_policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants, carried through the
+    /// bundle so export→import preserves an integration granted from a connect
+    /// surface (rather than restoring it "Connected" and reaching nobody).
+    overlay_tool_grants: Option<ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings, carried through the bundle so
     /// export→import preserves a console-narrowed department (rather than
     /// restoring it at the company's full grant).
@@ -299,9 +316,28 @@ impl BundleContents {
             });
         }
 
+        // Issue #1796: the bundle carries the **seed's** `[tools].allow`, not the
+        // record's materialised one.
+        //
+        // `write_to_dir` serializes this manifest straight into the bundle's
+        // `company.toml`, and that file BECOMES THE SEED for whatever host
+        // serves the restored company. Writing the folded list there would hand
+        // the next rebuild a seed that already grants `chargebee`, the carry
+        // rule would correctly read that as "version control spoke" and drop the
+        // override — and the console grant would have been silently promoted to
+        // a manifest grant: attribution gone, and `DELETE …/tools/grants` unable
+        // to reach it ever again. The override rides the bundle beside it, and
+        // `restore_via_ports` re-folds, so the restored record is materialised
+        // exactly as the builder would leave it.
+        let mut manifest = record.manifest;
+        manifest.tools.allow = crate::ports::types::seed_tool_allow(
+            &manifest.tools.allow,
+            record.overlay_tool_grants.as_ref(),
+        );
+
         Ok(Self {
             id: id.clone(),
-            manifest: record.manifest,
+            manifest,
             lifecycle: record.lifecycle,
             template_provenance: record.template_provenance,
             setup: record.setup,
@@ -320,6 +356,7 @@ impl BundleContents {
             overlay_agent_edits: record.overlay_agent_edits,
             overlay_retired_agents: record.overlay_retired_agents,
             overlay_policy: record.overlay_policy,
+            overlay_tool_grants: record.overlay_tool_grants,
             overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
         })
@@ -371,12 +408,21 @@ impl BundleContents {
         }
         // The manifest + lifecycle; ledger is appended separately so the store's
         // append-only ledger stays authoritative.
+        // The mirror of the strip in `read_via_ports`: the bundle holds the seed,
+        // so the record written here is re-folded. Without it a restored company
+        // would report its console grants as ungranted — and every reader of
+        // `[tools].allow` would agree with that — until its first rebuild.
+        let mut manifest = self.manifest.clone();
+        manifest.tools.allow = crate::ports::types::effective_tool_allow(
+            &manifest.tools.allow,
+            self.overlay_tool_grants.as_ref(),
+        );
         store
             .save(&CompanyRecord {
                 overlay_agent_edits: self.overlay_agent_edits.clone(),
                 overlay_retired_agents: self.overlay_retired_agents.clone(),
                 id: self.id.clone(),
-                manifest: self.manifest.clone(),
+                manifest,
                 ledger: Vec::new(),
                 lifecycle: self.lifecycle.clone(),
                 overlay_agents: self.overlay_agents.clone(),
@@ -386,6 +432,7 @@ impl BundleContents {
                 overlay_workflows: self.overlay_workflows.clone(),
                 overlay_budgets: self.overlay_budgets.clone(),
                 overlay_policy: self.overlay_policy.clone(),
+                overlay_tool_grants: self.overlay_tool_grants.clone(),
                 overlay_desk_tools: self.overlay_desk_tools.clone(),
                 disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
@@ -435,6 +482,7 @@ impl BundleContents {
             overlay_agent_edits: self.overlay_agent_edits.clone(),
             overlay_retired_agents: self.overlay_retired_agents.clone(),
             overlay_policy: self.overlay_policy.clone(),
+            overlay_tool_grants: self.overlay_tool_grants.clone(),
             overlay_desk_tools: self.overlay_desk_tools.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
@@ -606,6 +654,7 @@ impl BundleContents {
             overlay_agent_edits: meta.overlay_agent_edits,
             overlay_retired_agents: meta.overlay_retired_agents,
             overlay_policy: meta.overlay_policy,
+            overlay_tool_grants: meta.overlay_tool_grants,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
         })
@@ -966,6 +1015,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1277,6 +1327,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1360,6 +1411,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1494,6 +1546,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1588,6 +1641,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
@@ -1709,6 +1763,7 @@ mod test {
             overlay_workflows: workflows.clone(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -1886,6 +1941,17 @@ mod test {
                 set_by: admin_actor(),
                 at_millis: 1_700_000_000_002,
             }),
+            // Issue #1796: the console tool grants ride the same bundle, and
+            // need it more sharply than the desk ceiling below — this is the
+            // one overlay that WIDENS `[tools].allow`, so dropping it would
+            // silently revoke an integration the operator granted from a
+            // connect surface, leaving the imported company "Connected" and
+            // reaching nobody.
+            overlay_tool_grants: Some(ToolGrantsOverride {
+                added: vec!["chargebee".to_string()],
+                set_by: admin_actor(),
+                at_millis: 1_700_000_000_003,
+            }),
             // Non-empty for the same reason the tier above is: an empty map here
             // could not detect the field being dropped from the bundle, and
             // dropping it would silently restore an imported company's narrowed
@@ -2014,6 +2080,135 @@ mod test {
         }
     }
 
+    /// **A console tool grant must not be promoted to a seed grant by a
+    /// round-trip** (issue #1796).
+    ///
+    /// `write_to_dir` serializes the bundle's manifest straight into
+    /// `company.toml`, and that file becomes the SEED for whatever host serves
+    /// the restored company. The record's manifest is materialised
+    /// seed-plus-grants, so carrying it verbatim would write a seed that already
+    /// grants `chargebee` — the next rebuild's carry rule would correctly read
+    /// that as "version control spoke", drop the override, and the operator's
+    /// attributed grant would have become a manifest grant that
+    /// `DELETE …/tools/grants` can never reach again.
+    ///
+    /// So the bundle carries the seed and the override separately, and the
+    /// restored record is re-folded. Both halves are asserted: the `company.toml`
+    /// on disk must NOT name the namespace, and the imported record must.
+    #[tokio::test]
+    async fn a_console_tool_grant_survives_a_roundtrip_without_becoming_a_seed_grant() {
+        let home1 = tmp_root("grants-src");
+        let home2 = tmp_root("grants-dst");
+        let dest = tmp_root("grants-bundle");
+        let id = CompanyId::new("grants-co");
+
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Grants Co"
+            output = "widgets"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [tools]
+            allow = ["*", "search"]
+        "#,
+        )
+        .expect("valid manifest");
+
+        let held = ToolGrantsOverride {
+            added: vec!["chargebee".to_string()],
+            set_by: admin_actor(),
+            at_millis: 1_700_000_000_003,
+        };
+
+        // The record exactly as `PUT …/tools/grants` leaves it: the override
+        // stored, and the grant folded into the manifest every reader consults.
+        let mut folded = manifest.clone();
+        folded.tools.allow.push("chargebee".to_string());
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: folded,
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: Some(held.clone()),
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        })
+        .await
+        .unwrap();
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // The bundle's `company.toml` IS the restored company's seed. It must
+        // carry version control's own list and nothing the console added.
+        let seed_toml = tokio::fs::read_to_string(dest.join(COMPANY_TOML))
+            .await
+            .expect("the bundle writes a company.toml");
+        let seed: CompanyManifest = toml::from_str(&seed_toml).expect("a valid seed");
+        assert_eq!(
+            seed.tools.allow,
+            vec!["*".to_string(), "search".to_string()],
+            "the exported seed must not carry the console's grant"
+        );
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        import_bundle(&dest, s2.clone(), e2, m2, c2, None)
+            .await
+            .unwrap();
+        let dst = s2.load(&id).await.unwrap().unwrap();
+
+        // The grant itself survives, still attributed to the operator...
+        assert_eq!(
+            dst.overlay_tool_grants.as_ref(),
+            Some(&held),
+            "the console grant was dropped by the bundle round-trip"
+        );
+        // ...and is folded back in, so the restored company grants it from the
+        // first read rather than from its first rebuild.
+        assert!(
+            crate::company::grants_chargebee_explicit(&dst.manifest.tools.allow),
+            "the restored record must grant it: {:?}",
+            dst.manifest.tools.allow
+        );
+        assert_eq!(
+            dst.manifest
+                .tools
+                .allow
+                .iter()
+                .filter(|g| *g == "chargebee")
+                .count(),
+            1,
+            "folded twice"
+        );
+        // And the seed is still recoverable from it, which is what keeps the
+        // grant revocable and keeps the next rebuild from clearing it.
+        assert_eq!(
+            crate::ports::types::seed_tool_allow(
+                &dst.manifest.tools.allow,
+                dst.overlay_tool_grants.as_ref()
+            ),
+            vec!["*".to_string(), "search".to_string()]
+        );
+    }
+
     /// Issue #343: a bundle carrying two overrides for one teammate is **refused**
     /// at import, not silently reduced to whichever row deserialized first.
     ///
@@ -2045,6 +2240,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
@@ -2133,6 +2329,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
