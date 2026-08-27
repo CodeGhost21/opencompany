@@ -332,6 +332,16 @@ pub struct WorkflowRunApprovalRow {
 /// keeps this **never greater than `pending_approvals.len()`**, matching
 /// [`RunVerdictFacts::stranded_approvals`](crate::ports::workflow_verdict::RunVerdictFacts::stranded_approvals)'s
 /// own invariant.
+///
+/// **Absence of a receipt is not a failed park** (PR #1883 Codex review). A
+/// `requires_approval` gate `park_pending_gates` parks is never given an
+/// `approvals` row at all — that receipt shape is `park_gated_calls`'s alone,
+/// for a call gated inside an agent turn (see the module docs on
+/// [`WorkflowRunApprovalRow`] and `workflow_verdict`'s two-shapes note). A
+/// node in `pending_approvals` with zero rows here is therefore that ordinary
+/// gate shape, structurally silent by design, not a park that failed — so it
+/// must NOT count as stranded. Only a node that has at least one row, and
+/// none of them `Parked`, is one this function can actually see fail.
 pub fn stranded_approvals(
     pending_approvals: &[String],
     approvals: &[WorkflowRunApprovalRow],
@@ -339,10 +349,11 @@ pub fn stranded_approvals(
     pending_approvals
         .iter()
         .filter(|node_id| {
-            !approvals.iter().any(|a| {
-                a.node_id.as_deref() == Some(node_id.as_str())
-                    && a.outcome == WorkflowApprovalOutcome::Parked
-            })
+            let mut rows = approvals
+                .iter()
+                .filter(|a| a.node_id.as_deref() == Some(node_id.as_str()))
+                .peekable();
+            rows.peek().is_some() && rows.all(|a| a.outcome != WorkflowApprovalOutcome::Parked)
         })
         .count()
 }
@@ -1004,6 +1015,32 @@ mod test {
             row("gate-b", WorkflowApprovalOutcome::ParkFailed),
             row("gate-b", WorkflowApprovalOutcome::Discarded),
         ];
+        assert_eq!(stranded_approvals(&pending, &approvals), 1);
+    }
+
+    /// PR #1883 Codex review: a `requires_approval` gate `park_pending_gates`
+    /// parks — the ordinary authored/policy-raised gate shape, not a call
+    /// gated inside an agent turn — never gets an `approvals` row at all
+    /// (`park_pending_gates` writes straight to the approvals queue and
+    /// `WorkflowRun::approvals`, and never touches it). Before the fix this
+    /// read as `!approvals.iter().any(node_id && Parked)` — vacuously true
+    /// for a node with zero rows — so every ordinary gate reported stranded
+    /// on a run that never made a single failed park. A card is live and
+    /// waiting; `pending` alone, with no matching row, must count zero.
+    #[test]
+    fn a_node_with_no_approval_rows_at_all_is_not_stranded() {
+        let pending = vec!["gate".to_string()];
+        let approvals: Vec<WorkflowRunApprovalRow> = Vec::new();
+        assert_eq!(stranded_approvals(&pending, &approvals), 0);
+    }
+
+    /// The same shape, mixed with a genuinely gated-and-unparkable node: the
+    /// receipt-less gate must still not count, while the node with real
+    /// failed-park rows does.
+    #[test]
+    fn a_receiptless_gate_beside_a_genuinely_stranded_node_counts_only_the_latter() {
+        let pending = vec!["gate".to_string(), "agent-node".to_string()];
+        let approvals = vec![row("agent-node", WorkflowApprovalOutcome::ParkFailed)];
         assert_eq!(stranded_approvals(&pending, &approvals), 1);
     }
 }
