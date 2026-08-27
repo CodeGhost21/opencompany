@@ -998,6 +998,14 @@ async fn edit_agent(
 
     company.runtime.store().save(&record).await?;
 
+    // Release the write lock before the possible rebuild below (PR #1875
+    // review finding): `rebuild_company` now serializes its own
+    // load-through-save of the record on this same lock, and this task
+    // holding it while calling in would deadlock a non-reentrant
+    // `tokio::sync::Mutex` against itself. The save above already landed
+    // under the lock; nothing past this point still needs it held.
+    drop(_lock);
+
     // A harness or model change needs the runtime rebuilt, not just saved.
     //
     // Lanes, router bindings and `LocalAcpAgent`'s model map are snapshots

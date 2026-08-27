@@ -338,6 +338,14 @@ async fn add_grant(
     record.manifest.tools.allow = record.effective_tool_allow();
 
     save(&company, &record).await?;
+    // Release the write lock before `apply_to_runtime`, which may call
+    // `rebuild_company` (PR #1875 review finding): the rebuild's own
+    // load-through-save of the record now serializes on this same lock, and
+    // this task is still holding it — a non-reentrant `tokio::sync::Mutex`, so
+    // keeping it would deadlock this handler against its own rebuild rather
+    // than protect anything. The save above already landed under the lock;
+    // nothing past this point still needs it held.
+    drop(_lock);
     let takes_effect = apply_to_runtime(&state, &company).await;
     Ok(Json(ToolGrantsDto::build_with(&record, takes_effect)))
 }
@@ -390,6 +398,11 @@ async fn clear_grants(
     record.manifest.tools.allow = effective_tool_allow(&seed, record.overlay_tool_grants.as_ref());
 
     save(&company, &record).await?;
+    // Release the write lock before `apply_to_runtime` for the same reason
+    // `add_grant` does (PR #1875 review finding): it may call
+    // `rebuild_company`, which now serializes its own load-through-save on
+    // this same lock, and this task still holding it would deadlock.
+    drop(_lock);
     // A withdrawal needs the same treatment as a grant, and arguably needs it
     // more: a revocation the runtime has not picked up is a capability the
     // operator believes they removed and the agents still hold.
