@@ -390,6 +390,8 @@ mod tests {
                 template_provenance: None,
                 setup: None,
                 overlay_tool_grants: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
