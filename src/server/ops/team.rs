@@ -137,9 +137,10 @@ struct TeamMemberDto {
     ///
     /// `companyAllow` repeats on every row, which is the payload cost of
     /// mirroring the detail shape exactly rather than inventing a leaner
-    /// parallel one. It is worth paying: an **empty `requested` means the
-    /// company's standard grant**, not "no tools", and a row that dropped the
-    /// ceiling would leave a client no way to say which it was looking at.
+    /// parallel one. It is worth paying: `requested` is three-state since issue
+    /// #1804 (`null` = the company's standard grant, `[]` = an explicit no-tools
+    /// grant, `[globs]` = narrow), and a row that dropped the ceiling would leave
+    /// a client no way to say which of the three it was looking at.
     tools: super::team_agent::AgentToolsDto,
     /// The desks this teammate sits on, resolved through the same helper the
     /// detail read uses (issue #601). Desks are the company's real grouping —
@@ -614,8 +615,13 @@ async fn add_member(
         role: body.role,
         description: body.description,
         // Issue #661 / L5: the teammate's own grant, intersected with the
-        // company allow-list by the shared reads/roster build. Empty = standard.
-        tools,
+        // company allow-list by the shared reads/roster build. A teammate created
+        // with no stated (and no billing-narrowed) grant is stored as `None` —
+        // inherit the company's standard grant — not `Some(vec![])`, which since
+        // issue #1804 is an explicit deny-all. This create path expresses only
+        // "inherit" and "narrow"; the deny-all state is reachable by editing the
+        // teammate afterwards (`PATCH …/team/{id}` with `tools: []`).
+        tools: if tools.is_empty() { None } else { Some(tools) },
         model: None,
         harness: None,
     };
