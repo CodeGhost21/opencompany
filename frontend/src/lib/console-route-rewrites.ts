@@ -17,8 +17,13 @@ export const REWRITE_RETIRED = (
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
   // `#/work` is where the "Work" nav row points in shared and bookmarked links;
   // the board itself lives at `#/ledgers/tasks`, so send the alias there rather
-  // than let it fall through to not-found (issue #1797).
-  if (head === "work") return ["ledgers", BOARD_LEDGER];
+  // than let it fall through to not-found (issue #1797). Bare only: the Work
+  // surface's real sub-pages are addressed under `#/ledgers/...` (for example
+  // `#/ledgers/manage`), never under `#/work/...`, so a `sub` here names
+  // nothing this alias can answer — swallowing it would silently show the
+  // board for an address that meant something else. Leave it to fall through
+  // to the same not-found handling any other unrecognized head gets.
+  if (head === "work" && !sub) return ["ledgers", BOARD_LEDGER];
   if (head === "memory") return ["settings", "brain"];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
