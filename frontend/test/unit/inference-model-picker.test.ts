@@ -705,6 +705,87 @@ describe("proxy-incompatible overrides survive an unready catalog (issue #1838 f
     expect(body.key).toBe("");
     expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
   });
+
+  it("preserves an untouched tier draft when the strip effect updates baseline (issue #1838 follow-up, eighth instance)", async () => {
+    // Reproduces the "type a key, edit multiple tiers, clear the key again"
+    // class the effect's own docstring describes. Mount keyless so the
+    // proxied window is open from the first render and the mount-time strip
+    // already drops `chat-v1`'s raw catalog id, leaving `models` and
+    // `baseline` in agreement — nothing to distinguish old vs. new behavior
+    // yet. Typing a key closes the window; while it's closed, type a genuine
+    // hand-typed draft into `reasoning-v1` (not raw-catalog-shaped, so the
+    // strip never touches it) and a fresh raw catalog id into `chat-v1`.
+    // Clearing the key reopens the window: the strip effect fires again and
+    // must fold *only* `chat-v1` into baseline. The old code replaced
+    // `baseline.models` wholesale with the full stripped snapshot, which
+    // silently promoted `reasoning-v1`'s untouched draft into baseline too —
+    // `hasTypedDraft()` then saw no difference, and switching providers
+    // discarded that draft with no confirmation.
+    const inference = status(
+      "openrouter",
+      { "chat-v1": "anthropic/claude-sonnet-5", "reasoning-v1": "reasoning-v1" },
+      false,
+    );
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/inference/models")) throw new Error("registry unreachable");
+        return inference;
+      },
+      put: async () => ({ status: inference, note: "" }),
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    // Mount-time strip already ran; baseline and models started equal so
+    // this pass has nothing left to prove.
+    expect(container.querySelector("input#inference-model-chat-v1")).toHaveProperty("value", "");
+
+    function setValue(input: HTMLInputElement | null, value: string) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    const keyInput = container.querySelector<HTMLInputElement>("input#inference-key");
+    const chatInput = container.querySelector<HTMLInputElement>("input#inference-model-chat-v1");
+    const reasoningInput = container.querySelector<HTMLInputElement>("input#inference-model-reasoning-v1");
+    expect(keyInput).not.toBeNull();
+    expect(chatInput).not.toBeNull();
+    expect(reasoningInput).not.toBeNull();
+
+    await act(async () => setValue(keyInput, "sk-test")); // closes the proxied window
+    await act(async () => setValue(reasoningInput, "custom-draft")); // genuine operator draft
+    await act(async () => setValue(chatInput, "openai/reasoning")); // fresh raw id to strip
+    await act(async () => setValue(keyInput, "")); // reopens the window; strip fires again
+    await act(async () => {});
+
+    expect(chatInput).toHaveProperty("value", "");
+    expect(reasoningInput).toHaveProperty("value", "custom-draft");
+
+    // Switching provider now must still ask before discarding reasoning-v1's
+    // draft. If the strip effect wrongly promoted it into baseline, this
+    // switches immediately with no confirmation dialog.
+    const providerTrigger = container.querySelector("#inference-provider") as HTMLButtonElement;
+    await act(async () => {
+      providerTrigger.click();
+    });
+    await act(async () => {});
+    const ollamaItem = Array.from(document.body.querySelectorAll('[data-slot="select-item"]')).find(
+      (el) => el.textContent?.includes("Ollama"),
+    ) as HTMLElement | undefined;
+    expect(ollamaItem).not.toBeUndefined();
+    await act(async () => {
+      ollamaItem?.click();
+    });
+    await act(async () => {});
+
+    expect(document.body.querySelector('[data-slot="alert-dialog-content"]')).not.toBeNull();
+    expect(container.querySelector<HTMLInputElement>("input#inference-model-reasoning-v1")).toHaveProperty(
+      "value",
+      "custom-draft",
+    );
+  });
 });
 
 describe("typing a passthrough id one keystroke at a time while proxied (issue #1838 follow-up, sixth instance)", () => {

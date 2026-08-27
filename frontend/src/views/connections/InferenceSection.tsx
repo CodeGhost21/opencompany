@@ -488,18 +488,32 @@ export function InferenceSection({
    * `<author>/<model>` id — a bare tier passthrough, or the proxy's own
    * `openrouter/<author>/<model>` form — is left alone either way.
    *
-   * Folds the strip into `baseline` in the same pass, not just `models`.
-   * `pickProvider` seeds both together from the same preset, so skipping
-   * `baseline` here left it holding the raw ids this effect had just
-   * stripped out of `models` — and `hasTypedDraft()` reads any such gap as
-   * an operator draft, however it got there. That flipped a same-tick
-   * `pickProvider("openrouter")` → `pickProvider(<something else>)` (typing
-   * a key in between, never touching Base URL or a model field) into an
-   * unwanted "Replace the provider draft?" confirmation, because this
-   * effect's own cleanup — not anything the operator typed — was the entire
-   * difference `hasTypedDraft()` saw. An automatic proxy-safety strip is no
-   * more a typed draft than the preset it is correcting; `baseline` has to
-   * move with it for the same reason it moves with the preset itself.
+   * Folds the strip into `baseline` in the same pass, not just `models` —
+   * but only for the tiers the strip actually touched. `pickProvider` seeds
+   * both together from the same preset, so skipping `baseline` here left it
+   * holding the raw ids this effect had just stripped out of `models` — and
+   * `hasTypedDraft()` reads any such gap as an operator draft, however it
+   * got there. That flipped a same-tick `pickProvider("openrouter")` →
+   * `pickProvider(<something else>)` (typing a key in between, never
+   * touching Base URL or a model field) into an unwanted "Replace the
+   * provider draft?" confirmation, because this effect's own cleanup — not
+   * anything the operator typed — was the entire difference `hasTypedDraft()`
+   * saw. An automatic proxy-safety strip is no more a typed draft than the
+   * preset it is correcting; `baseline` has to move with it for the same
+   * reason it moves with the preset itself.
+   *
+   * Merging only the *changed* tiers into `baseline.models` (not replacing
+   * the whole map with `next`) matters because `next` is a full snapshot of
+   * every tier, stripped or not. A keyless operator can edit several tiers
+   * in the same proxied window — say a hand-typed passthrough id on one
+   * tier that `stripProxyIncompatible` leaves alone, alongside a raw
+   * catalog id on another that it strips. Setting `baseline.models = next`
+   * wholesale would silently promote that untouched tier's draft into the
+   * baseline too, since `next` carries it through unchanged — and
+   * `hasTypedDraft()` would then see baseline and draft agree and let a
+   * provider switch discard it without the confirmation dialog, even though
+   * the operator never asked for that edit to become the new baseline
+   * (issue #1838 follow-up, eighth instance).
    *
    * Latched to the *edge* of entering a proxied window, not every render
    * inside one (issue #1838 follow-up, sixth instance). `models` has to stay
@@ -529,10 +543,16 @@ export function InferenceSection({
     if (strippedForWindow.current) return;
     strippedForWindow.current = true;
     const next = stripProxyIncompatible(models);
-    const changed = TIERS.some((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
-    if (!changed) return;
+    const changedTiers = TIERS.filter((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
+    if (changedTiers.length === 0) return;
     setModels(next);
-    setBaseline((b) => ({ ...b, models: next }));
+    setBaseline((b) => ({
+      ...b,
+      models: {
+        ...b.models,
+        ...Object.fromEntries(changedTiers.map((tier) => [tier, next[tier]])),
+      },
+    }));
   }, [provider, wouldSaveProxied, models]);
 
   function pickProvider(next: InferenceProvider) {
