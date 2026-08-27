@@ -182,6 +182,12 @@ pub(crate) struct TaskCard {
     /// lockstep with `originRunId`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) origin_workflow_id: Option<String>,
+    /// Why a failed or cancelled run returned this card to `todo` (issue
+    /// #1865) — the chip that tells a bounced card apart from a fresh one
+    /// without opening it. Omitted for every card that has never bounced,
+    /// which is every card the board rendered before this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bounced: Option<String>,
 }
 
 impl From<TaskRecord> for TaskCard {
@@ -204,6 +210,7 @@ impl From<TaskRecord> for TaskCard {
             workflow_proposal: t.workflow_proposal,
             origin_run_id: t.origin_run_id,
             origin_workflow_id: t.origin_workflow_id,
+            bounced: t.bounced,
         }
     }
 }
@@ -495,6 +502,7 @@ async fn create_task(
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        bounced: None,
     };
     company.runtime.upsert_task(&record).await?;
     Ok(Json(record.into()))
@@ -2765,6 +2773,7 @@ mod steer_redirect_test {
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
