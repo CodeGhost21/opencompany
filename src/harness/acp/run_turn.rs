@@ -89,6 +89,90 @@ impl AcpRunTurn {
     }
 }
 
+/// How a turn ended, coarsened from ACP's raw `stopReason` string into the
+/// shapes this fold treats differently.
+///
+/// `EndTurn` is the only one that means "the agent said everything it meant
+/// to say"; every other value means the reply in hand — if any — is partial,
+/// and the fold must say so rather than let it pass for an ordinary answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopKind {
+    EndTurn,
+    MaxTokens,
+    Refusal,
+    Cancelled,
+    Other,
+}
+
+/// Classifies ACP's raw `stopReason` into [`StopKind`].
+///
+/// `max_turn_requests` folds into [`StopKind::MaxTokens`]: both mean the turn
+/// was cut off by a budget rather than by the model choosing to stop, and the
+/// operator-facing consequence — a resumable cap, not a clean finish — is the
+/// same for either.
+fn classify_stop_reason(raw: &str) -> StopKind {
+    match raw {
+        "end_turn" => StopKind::EndTurn,
+        "max_tokens" | "max_turn_requests" => StopKind::MaxTokens,
+        "refusal" => StopKind::Refusal,
+        "cancelled" => StopKind::Cancelled,
+        _ => StopKind::Other,
+    }
+}
+
+/// The short, fixed note surfaced when a turn stopped for a reason other than
+/// `end_turn`. Appended regardless of whether there is prose alongside it, so
+/// a capped, refused, cancelled or unrecognized turn never reads like a clean
+/// finish. `EndTurn` returns an empty string; callers only invoke this for a
+/// non-`EndTurn` [`StopKind`].
+fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> String {
+    match kind {
+        StopKind::EndTurn => String::new(),
+        StopKind::MaxTokens => {
+            "[stopped: hit the token/iteration limit before finishing]".to_string()
+        }
+        StopKind::Refusal => "[stopped: the agent declined to continue]".to_string(),
+        StopKind::Cancelled => "[stopped: cancelled before finishing]".to_string(),
+        StopKind::Other => format!("[stopped: unrecognized stop reason \"{raw_stop_reason}\"]"),
+    }
+}
+
+/// Builds the reply for a turn that produced no `MessageChunk` text.
+///
+/// Never returns an empty string: a blank reply from a tool-only turn, or one
+/// cut short before the agent said anything, would read on the operator's
+/// timeline as "the agent had nothing to say" rather than what actually
+/// happened. Built from tool-call step **labels** only — never a step's
+/// `result` — because labels are host-derived (a tool's name), while a
+/// result can carry a tool's raw output or arguments; synthesizing a reply
+/// from those would leak into the reply text exactly what the redaction the
+/// rest of this fold performs is trying to avoid.
+fn synthesize_empty_reply(steps: &[TurnStep], kind: StopKind, raw_stop_reason: &str) -> String {
+    let tool_labels: Vec<&str> = steps
+        .iter()
+        .filter(|step| step.kind == TurnStepKind::ToolCall)
+        .map(|step| step.label.as_str())
+        .collect();
+
+    let mut reply = if tool_labels.is_empty() {
+        String::new()
+    } else {
+        format!("Ran: {}", tool_labels.join(", "))
+    };
+
+    if kind != StopKind::EndTurn {
+        if !reply.is_empty() {
+            reply.push(' ');
+        }
+        reply.push_str(&stop_reason_note(kind, raw_stop_reason));
+    } else if reply.is_empty() {
+        // A clean end with no text and no tool calls. Still never blank.
+        reply.push_str("[no reply]");
+    }
+
+    reply
+}
+
 /// Folds a turn's updates into the outcome the company cycle expects.
 ///
 /// Separate from the trait impl so it is testable without an agent, and because
@@ -150,13 +234,29 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
         }
     }
 
+    // Issue #1853: `stop_reason` is ACP's own signal for how the turn ended,
+    // and the old fold never read it — a tool-only turn folded to `reply ==
+    // ""`, and a max_tokens/refusal/cancelled turn folded identically to a
+    // clean `end_turn`, indistinguishable to the operator from an ordinary
+    // answer.
+    let kind = classify_stop_reason(&turn.stop_reason);
+
+    if reply.trim().is_empty() {
+        reply = synthesize_empty_reply(&steps, kind, &turn.stop_reason);
+    } else if kind != StopKind::EndTurn {
+        reply.push(' ');
+        reply.push_str(&stop_reason_note(kind, &turn.stop_reason));
+    }
+
     TurnOutcome {
         reply,
         steps,
-        // Issue #926: an ACP turn runs behind an external agent process, whose
-        // protocol carries no iteration-cap signal — there is nothing to read,
-        // and inventing `true` here would label every ACP reply a pause.
-        hit_iteration_cap: false,
+        // A max_tokens/max_turn_requests stop is exactly the shape issue #926
+        // describes: the tool loop was cut off by a budget rather than the
+        // model choosing to stop. Every other `StopKind` is not a cap —
+        // `Refusal`/`Cancelled`/`Other` are surfaced in the reply above
+        // instead, and `EndTurn` needs no flag at all.
+        hit_iteration_cap: matches!(kind, StopKind::MaxTokens),
         // Issue #1032: nor is there a spend halt to report. The stop hooks are
         // installed around THIS crate's `agent.turn`, and an ACP turn does not
         // run through it — the external process bills and stops on its own
@@ -329,6 +429,127 @@ mod test {
             updates,
             stop_reason: "end_turn".to_string(),
         }
+    }
+
+    fn turn_with_stop_reason(updates: Vec<AcpUpdate>, stop_reason: &str) -> AcpTurn {
+        AcpTurn {
+            updates,
+            stop_reason: stop_reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_empty_turn_with_max_tokens_is_a_cap_not_a_clean_success() {
+        // Issue #1853: the old fold ignored `stop_reason` entirely and
+        // hardcoded `hit_iteration_cap: false`, so a turn cut off by the
+        // token/iteration budget folded identically to a clean end_turn with
+        // nothing to say — the operator saw a blank reply with no cap signal
+        // to explain it.
+        let outcome = fold(turn_with_stop_reason(vec![], "max_tokens"));
+        assert!(
+            outcome.hit_iteration_cap,
+            "a max_tokens stop is a cap, not a clean finish"
+        );
+        assert!(
+            !outcome.reply.trim().is_empty(),
+            "a capped turn must say so, not fold to a blank reply"
+        );
+    }
+
+    #[test]
+    fn a_tool_only_turn_synthesizes_its_reply_from_step_labels() {
+        // No MessageChunk at all — the agent's entire turn was tool calls.
+        // The old fold left `reply == ""`; the operator's timeline showed
+        // nothing where two tool calls plainly ran.
+        let outcome = fold(turn(vec![
+            AcpUpdate::ToolCall {
+                id: "t1".into(),
+                title: "Read".into(),
+            },
+            AcpUpdate::ToolCallUpdate {
+                id: "t1".into(),
+                status: "completed".into(),
+                result: Some("2.4 kB".into()),
+            },
+            AcpUpdate::ToolCall {
+                id: "t2".into(),
+                title: "Write".into(),
+            },
+        ]));
+        assert_eq!(outcome.reply, "Ran: Read, Write");
+        // A clean end_turn needs no stop-reason note on top of the synthesis.
+        assert!(!outcome.reply.contains("[stopped"));
+    }
+
+    #[test]
+    fn a_refusal_is_surfaced_and_the_cap_stays_false() {
+        // The agent had prose to say, then declined to continue. The note
+        // must land regardless — a refusal is not a clean finish even when
+        // there is a reply to read.
+        let outcome = fold(turn_with_stop_reason(
+            vec![AcpUpdate::MessageChunk("I can't help with that.".into())],
+            "refusal",
+        ));
+        assert!(
+            outcome.reply.starts_with("I can't help with that."),
+            "the agent's own prose is kept: {}",
+            outcome.reply
+        );
+        assert!(
+            outcome
+                .reply
+                .contains("[stopped: the agent declined to continue]"),
+            "the refusal must be surfaced, not silently swallowed: {}",
+            outcome.reply
+        );
+        assert!(
+            !outcome.hit_iteration_cap,
+            "a refusal is not an iteration-cap pause"
+        );
+    }
+
+    #[test]
+    fn an_end_turn_reply_is_left_verbatim() {
+        // The ordinary case — and the one the pre-existing seam test already
+        // pins — must not gain a note or any other alteration just because
+        // this fold now reads `stop_reason`.
+        let outcome = fold(turn(vec![AcpUpdate::MessageChunk("all done".into())]));
+        assert_eq!(outcome.reply, "all done");
+        assert!(!outcome.hit_iteration_cap);
+    }
+
+    #[test]
+    fn an_unrecognized_stop_reason_is_surfaced_not_swallowed() {
+        // A stop_reason this fold has never heard of must not silently pass
+        // for a clean end_turn — the raw string is carried into the note so
+        // the operator (and whoever reads the ticket) can see exactly what
+        // ACP reported.
+        let outcome = fold(turn_with_stop_reason(
+            vec![AcpUpdate::MessageChunk("partial thought".into())],
+            "some_new_reason_acp_added_later",
+        ));
+        assert!(
+            outcome.reply.contains(
+                "[stopped: unrecognized stop reason \"some_new_reason_acp_added_later\"]"
+            ),
+            "the raw stop_reason must be visible, not swallowed: {}",
+            outcome.reply
+        );
+        assert!(!outcome.hit_iteration_cap);
+    }
+
+    #[test]
+    fn classify_stop_reason_maps_the_known_shapes() {
+        assert_eq!(classify_stop_reason("end_turn"), StopKind::EndTurn);
+        assert_eq!(classify_stop_reason("max_tokens"), StopKind::MaxTokens);
+        assert_eq!(
+            classify_stop_reason("max_turn_requests"),
+            StopKind::MaxTokens
+        );
+        assert_eq!(classify_stop_reason("refusal"), StopKind::Refusal);
+        assert_eq!(classify_stop_reason("cancelled"), StopKind::Cancelled);
+        assert_eq!(classify_stop_reason("anything_else"), StopKind::Other);
+        assert_eq!(classify_stop_reason(""), StopKind::Other);
     }
 
     #[test]
