@@ -118,6 +118,7 @@ mod test {
     async fn seed_company(store: &Arc<dyn crate::ports::CompanyStore>, id: &CompanyId) {
         store
             .save(&CompanyRecord {
+                overlay_tool_grants: None,
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
