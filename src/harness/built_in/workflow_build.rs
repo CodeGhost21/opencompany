@@ -452,9 +452,9 @@ pub async fn run_workflow_build_pass(
     let spec = match draft.into_outcome() {
         BuildOutcome::NotAutomatable(reason) => {
             // Issue #873: a verdict, not a fault. `settle_not_automatable`
-            // settles the attempt Succeeded and converts the card to a `once`
-            // deliverable so the next dispatch reaches its assignee instead of
-            // re-entering this pass to draw the same conclusion again.
+            // settles the attempt Declined (issue #1809) and converts the card to
+            // a `once` deliverable so the next dispatch reaches its assignee
+            // instead of re-entering this pass to draw the same conclusion again.
             settle_not_automatable(
                 &runtime,
                 &task_id,
@@ -743,10 +743,15 @@ async fn settle_to_todo(
 /// bug: the same door served both, so a correct refusal was filed as a failure
 /// and then retried forever.
 ///
-/// 1. **The attempt settles `Succeeded`.** The builder was asked a question and
-///    answered it. Filing that as `Failed` made an honest "don't automate this"
-///    indistinguishable from a model timeout — to the console, to the attempt
-///    history, and to anything counting failures.
+/// 1. **The attempt settles [`Declined`](RunStatus::Declined)** (issue #1809).
+///    The builder was asked a question and answered it. Filing that as `Failed`
+///    made an honest "don't automate this" indistinguishable from a model
+///    timeout — to the console, to the attempt history, and to anything counting
+///    failures. #873 first moved it to `Succeeded`, which stopped the red but
+///    hid a decline among genuine completions and let the external "work that
+///    stopped" surface count it as work that finished. `Declined` is its own
+///    terminal state: neither an error nor an ordinary success, so the refusal
+///    reads as exactly what it is on every surface.
 /// 2. **The card's deliverable flips to `once`.** This is what breaks the loop.
 ///    `CompanyRuntime::dispatch_task` routes a `workflow`-deliverable card to
 ///    this very pass instead of to its assignee, so returning the card to To-do
@@ -804,7 +809,7 @@ async fn settle_not_automatable(
              In Progress until the next boot"
         );
     }
-    finish_run(runtime, run_id, RunStatus::Succeeded, None, usage).await;
+    finish_run(runtime, run_id, RunStatus::Declined, None, usage).await;
 }
 
 /// Settles the attempt row. Best-effort: the work (or its failure) has already

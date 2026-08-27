@@ -90,6 +90,24 @@ effect emitted ─▶ evaluate ─▶ Allow ─▶ execute, journal
   this path: an approval that disappears must never read as one that was
   granted. Each card carries its own `expiresAtMillis`, so nothing vanishes
   unannounced.
+- **Extend the deadline** (issue #1805). Showing the countdown is only half the
+  answer to a run that would default-deny over a weekend; the other half is a
+  lever to keep it alive. `POST
+  /api/v1/companies/{id}/approvals/{aid}/extend` (and the single-company
+  `/api/v1/company/approvals/{aid}/extend` alias) re-anchors a parked
+  approval's TTL window to *now*, giving it a fresh full deadline, and answers
+  with the new `expiresAtMillis` so the card redraws its countdown without a
+  reload. It is guarded by the same company auth as resolve — keeping a stalled
+  run alive is not an admin-only action — and 404s when nothing is parked under
+  that id, so extending an approval that has since resolved or expired is told,
+  not silently accepted. **A full fresh window, not "+N hours"**: the sweeper
+  and the console both read `parked_at + ttl`, so moving that one instant is the
+  whole of an extension and there is no second offset for a projection to
+  disagree on. **It survives a redeploy**: the move is journaled as
+  `ApprovalExtended` and replayed on boot (the gate is rehydrated from the moved
+  anchor), so an extension is not quietly reverted the next time the process
+  restarts. The payload timestamp (`at_millis`, the content's age) is left where
+  it is — extending a deadline does not make the request fresher.
 - **Edit** lets the Operator amend the effect payload (fix the email, lower
   the amount) and approve the amended version; the brain sees both the
   original and the edit.

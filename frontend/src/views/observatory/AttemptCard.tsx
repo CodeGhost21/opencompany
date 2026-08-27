@@ -21,6 +21,8 @@ const TONE = {
   failed: "border-l-[var(--status-failed)]",
   blocked: "border-l-[var(--status-blocked)]",
   running: "border-l-[var(--status-running)]",
+  // A declined attempt (issue #1809) — neutral, never green.
+  idle: "border-l-[var(--status-idle)]",
 } as const;
 
 /** Whether this attempt should start open. */

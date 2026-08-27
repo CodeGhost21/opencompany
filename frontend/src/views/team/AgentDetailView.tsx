@@ -593,10 +593,13 @@ export function AgentDetailView({
    * ordinary edit by a member 403 the moment a stale tools value rode along.
    * Sent alone, a member never sends the key at all.
    */
-  async function saveTools(globs: string[]) {
+  async function saveTools(globs: string[] | null) {
     if (!agent) return;
     setSaving(true);
     try {
+      // Three-state (issue #1804): `null` resets to the standard company grant,
+      // `[]` is a deliberate deny-all, a non-empty list narrows. All three are
+      // meaningful on the wire, so the value is passed through untouched.
       const updated = await client.updateAgent(agentId, { tools: globs }, company);
       // A slow save must not clobber the active detail: only fold the response
       // in when the agent on screen is still the one we saved (the same guard
@@ -1278,23 +1281,27 @@ function Tools({
 }: {
   agent: AgentDetailDto;
   saving: boolean;
-  onSave: (globs: string[]) => Promise<void>;
+  onSave: (globs: string[] | null) => Promise<void>;
 }) {
   const summary = summarizeGrants(agent.tools);
   const canEdit = isEditable(agent, "tools");
   const [editing, setEditing] = useState(false);
-  const [field, setField] = useState(agent.tools.requested.join(", "));
+  // `requested` is three-state since #1804 (`null` = standard, `[]` = deny-all,
+  // list = narrow); the text field only ever renders the concrete globs, so a
+  // `null`/`[]` grant both start from an empty box.
+  const requestedGlobs = agent.tools.requested ?? [];
+  const [field, setField] = useState(requestedGlobs.join(", "));
 
   // The teammate on screen can change under this card (a slow detail load, a
   // sibling route swap), and a draft left over from the previous one would be
   // saved onto the new teammate. Re-seed whenever the stored list changes.
   useEffect(() => {
-    setField(agent.tools.requested.join(", "));
+    setField((agent.tools.requested ?? []).join(", "));
     setEditing(false);
   }, [agent.id, agent.tools.requested]);
 
   const draft = parseToolGlobs(field);
-  const dirty = toolGlobsDiffer(agent.tools.requested, draft);
+  const dirty = toolGlobsDiffer(requestedGlobs, draft);
   // Live, before the save rather than after it: the intersection is the thing
   // operators get wrong, and a glob the desk-and-company ceiling does not allow
   // is stored happily and then confers nothing. Saying so while they type is the
@@ -1316,7 +1323,9 @@ function Tools({
           ? deskCeilingActive
             ? "This teammate lists no tools of its own, so it holds what its desk allows, narrowed by the company."
             : "This teammate lists no tools of its own, so it holds everything the company allows."
-          : "What this teammate asked for, narrowed by what its desk and the company allow."
+          : summary.deniedAll
+            ? "This teammate has been given an explicit empty grant, so it holds no tools at all."
+            : "What this teammate asked for, narrowed by what its desk and the company allow."
       }
       action={
         canEdit && !editing ? (
@@ -1349,13 +1358,12 @@ function Tools({
             can only ever take capability away — never add to it.
           </p>
           {draft.length === 0 && (
-            // Not a warning about losing tools — the opposite, and the
-            // inversion is exactly what an operator clearing this field
-            // expects to be told.
+            // Since #1804 the inversion runs the other way: an empty list is a
+            // deliberate deny-all, NOT the standard grant. An operator who
+            // wants the standard grant back must use "Reset to standard" below.
             <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
-              {deskCeilingActive
-                ? "An empty list means the standard grant, not \"no tools\" — this teammate would hold what its desk and the company allow."
-                : "An empty list means the company's standard grant, not \"no tools\" — this teammate would hold everything the company allows."}
+              Saving an empty list is a deny-all — this teammate would hold no tools at all. To
+              give it the standard company grant instead, use “Reset to standard grant”.
             </p>
           )}
           {willNotApply.length > 0 && (
@@ -1370,19 +1378,40 @@ function Tools({
               variant="ghost"
               size="sm"
               onClick={() => {
-                setField(agent.tools.requested.join(", "));
+                setField(requestedGlobs.join(", "));
                 setEditing(false);
               }}
             >
               Cancel
             </Button>
+            {/* Reset to the standard grant (`null`) — a distinct action from
+                saving an empty list (`[]`, a deny-all) since #1804. Only shown
+                when the teammate is not already on the standard grant. */}
+            {!summary.standardGrant && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={saving}
+                onClick={() => {
+                  void onSave(null).then(
+                    () => setEditing(false),
+                    () => undefined,
+                  );
+                }}
+                data-testid="agent-tools-reset"
+              >
+                Reset to standard grant
+              </Button>
+            )}
             <Button
               size="sm"
               disabled={saving || !dirty}
               onClick={() => {
                 // The editor closes on success and stays open on a refusal;
                 // the toast is raised by the caller, so the rejection is
-                // swallowed here rather than left unhandled.
+                // swallowed here rather than left unhandled. An empty `draft`
+                // is a deliberate deny-all (`[]`), not a reset — that is the
+                // separate "Reset to standard grant" button above.
                 void onSave(draft).then(
                   () => setEditing(false),
                   () => undefined,
@@ -1397,12 +1426,16 @@ function Tools({
       )}
       {summary.effective.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="agent-tools-empty">
-          {/* Both ways of holding nothing land here, and they are not the same
-              fact. An agent that asked for nothing under a company that allows
-              nothing has been refused nothing. */}
+          {/* The ways of holding nothing land here, and they are not the same
+              fact. An agent on the standard grant under a company that allows
+              nothing has been refused nothing; a deny-all agent asked to hold
+              nothing; a narrowed agent asked for tools none of which are
+              covered. */}
           {summary.standardGrant
             ? "This teammate has no tools, because the company allows none."
-            : "This teammate has no tools. Nothing it asked for is covered by the company tool list."}
+            : summary.deniedAll
+              ? "This teammate has no tools: it was given an explicit empty (deny-all) grant."
+              : "This teammate has no tools. Nothing it asked for is covered by the company tool list."}
         </p>
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-tools">

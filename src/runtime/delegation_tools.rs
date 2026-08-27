@@ -160,7 +160,35 @@ the desk knows it was handed the work when asked directly."
 ///
 /// Lifted here from the harness-only delegation runtime so the hosted path can
 /// resolve a desk lead without the `openhuman` feature.
+///
+/// An [`Auto`](crate::ports::types::ResponderMode::Auto) channel (issue #1835)
+/// answers `None` **by definition, not by accident**: no lead exists there, so
+/// every lead-derived surface — the org chart's crown, the members-pane badge,
+/// a `delegate_to_desk` hand-off — stays honest without knowing the mode. The
+/// deterministic "who answers here" question is [`desk_default_responder`],
+/// which ignores the mode on purpose.
 pub fn desk_lead(record: &CompanyRecord, desk: &str) -> Option<String> {
+    let desk_id = record.resolve_desk_id(desk)?;
+    if !record.desk_responder_mode(&desk_id).is_lead() {
+        return None;
+    }
+    record
+        .effective_desk_members(&desk_id)
+        .into_iter()
+        .find(|m| record.is_roster_agent(m))
+}
+
+/// The desk's first effective roster member, **whatever its responder mode**
+/// (issue #1835).
+///
+/// For a [`Lead`](crate::ports::types::ResponderMode::Lead) desk this is the
+/// lead, byte-for-byte what [`desk_lead`] answers. For an `Auto` channel it is
+/// the deterministic fallback: the answer wherever per-message selection
+/// cannot run — the default build (the selector compiles only under the
+/// harness feature), the cycle's small-talk fast path, or a selection failure.
+/// One function, so "the fallback" cannot drift from "the pre-selector
+/// behaviour".
+pub fn desk_default_responder(record: &CompanyRecord, desk: &str) -> Option<String> {
     let desk_id = record.resolve_desk_id(desk)?;
     record
         .effective_desk_members(&desk_id)
@@ -188,7 +216,16 @@ pub fn desk_lead(record: &CompanyRecord, desk: &str) -> Option<String> {
 /// and runs before any brain — attributes its reply to the same teammate the
 /// turn it replaced would have been answered by.
 pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
-    let direct = |key: &str| desk_lead(record, key).or_else(|| record.resolve_roster_agent_id(key));
+    // The desk arm asks [`desk_default_responder`], not [`desk_lead`]: for a
+    // lead desk the two are identical, and for an `Auto` channel (issue #1835)
+    // — where `desk_lead` is `None` by definition — this stays the
+    // deterministic answer. The per-message selection that may override it is
+    // the harness brain's own rung, deliberately not folded in here: this seam
+    // is sync, record-only, and shared with the small-talk fast path, which
+    // must not pay an inference call to attribute a greeting.
+    let direct = |key: &str| {
+        desk_default_responder(record, key).or_else(|| record.resolve_roster_agent_id(key))
+    };
     direct(chat).or_else(|| crate::runtime::assignee::dm_key(chat).and_then(direct))
 }
 
@@ -240,6 +277,12 @@ pub fn reject_desk_target(record: &CompanyRecord, key: &str) -> Option<String> {
     let Some(desk_id) = record.resolve_desk_id(key) else {
         return Some(unknown_desk_message(record, key));
     };
+    // An `Auto` channel (issue #1835) is refused with its own reason, before
+    // the leadless-desk arm below can claim it: that arm's wording — "has no
+    // member on the roster" — would be a lie about a channel full of members.
+    if let Some(reason) = reject_auto_channel_target(record, &desk_id) {
+        return Some(reason);
+    }
     if desk_lead(record, &desk_id).is_some() {
         return None;
     }
@@ -257,6 +300,52 @@ Desks that can take work: {list}."
         None => format!(
             "The \"{desk_id}\" desk has no member on the roster, so nothing can be handed to it, \
 and no other desk has a lead either. Answer directly instead of delegating."
+        ),
+    })
+}
+
+/// Why an [`Auto`](crate::ports::types::ResponderMode::Auto) channel cannot
+/// take a `delegate_to_desk` hand-off (issue #1835) — or `None` when
+/// `desk_id` is an ordinary lead desk.
+///
+/// A hand-off to a desk is a hand-off to **its lead**, and an auto channel has
+/// none by design: its answerer is chosen per message. So the refusal says
+/// that, rather than reusing the leadless-desk wording ("has no member on the
+/// roster"), which would be a lie about a channel full of members.
+///
+/// **Public because both delegation paths must refuse identically.** The
+/// harness tool reaches it through [`reject_desk_target`]; the hosted
+/// device-side handler (`runtime::cycle`) calls it directly, because that path
+/// deliberately does *not* refuse an ordinary leadless desk — there a hand-off
+/// is a durable card on the board, visible whether or not anyone leads the
+/// desk yet. An auto channel is the one case it must still refuse, and codex
+/// caught the two paths disagreeing: the hosted one accepted the channel and
+/// wrote a card noting "no lead member on the roster yet", which is both false
+/// and permanently so.
+///
+/// Takes a **resolved** desk id, as `desk_responder_mode` does.
+pub fn reject_auto_channel_target(record: &CompanyRecord, desk_id: &str) -> Option<String> {
+    if record.desk_responder_mode(desk_id).is_lead() {
+        return None;
+    }
+    // `desk_lead` is `None` for an auto channel by definition, so this list
+    // excludes them without a second mode check.
+    let with_leads = desk_list(
+        desk_ids(record)
+            .into_iter()
+            .filter(|id| desk_lead(record, id).is_some())
+            .collect(),
+    );
+    Some(match with_leads {
+        Some(list) => format!(
+            "The \"{desk_id}\" channel has no lead — who answers there is picked per \
+message, not by rank — so `delegate_to_desk` has no one to hand this to. Desks that can \
+take work: {list}."
+        ),
+        None => format!(
+            "The \"{desk_id}\" channel has no lead — who answers there is picked per \
+message, not by rank — so `delegate_to_desk` has no one to hand this to, and no other \
+desk has a lead either. Answer directly instead of delegating."
         ),
     })
 }
@@ -900,6 +989,78 @@ members = ["counsel"]
         assert_eq!(chat_responder(&record, "legal"), None);
         assert_eq!(chat_responder(&record, "nope"), None);
         assert_eq!(chat_responder(&record, "dm:"), None);
+    }
+
+    /// Issue #1835: an `auto` channel answers the three routing questions
+    /// three different ways, and each is load-bearing. `desk_lead` is `None`
+    /// — no lead exists, so no crown, no badge, no `delegate_to_desk` target.
+    /// `desk_default_responder` is the first roster member — the deterministic
+    /// fallback wherever per-message selection cannot run. `chat_responder`
+    /// answers that fallback, so the small-talk fast path and the default
+    /// build route exactly as a lead desk would have.
+    #[test]
+    fn an_auto_channel_has_no_lead_but_a_deterministic_responder() {
+        let mut record = record();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["ceo".to_string(), "writer".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        assert_eq!(
+            desk_lead(&record, "launch"),
+            None,
+            "auto channels have no lead"
+        );
+        assert_eq!(
+            desk_default_responder(&record, "launch").as_deref(),
+            Some("ceo"),
+            "the deterministic fallback is the first roster member"
+        );
+        assert_eq!(
+            chat_responder(&record, "launch").as_deref(),
+            Some("ceo"),
+            "the shared seam answers the fallback, not None"
+        );
+        // An overlay desk that never states a mode is lead-routed — the
+        // pre-#1835 behaviour, byte-for-byte.
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "growth".to_string(),
+            name: "Growth".to_string(),
+            description: None,
+            members: vec!["writer".to_string()],
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+        assert_eq!(desk_lead(&record, "growth").as_deref(), Some("writer"));
+    }
+
+    /// Issue #1835: a hand-off to an `auto` channel is refused with the real
+    /// reason — no lead exists by design — never with the leadless-desk arm's
+    /// "no member on the roster", which would be a lie about a staffed
+    /// channel. The valid-target list must also exclude the channel itself.
+    #[test]
+    fn delegating_to_an_auto_channel_is_refused_naming_the_selection() {
+        let mut record = record();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["ceo".to_string(), "writer".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        let message = reject_desk_target(&record, "launch").expect("refused");
+        assert!(message.contains("picked per message"), "{message}");
+        assert!(
+            !message.contains("no member on the roster"),
+            "a staffed channel must not be reported empty: {message}"
+        );
+        // Desks that can take work are still offered — and never the channel.
+        assert!(message.contains("engineering"), "{message}");
+        assert!(
+            !message.contains("Desks that can take work: launch"),
+            "{message}"
+        );
     }
 
     #[test]
