@@ -704,6 +704,33 @@ pub struct TurnOutcome {
     /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
     /// would tell the operator to reply "continue" to a turn that never ran.
     pub hit_iteration_cap: bool,
+    /// A fixed, host-authored notice when this turn stopped for a reason that
+    /// is neither a clean finish nor a resumable cap (PR #1880 review) — on
+    /// the ACP fold, an agent-issued `refusal`, a `cancelled` turn, or a
+    /// `stopReason` this fold does not recognise.
+    ///
+    /// `None` on every other path, including [`hit_iteration_cap`] pauses,
+    /// which already have their own distinct, resumable-checkpoint signal and
+    /// must keep it — this field is for the opposite case, where there is no
+    /// checkpoint to resume. Before this field existed,
+    /// [`HarnessAgentRunner`](crate::workflows::caps::HarnessAgentRunner)
+    /// read only `hit_iteration_cap` to decide whether a workflow agent node
+    /// finished; it stayed `false` for all three of these stops too, so a
+    /// refused or cancelled turn settled the node `Succeeded` and reported
+    /// `StopReason::Finished` — indistinguishable from the agent actually
+    /// answering, and a declined or interrupted reply advanced the workflow
+    /// graph as if it were the deliverable.
+    ///
+    /// Always a short, host-authored string, **never** the raw
+    /// `stopReason`/error text an external agent sent (same reasoning as the
+    /// `Other` arm of `stop_reason_note` in `harness::acp::run_turn`, which
+    /// this field's message is drawn from): it ends up in
+    /// `EngineError::Capability`, a developer/operator-facing message, and an
+    /// unbounded wire string has no more business there than in a persisted
+    /// [`TurnStep`].
+    ///
+    /// [`hit_iteration_cap`]: Self::hit_iteration_cap
+    pub abnormal_stop: Option<String>,
     /// The in-turn **spend halt**, when one stopped this turn (issue #1032).
     ///
     /// `Some` exactly when the teammate declared a `budget_usd_daily`, the
@@ -1266,6 +1293,9 @@ impl CompanyAgent {
                 reply,
                 steps,
                 hit_iteration_cap,
+                // This is the built_in harness, not the ACP fold — the only
+                // path that produces an abnormal stop (PR #1880 review).
+                abnormal_stop: None,
                 halted_for_spend,
             },
             usages,
@@ -3026,6 +3056,12 @@ impl HarnessPool {
                                 // No model call ran, so no cap was reached
                                 // (issue #926). A refusal is not a pause.
                                 hit_iteration_cap: false,
+                                // This pre-turn refusal is its own, older
+                                // signal (the reply text itself names the
+                                // cap) — not the PR #1880 `abnormal_stop`,
+                                // which is scoped to the ACP fold's
+                                // refusal/cancelled/unrecognized stops.
+                                abnormal_stop: None,
                                 // And no in-turn hook fired, because no turn
                                 // ran (issue #1032). The reply already IS the
                                 // budget notice; labelling this as a halt too
@@ -3281,6 +3317,10 @@ impl HarnessPool {
                                     // No model call ran, so no cap was reached
                                     // (issue #926). A refusal is not a pause.
                                     hit_iteration_cap: false,
+                                    // Same reasoning as the total-ceiling
+                                    // refusal above: this is its own signal,
+                                    // not the PR #1880 ACP-only field.
+                                    abnormal_stop: None,
                                     // Same teammate cap, refused BEFORE the
                                     // turn (issue #1032). The in-turn brake
                                     // never armed, and the reply above already
