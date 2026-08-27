@@ -112,6 +112,17 @@ struct InferenceStatusDto {
     base_url: String,
     /// Abstract-tier → concrete model id.
     models: BTreeMap<String, String>,
+    /// The shipped tier → model defaults ([`inference::DEFAULT_TIER_MODELS`]),
+    /// independent of `provider`/`models` above.
+    ///
+    /// The console's OpenRouter preset used to hard-code its own copy of these
+    /// four ids so switching to OpenRouter had something to prefill the form
+    /// with before an operator typed an override — duplicated data that could
+    /// silently drift from this host's actual defaults the moment
+    /// `DEFAULT_TIER_MODELS` changed. Carrying the live values on every status
+    /// read means the preset is never more than one request stale, on a route
+    /// the console already polls.
+    default_tier_models: BTreeMap<String, String>,
     /// Where the effective config came from: `default` / `manifest` / `runtime`,
     /// or `managed` when nothing tenant-specific is configured.
     source: String,
@@ -447,12 +458,19 @@ async fn effective_status_with(
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
+    // Independent of `decl`: the shipped defaults are the same regardless of
+    // what (if anything) this company has configured.
+    let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
+        .iter()
+        .map(|(tier, model)| (tier.to_string(), model.to_string()))
+        .collect();
     Ok(match decl {
         Some(d) => InferenceStatusDto {
             provider: d.provider.clone(),
             slug: d.telemetry_slug().to_string(),
             base_url,
             models: d.models.clone(),
+            default_tier_models: default_tier_models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
             cognition: cognition.path.to_string(),
@@ -466,6 +484,7 @@ async fn effective_status_with(
             slug: "managed".to_string(),
             base_url,
             models: BTreeMap::new(),
+            default_tier_models,
             source: "managed".to_string(),
             key_configured: false,
             cognition: cognition.path.to_string(),
