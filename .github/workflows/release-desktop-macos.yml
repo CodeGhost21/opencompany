@@ -101,7 +101,18 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            echo "::error::create_release=true but no GitHub Release exists for tag '$TAG'. Run the \`Release\` workflow (release.yml) for that tag first — it owns \`generate_release_notes\` — then re-dispatch this workflow to attach the DMGs." >&2
+            echo "::error::create_release=true but no GitHub Release exists for tag '$TAG'. Run the \`Release\` workflow (release.yml) for that tag first — it generates the notes and creates the draft — then re-dispatch this workflow to attach the DMGs and publish it." >&2
+            exit 1
+          fi
+
+          # IT MUST STILL BE A DRAFT. This repository has immutable releases
+          # enabled: publishing freezes the release AND its asset list, so
+          # `gh release upload` on a published one is rejected outright. Caught
+          # here, in seconds, because the alternative is discovering it after
+          # two ~40-minute builds have already signed and notarized — which is
+          # exactly how v0.0.1-rc.1 went.
+          if [ "$(gh release view "$TAG" -R "$REPO" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::error::Release '$TAG' is already published. Immutable releases freeze the asset list at publish, so the DMGs can no longer be attached to it. Cut a new tag and re-run \`release.yml\`, which creates the release as a draft." >&2
             exit 1
           fi
 
@@ -310,17 +321,31 @@ jobs:
       # so the Release ends up carrying both DMGs. They upload as separate
       # assets and do not overwrite each other.
       #
-      # This action would CREATE the Release if none existed, which both legs
-      # could race. The `guard` job proves one already exists whenever
-      # `create_release` is true, so by here this step only ever ATTACHES —
-      # and two concurrent attaches of differently-named assets do not race.
-      # `release.yml` is what cuts the Release; it owns `generate_release_notes`.
-      - name: Attach signed DMG to release
+      # `gh release upload`, NOT `softprops/action-gh-release`.
+      #
+      # That action does not just upload assets: on every run it also PATCHes
+      # the release, and one field it sends is `target_commitish` derived from
+      # the dispatch ref. Against this repository that failed outright —
+      # "target_commitish cannot be changed when release is immutable" — and
+      # had it succeeded it would have been worse, silently retargeting a
+      # release cut from `main` at whatever branch the build was dispatched
+      # from. `gh release upload` touches the asset list and nothing else.
+      #
+      # The `guard` job proves a DRAFT release already exists whenever
+      # `create_release` is true, so this only ever attaches; it never creates.
+      # Two concurrent uploads of differently-named assets do not race — Tauri
+      # names the outputs per-arch, so the two legs cannot collide.
+      #
+      # `--clobber` makes a re-run of one leg idempotent rather than failing on
+      # an asset name that already exists from the previous attempt.
+      - name: Attach signed DMG to draft release
         if: inputs.create_release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          tag_name: ${{ inputs.tag }}
-          files: ${{ steps.locate.outputs.dmg_path }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          DMG_PATH: ${{ steps.locate.outputs.dmg_path }}
+        run: gh release upload "$TAG" "$DMG_PATH" -R "$REPO" --clobber
 
       # Otherwise upload the DMG (unsigned by default) as an Actions artifact.
       # The name carries the target, or the second leg to finish would collide
@@ -332,3 +357,34 @@ jobs:
           name: opencompany-macos-${{ matrix.target }}-dmg
           path: ${{ steps.locate.outputs.dmg_path }}
           if-no-files-found: error
+
+  # Publish the draft, once BOTH architectures have attached their DMG.
+  #
+  # This is the step that makes the release immutable, and it is deliberately
+  # the last thing that happens: from here the asset list is frozen, so it must
+  # not run until everything that belongs in the release is already in it.
+  #
+  # `needs: build` with the matrix's `fail-fast: false` means this job is
+  # reached only if EVERY leg succeeded — a failed Intel build leaves the draft
+  # unpublished rather than shipping a release that silently has one
+  # architecture. Fix the leg and re-dispatch; the draft is still there, and
+  # `--clobber` on the upload makes the successful leg's re-run harmless.
+  publish:
+    name: Publish release
+    needs: build
+    if: inputs.create_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "Assets attached to $TAG:"
+          gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name'
+          gh release edit "$TAG" -R "$REPO" --draft=false
+          echo "Published $TAG"
