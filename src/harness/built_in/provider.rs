@@ -781,6 +781,30 @@ fn extract_content_text(value: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Find a refusal encoded as an array-of-parts `content` part
+/// (`{"type":"refusal","refusal":"…"}`) rather than the scalar sibling
+/// `message.refusal` field.
+///
+/// `extract_content_text` only concatenates `"text"`-typed parts, so a
+/// refusal part in the same array is silently dropped and never reaches
+/// visible `content` — it must be recovered separately so the
+/// reasoning-fallback guard can still detect it and refuse to promote
+/// leaked reasoning over it. Returns the first nonempty refusal found, or
+/// `None` when the value isn't an array or carries no refusal part.
+fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let parts = value?.as_array()?;
+    parts.iter().find_map(|part| {
+        let is_refusal = part.get("type").and_then(|t| t.as_str()) == Some("refusal");
+        if !is_refusal {
+            return None;
+        }
+        part.get("refusal")
+            .and_then(|r| r.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// Parse an OpenAI-compatible chat-completion payload into a tinyagents
 /// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
 /// billing envelope.
@@ -872,13 +896,24 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         // response — it wins over any `reasoning`/`reasoning_content` the
         // model emitted before declining. Promoting the reasoning instead
         // would expose exactly the content the refusal was withholding
-        // (CodeRabbit review on #1779, comment 3872084054).
+        // (CodeRabbit review on #1779, comment 3872084054). Some
+        // providers/gateways instead normalize a Responses-API-style
+        // refusal into the array-shaped `content` field itself, as a
+        // `{"type":"refusal","refusal":"…"}` part — `extract_content_text`
+        // only concatenates `"text"`-typed parts, so that part contributes
+        // nothing and `content` came back empty above; without this
+        // fallback the scalar lookup below would also find nothing and let
+        // the reasoning promotion leak the same withheld content via the
+        // array channel instead of the scalar one (Codex review on #1779,
+        // comment 3874381270).
         let refusal = payload
             .pointer("/choices/0/message/refusal")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| extract_array_refusal_text(payload.pointer("/choices/0/message/content")));
         if let Some(refusal) = refusal {
-            content = refusal.to_string();
+            content = refusal;
         } else {
             content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
             if content.is_empty() {
@@ -2166,6 +2201,36 @@ mod tests {
                     "content": null,
                     "reasoning": "The user wants help with something I should decline.",
                     "refusal": "I can't help with that."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A refusal turn where the array-shaped `content` field itself encodes
+    /// the refusal as a `{"type":"refusal","refusal":"…"}` part instead of
+    /// the scalar sibling `message.refusal` field — some providers/gateways
+    /// normalize a Responses-API-style refusal part into the Chat
+    /// Completions `content` array. `extract_content_text` only concatenates
+    /// `"text"`-typed parts, so the refusal part contributes nothing and
+    /// `content` comes back empty; without an array-aware refusal check the
+    /// scalar `message.refusal` lookup also finds nothing, and the reasoning
+    /// fallback would promote the leaked pre-refusal reasoning as the
+    /// visible answer. The refusal must still win (Codex review on #1779,
+    /// comment 3874381270).
+    #[test]
+    fn a_refusal_wins_over_leaked_reasoning_when_refusal_is_an_array_content_part() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "refusal", "refusal": "I can't help with that." }
+                    ],
+                    "reasoning": "The user wants help with something I should decline."
                 }
             }]
         });
