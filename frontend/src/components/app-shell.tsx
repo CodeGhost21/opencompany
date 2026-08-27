@@ -61,7 +61,11 @@ import { TourController } from "@/tour/TourController";
 import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
 import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
-import { resolveGateAdminCheckError, shouldShowOnboardingGate } from "@/onboarding/gate-logic";
+import {
+  resolveGateAdminCheckError,
+  shouldPollActivationForRole,
+  shouldShowOnboardingGate,
+} from "@/onboarding/gate-logic";
 import { me as fetchMe } from "@/api/auth";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -860,15 +864,6 @@ export function AppShell({
    * `gateSkippedThisSession` is read once, into state rather than a plain
    * `const`, so clicking "skip for now" re-renders past the gate without a
    * page reload — `sessionStorage` alone would need one.
-   *
-   * The poll below is passed `true`, NOT `!gateSkipped` (PR #1875 review
-   * finding, round 4): `GET {scope}/activation` is the only production caller
-   * of `compute_and_latch` on the host, so an operator who skips and then
-   * finishes the funnel anyway (connects an integration, runs a workflow from
-   * the ordinary shell) needs the poll to still be running to ever notice and
-   * persist it — see `shouldPollActivation` for the full reasoning. The poll
-   * stops itself once the company is actually activated; nothing here needs
-   * to.
    */
   const [gateSkipped, setGateSkipped] = useState(() => gateSkippedThisSession(scope));
   useEffect(() => {
@@ -878,15 +873,6 @@ export function AppShell({
     markGateSkipped(scope);
     setGateSkipped(true);
   }, [scope]);
-  const activationGate = useActivationGate(client, company, true);
-
-  // PR #1875 review finding, round 4: a skip marker from before the funnel
-  // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
-  // already stops gating on it either way), but leaving it in `sessionStorage`
-  // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
-  useEffect(() => {
-    if (activationGate.status?.isActivated) clearGateSkipped(scope);
-  }, [activationGate.status?.isActivated, scope]);
 
   /**
    * Whether the signed-in user is this company's admin (PR #1875 review
@@ -907,6 +893,9 @@ export function AppShell({
    *   actual admin for the rest of that mount (PR #1875 review finding,
    *   round 2). Only a definitive `401` settles to `false`; anything else
    *   retries.
+   *
+   * Declared before `activationGate` (below) because that hook's `enabled`
+   * input now reads this state — PR #1875 review finding, round 5.
    */
   const [isGateAdmin, setIsGateAdmin] = useState<boolean | null>(null);
   useEffect(() => {
@@ -935,6 +924,32 @@ export function AppShell({
       if (retryTimer !== undefined) clearTimeout(retryTimer);
     };
   }, [client, company]);
+
+  // The poll below is passed `shouldPollActivationForRole(isGateAdmin)`, NOT
+  // a bare `true` (PR #1875 review finding, round 5) and NOT `!gateSkipped`
+  // (round 4): `GET {scope}/activation` is the only production caller of
+  // `compute_and_latch` on the host, so an admin who skips and then finishes
+  // the funnel anyway (connects an integration, runs a workflow from the
+  // ordinary shell) needs the poll to still be running to ever notice and
+  // persist it — see `shouldPollActivation` for that half. But none of the
+  // three funnel steps can be cleared by anyone but the admin (see
+  // `isGateAdmin`'s own doc comment above), so a confirmed non-admin's poll
+  // can never be the read that observes the funnel complete — it only repeats
+  // `compute_and_latch`'s whole-journal scan for every invited member's open
+  // tab. `shouldPollActivationForRole` keeps polling through `isGateAdmin ===
+  // null` (the check has not landed yet) for the same reason `null` holds
+  // rather than guesses everywhere else in this gate; only a confirmed
+  // `false` stops it. The poll also stops itself once the company is actually
+  // activated; nothing here needs to.
+  const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
+
+  // PR #1875 review finding, round 4: a skip marker from before the funnel
+  // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
+  // already stops gating on it either way), but leaving it in `sessionStorage`
+  // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
+  useEffect(() => {
+    if (activationGate.status?.isActivated) clearGateSkipped(scope);
+  }, [activationGate.status?.isActivated, scope]);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;
