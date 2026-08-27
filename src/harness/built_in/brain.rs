@@ -5499,6 +5499,11 @@ members = ["engineer"]
             "the orchestrator answers for its own roster"
         );
         assert!(posted.text.contains("Shane"), "{}", posted.text);
+        // Issue #1852: `refuse_dispatch` relays through the same
+        // `relay_reply` as a settled run, so it carries the card id too —
+        // once journaled, the origin thread's refusal bubble links back to
+        // the card it refused.
+        assert_eq!(posted.task_id.as_deref(), Some("t-origin"));
     }
 
     /// A dispatch for a card that no longer exists is a silent no-op, not an
