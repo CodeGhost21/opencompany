@@ -608,6 +608,11 @@ struct CreateWorkflowBody {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    /// The owning desk (issue #1862 prerequisite), so the console's creator
+    /// can post it exactly like every other field — see
+    /// [`WorkflowFile::owner_desk`].
+    #[serde(default)]
+    owner_desk: Option<String>,
     #[serde(default)]
     nodes: Vec<CreateNode>,
     #[serde(default)]
@@ -728,6 +733,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
             id: body.id,
             name: body.name,
             description: body.description,
+            owner_desk: body.owner_desk,
             nodes,
             edges: body
                 .edges
@@ -2913,6 +2919,9 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                 workflow_id,
                 run_id,
                 scheduled,
+                // The run history fold does not surface who started a run
+                // (issue #1862 prerequisite is data-only for now).
+                started_by: _,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -3896,6 +3905,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "call".into(),
                 kind: WorkflowNodeKind::ToolCall,
@@ -3941,6 +3951,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "publish".into(),
@@ -4149,6 +4160,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "start".into(),
@@ -6701,6 +6713,7 @@ mod tests {
                         workflow_id: "digest".to_string(),
                         run_id: ctx.run_id.clone(),
                         scheduled: false,
+                        started_by: None,
                     },
                 )
                 .await
@@ -7265,6 +7278,7 @@ mod tests {
                         workflow_id: workflow_id.to_string(),
                         run_id: run_id.to_string(),
                         scheduled,
+                        started_by: None,
                     },
                 )
                 .await
