@@ -247,17 +247,26 @@ fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
 /// Whether an operator-created overlay desk stands where the built-in
 /// `#general` channel does (issue #1743).
 ///
-/// Both the id and the display name count, because `resolve_desk_id` matches
-/// either: an id collides with the thread key the console addresses, and a name
-/// collides with the `General` that `HarnessBrain::everyone_desk` folds `main`
-/// to. Creation refuses both now; neither was refused before, so this is
-/// reachable persisted state rather than a hypothesis.
+/// **By id, and only by id** — because that is exactly what
+/// [`CompanyRecord::resolve_desk_id`](crate::ports::types::CompanyRecord::resolve_desk_id)
+/// refuses. It declines to match an overlay desk against a General key, so a
+/// desk merely *named* `General` no longer shadows anything: it is addressed by
+/// its own id, its lead still answers there, `delegate_to_desk` still reaches
+/// it, and every write to it still works. Hiding it here would take a live desk
+/// and its transcript out of Chat while the API kept routing to it — the
+/// mirror image of the defect this projection exists to prevent.
+///
+/// A desk whose **id** is a General spelling is a different matter: no key
+/// resolves it, so there is nothing left to address and every desk write aimed
+/// at it is refused. Creation refuses both spellings now, but neither was
+/// refused before, so both are reachable persisted state rather than a
+/// hypothesis.
 ///
 /// Only overlay desks. A manifest desk answering to one of those spellings is
-/// the blueprint's own General desk, which this host has always honoured.
+/// the blueprint's own General desk, which this host has always honoured, and
+/// it keeps the company-wide line along with its row here.
 fn shadows_general_channel(desk: &crate::ports::types::OverlayDesk) -> bool {
-    let general = |s: &str| crate::server::chat_history::is_general_chat(Some(s));
-    general(&desk.id) || general(&desk.name)
+    crate::server::chat_history::is_general_chat(Some(&desk.id))
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -5467,6 +5476,87 @@ mode = "full"
 
         let desks = get_desks(&app, &cookie).await;
         assert_eq!(desks.as_array().unwrap().len(), 1, "nothing was created");
+    }
+
+    /// An overlay desk carrying a reserved **display name** under its own id is
+    /// still a desk, and is still projected (issue #1743).
+    ///
+    /// `resolve_desk_id` declines to match an overlay desk against a General
+    /// key at all, so `{id: "ops", name: "General"}` shadows nothing: `ops`
+    /// resolves it, its lead answers there, `delegate_to_desk` reaches it, and
+    /// every desk write to it is allowed. Hiding it would take a live desk and
+    /// its transcript out of Chat while the API went on routing to it — the
+    /// mirror image of the defect this projection exists to prevent, and a
+    /// worse one, because nothing would say where the conversation went.
+    ///
+    /// Creation still refuses that display name
+    /// ([`a_desk_cannot_take_the_general_display_name_under_another_id`]); this
+    /// is only about state already on disk.
+    #[tokio::test]
+    async fn an_overlay_desk_named_general_under_its_own_id_is_still_projected() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        {
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+            let store = runtime.store();
+            let mut record = store.load(&id).await.unwrap().unwrap();
+            record.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "ops".to_string(),
+                name: "General".to_string(),
+                description: None,
+                members: vec!["ceo".to_string()],
+            });
+            // The resolver is the reason this row is safe to project.
+            assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+            assert_eq!(record.resolve_desk_id("General"), None);
+            assert_eq!(record.resolve_desk_id("main"), None);
+            store.save(&record).await.unwrap();
+        }
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let ops = desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "ops")
+            .unwrap_or_else(|| panic!("the desk must still be listed: {desks}"));
+        assert_eq!(ops["name"], "General");
+        assert_eq!(ops["overlayCreated"], true);
+
+        // And it takes desk writes under its own id, like any other desk.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks/ops/members")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"eng"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // While the General *key* still names the channel, not this desk.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/General")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     /// An overlay desk persisted **before** the ids were reserved is still not

@@ -206,13 +206,23 @@ pub fn desk_lead(record: &CompanyRecord, desk: &str) -> Option<String> {
 /// Only the **bare** key. The teammate keeps its DM under `dm:<id>`, which the
 /// arm below still unwraps and resolves, and a desk that claims the key is
 /// matched first and still wins.
+///
+/// **A desk can claim the line by display name**, which the raw key misses: a
+/// blueprint declaring `id = "ops", name = "General"` answers to `General` but
+/// not to `main`, so asking for the raw key alone would hand a `main` turn to
+/// the orchestrator while an `ops` turn went to that desk's lead — two voices
+/// in one channel. The General arm therefore re-asks under
+/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK), which is the
+/// same fold `HarnessBrain::everyone_desk` applies before expanding
+/// `@everyone`, so who answers and who a broadcast names cannot disagree. With
+/// no claimant it misses and the caller's orchestrator answers, as before.
 pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     let direct = |key: &str| desk_lead(record, key).or_else(|| record.resolve_roster_agent_id(key));
     if let Some(lead) = desk_lead(record, chat) {
         return Some(lead);
     }
     if crate::server::chat_history::is_general_chat(Some(chat)) {
-        return None;
+        return desk_lead(record, crate::server::ops::language::DEFAULT_DESK);
     }
     record
         .resolve_roster_agent_id(chat)
@@ -991,6 +1001,41 @@ members = ["counsel"]
         .expect("valid manifest");
         record.manifest.group_chats.extend(declared.group_chats);
         assert_eq!(chat_responder(&record, "main").as_deref(), Some("writer"));
+    }
+
+    /// A desk that claims the line by **display name** answers every spelling
+    /// folded into it, not just the one it is spelled with (issue #1743).
+    ///
+    /// `id = "ops", name = "General"` answers to `General` but not to `main`,
+    /// so asking for the raw key alone handed a `main` turn to the caller's
+    /// orchestrator while an `ops` turn went to that desk's lead — two voices
+    /// in the one channel the console renders for both. The General arm re-asks
+    /// under `DEFAULT_DESK`, which is the same fold `everyone_desk` applies, so
+    /// who answers and who `@everyone` names cannot disagree.
+    #[test]
+    fn chat_responder_folds_the_general_aliases_to_a_display_name_claimant() {
+        let plain = record();
+        let mut record = record();
+        let declared: crate::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n[[group_chat]]\nid = \"ops\"\nname = \"General\"\nmembers = [\"writer\"]\n",
+        )
+        .expect("valid manifest");
+        record.manifest.group_chats.extend(declared.group_chats);
+
+        for spelling in ["", "main", "Main", "general", "General", "ops"] {
+            assert_eq!(
+                chat_responder(&record, spelling).as_deref(),
+                Some("writer"),
+                "one voice in the channel, addressed as {spelling:?}"
+            );
+        }
+        // The other desks are untouched, and a company with no claimant still
+        // leaves the line to the caller.
+        assert_eq!(
+            chat_responder(&record, "engineering").as_deref(),
+            Some("ceo")
+        );
+        assert_eq!(chat_responder(&plain, "main"), None);
     }
 
     #[test]
