@@ -2374,7 +2374,24 @@ impl CompanyRuntime {
                             .unwrap_or_else(|| response.channel.clone()),
                         text: response.text.clone(),
                         steps: response.steps.clone(),
-                        task_id: response.task_id.clone(),
+                        // Dropped, deliberately — unlike `publish_continuation`
+                        // and `journal_chat_replies`, which carry it through.
+                        // `response.task_id` here always names the very card
+                        // `journal_task_outcome` (`HarnessBrain`) just settled
+                        // and already marked with a `DeskTaskCompleted` pointed
+                        // at this same `chat_id` (issue #377's "finished → …"
+                        // pill, `chat_history::owns`). That pill is already the
+                        // origin thread's card link for this settle; setting
+                        // `task_id` here too would additionally render this
+                        // bubble's own "Card opened" chip (`CardChip`,
+                        // `MessageRow`) — a second link to a card that, by the
+                        // time this prose lands, is not "opened" at all. Two
+                        // links for one settle is `journal_task_outcome`'s own
+                        // "one run's words into one conversation twice" mistake
+                        // (see its doc comment), aimed at a link instead of the
+                        // text — and it is exactly what doubled the e2e
+                        // `chat-dispatch-marker` reload count.
+                        task_id: None,
                         mentions: reply_mentions.clone(),
                         // Zero, and stays zero: no reply's mentions reach
                         // dispatch, so no reply is ever a mention hop.
@@ -4559,9 +4576,10 @@ mod tests {
             "the orchestrator answers for its own roster (issue #885 fallback)"
         );
         assert_eq!(
-            task_id.as_deref(),
-            Some("t-1"),
-            "the bubble must link back to the card it answered"
+            task_id, &None,
+            "the settle already has its own card link — `DeskTaskCompleted`'s \
+             \"finished → …\" pill (issue #377) — so this bubble must not carry \
+             its own \"Card opened\" chip alongside it"
         );
         assert!(
             crate::server::chat_history::owns("strategy", "Strategy", relays[0]),
@@ -4660,7 +4678,11 @@ mod tests {
             unreachable!()
         };
         assert_eq!(chat_id, "strategy");
-        assert_eq!(task_id.as_deref(), Some("t-1"));
+        // Not `Some("t-1")`, even though the response itself carries it:
+        // `journal_task_outcome` already marked "t-1" settled with its own
+        // `DeskTaskCompleted` card link into this same thread, so this bubble
+        // must not add a second one. See the drop site's own comment.
+        assert_eq!(task_id, &None);
     }
 
     /// Issue #435: the guard that decides whether a remembered thread root is
