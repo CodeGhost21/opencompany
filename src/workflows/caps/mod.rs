@@ -51,6 +51,10 @@
 
 mod dry_run;
 mod http;
+/// Issue #1866: the deterministic postcondition tier of the sufficiency gate —
+/// mechanical predicates over a node's output, evaluated before the node's
+/// success settles.
+mod postcondition;
 pub(crate) mod resolver;
 mod state;
 mod tools;
@@ -2097,6 +2101,41 @@ impl HarnessAgentRunner {
             return Err(EngineError::Capability(message));
         }
 
+        // ── Issue #1866: the deterministic postcondition gate ────────────────
+        //
+        // A node whose declared `postcondition` the output fails does not feed
+        // downstream, full stop — checked BEFORE the hit_iteration_cap decision
+        // below and before the attempt row settles Succeeded, on the same
+        // envelope shape that decision (and the eventual `Ok` return) builds.
+        // A capped turn's partial reply is exactly the truncation class this
+        // gate is meant to catch, so it is deliberately not special-cased here:
+        // if a postcondition is declared, it is checked regardless of whether
+        // the cap already would have failed the attempt on its own. This runs
+        // AFTER the `abnormal_stop` check above: a refusal/cancellation has
+        // already returned `Err` with no reply worth evaluating by the time
+        // this is reached.
+        //
+        // `on_error` defaults to `"stop"` and `retry.max_attempts` to `1` (the
+        // same contract issue #881's block above leans on), so returning `Err`
+        // halts the branch at this node with no retry re-running the turn, and
+        // nothing downstream ever sees the insufficient output.
+        if let Some(spec) = request.get("postcondition") {
+            let envelope = json!({ "text": outcome.reply, "agent_ref": agent_ref });
+            if let Err(gap) = postcondition::evaluate_postcondition(spec, &envelope) {
+                let message = format!(
+                    "workflow node `{}` failed its postcondition: {gap}",
+                    node_id.as_deref().unwrap_or(agent_ref)
+                );
+                self.settle_attempt(
+                    run_sink.as_ref(),
+                    crate::ports::RunStatus::Failed,
+                    Some(message.clone()),
+                )
+                .await;
+                return Err(EngineError::Capability(message));
+            }
+        }
+
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves. A
         // workflow node carries no chat bubble, so the turn's steps are dropped
@@ -3165,6 +3204,185 @@ mod tests {
             message.contains("the agent declined to continue"),
             "the error must carry the abnormal-stop reason, not a generic failure: {message}"
         );
+    }
+
+    /// Issue #1866 (deterministic tier) — the RED-on-old proof. A capped
+    /// turn's partial reply already settles the attempt row `Failed` (issue
+    /// #1865, pinned above), but on the pre-#1866 `run_turn` it still returns
+    /// `Ok` and flows the truncated text downstream via `=items` — nothing
+    /// stops it. Declaring a `postcondition` this same output fails must
+    /// ALSO turn the return into `Err`, so nothing downstream ever binds it.
+    ///
+    /// Reuses [`CappedWorkflowTurn`] — its `{ "text": "partial answer, still
+    /// going", "agent_ref": ... }` envelope has no `items` field, so
+    /// `field_present` on `items` is exactly the gap this node's truncated
+    /// output represents. On the code as it stood before this issue, this
+    /// assertion fails: `run_turn` returns `Ok` here (see the sibling test
+    /// above, which asserts `.expect(...)` on the identical outcome).
+    #[tokio::test]
+    async fn a_node_whose_postcondition_fails_halts_before_returning_ok() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(CappedWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1866"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1866".to_string(),
+            "run-1866".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "loop_step",
+                    "prompt": "keep going",
+                    "postcondition": { "require": "field_present", "field": "items" }
+                }),
+            )
+            .await;
+
+        let err = result.expect_err(
+            "a truncated reply that also fails its declared postcondition must halt — \
+             this is the RED-on-old assertion: pre-#1866 code returns Ok here",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("items"),
+            "the halting message should name what the output was missing: {message}"
+        );
+
+        // The ordinary failure bucket, not `WaitingApproval` — nobody has to
+        // approve a bad output the way they approve a gated tool call.
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1866".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1, "one attempt for one node turn");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+    }
+
+    /// Companion GREEN: a node with no `postcondition` declared is completely
+    /// unaffected — the exact back-compat contract every other first-class
+    /// field on this call site keeps (`on_error`, `retry`,
+    /// `requires_approval`). Reuses the ordinary `RecordingWorkflowTurn` /
+    /// `ok_outcome` fixture the #1702 dispatch test above already trusts.
+    #[tokio::test]
+    async fn a_node_with_no_postcondition_is_unaffected() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-no-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1866b"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866b"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1866b".to_string(),
+            "run-1866b".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn("researcher", json!({ "node_id": "plain", "prompt": "go" }))
+            .await
+            .expect("a node with no postcondition must not be gated at all");
+        assert_eq!(outcome.reply, "ok");
+        assert_eq!(value["text"], "ok");
+    }
+
+    /// Companion GREEN: an output that DOES satisfy its declared
+    /// postcondition returns `Ok` exactly as an ungated node would — the gate
+    /// only ever removes a path, never adds one for output that clears it.
+    #[tokio::test]
+    async fn a_satisfying_output_still_returns_ok() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-satisfying-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1866c"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866c"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1866c".to_string(),
+            "run-1866c".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // `RecordingWorkflowTurn::ok_outcome` replies "ok" — non-empty, so
+        // `non_empty` is satisfied and the turn proceeds exactly as if no
+        // postcondition were declared at all.
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "plain",
+                    "prompt": "go",
+                    "postcondition": { "require": "non_empty" }
+                }),
+            )
+            .await
+            .expect("an output that satisfies its postcondition must not be halted");
+        assert_eq!(outcome.reply, "ok");
+        assert_eq!(value["text"], "ok");
     }
 
     /// Issue #638: a node that gates more calls than the cap allows leaves the
