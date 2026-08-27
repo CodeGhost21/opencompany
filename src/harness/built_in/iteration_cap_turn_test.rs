@@ -317,6 +317,7 @@ async fn company_agent(
         agent_id: "ceo".to_string(),
         role: "Chief Executive".to_string(),
         budget_usd_daily,
+        step_labels: crate::harness::steps::StepLabels::from_tools(agent.tools()),
         agent: tokio::sync::Mutex::new(agent),
         bound_chat: tokio::sync::Mutex::new(None),
     }

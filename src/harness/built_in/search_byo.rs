@@ -606,8 +606,9 @@ mod tests {
                 api_key: Some("test-key".to_string()),
                 endpoint,
             };
-            let aliased = byo_search_tools(&config)
-                .into_iter()
+            let tools = byo_search_tools(&config);
+            let aliased = tools
+                .iter()
                 .find(|tool| tool.name() == crate::harness::search::WEB_SEARCH_TOOL)
                 .expect("every provider wires a canonical web_search");
             assert_eq!(
@@ -615,7 +616,37 @@ mod tests {
                 Some(label),
                 "{provider}"
             );
+            // And it reaches the operator. Every provider is aliased to the one
+            // canonical `web_search`, so the tool *name* the loop labels from
+            // carries no provider at all — only the tool's own label, restored by
+            // `StepLabels`, can tell these four rows apart.
+            assert_eq!(step_label(&tools), label, "{provider}");
         }
+    }
+
+    /// The label an operator actually reads for a `web_search` row, folded the
+    /// way a real turn folds it: the loop supplies the humanized tool name,
+    /// [`StepLabels`](crate::harness::steps::StepLabels) restores what the tool
+    /// calls itself, and `fold_steps` renders the row.
+    fn step_label(tools: &[Box<dyn openhuman_core::openhuman::tools::traits::Tool>]) -> String {
+        use crate::harness::search::WEB_SEARCH_TOOL;
+        use crate::harness::steps::{StepLabels, fold_steps};
+        use openhuman_core::openhuman as oh;
+
+        let labels = StepLabels::from_tools(tools);
+        let started = oh::agent::progress::AgentProgress::ToolCallStarted {
+            call_id: "c1".into(),
+            tool_name: WEB_SEARCH_TOOL.into(),
+            arguments: serde_json::Value::Null,
+            iteration: 1,
+            display_label: Some(oh::tools::traits::humanize_tool_name(WEB_SEARCH_TOOL)),
+            display_detail: None,
+        };
+        fold_steps(vec![labels.apply(started)])
+            .first()
+            .expect("a tool call folds to one step")
+            .label
+            .clone()
     }
 
     #[test]
