@@ -823,6 +823,41 @@ async fn commit_staged(path: &Path, tmp: PathBuf) -> Result<()> {
     .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
 }
 
+/// Best-effort cleanup of a temp file previously returned by
+/// [`stage_atomic_bytes`], called when a multi-file save (`FsCompanyStore::save`,
+/// issue #1828 review, fifth round) aborts after staging it but before — or
+/// instead of — committing it.
+///
+/// Safe to call on a path [`commit_staged`] already renamed away: that is a
+/// `NotFound` on `remove_file`, silently ignored, not a fault in either
+/// direction. What it exists to stop is the other outcome — a staged temp
+/// file (already written and fsynced, so it holds real bytes on disk) that
+/// `save` returns `Err` without ever renaming into place. Left alone, each
+/// failed attempt at the same save stages a fresh uniquely-named temp file
+/// and abandons it, so a caller that retries into a persistent fault (a full
+/// disk being the case this matters most: [`stage_atomic_bytes`] already
+/// wrote and fsynced the file before the failure this cleans up after)
+/// consumes more of the already-constrained filesystem on every retry,
+/// working against the very recovery the retry is trying to achieve.
+///
+/// Errors other than `NotFound` are logged, not propagated: this runs on an
+/// error path that is already returning the real failure to the caller, and
+/// a second failure here must not shadow it or abort the cleanup of any
+/// other temp file still owed.
+async fn remove_staged(tmp: &Path) {
+    match tokio::fs::remove_file(tmp).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(
+                path = %tmp.display(),
+                error = %e,
+                "[store] failed to remove orphaned staged temp file after a save error"
+            );
+        }
+    }
+}
+
 /// Bundle metadata persisted alongside the manifest.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Meta {
@@ -1146,14 +1181,46 @@ impl CompanyStore for FsCompanyStore {
         // commits below (an already-fsynced rename failing) still lands
         // asymmetrically, and that residual, much smaller window is what
         // the create/update commit order was chosen to make safe.
+        // A failure anywhere below this point must not just fail safe for
+        // the *live* files (the invariant above) — it must not strand the
+        // temp file(s) already staged either (issue #1828 review, fifth
+        // round). Each is a fully written, fsynced file sitting on disk
+        // under a name nothing will ever rename into place once `save`
+        // returns `Err`; on a full disk, exactly the failure mode most
+        // likely to land here, leaving it behind means every retry stages
+        // another one and consumes more of the already-constrained
+        // filesystem instead of recovering it. `remove_staged` is best-
+        // effort and safe to call on a path that a later `commit_staged`
+        // already renamed away, so every early return below cleans up
+        // whichever staged temp file(s) are still sitting unrenamed.
         let meta_tmp = stage_atomic_bytes(&bundle.meta_json(), meta_src.as_bytes()).await?;
-        let toml_tmp = stage_atomic_bytes(&bundle.company_toml(), toml_src.as_bytes()).await?;
+        let toml_tmp = match stage_atomic_bytes(&bundle.company_toml(), toml_src.as_bytes()).await {
+            Ok(tmp) => tmp,
+            Err(e) => {
+                remove_staged(&meta_tmp).await;
+                return Err(e);
+            }
+        };
         if updating_existing_bundle {
-            commit_staged(&bundle.company_toml(), toml_tmp).await?;
-            commit_staged(&bundle.meta_json(), meta_tmp).await?;
+            if let Err(e) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
+                remove_staged(&toml_tmp).await;
+                remove_staged(&meta_tmp).await;
+                return Err(e);
+            }
+            if let Err(e) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
+                remove_staged(&meta_tmp).await;
+                return Err(e);
+            }
         } else {
-            commit_staged(&bundle.meta_json(), meta_tmp).await?;
-            commit_staged(&bundle.company_toml(), toml_tmp).await?;
+            if let Err(e) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
+                remove_staged(&meta_tmp).await;
+                remove_staged(&toml_tmp).await;
+                return Err(e);
+            }
+            if let Err(e) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
+                remove_staged(&toml_tmp).await;
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -3204,6 +3271,118 @@ mod test {
                 .company
                 .name,
             "Acme Renamed"
+        );
+    }
+
+    /// **Issue #1828 review, fifth round**: the structural fix above (fourth
+    /// round) stages both files — write + fsync to a temp name — before
+    /// committing either, so a write failure never touches a live file. It
+    /// says nothing about the temp file that staging *did* manage to write
+    /// before the failure. If staging `meta.json` succeeds and staging
+    /// `company.toml` then fails, the old code let `?` return straight out
+    /// of `save`, leaving the fully written, fsynced `meta.tmp-*` file
+    /// behind — nothing ever renames it into place and nothing ever deletes
+    /// it. On the disk-full failure this matters most for, that is doubly
+    /// bad: the leaked temp file's bytes are exactly what the disk is
+    /// already short of, so every retry into a persistent fault stages
+    /// another orphan and shrinks the room available to recover in, rather
+    /// than the retry loop converging on either success or a clean failure.
+    ///
+    /// This proves it: arm the write fault on `company.toml` for a
+    /// first-time publish — the same fault as the very first round's test
+    /// above, which already proves the *live* files stay safe — and, in
+    /// addition to that, assert no `*.tmp-*` file is left anywhere under the
+    /// bundle directory afterward. Pre-fix, `meta.tmp-<id>` survives the
+    /// failed `save` call; post-fix, `save`'s error path removes it before
+    /// returning.
+    #[tokio::test]
+    async fn a_failed_second_stage_write_does_not_strand_the_first_staged_temp_file() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = || CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "provisioning".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        fn staged_tmp_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.contains(".tmp-"))
+                })
+                .collect()
+        }
+
+        // Staging order is fixed regardless of the commit-order branch:
+        // `save` stages `meta.json` first, then `company.toml`. Arming the
+        // fault on `company.toml`'s write fails the *second* stage call,
+        // after `meta.json`'s temp file has already landed on disk.
+        fault_probe::fail_next_write(&bundle.company_toml());
+
+        let err = store.save(&record()).await;
+        assert!(
+            err.is_err(),
+            "the injected staging failure must propagate out of save"
+        );
+
+        assert!(
+            !tokio::fs::try_exists(&bundle.company_toml()).await.unwrap(),
+            "company.toml must not exist after a staging failure"
+        );
+        assert!(
+            !tokio::fs::try_exists(&bundle.meta_json()).await.unwrap(),
+            "meta.json must not exist after a staging failure"
+        );
+        assert_eq!(
+            staged_tmp_files(bundle.dir()),
+            Vec::<std::path::PathBuf>::new(),
+            "a failed second stage write must not strand the temp file the \
+             first stage write already committed to disk — every retry into \
+             a persistent fault (e.g. a full disk) would otherwise leak \
+             another one"
+        );
+
+        // `fail_next_write` is one-shot, so the retry hits the real write
+        // path and publishes normally, with no temp files left behind
+        // either.
+        store
+            .save(&record())
+            .await
+            .expect("retry succeeds once the fault is no longer armed");
+        assert!(store.load(&id).await.unwrap().is_some());
+        assert_eq!(
+            staged_tmp_files(bundle.dir()),
+            Vec::<std::path::PathBuf>::new(),
+            "a successful save must not leave any staged temp file behind \
+             either"
         );
     }
 
