@@ -255,3 +255,51 @@ describe("every routed view is named by something (#1763)", () => {
     expect(empty, empty.join("\n")).toEqual([]);
   });
 });
+
+/**
+ * A page header sits in the same gutter as the body it heads.
+ *
+ * `PageHeader` defaults to `px-4`, which is right for a page whose content
+ * wrapper is `p-4`. A page whose body is `p-6` has to say so, or the title and
+ * its actions sit 8px outside the content they belong to — which is what
+ * happened to Lists: before it had a `PageHeader` at all, its heading lived
+ * inside the same `p-6` wrapper and lined up.
+ *
+ * Checked for the two pages that opt out, rather than inferred across every
+ * view: a body's padding is not always a single literal on one wrapper, and a
+ * guard that has to guess would be a guard nobody trusts.
+ */
+describe("a header's gutter matches its body", () => {
+  const source = (rel: string) => readFileSync(join(VIEWS, rel), "utf8");
+
+  it("gives the p-6 pages the px-6 gutter, in every state", () => {
+    for (const rel of ["LedgersView.tsx", "company/ManageListsView.tsx"]) {
+      const text = source(rel);
+      expect(text, rel).toContain('gutter="px-6"');
+      const headers = text.match(/<PageHeader/g) ?? [];
+      const gutters = text.match(/gutter="px-6"/g) ?? [];
+      expect(gutters.length, `${rel}: every PageHeader needs the gutter`).toBe(
+        headers.length,
+      );
+    }
+  });
+
+  /**
+   * And the Observatory names the run in *every* state, not only when ready.
+   *
+   * The lazy fallback was corrected first, so a direct `#/observatory/<runId>`
+   * visit announced "Run" — and then the chunk landed and the loading branch
+   * replaced it with "Observatory" until the run request settled. A heading that
+   * corrects itself and then un-corrects itself is worse than one that was
+   * always wrong.
+   */
+  it("names an Observatory run in the load, unavailable and error states too", () => {
+    const text = source("observatory/ObservatoryView.tsx");
+    expect(text).not.toContain('<PageHeader title="Observatory"');
+    const named = text.match(/title=\{runId \? "Run" : "Observatory"\}/g) ?? [];
+    const headers = text.match(/<PageHeader/g) ?? [];
+    expect(named.length, "every state header follows the same rule").toBe(
+      headers.length,
+    );
+  });
+});

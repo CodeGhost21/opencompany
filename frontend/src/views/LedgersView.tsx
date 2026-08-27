@@ -651,7 +651,9 @@ export function LedgersView({
     and "Lists" when it is not, which is the honest name for a page that does
     not yet know which one it is showing.
   */
-  const loadingHeader = <PageHeader title={ledger?.title ?? "Lists"} />;
+  // Same gutter as the loaded header below, so the title does not shift 8px
+  // sideways the moment the board arrives.
+  const loadingHeader = <PageHeader gutter="px-6" title={ledger?.title ?? "Lists"} />;
 
   if (!company) {
     return (
@@ -693,6 +695,12 @@ export function LedgersView({
         a `<details>`, and the description renders into a `<p>`.
       */}
       <PageHeader
+        // The body below is `p-6`, so the header's default `px-4` put the title
+        // and actions 8px outside the board content they belong to. Before this
+        // page had a `PageHeader` at all its heading lived inside that same
+        // wrapper and lined up; `ManageListsView` passes the same gutter for the
+        // same reason.
+        gutter="px-6"
         title={
           <DropdownMenu>
               <DropdownMenuTrigger

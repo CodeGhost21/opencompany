@@ -211,7 +211,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   if (load.phase === "loading") {
     return (
       <div className="flex flex-col">
-        <PageHeader title="Observatory" />
+        <PageHeader title={runId ? "Run" : "Observatory"} />
         <p className="text-muted-foreground p-4 text-sm">Reading run history…</p>
       </div>
     );
@@ -220,7 +220,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   if (load.phase === "unavailable") {
     return (
       <div className="flex flex-col">
-        <PageHeader title="Observatory" />
+        <PageHeader title={runId ? "Run" : "Observatory"} />
         <p className="text-muted-foreground max-w-prose p-4 text-sm">
           This host does not expose the run-observability read yet. Attempts and
           their step traces are still recorded — the Attempts tab on a card shows
@@ -233,7 +233,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   if (load.phase === "error") {
     return (
       <div className="flex flex-col">
-        <PageHeader title="Observatory" />
+        <PageHeader title={runId ? "Run" : "Observatory"} />
         <div className="flex flex-col items-start gap-2 p-4">
           <p className="text-[var(--status-failed-text)] text-sm">{load.message}</p>
           <Button variant="outline" size="sm" onClick={() => void reload()}>
