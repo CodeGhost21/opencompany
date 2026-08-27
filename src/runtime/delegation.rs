@@ -1534,17 +1534,30 @@ impl<'a> DelegationRunner<'a> {
             // Read BEFORE the fold below moves `relay.budget_paused` into
             // `budget_paused`.
             if let Some(pause) = &relay.budget_paused {
+                // Issue #1846 review (Codex #3865812419/#3865812423/
+                // #3865812432): the ambient parent/deliverable/mentions the
+                // cycle was started with, so a redeem replays the operator's
+                // ORIGINAL thread/intent/audience.
+                //
+                // Issue #1846 review (Codex #3866418891): `message` is the
+                // COMPOSED text (`with_attachment_refs` markers already
+                // baked in) — the ambient context's own raw text +
+                // structured attachments are preferred whenever this cycle
+                // carries an `OperatorMessage`, so a redeem recomposes fresh
+                // instead of doubling the attachment markers on top of the
+                // ones already baked into `message`.
+                let redeem_context = crate::runtime::grants::current_redeem_context();
+                let park_message = redeem_context
+                    .text
+                    .clone()
+                    .unwrap_or_else(|| message.to_string());
                 let marker = crate::runtime::grants::budget_pauses_for(self.company).park(
                     pause.agent.clone(),
                     chat_id.map(str::to_string),
-                    message.to_string(),
+                    park_message,
                     pause.summary.clone(),
                     now_millis(),
-                    // Issue #1846 review (Codex #3865812419/#3865812423/
-                    // #3865812432): the ambient parent/deliverable/mentions
-                    // the cycle was started with, so a redeem replays the
-                    // operator's ORIGINAL thread/intent/audience.
-                    crate::runtime::grants::current_redeem_context(),
+                    redeem_context,
                 );
                 tracing::info!(
                     company = %self.company,
@@ -2078,17 +2091,33 @@ impl<'a> DelegationRunner<'a> {
         if let Some(pause) = &outcome.budget_paused
             && let Some(original) = &self.reissue_message
         {
+            // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+            // the ambient parent/deliverable/mentions the cycle was started
+            // with, so a redeem replays the operator's ORIGINAL
+            // thread/intent/audience.
+            //
+            // Issue #1846 review (Codex #3866418891): `original`
+            // (`self.reissue_message`) is the SAME composed text brain.rs
+            // built with `with_attachment_refs` — markers already baked in.
+            // The ambient context's own raw text + structured attachments
+            // are preferred whenever this cycle carries an
+            // `OperatorMessage`, so a redeem recomposes fresh instead of
+            // doubling the attachment markers on top of the ones already
+            // baked into `original`. Falls back to `original` only for the
+            // (untested-in-practice) case where a caller set
+            // `reissue_message` outside any ambient `OperatorMessage` scope.
+            let redeem_context = crate::runtime::grants::current_redeem_context();
+            let park_message = redeem_context
+                .text
+                .clone()
+                .unwrap_or_else(|| original.clone());
             let marker = crate::runtime::grants::budget_pauses_for(self.company).park(
                 pause.agent.clone(),
                 chat_id.map(str::to_string),
-                original.clone(),
+                park_message,
                 pause.summary.clone(),
                 now_millis(),
-                // Issue #1846 review (Codex #3865812419/#3865812423/
-                // #3865812432): the ambient parent/deliverable/mentions the
-                // cycle was started with, so a redeem replays the operator's
-                // ORIGINAL thread/intent/audience.
-                crate::runtime::grants::current_redeem_context(),
+                redeem_context,
             );
             tracing::info!(
                 company = %self.company,
@@ -7407,7 +7436,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// redeem.
     #[tokio::test]
     async fn a_delegated_budget_pause_parks_the_ambient_redeem_context() {
-        use crate::ports::types::{EventSeq, Mention, MentionTarget, MessageIntent};
+        use crate::ports::types::{Attachment, EventSeq, Mention, MentionTarget, MessageIntent};
 
         // A fixture over `nested_record()`'s manifest, but NOT `Fixture::nested()`
         // itself: that helper hardcodes `CompanyId::new("acme")`, which is
@@ -7443,6 +7472,11 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             ],
         );
 
+        // Issue #1846 review (Codex #3866418891): `text`/`attachments` are the
+        // same "raw operator message" pair `park_message` prefers over the
+        // delegated turn's own COMPOSED `message`/`original` — assert they
+        // reach the marker through this call site too, not just the
+        // top-level one `redeem_replays_the_markers_attachments` covers.
         let redeem = crate::runtime::grants::RedeemContext {
             parent: Some(EventSeq::new(7)),
             deliverable: Some(MessageIntent::Once),
@@ -7453,6 +7487,14 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 text: "@engineering".to_string(),
                 offset: 0,
                 quiet: false,
+            }],
+            text: Some("ship the API, and see the attached spec".to_string()),
+            attachments: vec![Attachment {
+                node_id: "node-delegated-1".to_string(),
+                name: "spec.pdf".to_string(),
+                mime: "application/pdf".to_string(),
+                size: 2048,
+                extracted_text: Some("API spec v2".to_string()),
             }],
         };
 
@@ -7483,6 +7525,16 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert_eq!(
             marker.mentions, redeem.mentions,
             "the marker must carry the ambient cycle's resolved mentions"
+        );
+        assert_eq!(
+            marker.message,
+            redeem.text.clone().unwrap(),
+            "the marker must carry the ambient context's RAW text, not the delegated turn's \
+             own composed message"
+        );
+        assert_eq!(
+            marker.attachments, redeem.attachments,
+            "the marker must carry the ambient context's structured attachments"
         );
     }
 

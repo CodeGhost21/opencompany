@@ -3567,18 +3567,34 @@ impl HarnessPool {
                 LiveStream::On { chat_id } => chat_id.map(str::to_string),
                 LiveStream::Workflow { .. } | LiveStream::Off => None,
             };
+            // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+            // the ambient parent/deliverable/mentions the cycle was started
+            // with, so a redeem replays the operator's ORIGINAL
+            // thread/intent/audience instead of the empty defaults
+            // `redeem_budget_pause` used to fall back to.
+            let redeem_context = crate::runtime::grants::current_redeem_context();
+            // Issue #1846 review (Codex #3866418891): `message` here is
+            // whatever this turn actually ran with — for an operator-message
+            // turn that is `composed`, already carrying `with_attachment_refs`
+            // markers baked into the text, which would double up with
+            // `redeem_context.attachments` below once `redeem_budget_pause`
+            // recomposes them fresh. The ambient context's own RAW text (set
+            // once, from the ORIGINAL `OperatorMessage`, before any composing
+            // happened) is preferred whenever one is in scope; falling back to
+            // the local `message` only for a cycle with no `OperatorMessage`
+            // at all (a workflow node's own background turn), which has no
+            // raw/composed split — and no attachments — to begin with.
+            let park_message = redeem_context
+                .text
+                .clone()
+                .unwrap_or_else(|| message.to_string());
             let marker = crate::runtime::grants::budget_pauses_for(company).park(
                 pause.agent.clone(),
                 chat_id,
-                message.to_string(),
+                park_message,
                 pause.summary.clone(),
                 crate::ports::now_millis(),
-                // Issue #1846 review (Codex #3865812419/#3865812423/
-                // #3865812432): the ambient parent/deliverable/mentions the
-                // cycle was started with, so a redeem replays the operator's
-                // ORIGINAL thread/intent/audience instead of the empty
-                // defaults `redeem_budget_pause` used to fall back to.
-                crate::runtime::grants::current_redeem_context(),
+                redeem_context,
             );
             tracing::info!(
                 company = %company,
@@ -7105,7 +7121,7 @@ description = "Builds the product."
     /// dropped them on the OTHER side of a redeem.
     #[tokio::test]
     async fn a_top_level_budget_pause_parks_the_ambient_redeem_context() {
-        use crate::ports::types::{EventSeq, Mention, MentionTarget, MessageIntent};
+        use crate::ports::types::{Attachment, EventSeq, Mention, MentionTarget, MessageIntent};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let company = CompanyId::new("acme-budget-redeem-context");
@@ -7175,6 +7191,11 @@ description = "Builds the product."
         let pool = HarnessPool::new();
         pool.ensure(&rec, &deps).await.expect("pool ensures");
 
+        // Issue #1846 review (Codex #3866418891): `text`/`attachments` are the
+        // same "raw operator message" pair `park_message` prefers over this
+        // turn's own COMPOSED `message` — assert they reach the marker
+        // through this top-level call site too, not just the direct
+        // `budget_pauses_for(...).park(...)` unit test in `budget_pause.rs`.
         let redeem = crate::runtime::grants::RedeemContext {
             parent: Some(EventSeq::new(42)),
             deliverable: Some(MessageIntent::Workflow),
@@ -7185,6 +7206,14 @@ description = "Builds the product."
                 text: "@researcher".to_string(),
                 offset: 0,
                 quiet: false,
+            }],
+            text: Some("@researcher please summarize the attached standup notes.".to_string()),
+            attachments: vec![Attachment {
+                node_id: "node-top-level-1".to_string(),
+                name: "standup-notes.txt".to_string(),
+                mime: "text/plain".to_string(),
+                size: 512,
+                extracted_text: Some("stand-up highlights".to_string()),
             }],
         };
 
@@ -7215,6 +7244,16 @@ description = "Builds the product."
         assert_eq!(
             marker.mentions, redeem.mentions,
             "the marker must carry the ambient cycle's resolved mentions"
+        );
+        assert_eq!(
+            marker.message,
+            redeem.text.clone().unwrap(),
+            "the marker must carry the ambient context's RAW text, not this turn's own \
+             composed message"
+        );
+        assert_eq!(
+            marker.attachments, redeem.attachments,
+            "the marker must carry the ambient context's structured attachments"
         );
     }
 

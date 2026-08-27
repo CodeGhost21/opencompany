@@ -209,7 +209,17 @@ async fn redeem_budget_pause(
         parent: marker.parent,
         deliverable: marker.deliverable,
         mentions: marker.mentions.clone(),
-        attachments: Vec::new(),
+        // Issue #1846 review (Codex #3866418891): replay the ORIGINAL
+        // message's structured attachments, not an empty list. `marker.message`
+        // is the raw operator text (see `RedeemContext::text`'s doc), so the
+        // model-facing wire body is recomposed fresh from `text` +
+        // `attachments` exactly once downstream — replaying an empty list
+        // here used to flatten `[Attached file: ...]` marker text into
+        // `marker.message` itself, so the rerun journaled the generated
+        // block as though the operator had typed it, losing the structured
+        // attachment metadata and preview links the console renders from
+        // `Attachment` values.
+        attachments: marker.attachments.clone(),
     };
     // Issue #1846 review (Codex #3865812411): spawned, not awaited directly
     // in this handler's own future. This host is plain
@@ -265,7 +275,7 @@ mod tests {
     use crate::company::CompanyManifest;
     use crate::ports::CompanyStore;
     use crate::ports::types::{
-        CompanyId, CompanyRecord, EventSeq, Mention, MentionTarget, MessageIntent,
+        Attachment, CompanyId, CompanyRecord, EventSeq, Mention, MentionTarget, MessageIntent,
     };
     use crate::runtime::RuntimeBuilder;
     use crate::runtime::grants::RedeemContext;
@@ -420,6 +430,8 @@ mod tests {
                 parent: Some(parent),
                 deliverable: Some(deliverable),
                 mentions: mentions.clone(),
+                text: None,
+                attachments: Vec::new(),
             },
         );
 
@@ -459,6 +471,77 @@ mod tests {
                 assert_eq!(got_parent, Some(parent));
                 assert_eq!(got_deliverable, Some(deliverable));
                 assert_eq!(got_mentions, mentions);
+            }
+            other => panic!("expected an OperatorMessage, got {other:?}"),
+        }
+    }
+
+    /// Issue #1846 review (Codex #3866418891) — the keystone test for the
+    /// attachment-flattening fix. Before this fix, `redeem_budget_pause`
+    /// always redispatched with `attachments: Vec::new()`, so a paused
+    /// message that had files parked would journal the rerun as though the
+    /// operator had typed the `[Attached file: ...]` marker text themselves
+    /// (baked into `marker.message` by `with_attachment_refs` upstream of
+    /// `park`), with the structured attachment gone. This proves the
+    /// opposite: the marker's `attachments` survive parking and are replayed
+    /// on the redispatched event, not flattened.
+    #[tokio::test]
+    async fn redeem_replays_the_markers_attachments() {
+        let home = home();
+        let company = "acme-redeem-attachments";
+        let recording = Arc::new(RecordingBrain::default());
+        let state = state_with_brain(home.path(), company, recording.clone()).await;
+        let id = CompanyId::new(company);
+
+        let attachments = vec![Attachment {
+            node_id: "node-1".to_string(),
+            name: "quarterly-report.pdf".to_string(),
+            mime: "application/pdf".to_string(),
+            size: 4096,
+            extracted_text: Some("Q3 revenue grew 12%".to_string()),
+        }];
+        budget_pauses_for(&id).park(
+            "ceo",
+            Some("general".to_string()),
+            "review the attached report",
+            "paused",
+            1_000,
+            RedeemContext {
+                attachments: attachments.clone(),
+                ..RedeemContext::default()
+            },
+        );
+
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            "/api/v1/company/agents/ceo/budget-pause/redeem",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let recorded = recording
+            .last
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the redispatch reached the brain");
+        match recorded {
+            CompanyEvent::OperatorMessage {
+                text,
+                attachments: got_attachments,
+                ..
+            } => {
+                assert_eq!(
+                    text, "review the attached report",
+                    "the raw operator text must not carry a baked attachment marker"
+                );
+                assert_eq!(
+                    got_attachments, attachments,
+                    "the marker's structured attachments must replay onto the redispatched \
+                     event instead of being dropped"
+                );
             }
             other => panic!("expected an OperatorMessage, got {other:?}"),
         }

@@ -104,7 +104,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::ports::generate_id;
 use crate::ports::types::{
-    Actor, ApprovalId, CompanyEvent, CompanyId, EventSeq, Mention, MessageIntent,
+    Actor, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, Mention, MessageIntent,
 };
 
 /// How long an unredeemed grant stays live: 15 minutes.
@@ -1025,6 +1025,19 @@ pub struct BudgetPauseMarker {
     /// tools and permissions than the operator's `@mention` had actually
     /// asked for.
     pub mentions: Vec<Mention>,
+    /// The ORIGINAL message's structured attachments, replayed alongside
+    /// `message` on redeem (issue #1846 review, Codex #3866418891) instead of
+    /// being flattened into it a second time. Forcing this to `Vec::new()` —
+    /// the pre-fix behaviour — meant the rerun journaled the
+    /// `with_attachment_refs` marker text already baked into `message` as
+    /// though the operator had typed it themselves: the structured attachment
+    /// metadata (name/mime/size) and whatever preview the console renders
+    /// from it were gone, and for a large extracted document the baked block
+    /// could carry up to the wire-body limit of plain-looking transcript
+    /// text. Empty for a marker with no ambient [`RedeemContext`] to draw
+    /// from (a workflow node's own background turn) or whose original
+    /// message carried none.
+    pub attachments: Vec<Attachment>,
 }
 
 /// The parent / deliverable / mentions the operator's ORIGINAL message set,
@@ -1054,6 +1067,24 @@ pub struct RedeemContext {
     pub parent: Option<EventSeq>,
     pub deliverable: Option<MessageIntent>,
     pub mentions: Vec<Mention>,
+    /// The ORIGINAL `OperatorMessage`'s raw text, before
+    /// [`with_attachment_refs`](crate::brain::medulla::effects::with_attachment_refs)
+    /// composed it with any attachment markers (issue #1846 review, Codex
+    /// #3866418891) — distinct from whatever COMPOSED text a delegate's or
+    /// the orchestrator's own dispatch actually ran the turn with. A
+    /// `park()` call site reads this in preference to its own local message
+    /// whenever it is `Some`, so a redeem re-composes fresh from raw text +
+    /// [`attachments`](Self::attachments) instead of replaying a stale,
+    /// already-baked block. `None` — the same "not applicable" reading
+    /// [`parent`](Self::parent) already uses — for every cycle that carries
+    /// no `OperatorMessage` at all (a workflow node's own background turn),
+    /// where the caller's own local message is the correct thing to park.
+    pub text: Option<String>,
+    /// The SAME message's structured attachments, carried alongside `text`
+    /// so a `park()` call site can stamp [`BudgetPauseMarker::attachments`]
+    /// (issue #1846 review, Codex #3866418891). Empty whenever `text` is
+    /// `None`, and also whenever the original message itself carried none.
+    pub attachments: Vec<Attachment>,
 }
 
 impl RedeemContext {
@@ -1074,11 +1105,15 @@ impl RedeemContext {
                     parent,
                     deliverable,
                     mentions,
+                    text,
+                    attachments,
                     ..
                 } => Some(Self {
                     parent: *parent,
                     deliverable: *deliverable,
                     mentions: mentions.clone(),
+                    text: Some(text.clone()),
+                    attachments: attachments.clone(),
                 }),
                 _ => None,
             })
@@ -1158,6 +1193,7 @@ impl BudgetPauseSet {
             parent: redeem.parent,
             deliverable: redeem.deliverable,
             mentions: redeem.mentions,
+            attachments: redeem.attachments,
         };
         self.by_agent
             .lock()
@@ -2505,6 +2541,8 @@ mod test {
             parent: Some(EventSeq::new(3)),
             deliverable: Some(MessageIntent::Workflow),
             mentions: Vec::new(),
+            text: None,
+            attachments: Vec::new(),
         };
         let read_back = with_redeem_context(ctx.clone(), async { current_redeem_context() }).await;
         assert_eq!(
