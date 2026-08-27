@@ -236,7 +236,9 @@ pub(crate) async fn create_company_workflow(
     // every `tool_call` node against the company's wired+granted tools.
     // `parse_workflow` checks the graph's own shape but has no record to validate
     // names against — the same helper gates create and update identically.
-    validate_draft_against_record(&draft, &record, source_dir, wired_channels)?;
+    // `previous_owner_desk: None` — nothing to grandfather a bad desk against
+    // on a fresh create.
+    validate_draft_against_record(&draft, &record, source_dir, wired_channels, None)?;
 
     // Id uniqueness against every id this company already answers for: the seed
     // files, the record's overlay bodies, and the manifest-enabled ids. The
@@ -615,7 +617,17 @@ pub(crate) fn courtesy_validate_draft(
     // pre-flight route on this function: a pre-flight that names a different
     // problem than the submit is worse than none.
     //
-    validate_draft_against_record(draft, record, source_dir, wired_channels)?;
+    // `previous_owner_desk: None` (issue #1882 review) — unlike the other two
+    // rules this function shares with the real write path, this is a KNOWN,
+    // documented asymmetry, not a drift: `update_company_workflow` grandfathers
+    // an unchanged stale desk under the write lock, where the current stored
+    // body is authoritative. This lockless pre-flight has no such body to
+    // compare against without a second lookup this route does not otherwise
+    // need — so it can return a false-negative `400` on an edit the real save
+    // would accept, the same tolerated direction as the id/name-uniqueness gap
+    // documented above `validate_workflow`. Never the other way around: it
+    // cannot pass a desk the write would refuse.
+    validate_draft_against_record(draft, record, source_dir, wired_channels, None)?;
     let toml_src = render_workflow(draft)?;
     if toml_src.len() > MAX_WORKFLOW_TOML_BYTES {
         return Err(over_cap_error(toml_src.len()));
@@ -783,6 +795,7 @@ fn validate_draft_against_record(
     record: &CompanyRecord,
     source_dir: Option<&Path>,
     wired_channels: Option<&[String]>,
+    previous_owner_desk: Option<&str>,
 ) -> Result<()> {
     let roster: HashSet<&str> = record
         .manifest
@@ -944,9 +957,20 @@ fn validate_draft_against_record(
     // graph whose desk was since renamed or removed still has to load, or an
     // operator opening the editor on an otherwise-untouched workflow would be
     // greeted with a hard failure over a field they never looked at.
+    //
+    // Grandfathered when unchanged (issue #1882 review): the SAME "a field
+    // nobody looked at" hazard applies to a *save*, not just a load, once the
+    // console round-trips `ownerDesk` without offering any control to touch
+    // it — an edit to an unrelated field would otherwise refuse to save at
+    // all just because the desk it silently carries forward went stale.
+    // `previous_owner_desk` is `None` on create (nothing to grandfather) and
+    // the record's current stored value on update; only a desk that is both
+    // unresolvable AND *different* from what was already on file is a
+    // refusal — a newly typed/selected bad desk still is.
     if let Some(desk) = draft.owner_desk.as_deref()
         && !desk.trim().is_empty()
         && record.resolve_desk_id(desk).is_none()
+        && previous_owner_desk != Some(desk)
     {
         problems.push(WorkflowProblem {
             node_id: None,
@@ -1549,7 +1573,23 @@ pub(crate) async fn update_company_workflow(
     // Same record cross-check as create (roster + tool_call grants):
     // `parse_workflow` validates the graph's own shape but has no record to check
     // `agent`/`tool_call` node names against.
-    validate_draft_against_record(&draft, &record, source_dir, wired_channels)?;
+    //
+    // `previous_owner_desk`, issue #1882 review: the desk on the body this
+    // save is about to REPLACE, read under the same lock — so an unrelated
+    // edit can still save when the workflow's desk went stale (renamed or
+    // removed) since it was last touched, exactly as the lenient load path
+    // already tolerates. A body that no longer parses grandfathers nothing,
+    // the conservative reading matching `armed_before` below.
+    let previous_owner_desk = parse_workflow(&record.overlay_workflows[index].toml)
+        .ok()
+        .and_then(|previous| previous.owner_desk);
+    validate_draft_against_record(
+        &draft,
+        &record,
+        source_dir,
+        wired_channels,
+        previous_owner_desk.as_deref(),
+    )?;
 
     // Display-name uniqueness, MINUS this workflow's own current name — a
     // re-save that doesn't rename must not collide with itself. Every other
@@ -6862,5 +6902,81 @@ to = "done"
         create_company_workflow(&company, None, &store, None, draft, None, None)
             .await
             .expect("a blank owner_desk is not resolved against the desk set");
+    }
+
+    /// **Regression, issue #1882 review.** An edit to a field that has
+    /// nothing to do with `owner_desk` must still save when the workflow's
+    /// STORED desk has since been renamed or removed — the same "a field
+    /// nobody looked at" leniency `parse_workflow`'s lenient load path
+    /// already grants. Before the fix, the strict desk-exists check
+    /// re-validated the untouched, unchanged desk on every save and refused
+    /// unconditionally — so once a desk went stale, an operator could not
+    /// save ANY edit from an editor that (correctly, per the round-trip fix)
+    /// carries `ownerDesk` forward with no control to clear it.
+    #[tokio::test]
+    async fn an_unrelated_update_survives_a_desk_that_went_stale() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant_and_desk(),
+        )));
+        let mut created = valid_draft("wf", "WF");
+        created.owner_desk = Some("ops".to_string());
+        create_company_workflow(&company, None, &store, None, created, None, None)
+            .await
+            .expect("creates with a real desk");
+        let saved = store.load(&company).await.unwrap().unwrap();
+        let version = workflow_version(&saved.overlay_workflows[0].toml);
+
+        // The desk is renamed/removed underneath the workflow — nothing about
+        // the workflow itself is touched.
+        let mut stale_record = store.load(&company).await.unwrap().unwrap();
+        stale_record.manifest = manifest_with_assistant();
+        store.save(&stale_record).await.unwrap();
+
+        // An edit to a completely unrelated field, carrying the stored
+        // owner_desk forward unchanged rather than re-typing it — exactly
+        // what a console round-tripping the read does.
+        let mut edit = valid_draft("wf", "WF");
+        edit.owner_desk = Some("ops".to_string());
+        edit.description = Some("Renamed the description only.".to_string());
+        let file = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            edit,
+            Some(&version),
+            None,
+        )
+        .await
+        .expect("an unrelated edit must save even though the stored desk went stale");
+        assert_eq!(
+            file.owner_desk.as_deref(),
+            Some("ops"),
+            "the stale desk is grandfathered, not cleared"
+        );
+
+        // A DIFFERENT bad desk is still a refusal — grandfathering only covers
+        // the value already on file, never a newly typed/selected one.
+        let saved2 = store.load(&company).await.unwrap().unwrap();
+        let version2 = workflow_version(&saved2.overlay_workflows[0].toml);
+        let mut bad_edit = valid_draft("wf", "WF");
+        bad_edit.owner_desk = Some("a-totally-different-ghost-desk".to_string());
+        let err = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            bad_edit,
+            Some(&version2),
+            None,
+        )
+        .await
+        .expect_err("a newly typed desk that resolves to nothing is still refused");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
     }
 }
