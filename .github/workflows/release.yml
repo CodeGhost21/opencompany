@@ -156,13 +156,49 @@ jobs:
       - name: Print notes to job summary
         run: cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Create release
+      # CREATED AS A DRAFT, and published only once the DMGs are attached.
+      #
+      # This repository has IMMUTABLE RELEASES enabled: at the moment a release
+      # is published, it and its asset list are frozen. `POST .../assets` on one
+      # is rejected, and so is any update that would move `target_commitish`.
+      # So the obvious ordering — publish here, have `release-desktop-macos.yml`
+      # attach the DMGs when they finish an hour later — cannot work at all.
+      # It failed exactly that way on v0.0.1-rc.1: both architectures signed,
+      # notarized and stapled, and both then failed to attach to a release that
+      # had been frozen 40 minutes earlier.
+      #
+      # A DRAFT is mutable. `release-desktop-macos.yml` uploads into this draft
+      # and its `publish` job flips `--draft=false` at the end, so the release
+      # becomes immutable at the moment it becomes public — already carrying
+      # both DMGs. That is the behaviour immutable releases are asking for: a
+      # published release is a complete one.
+      #
+      # A draft holds no git tag of its own, which is why `tag` must already
+      # exist as a real tag before this workflow is dispatched.
+      - name: Create draft release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ inputs.tag }}
           body_path: release-notes.md
+          draft: true
           # Anything with a pre-release suffix — `v0.1.0-rc.1`, `-beta.2` — is
           # marked as one, so it does not become the "Latest release" the
           # repository's front page points at and `--from latest-release` picks
           # up next time. A plain `vX.Y.Z` has no hyphen and is a full release.
           prerelease: ${{ contains(inputs.tag, '-') }}
+
+      # Say what has to happen next, in the run that created the draft. A draft
+      # release is invisible on the repository's front page, so a half-finished
+      # release otherwise looks like nothing happened at all.
+      - name: Explain the next step
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          {
+            echo "### Draft release created"
+            echo ""
+            echo "\`$TAG\` is a DRAFT and is not public yet."
+            echo ""
+            echo "Dispatch **Release Desktop (macOS DMG)** with \`tag=$TAG\`, \`sign=true\`, \`create_release=true\`."
+            echo "It attaches both signed DMGs to this draft and publishes it."
+          } >> "$GITHUB_STEP_SUMMARY"
