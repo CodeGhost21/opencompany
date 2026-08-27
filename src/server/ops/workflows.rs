@@ -1616,11 +1616,15 @@ async fn run_workflow(
                 // stops a run whose approvals queue is unwired, or whose turn
                 // gated more calls than the per-batch cap, from reporting
                 // `awaiting-approval` on a card nobody will ever see.
-                stranded_approvals: run
-                    .approvals
-                    .iter()
-                    .filter(|a| a.outcome.unparkable())
-                    .count(),
+                // Codex review (#1865): counted per pending *node*, not per
+                // gated call — `run.pending_approvals` and `run.approvals` are
+                // different units, and a call-level count made a node with one
+                // live parked call alongside one failed one read as fully
+                // stranded. See `workflow_runner::stranded_approvals`.
+                stranded_approvals: crate::ports::workflow_runner::stranded_approvals(
+                    &run.pending_approvals,
+                    &run.approvals,
+                ),
                 // Issue #1865: `run.nodes` already carries the runner's own
                 // reclassification (`reclassify_blocked`, `reclassify_capped_nodes`)
                 // by the time it reaches this response, so a row still `Error`
