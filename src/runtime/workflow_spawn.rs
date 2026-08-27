@@ -79,6 +79,20 @@ pub(crate) const PANICKED_BEFORE_FINISH: &str = concat!(
     "the nodes recorded against it are the ones that completed before it stopped"
 );
 
+/// The `detail` a company-wide "workflow run failed" notification carries when
+/// the engine itself returned an `Err` (issue #1865, CodeRabbit review PR
+/// #1883).
+///
+/// Deliberately fixed rather than `err.to_string()`: this notification's
+/// `audience` is `None` (every company user), while the real error — already
+/// stamped onto this run's own `WorkflowRunFinished` a few lines above — is
+/// only readable back through the authorized run-history route. Interpolating
+/// the raw engine error here would broadcast whatever internal detail it
+/// happens to carry to everyone in the company instead of just the people who
+/// open that run.
+const RUN_FAILED_DETAIL: &str =
+    "the run errored before it could finish; open its run history for the reason";
+
 /// Everything starting a supervised workflow run needs, and nothing else.
 #[derive(Clone)]
 pub struct WorkflowSpawn {
@@ -397,12 +411,22 @@ impl WorkflowSpawn {
                         .await;
                     }
                     Ok(_) => {}
-                    Err(err) => {
+                    // CodeRabbit review (PR #1883): the raw engine error can
+                    // carry internal detail (tool arguments, host paths,
+                    // dependency errors) that must not fan out to every
+                    // company user — `notify_run_unhealthy` is company-wide
+                    // (`audience: None`). The real text is already durable in
+                    // this run's own `WorkflowRunFinished` above, which is
+                    // read back through the authorized run-history route; the
+                    // notification only needs to say a run failed and point
+                    // at it, the same discipline the panic arm above already
+                    // applies via `PANICKED_BEFORE_FINISH`.
+                    Err(_) => {
                         self.notify_run_unhealthy(
                             &workflow.id,
                             &ctx.run_id,
                             "failed",
-                            &err.to_string(),
+                            RUN_FAILED_DETAIL,
                         )
                         .await;
                     }
@@ -533,6 +557,84 @@ mod tests {
         ) -> Result<WorkflowRun> {
             panic!("the run blew up");
         }
+    }
+
+    /// A runner whose `run` returns an `Err` carrying a distinctive, made-up
+    /// internal detail — a stand-in for the kind of thing a real engine error
+    /// can plausibly say. CodeRabbit review (PR #1883) flagged that this text
+    /// used to be interpolated straight into a company-wide notification.
+    struct EngineFailingRunner;
+
+    /// The made-up internal detail `EngineFailingRunner` fails with. Chosen to
+    /// look like something that must never fan out to every company user.
+    const ENGINE_FAILURE_SECRET: &str = "token=sk-leaked-1234 at /internal/host/path";
+
+    #[async_trait]
+    impl WorkflowRunner for EngineFailingRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &WorkflowRunContext,
+        ) -> Result<WorkflowRun> {
+            Err(crate::error::OpenCompanyError::Store(
+                ENGINE_FAILURE_SECRET.to_string(),
+            ))
+        }
+    }
+
+    /// Issue #1865 (CodeRabbit review, PR #1883): a run that fails with an
+    /// engine `Err` must NOT leak that error's raw text into the company-wide
+    /// `workflow_run_failed` notification — `notify_run_unhealthy`'s audience
+    /// is `None` (everyone), while the real error is only readable back
+    /// through the authorized run-history route. Before the fix, this arm
+    /// interpolated `err.to_string()` straight into the notification title,
+    /// so `ENGINE_FAILURE_SECRET` would have shown up in it verbatim.
+    #[tokio::test]
+    async fn a_failed_run_does_not_leak_the_raw_engine_error_into_its_notification() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-spawn-failed-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let notifications = Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let spawn = WorkflowSpawn {
+            company: company.clone(),
+            events: events.clone(),
+            supervisor: RunSupervisor::new(),
+            runner: Arc::new(EngineFailingRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
+            notifications: notifications.clone(),
+        };
+
+        let (run_id, handle) = spawn
+            .spawn(empty_workflow(), Value::Null, false, false)
+            .expect("under the default cap");
+        handle.await.expect("join").expect_err("the engine failed");
+
+        use crate::ports::notifications::NotificationStore;
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        let failed = notes
+            .iter()
+            .find(|n| {
+                n.notification.kind == "workflow_run_failed" && n.notification.subject.id == run_id
+            })
+            .expect("a failed run must file a durable notification");
+        assert!(
+            !failed.notification.title.contains(ENGINE_FAILURE_SECRET),
+            "the raw engine error must never reach a company-wide notification: {:?}",
+            failed.notification.title
+        );
+        assert!(
+            failed.notification.title.contains(RUN_FAILED_DETAIL),
+            "the notification must still say the run failed, using fixed text: {:?}",
+            failed.notification.title
+        );
     }
 
     fn empty_workflow() -> WorkflowFile {
