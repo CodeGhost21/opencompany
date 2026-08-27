@@ -717,7 +717,24 @@ impl HarnessBrain {
         drop(delegation_claim);
 
         let text = match outcome {
-            Ok(outcome) => outcome.reply,
+            // Issue #1846 review (Codex #3869725683): `run_steered_background`
+            // runs through the SAME `run_inner` the interactive chat path
+            // does, so a provider that is out of credits parks a re-issue
+            // marker for `grant.agent` here exactly as it would for an
+            // ordinary message — but `outcome.reply` is just the
+            // budget-paused placeholder text (`classify_turn`'s
+            // `AttemptOutcome::BudgetPaused` handling), which does NOT start
+            // with `BUDGET_PAUSE_NOTICE_PREFIX`. Sent straight through as an
+            // ordinary reply, the console's `isBudgetPauseNotice` check never
+            // fires, so the bubble rendered as a normal (if oddly-worded)
+            // answer with no "Add credits & resend" CTA — even though a
+            // marker was sitting there, parked and redeemable, the whole time.
+            // Swap in the SAME notice text the interactive and confined-turn
+            // paths already emit so the console recognises and renders it.
+            Ok(outcome) => match &outcome.budget_paused {
+                Some(pause) => budget_pause_notice(pause),
+                None => outcome.reply,
+            },
             Err(err) => {
                 // The grant stays live: the call did not go through, so the
                 // operator's approval has not been spent and the TTL sweep will
@@ -7648,6 +7665,72 @@ members = ["eng1", "eng2"]
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
 
+    /// As [`brain_with_queue_and_events`], but every model call fails with a
+    /// budget-exhausted body via [`BudgetExhaustedProvider`] (issue #1846
+    /// review, Codex #3869725683) — otherwise byte-identical, so the only
+    /// variable a test built on this exercises is how the approval-
+    /// continuation redispatch path reacts to that one failure shape.
+    fn brain_with_queue_and_events_and_budget_exhausted_provider(
+        dir: &std::path::Path,
+        requests: crate::harness::policy::ApprovalRequestQueue,
+        events: Arc<dyn crate::ports::EventLog>,
+    ) -> HarnessBrain {
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(BudgetExhaustedProvider),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: None,
+            workspace_root: dir.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: Some(events),
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: requests,
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
+        };
+        HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
+    }
+
     fn approval_resolved(id: &str, verdict: Verdict) -> CompanyEvent {
         CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -7760,6 +7843,80 @@ members = ["eng1", "eng2"]
             .unwrap()
             .iter()
             .all(|e| !matches!(e.event, CompanyEvent::AgentReply { .. }))
+    }
+
+    /// Issue #1846 review (Codex #3869725683) — **the regression.** Same
+    /// fixture as `an_approved_grant_redispatches_its_agent_with_the_exact_arguments`
+    /// above, but the re-issued call's provider is now out of credits.
+    ///
+    /// `run_steered_background` runs through the SAME `run_inner` the
+    /// interactive chat path does, so it parks a re-issue marker for the
+    /// granting agent exactly as an ordinary paused message would — proven
+    /// below by reading it straight off `BudgetPauseSet`. Before this fix, the
+    /// bubble `redispatch_granted_call` built from that outcome carried
+    /// `outcome.reply` (the budget-paused placeholder text) verbatim, which
+    /// does not start with `BUDGET_PAUSE_NOTICE_PREFIX` — so the console's
+    /// `isBudgetPauseNotice` check never recognised it, and the operator saw
+    /// an ordinary-looking reply with no "Add credits & resend" CTA for a
+    /// marker that was sitting there, parked and redeemable, the whole time.
+    #[tokio::test]
+    async fn a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-1"),
+                agent: "ceo".into(),
+                tool: "composio_execute".into(),
+                args: args.clone(),
+                at_millis: now_millis(),
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+            });
+        let brain = brain_with_queue_and_events_and_budget_exhausted_provider(
+            dir.path(),
+            requests,
+            log.clone(),
+        );
+
+        let result = brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        assert_eq!(bubble.channel, "ceo");
+        assert!(
+            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the console's SystemPill only renders the highlighted pause card for this exact \
+             prefix — got: {}",
+            bubble.text
+        );
+        assert!(
+            bubble.text.to_ascii_lowercase().contains("add credits"),
+            "the actionable ask survives into the notice: {}",
+            bubble.text
+        );
+
+        // And a re-issue marker really was parked for the granting agent —
+        // the CTA this notice's text is asking the console to render would
+        // have nothing to redeem otherwise.
+        let marker = crate::runtime::grants::budget_pauses_for(&CompanyId::new("acme"))
+            .peek("ceo")
+            .expect("run_steered_background parks a marker on the same terms run_inner does");
+        assert_eq!(marker.agent, "ceo");
     }
 
     /// Issue #374: a resolution that minted only a STANDING grant must still
