@@ -104,7 +104,21 @@ impl Deployment {
         // as the analytics switch treats a blank one: a launcher that exported
         // the variable without a value has said nothing, and must not cost a
         // hosted tenant the inference it would otherwise have had.
-        if let Some(raw) = env.get_os(DEPLOYMENT_ENV).filter(|raw| !raw.is_empty()) {
+        //
+        // **Whitespace-only stays absent too**, and for the same reason it does
+        // there: a launcher that mounts this from a file hands it over with a
+        // trailing newline more often than not, and `"\n"` is not empty. Left
+        // untrimmed, a hosted tenant whose file ended in a newline fell through
+        // `parse` to `SelfHosted` and silently lost the tenant inference — while
+        // `crate::analytics::config::resolve` trims before deciding, so the two
+        // readers disagreed about the same input shape. A value that is not
+        // valid UTF-8 is still *malformed rather than absent* and still answers
+        // `SelfHosted`, which is the distinction this whole block exists for.
+        if let Some(raw) = env
+            .get_os(DEPLOYMENT_ENV)
+            .filter(|raw| !raw.is_empty())
+            .filter(|raw| raw.to_str().is_none_or(|text| !text.trim().is_empty()))
+        {
             return raw
                 .into_string()
                 .map_or(Self::SelfHosted, |declared| Self::parse(&declared));
@@ -146,6 +160,44 @@ mod test {
     fn a_tenant_namespace_names_a_hosted_tenant() {
         let env = MapEnv::new([("OPENCOMPANY_TENANT_ID", "acme")]);
         assert_eq!(Deployment::from_env(&env), Deployment::HostedTenant);
+    }
+
+    /// A **whitespace-only** declaration is absent, not a declaration.
+    ///
+    /// `"\n"` is not empty, so the length filter alone let it through to
+    /// `parse`, which trims it to `""`, matches no arm and answers
+    /// `SelfHosted` — costing a hosted tenant the inference it would otherwise
+    /// have had. A launcher that mounts this variable from a file hands it over
+    /// with a trailing newline more often than not, so this is the ordinary
+    /// shape rather than a contrived one, and `analytics::config::resolve`
+    /// already trims before deciding — the two readers disagreed about the same
+    /// input.
+    #[test]
+    fn a_whitespace_only_declaration_is_absent() {
+        for blank in ["\n", " ", "\t\n ", "\r\n"] {
+            assert_eq!(
+                Deployment::from_env(&MapEnv::new([(DEPLOYMENT_ENV, blank)])),
+                Deployment::SelfHosted,
+                "with nothing else to go on: {blank:?}"
+            );
+            // The point of the fix: the tenant inference survives it.
+            assert_eq!(
+                Deployment::from_env(&MapEnv::new([
+                    (DEPLOYMENT_ENV, blank),
+                    ("OPENCOMPANY_TENANT_ID", "acme"),
+                ])),
+                Deployment::HostedTenant,
+                "a blank declaration must not outrank the tenant namespace: {blank:?}"
+            );
+        }
+        // A real declaration still wins, padding and all.
+        assert_eq!(
+            Deployment::from_env(&MapEnv::new([
+                (DEPLOYMENT_ENV, " desktop\n"),
+                ("OPENCOMPANY_TENANT_ID", "acme"),
+            ])),
+            Deployment::Desktop,
+        );
     }
 
     /// A typo must fall to silence, never to reporting. The dangerous direction

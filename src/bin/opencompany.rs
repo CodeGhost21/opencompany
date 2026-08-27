@@ -2350,10 +2350,23 @@ async fn async_main() -> Result<()> {
             println!("listening on {} (from {bind_source})", state.config().bind);
             let served = serving.run().await;
             // Issue #1739: after the server has drained, so anything a
-            // last-moment turn reported still leaves. Infallible and bounded by
-            // the client's own timeout — a dead collector costs a few seconds of
-            // a shutdown that has already stopped serving, and nothing else.
-            opencompany::analytics::Tracker::flush(analytics.as_ref()).await;
+            // last-moment turn reported still leaves — and bounded, because the
+            // drain budget is the whole point. The client's own 5s timeout is
+            // not a bound on *this*: added to the 25s drain and the 2s
+            // connection grace it takes the worst case to 32s, past the 30s
+            // those two were sized to fit inside, so a slow collector during a
+            // rollout would have bought a `SIGKILL` mid-shutdown. Giving up the
+            // batch is the right trade — a dropped batch costs a line in a
+            // dashboard, an overrun costs a half-finished turn.
+            if tokio::time::timeout(
+                opencompany::server::shutdown::FLUSH_BUDGET,
+                opencompany::analytics::Tracker::flush(analytics.as_ref()),
+            )
+            .await
+            .is_err()
+            {
+                tracing::debug!("analytics: flush did not finish inside the shutdown budget");
+            }
             served
         }
         Some(Command::Spec { openhuman_root }) => {

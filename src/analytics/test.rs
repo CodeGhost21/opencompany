@@ -358,11 +358,17 @@ fn a_tenant_id_key_is_not_printable() {
             .contains(&SECRET.to_ascii_lowercase()),
         "the Debug impl leaked the key: {printed}"
     );
+    // The self-check, against a value that actually carries the key: the same
+    // search *does* find it in an unredacted rendering, so the assertion above
+    // is refusing something findable rather than passing because the needle
+    // could never be found at all. Comparing the constant with itself proved
+    // only that `contains` is reflexive.
+    let unredacted = format!("TenantIdKey({SECRET})");
     assert!(
-        SECRET
+        unredacted
             .to_ascii_lowercase()
             .contains(&SECRET.to_ascii_lowercase()),
-        "the needle must be findable in the unredacted value, or this is vacuous"
+        "the needle must be findable in an unredacted rendering, or the guard above is vacuous"
     );
 }
 

@@ -87,6 +87,24 @@ pub const DEFAULT_GRACE: Duration = Duration::from_secs(25);
 /// past the pod's grace period and turning a clean exit into a `SIGKILL`.
 pub const CONNECTION_GRACE: Duration = Duration::from_secs(2);
 
+/// The last window, after the server has stopped serving, for analytics to get
+/// its final batch out (issue #1739).
+///
+/// **Bounded because the budget above is the whole point.** [`DEFAULT_GRACE`]
+/// and [`CONNECTION_GRACE`] are sized to land at 27s, deliberately under
+/// Kubernetes' default 30s `terminationGracePeriodSeconds`. The flush is a
+/// network call to a collector this process does not control, and its client
+/// timeout is 5s — so an unbounded flush during a rollout with a slow collector
+/// took the worst case to 32s and invited the `SIGKILL` the 27s exists to
+/// avoid, losing the drain rather than the telemetry.
+///
+/// 2s keeps the total at 29s. Telemetry is the right thing to give up here: a
+/// dropped batch costs a boot line in a dashboard, while an overrun costs a
+/// half-finished turn. An operator who raises [`GRACE_ENV`] past the pod's
+/// grace period has already left this budget behind, and this bound does not
+/// grow with it.
+pub const FLUSH_BUDGET: Duration = Duration::from_secs(2);
+
 /// The drain bound, read from [`GRACE_ENV`] and falling back to
 /// [`DEFAULT_GRACE`].
 ///
@@ -281,6 +299,31 @@ pub async fn drain(state: &AppState, grace: Duration) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The three shutdown budgets must still fit inside a pod's default grace.
+    ///
+    /// Kubernetes' default `terminationGracePeriodSeconds` is 30, and every one
+    /// of these constants is sized against it — but the arithmetic lived only in
+    /// prose, so issue #1739's flush was added on the end and took the worst
+    /// case to 32s without anything complaining. A `SIGKILL` mid-drain is a
+    /// half-finished turn, which is worse than anything the extra window buys.
+    ///
+    /// This fails on the next constant raised in isolation. Raise the pod's
+    /// grace period deliberately, together, if the budget really has to grow.
+    #[test]
+    fn the_shutdown_budgets_fit_inside_a_pods_default_grace() {
+        const K8S_DEFAULT_GRACE: Duration = Duration::from_secs(30);
+        let total = super::DEFAULT_GRACE + super::CONNECTION_GRACE + super::FLUSH_BUDGET;
+        assert!(
+            total <= K8S_DEFAULT_GRACE,
+            "drain {}s + connections {}s + flush {}s = {}s, past the {}s default",
+            super::DEFAULT_GRACE.as_secs(),
+            super::CONNECTION_GRACE.as_secs(),
+            super::FLUSH_BUDGET.as_secs(),
+            total.as_secs(),
+            K8S_DEFAULT_GRACE.as_secs(),
+        );
+    }
     use std::sync::Arc;
     use std::time::Duration;
 

@@ -118,10 +118,25 @@ opaque id, a platform constant, or a word from a hand-written vocabulary.
 
 `distinct_id` is opaque and stable, and it is one of two things:
 
-- `t_<32 hex>` — the **SHA-256 of the tenant slug**, for a hosted tenant. Hashed
+- `t_<32 hex>` — an **HMAC-SHA256 of the tenant slug**, for a hosted tenant, and
+  only when the platform also supplies `OPENCOMPANY_ANALYTICS_ID_KEY`. Hashed
   rather than passed through because a tenant slug is usually the customer's own
   brand. Every question analytics asks — uniques, funnels, segmentation,
   retention — needs only that the same tenant maps to the same value every time.
+
+  **Keyed, not a bare digest.** The slug space is small, guessable and often
+  public, so a plain SHA-256 is a lookup table away from being reversible: an
+  attacker who can list plausible customer names recovers the mapping offline.
+  The key removes that, at the cost of making it load-bearing — rotating it
+  re-identifies every tenant and breaks retention continuity, so it is minted
+  once per platform and kept.
+
+  Both halves are required. `boot::identify` emits `t_` only when a tenant
+  namespace **and** the key are present; with either missing it falls back to the
+  `i_` form below rather than emitting a weaker identity. A platform operator who
+  omits the key therefore gets per-instance identity and per-instance retention,
+  which is a quieter outcome than they may expect — the boot line does not call
+  it out, and this is the place that says so.
 - `i_<32 hex>` — this host's **instance id** otherwise: 16 random bytes minted
   on first boot and persisted under the data root
   ([data-root.md](data-root.md)). Random, not derived: `src/app/instance.rs`
@@ -207,7 +222,7 @@ analytics: off (reporting to https://api.mixpanel.com/track was configured, but 
 analytics: reporting to https://api.mixpanel.com/track
 ```
 
-The fifth of those is the endpoint check. `OPENCOMPANY_ANALYTICS_ENDPOINT` is
+The fourth of those is the endpoint check. `OPENCOMPANY_ANALYTICS_ENDPOINT` is
 validated where the decision is made, not where the send is attempted:
 `collector.internal/track` — a proxy hostname written without a scheme, which is
 how anyone writes one the first time — used to resolve to reporting, so boot
@@ -285,6 +300,7 @@ because it holds both the key and the slug. The collector cannot.
 | `turn_metered` | `analytics::meter::TrackingUsageMeter`, a decorator over the `UsageMeter` port | Every `metering::record_*` path ends there, on every build. The harness cost hook is richer but `openhuman`-gated, and the cycle-level path deliberately reports zero tokens on that build so spend is not double-counted — so an event at either one is blind on the other half of the fleet. |
 | `instance_started` | `analytics::boot::install` | After companies register **and after the port is bound**: the company count and the cognition path are not known before the first, and a host that never took its address never started in any sense worth counting. |
 | cognition relabel | `Tracker::observe_cognition`, from `server::provision` and `runtime::rebuild` | Boot's answer stops being true in two ways. A hosted host provisioned into an empty registry had no runtime to read and recorded `custom`/`unknown`; and a company that configures inference for the first time is rebuilt in place (issue #290), which moves it from `echo` to `harness`. Most recent observation wins. Events already sent are not revised. |
+| `flush` | `src/bin/opencompany.rs`, after the bound host stops serving | The server has already drained, so a last-moment turn's event still leaves — bounded by `shutdown::FLUSH_BUDGET`, below. |
 
 **Cognition is a host-level label, and on a multi-company host it is
 approximate.** Inference is configured per company, so a host serving two
@@ -295,7 +311,15 @@ exact means moving cognition off the envelope's super-properties and onto
 this document describes and does not fit `instance_started`, which has no
 company. That is an analytics-contract decision rather than a defect, raised in
 review on PR #1751 and left for its own change.
-| flush | `src/bin/opencompany.rs`, after the bound host stops serving | The server has already drained, so a last-moment turn's event still leaves. |
+
+**The flush is bounded, and telemetry is what gives way.** `DEFAULT_GRACE`
+(25s) and `CONNECTION_GRACE` (2s) are sized to land at 27s, deliberately under
+Kubernetes' default 30s `terminationGracePeriodSeconds`. The flush talks to a
+collector this process does not control, with a 5s client timeout of its own, so
+unbounded it took the worst case to 32s — buying a `SIGKILL` in the middle of the
+drain those 27s exist to protect. `shutdown::FLUSH_BUDGET` caps it at 2s, for a
+29s total, and a flush that does not finish is abandoned. A dropped batch costs a
+line in a dashboard; an overrun costs a half-finished turn.
 
 Failure is silent by construction: `Tracker::track` is synchronous and
 infallible and returns nothing, so a call site cannot await a network or branch
