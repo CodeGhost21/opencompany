@@ -1299,6 +1299,13 @@ impl HarnessBrain {
         // produces — a hand-off never breaks the loop.
         if let Some(column) = crate::ports::tasks::column_for_settled_run(settled) {
             card.column = column.to_string();
+            // Issue #1865: the board's bounce chip — same rule the system
+            // mover applies in `crate::runtime::advance::advance_settled_card`,
+            // so a card cannot read differently depending on which of the two
+            // settle paths landed it. `result_text` is this attempt's own
+            // account of what happened, the same text `settle_run` below
+            // stamps as the failure reason.
+            card.bounced = crate::runtime::advance::bounced_reason(column, settled, &result_text);
         }
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
@@ -2301,6 +2308,7 @@ impl HarnessBrain {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
         // card that exists. If the artifact writes then fail, the failure
@@ -4349,6 +4357,7 @@ members = ["engineer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 
@@ -7741,6 +7750,7 @@ members = ["eng1", "eng2"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 

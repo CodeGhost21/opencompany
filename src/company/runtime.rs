@@ -965,7 +965,21 @@ impl CompanyRuntime {
             .map(|t| t.column);
         let dispatch = task_enters_in_progress(prev_column.as_deref(), &task.column);
         let plan = task_enters_planning(prev_column.as_deref(), &task.column);
-        self.ops.tasks.upsert(&self.id, task).await?;
+        // Issue #1865: a card re-entering In Progress is a fresh attempt, so
+        // any bounce chip left over from a *previous* failed attempt is stale
+        // the moment this one starts — a card mid-retry must not go on
+        // advertising the reason its last try came back. Cloned rather than
+        // mutating the caller's `task` in place: this is the single write
+        // site for REST mutations and the caller may hold or re-render its own
+        // copy afterwards.
+        let write: std::borrow::Cow<'_, TaskRecord> = if dispatch && task.bounced.is_some() {
+            let mut cleared = task.clone();
+            cleared.bounced = None;
+            std::borrow::Cow::Owned(cleared)
+        } else {
+            std::borrow::Cow::Borrowed(task)
+        };
+        self.ops.tasks.upsert(&self.id, &write).await?;
         if dispatch {
             self.dispatch_task(task).await;
         }
@@ -1177,7 +1191,7 @@ impl CompanyRuntime {
             // by an attempt. Leave it for the boot reaper to settle both.
             return;
         }
-        if let Err(err) = crate::runtime::advance::advance_settled_card(
+        match crate::runtime::advance::advance_settled_card(
             self.ops.tasks.as_ref(),
             &self.id,
             task_id,
@@ -1186,13 +1200,55 @@ impl CompanyRuntime {
         )
         .await
         {
+            // Issue #1865: the card actually bounced to To-do — notify, the
+            // same as the cycle's own terminality backstop does for the far
+            // more common "the brain errored" shape of this failure.
+            Ok(Some(crate::ports::tasks::COLUMN_TODO)) => {
+                self.notify_dispatch_failed(task_id, crate::ports::runs::RUNTIME_REPLACED_ERROR)
+                    .await;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    run = %run_id,
+                    task = %task_id,
+                    error = %err,
+                    "[runs] settled an attempt refused by a quiescing runtime but could not \
+                     return its card; it stays in progress until the next boot"
+                );
+            }
+        }
+    }
+
+    /// Files a durable notification that a board card's dispatch failed and it
+    /// bounced back to To-do (issue #1865) — shared by every system path that
+    /// settles a run its own turn did not: [`abandon_run`](Self::abandon_run),
+    /// the cycle's terminality backstop, and the boot reaper's card sweep.
+    ///
+    /// Whole-company audience: a bounced card has no single decider the way a
+    /// mention does, and its assignee is exactly who the card's own `assignee`
+    /// field already names for anyone who opens it.
+    pub(crate) async fn notify_dispatch_failed(&self, task_id: &str, reason: &str) {
+        let note = crate::ports::notifications::Notification {
+            id: crate::ports::generate_id(),
+            kind: "dispatch_failed".to_string(),
+            subject: crate::ports::notifications::Subject {
+                kind: crate::ports::notifications::SubjectKind::Task,
+                id: task_id.to_string(),
+            },
+            created_at: now_millis(),
+            title: format!("A card's dispatch failed and returned to To-do: {reason}"),
+            audience: None,
+            context: None,
+        };
+        if let Err(err) = self.notifications().append(&self.id, &note).await {
             tracing::warn!(
                 company = %self.id,
-                run = %run_id,
                 task = %task_id,
                 error = %err,
-                "[runs] settled an attempt refused by a quiescing runtime but could not return \
-                 its card; it stays in progress until the next boot"
+                "[runs] a dispatch-failure notification could not be recorded; the card still \
+                 bounced, but nobody is badged for it"
             );
         }
     }
@@ -2478,8 +2534,42 @@ impl CompanyRuntime {
             .sweep_expired_capped(now, MAX_RETIREMENTS_PER_TICK);
         for id in &expired {
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
+            // Issue #1865: a blocker nobody answered is exactly the silent
+            // failure this notification exists for — "awaiting approval"
+            // forever with nothing telling anybody it timed out. Best-effort
+            // and after the retirement, which already propagates its own
+            // error: a notification that could not be filed must not undo a
+            // default-deny that already happened.
+            self.notify_approval_expired(id).await;
         }
         Ok(expired)
+    }
+
+    /// Files a durable notification that a parked approval expired unanswered
+    /// (issue #1865) — one row, whole company, since expiry has no single
+    /// decider the way a mention has a mentioned user.
+    async fn notify_approval_expired(&self, id: &ApprovalId) {
+        let note = crate::ports::notifications::Notification {
+            id: crate::ports::generate_id(),
+            kind: "approval_expired".to_string(),
+            subject: crate::ports::notifications::Subject {
+                kind: crate::ports::notifications::SubjectKind::Approval,
+                id: id.as_ref().to_string(),
+            },
+            created_at: now_millis(),
+            title: "An approval expired unanswered and was denied by default".to_string(),
+            audience: None,
+            context: None,
+        };
+        if let Err(err) = self.notifications().append(&self.id, &note).await {
+            tracing::warn!(
+                company = %self.id,
+                approval = %id.as_ref(),
+                error = %err,
+                "[approvals] an expiry notification could not be recorded; the default-deny \
+                 still lands, but nobody is badged for it"
+            );
+        }
     }
 
     /// Retires one approval the operator never decided: the whole default-deny
@@ -4158,6 +4248,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
 
         let first = runtime.open_run(&card).await.expect("an attempt is minted");
@@ -4251,6 +4342,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
 
         // Positive control: on a live runtime the cycle runs, so the row is
