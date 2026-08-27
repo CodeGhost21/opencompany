@@ -384,12 +384,26 @@ impl WorkflowSpawn {
                     // `pending_approvals.len()`, so `==` is "every pending
                     // node lost its card", the only case "nobody was asked"
                     // is honest.
+                    //
+                    // Codex review (PR #1883, comment 3875617184): a `Pending`
+                    // delivery row is a *second* thing waiting on a person,
+                    // on the approvals queue rather than the gate join, and
+                    // `fully_stranded` excludes it for exactly that reason —
+                    // see its doc comment in `workflow_verdict.rs`. This arm
+                    // must apply the same exclusion, or a run whose gates are
+                    // all lost but whose report is parked for delivery still
+                    // gets told "nothing is waiting on it any more, and
+                    // nobody was asked" while a report is parked waiting on
+                    // exactly that.
                     Ok(run)
                         if !run.pending_approvals.is_empty()
                             && crate::ports::workflow_runner::stranded_approvals(
                                 &run.pending_approvals,
                                 &run.approvals,
-                            ) == run.pending_approvals.len() =>
+                            ) == run.pending_approvals.len()
+                            && !run.deliveries.iter().any(|d| {
+                                matches!(d.status, crate::ports::DeliveryStatus::Pending)
+                            }) =>
                     {
                         self.notify_run_unhealthy(
                             &workflow.id,
@@ -970,6 +984,106 @@ mod tests {
                 .any(|n| n.notification.kind == "workflow_run_stranded"),
             "a partly-stranded run must NOT be announced as fully stranded — \
              node2's card is still live and actionable: {notes:?}"
+        );
+    }
+
+    /// Same approvals shape as `FullyStrandedRunner` — `node1` is the run's
+    /// only pending node and it lost its card completely — but the run also
+    /// carries a `deliveries` row parked for approval on the same run.
+    struct StrandedApprovalWithPendingDeliveryRunner;
+
+    #[async_trait]
+    impl WorkflowRunner for StrandedApprovalWithPendingDeliveryRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &WorkflowRunContext,
+        ) -> Result<WorkflowRun> {
+            Ok(WorkflowRun {
+                output: Value::Null,
+                pending_approvals: vec!["node1".to_string()],
+                deliveries: vec![crate::ports::DeliveryReport {
+                    node: "output1".to_string(),
+                    kind: "email".to_string(),
+                    target: None,
+                    status: crate::ports::DeliveryStatus::Pending,
+                    detail: "parked for operator approval".to_string(),
+                    reason: crate::ports::DeliveryReason::default(),
+                }],
+                cancelled: false,
+                nodes: Vec::new(),
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                    node_id: "node1".to_string(),
+                    tools: vec!["some_tool".to_string()],
+                    approval_ids: Vec::new(),
+                    unparkable: 1,
+                    stranded: 0,
+                }],
+                approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("node1".to_string()),
+                    tool: Some("some_tool".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                    approval_id: None,
+                }],
+            })
+        }
+    }
+
+    /// Codex review on PR #1883 (comment 3875617184): `node1` is fully
+    /// stranded on its own — `stranded_approvals(...) == pending_approvals.len()`
+    /// holds exactly as it does for `FullyStrandedRunner` — but the run also
+    /// has a report parked on the deliveries queue
+    /// (`DeliveryStatus::Pending`). `RunVerdictFacts::fully_stranded`
+    /// excludes a run with a pending delivery because that report is a
+    /// *second* thing still waiting on a person; the notification guard must
+    /// apply the same exclusion so it does not claim "nobody was asked" while
+    /// exactly that is true of the parked report.
+    ///
+    /// Before the fix, this arm ignored `run.deliveries` entirely, so it fired
+    /// `workflow_run_stranded` here too. `blocked_nodes` is non-empty (same
+    /// shape as `FullyStrandedRunner`), so once the stranded arm correctly
+    /// declines, the run falls through to the `blocked` arm below it — same
+    /// fallback the partly-stranded case uses.
+    #[tokio::test]
+    async fn a_stranded_run_with_a_pending_delivery_does_not_notify_stranded() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-spawn-stranded-pending-delivery-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let notifications = Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let spawn = WorkflowSpawn {
+            company: company.clone(),
+            events: events.clone(),
+            supervisor: RunSupervisor::new(),
+            runner: Arc::new(StrandedApprovalWithPendingDeliveryRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
+            notifications: notifications.clone(),
+        };
+
+        let (run_id, handle) = spawn
+            .spawn(empty_workflow(), Value::Null, false, false)
+            .expect("under the default cap");
+        handle.await.expect("join").expect("run settles Ok");
+
+        use crate::ports::notifications::NotificationStore;
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_stranded"
+                    && n.notification.subject.id == run_id),
+            "a run with a pending delivery must NOT be announced as fully \
+             stranded — the parked report is still actionable, exactly like \
+             `RunVerdictFacts::fully_stranded` excludes it: {notes:?}"
         );
     }
 }
