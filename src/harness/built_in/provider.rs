@@ -902,10 +902,25 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
     // `content` is empty so it can still override already-nonempty leaked
     // text, not just leaked reasoning.
     let array_refusal = extract_array_refusal_text(payload.pointer("/choices/0/message/content"));
+    // Array-shaped `content` can also carry only a `"text"` part — no
+    // `{"type":"refusal",…}` part at all — while the refusal lives in the
+    // scalar sibling `message.refusal` field, same as the plain-string-
+    // content case this block was originally written for. `array_refusal`
+    // is `None` in that shape (there is no refusal-typed part to find), so
+    // gating on `content.is_empty() || array_refusal.is_some()` alone still
+    // skips the whole block — and with it, the scalar `message.refusal`
+    // lookup a few lines below — leaking the text fragment instead of the
+    // refusal. Check for a nonempty scalar refusal independently too, so
+    // its presence alone is enough to enter the block regardless of what
+    // shape `content` took (Codex review on #1779, comment 3875101974).
+    let scalar_refusal_present = payload
+        .pointer("/choices/0/message/refusal")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
     if tool_calls.is_empty()
         && !raw_tool_call_requested
         && genuinely_finished
-        && (content.is_empty() || array_refusal.is_some())
+        && (content.is_empty() || array_refusal.is_some() || scalar_refusal_present)
     {
         // A nonempty `message.refusal` is the provider's own visible safety
         // response — it wins over any `reasoning`/`reasoning_content` the
@@ -2273,6 +2288,35 @@ mod tests {
                         { "type": "text", "text": "Sure, here's a start: " },
                         { "type": "refusal", "refusal": "I can't help with that." }
                     ]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// An array-shaped `content` with only a `"text"`-typed part (no
+    /// `{"type":"refusal",…}` part at all) alongside a nonempty *scalar*
+    /// `message.refusal` sibling field. `extract_content_text` concatenates
+    /// the text part, so `content` is nonempty; `extract_array_refusal_text`
+    /// finds no refusal-typed part, so `array_refusal` is `None`. Gating the
+    /// refusal-precedence block on `content.is_empty() || array_refusal.is_some()`
+    /// alone therefore skips the block entirely and never even looks at the
+    /// scalar `message.refusal` field, leaking the text fragment as the
+    /// answer instead of surfacing the provider's actual safety response
+    /// (Codex review on #1779, comment 3875101974).
+    #[test]
+    fn a_scalar_refusal_wins_over_leaked_text_in_array_shaped_content() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Sure, here's a start: " }
+                    ],
+                    "refusal": "I can't help with that."
                 }
             }]
         });
