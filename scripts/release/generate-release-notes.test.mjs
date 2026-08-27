@@ -13,6 +13,7 @@ import { test } from 'node:test';
 
 import {
   buildOpenAiRequest,
+  serializeOpenAiPayload,
   buildReleasePayload,
   collectContributorStats,
   ensureAllPullRequestsLinked,
@@ -57,6 +58,23 @@ test('extractPullRequestNumbers takes the merge PR last', () => {
   assert.deepEqual(extractPullRequestNumbers('fix: thing (#12)'), [12]);
   assert.deepEqual(extractPullRequestNumbers('fix: closes (#12) (#34)'), [12, 34]);
   assert.deepEqual(extractPullRequestNumbers('chore: no pr'), []);
+});
+
+test('extractPullRequestNumbers reads regular merge-commit subjects', () => {
+  // This repository merges most PRs with a merge commit, not a squash: 25 of
+  // the last 200 subjects are this shape and carry no parenthesized number at
+  // all. Matching only `(#N)` dropped every one of them — unfetched, unlinked,
+  // and uncredited.
+  assert.deepEqual(
+    extractPullRequestNumbers('Merge pull request #1731 from theamazinghenk/feat/company-logo-backend'),
+    [1731],
+  );
+  // Both forms present: the merge is the PR, so it must be last and therefore
+  // primary. A `(#12)` inside is the issue the branch referenced.
+  assert.deepEqual(extractPullRequestNumbers('Merge pull request #34 from a/fix-(#12)'), [12, 34]);
+  assert.deepEqual(parseGitLog(
+    ['m1', 'Merge pull request #1731 from x/y', 'Ada', 'a@e.com', '2026-08-01T00:00:00Z'].join('\x1f'),
+  )[0].primaryPrNumber, 1731);
 });
 
 test('parseGitLog splits on ASCII separators', () => {
@@ -234,4 +252,61 @@ test('buildOpenAiRequest tells the model that contributor names are not handles'
   assert.equal(request.model, 'gpt-5.2');
   assert.match(request.input[1].content, /DISPLAY NAME, not a GitHub handle/);
   assert.match(request.input[1].content, /Never prefix it with "@"/);
+});
+
+test('groupPullRequestsByHighlight anchors keywords to word starts', () => {
+  // `includes` filed anything saying "support" under Ledgers (via `port`) and
+  // anything saying "efficient" under Desktop (via `ci`).
+  const prs = [
+    { number: 1, title: 'feat: add support for wide screens', url: 'u1', labels: [] },
+    { number: 2, title: 'perf: more efficient rendering', url: 'u2', labels: [] },
+  ];
+
+  const groups = groupPullRequestsByHighlight(prs);
+  const titleFor = (n) => groups.find((g) => g.pullRequests.some((pr) => pr.number === n)).title;
+  assert.doesNotMatch(titleFor(1), /Ledgers/);
+  assert.doesNotMatch(titleFor(2), /Desktop/);
+
+  // Prefix and plural keywords must still match.
+  const stillMatched = groupPullRequestsByHighlight([
+    { number: 3, title: 'chore: notarize the dmg', url: 'u3', labels: [] },
+    { number: 4, title: 'feat: new skills surface', url: 'u4', labels: [] },
+  ]);
+  assert.match(stillMatched.find((g) => g.pullRequests.some((pr) => pr.number === 3)).title, /Desktop/);
+  assert.match(stillMatched.find((g) => g.pullRequests.some((pr) => pr.number === 4)).title, /Companies/);
+});
+
+test('serializeOpenAiPayload trims non-PR collections to reach the cap', () => {
+  // A first-release range is mostly uncategorized commits. Trimming only PRs
+  // could never get under the ceiling, so the request was rejected for size
+  // after discarding the very PRs it existed to describe.
+  const payload = {
+    repo: 'tinyhumansai/opencompany',
+    range: { from: 'root', to: 'v1', resolvedTo: 'v1', compareUrl: 'https://x/compare' },
+    totals: { commits: 9000, pullRequests: 2, contributors: 400, newContributors: 1 },
+    contributors: Array.from({ length: 400 }, (_, i) => ({
+      name: `Person ${i}`,
+      commits: 1,
+      prs: [],
+      isNew: i === 0,
+    })),
+    pullRequests: [
+      { number: 1, title: 'a', url: 'https://x/1', author: 'ada', labels: [], body: 'b'.repeat(600), commits: [] },
+      { number: 2, title: 'b', url: 'https://x/2', author: 'bo', labels: [], body: 'b'.repeat(600), commits: [] },
+    ],
+    uncategorizedCommits: Array.from({ length: 8700 }, (_, i) => ({
+      sha: String(i),
+      subject: 'chore: something reasonably wordy '.repeat(3),
+      authorName: `Person ${i % 400}`,
+    })),
+  };
+
+  const serialized = serializeOpenAiPayload(payload);
+  assert.ok(serialized.length <= 120_000, `payload still ${serialized.length} chars`);
+
+  const parsed = JSON.parse(serialized);
+  assert.ok(parsed.uncategorizedCommits.length < 8700);
+  assert.ok(parsed.omittedUncategorizedCommits > 0);
+  // The PRs are what the notes are about — they must survive the trim.
+  assert.equal(parsed.pullRequests.length, 2);
 });
