@@ -995,7 +995,14 @@ impl CompanyRuntime {
     /// the result lands on the card asynchronously. Without an attached harness
     /// both are no-ops and the board stays inert — the card simply rests where
     /// it was put.
-    pub async fn upsert_task(self: &Arc<Self>, task: &TaskRecord) -> Result<()> {
+    ///
+    /// Returns the record actually persisted, not necessarily `task` itself:
+    /// when a stale `bounced` chip is cleared (above), the clone that carries
+    /// the clear is what lands in the store, and a caller that went on to
+    /// serialize its own `task` back to a client (`PATCH /tasks/{id}`'s REST
+    /// handler) would otherwise hand back a `bounced` reason the stored card no
+    /// longer has (Codex review, PR #1883).
+    pub async fn upsert_task(self: &Arc<Self>, task: &TaskRecord) -> Result<TaskRecord> {
         let prev_column = self
             .ops
             .tasks
@@ -1044,7 +1051,7 @@ impl CompanyRuntime {
         if plan {
             self.plan_task(task);
         }
-        Ok(())
+        Ok(write.into_owned())
     }
 
     /// Fires the detached planning pass for a card that just entered
