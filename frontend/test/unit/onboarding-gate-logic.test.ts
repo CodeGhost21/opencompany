@@ -23,6 +23,11 @@ const base: GateDecisionInput = {
   checked: false,
   setupOpen: false,
   skippedThisSession: false,
+  // Every pre-existing case below is written from an admin's point of view
+  // (the only role the gate could originally distinguish), so the shared
+  // fixture defaults to `true` and the admin-specific guard gets its own
+  // cases below.
+  isAdmin: true,
 };
 
 describe("shouldShowOnboardingGate", () => {
@@ -88,5 +93,32 @@ describe("shouldShowOnboardingGate", () => {
         skippedThisSession: true,
       }),
     ).toBe(false);
+  });
+
+  // PR #1875 review finding: an invited member cannot clear any of the three
+  // steps this gate blocks on — naming the company is `require_admin`-gated
+  // on the host, and `OAuthView` disables every connect control unless
+  // `/auth/me` reports `role === "admin"`. Their only way past an
+  // unconditional gate was "Skip for now", which is deliberately
+  // session-scoped (`onboarding/state.ts`) so it re-traps them on every new
+  // tab. These three cases are what closes that dead end.
+  describe("the admin-only guard (PR #1875)", () => {
+    it("does not block before the admin read has landed, even with an incomplete funnel", () => {
+      expect(
+        shouldShowOnboardingGate({ ...base, checked: true, status: incomplete, isAdmin: null }),
+      ).toBe(false);
+    });
+
+    it("never blocks a non-admin member — they cannot act on any step", () => {
+      expect(
+        shouldShowOnboardingGate({ ...base, checked: true, status: incomplete, isAdmin: false }),
+      ).toBe(false);
+    });
+
+    it("still blocks an admin exactly as before once the read confirms the role", () => {
+      expect(
+        shouldShowOnboardingGate({ ...base, checked: true, status: incomplete, isAdmin: true }),
+      ).toBe(true);
+    });
   });
 });

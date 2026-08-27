@@ -62,6 +62,7 @@ import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
 import { gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
 import { shouldShowOnboardingGate } from "@/onboarding/gate-logic";
+import { me as fetchMe } from "@/api/auth";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
 import {
@@ -861,6 +862,34 @@ export function AppShell({
     setGateSkipped(true);
   }, [scope]);
   const activationGate = useActivationGate(client, company, !gateSkipped);
+
+  /**
+   * Whether the signed-in user is this company's admin (PR #1875 review
+   * finding) — `null` until the read lands. Mirrors the `admin =
+   * (await fetchMe(...)).role === "admin"` pattern every other admin-gated
+   * view in this app already uses (`OAuthView`, `TeamView`, etc.); the only
+   * difference here is the `null` "not yet known" state, because this reader
+   * feeds a gate that must never flash open for a member who cannot clear
+   * it — see `shouldShowOnboardingGate`'s own guard.
+   */
+  const [isGateAdmin, setIsGateAdmin] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    setIsGateAdmin(null);
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin,
+        // same as every other `fetchMe`-gated view.
+      }
+      if (live) setIsGateAdmin(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;
@@ -2689,6 +2718,7 @@ export function AppShell({
       checked: activationGate.checked,
       setupOpen,
       skippedThisSession: gateSkipped,
+      isAdmin: isGateAdmin,
     }) &&
     // Narrows `status` for the render below — `shouldShowOnboardingGate`
     // already guarantees this is non-null whenever it returns `true`, but
