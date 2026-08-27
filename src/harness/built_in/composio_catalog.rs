@@ -857,9 +857,18 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// `/browse/...`) lives outside `/rest/` entirely, so `/rest/` is still the
 /// exact API/UI boundary on this host, just drawn at its real location
 /// instead of one family under it.
+///
+/// GitHub is the fourth shape (PR #1780 review, round 5): `api.github.com` is
+/// the dedicated REST/GraphQL host, but release-asset upload/download traffic
+/// (`POST/GET .../releases/{id}/assets`) is served from a SIBLING host,
+/// `uploads.github.com` — not a sub-domain of `api.github.com`, so
+/// [`host_is`]'s suffix match never caught it. Unlike Drive/Jira this is not a
+/// second path prefix on the same host; it is a second, unrelated host that
+/// fronts the same toolkit's API surface, so it gets its own entry in the
+/// slice rather than a wider prefix set on the first one.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
-        "github" => &[("api.github.com", &[])],
+        "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
         "gmail" => &[
             ("gmail.googleapis.com", &[]),
             ("www.googleapis.com", &["/gmail/"]),
@@ -1735,6 +1744,29 @@ mod tests {
             )
             .is_some(),
             "the dedicated Gmail host stays deflected unscoped"
+        );
+    }
+
+    /// PR #1780 review (round 5): `api.github.com` is GitHub's dedicated REST
+    /// host, but release-asset uploads are served from a SIBLING host,
+    /// `uploads.github.com` — not a sub-domain of `api.github.com`, so
+    /// `host_is` never caught it before this host was added to the table. An
+    /// agent uploading a release asset by hand hit this host with no
+    /// credential and passed straight through instead of being deflected.
+    #[test]
+    fn github_upload_host_is_deflected_alongside_the_api_host() {
+        let connected = vec!["github".to_string()];
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://uploads.github.com/repos/o/r/releases/1/assets?name=out.zip"
+            )
+            .is_some(),
+            "the release-asset upload host must be deflected alongside api.github.com"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://api.github.com/repos/o/r/issues").is_some(),
+            "the dedicated API host stays deflected"
         );
     }
 }
