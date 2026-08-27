@@ -3290,8 +3290,21 @@ impl HarnessBrain {
                     // carries `None` and lands on the channel-level
                     // conversation, exactly where every message went before the
                     // root was part of the key.
-                    let chat_target =
-                        crate::runtime::delegation::ChatTarget::in_thread(chat_id, *parent);
+                    //
+                    // The id is normalized to the General desk when the message
+                    // named no chat (codex review finding). An unaddressed post
+                    // is journaled with `chat: None` but routes to General, and
+                    // `run_with_steer` only binds a thread `if let Some(incoming)
+                    // = turn_chat_id` — so a `None` id threw the root away and
+                    // sibling threads on the default desk went on sharing one
+                    // history, which is the whole defect on the surface most
+                    // clients actually use. `is_general_chat` already folds
+                    // `None` into General everywhere else; this makes the
+                    // binding agree with it.
+                    let chat_target = crate::runtime::delegation::ChatTarget::in_thread(
+                        Some(chat_id.unwrap_or(crate::server::ops::language::DEFAULT_DESK)),
+                        *parent,
+                    );
                     // Issue #989: the dispatch-start baseline for "did this
                     // responder write anything it did not publish?" — taken
                     // before the turn runs, for the same reason run_task's own

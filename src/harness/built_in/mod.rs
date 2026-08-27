@@ -939,7 +939,8 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None, None, None).await
+        self.run_with_steer(message, None, None, None, None, None)
+            .await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -972,6 +973,15 @@ impl CompanyAgent {
         stream: Option<crate::turn_stream::TurnStreamCtx>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
         chat_seed: Option<chat_seed::ChatSeedRequest>,
+        // The thread this turn belongs to (#1890), carried in its own right
+        // rather than read off `chat_seed`. The binding must not depend on an
+        // optional dependency: `chat_seed` is `None` whenever no `EventLog` is
+        // wired, so reading the root from it made two different threads of one
+        // channel compare equal on such a host — no clear, no re-seed, and the
+        // leak this whole change exists to close, reopened in exactly the
+        // configuration that cannot re-seed its way out of it (coderabbit
+        // review finding).
+        thread_root: Option<EventSeq>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
@@ -1069,12 +1079,7 @@ impl CompanyAgent {
         // own durable transcript. Runs inside the `agent` critical section,
         // which already serialises this agent's turns.
         if let Some(incoming) = turn_chat_id.as_deref() {
-            // The thread within that channel (#1890). Read off the seed request
-            // because that is what the route already resolved; a turn with no
-            // request (background, workflow, confined) carries no thread either
-            // and lands on the channel-level `None`, exactly as it did before
-            // the root was part of the key.
-            let incoming_root = chat_seed.as_ref().and_then(|request| request.thread_root);
+            let incoming_root = thread_root;
             let mut bound = self.bound_chat.lock().await;
             let switched = bound.as_ref().map(|(chat, root)| (chat.as_str(), *root))
                 != Some((incoming, incoming_root));
@@ -3495,7 +3500,7 @@ impl HarnessPool {
         // reason (issue #1840): a confined turn is intentionally context-free, so
         // it carries none of the desk's recent history.
         let (outcome, turn_costs) = agent
-            .run_with_steer(message, None, stream_ctx, None, None)
+            .run_with_steer(message, None, stream_ctx, None, None, None)
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
@@ -3824,6 +3829,12 @@ impl HarnessPool {
                 stream_ctx,
                 run_sink.clone(),
                 chat_seed_request,
+                // From `live`, not from the seed request: the binding must hold
+                // on a host with no event log wired too (#1890).
+                match &live {
+                    LiveStream::On { thread_root, .. } => *thread_root,
+                    LiveStream::Workflow { .. } | LiveStream::Off => None,
+                },
             )
             .await?;
         // Issue #1846: park a durable re-issue marker the moment a pause is
@@ -6979,7 +6990,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None, None, None)
+            .run_with_steer("hi", Some(&control), None, None, None, None)
             .await
             .expect("runs");
         assert_eq!(
@@ -11485,6 +11496,67 @@ budget_usd_daily = 0.0
                 log.reads() > reads_after_first,
                 "a different thread of the same channel is a switch: it must \
                  clear the previous thread's history and re-seed from its own"
+            );
+        }
+
+        /// The binding must not depend on the event log being wired
+        /// (coderabbit review finding).
+        ///
+        /// `incoming_root` used to be read off `chat_seed`, which is `None`
+        /// whenever `deps.events` is — so on such a host two different threads
+        /// of one channel compared equal, the clear-and-re-seed never ran, and
+        /// the leak this change exists to close was reopened in exactly the
+        /// configuration that cannot re-seed its way out of it.
+        ///
+        /// Asserted through `bound_chat` rather than through a seed, because a
+        /// host with no journal has no seed to inspect: the binding is the only
+        /// observable, and it is the thing that was wrong.
+        #[tokio::test]
+        async fn the_thread_binding_holds_with_no_event_log_wired() {
+            let mut fx = fixture();
+            fx.deps.events = None;
+            let rec = record();
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            let thread_a = crate::runtime::delegation::ChatTarget::in_thread(
+                Some("general"),
+                Some(EventSeq::new(1)),
+            );
+            let thread_b = crate::runtime::delegation::ChatTarget::in_thread(
+                Some("general"),
+                Some(EventSeq::new(2)),
+            );
+
+            pool.run(&rec.id, "ceo", "first", &fx.deps, thread_a)
+                .await
+                .expect("thread A turn");
+            // The pool keeps one `CompanyAgent` per (company, agent) and
+            // reuses it across turns — which is exactly why the binding exists.
+            let agent = {
+                let guard = pool.agents.read().await;
+                guard
+                    .get(&rec.id)
+                    .and_then(|roster| roster.iter().find(|a| a.agent_id == "ceo"))
+                    .cloned()
+                    .expect("the agent stays resident between turns")
+            };
+            assert_eq!(
+                *agent.bound_chat.lock().await,
+                Some(("general".to_string(), Some(EventSeq::new(1)))),
+                "the first turn binds to its own thread, journal or no journal"
+            );
+
+            pool.run(&rec.id, "ceo", "second", &fx.deps, thread_b)
+                .await
+                .expect("thread B turn");
+            assert_eq!(
+                *agent.bound_chat.lock().await,
+                Some(("general".to_string(), Some(EventSeq::new(2)))),
+                "a different thread of the same channel must rebind — with no \
+                 event log the re-seed is empty, but the history clear is not \
+                 optional"
             );
         }
 
