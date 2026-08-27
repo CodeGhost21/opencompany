@@ -476,6 +476,29 @@ pub(crate) mod fault_probe {
             .expect("fault-probe poisoned")
             .remove(&key(path))
     }
+
+    static FAIL_NEXT_EXISTS_CHECK: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    /// Arms a one-shot failure for the next `try_exists` probe of `path`
+    /// (issue #1828 review, third round: an existence check can fail for
+    /// reasons other than "not found" — a transient I/O error or an ACL
+    /// denial on the bundle directory — and that failure must not be
+    /// silently read as "does not exist").
+    pub(crate) fn fail_next_exists_check(path: &Path) {
+        FAIL_NEXT_EXISTS_CHECK
+            .lock()
+            .expect("fault-probe poisoned")
+            .insert(key(path));
+    }
+
+    /// Consumes the armed existence-check failure for `path`, if any.
+    pub(crate) fn should_fail_exists_check(path: &Path) -> bool {
+        FAIL_NEXT_EXISTS_CHECK
+            .lock()
+            .expect("fault-probe poisoned")
+            .remove(&key(path))
+    }
 }
 
 /// Reads a file to a string, returning an empty string if it does not exist.
@@ -1037,9 +1060,22 @@ impl CompanyStore for FsCompanyStore {
         //   save. An update's `meta.json` already exists from a prior save,
         //   so if this save's rewrite of it never lands, `load` falls back to
         //   that OLD `meta.json` — never a default.
+        // `unwrap_or(false)` would misclassify a probe failure (e.g. a
+        // transient I/O error or an ACL denial on the bundle directory) as
+        // "no such bundle", steering an update onto the first-publish branch
+        // below and reopening the exact partial-write hazard that branch
+        // exists to avoid (issue #1828 review, third round). Propagate it
+        // instead.
+        #[cfg(test)]
+        if fault_probe::should_fail_exists_check(&bundle.company_toml()) {
+            return Err(io_err(
+                &bundle.company_toml(),
+                std::io::Error::other("injected test failure (fault_probe)"),
+            ));
+        }
         let updating_existing_bundle = tokio::fs::try_exists(&bundle.company_toml())
             .await
-            .unwrap_or(false);
+            .map_err(|e| io_err(&bundle.company_toml(), e))?;
         let meta_src = serde_json::to_string(&meta)?;
         if updating_existing_bundle {
             write_atomic(&bundle.company_toml(), &toml_src).await?;
@@ -2978,6 +3014,98 @@ mod test {
 
         // `fail_next_write` is one-shot, so the retry hits the real write
         // path and the lifecycle change lands normally.
+        store
+            .save(&record("running"))
+            .await
+            .expect("retry succeeds once the fault is no longer armed");
+        assert_eq!(store.load(&id).await.unwrap().unwrap().lifecycle, "running");
+    }
+
+    /// **Issue #1828 review, third round**: `save` picks its write order by
+    /// probing `try_exists(company.toml)` and treating a failed probe the
+    /// same as `Ok(false)`. For an *update* — the bundle already exists —
+    /// that misclassification steers the save onto the first-publish branch,
+    /// which writes `meta.json` (the new lifecycle) *first*. If the
+    /// subsequent `company.toml` write then also fails, or even if it
+    /// doesn't, the probe failure alone means the safety property the
+    /// second-round fix established (an update's first write is
+    /// `company.toml`, so a failure never lands the lifecycle change) no
+    /// longer holds — the wrong branch was taken before either file write
+    /// was attempted.
+    ///
+    /// This proves the probe failure itself is propagated as an error from
+    /// `save`, rather than silently steering the branch choice: publish a
+    /// bundle, arm a fault on the *existence check* (not a write) for the
+    /// next update save, and assert `save` returns `Err` — never that it
+    /// silently took the first-publish branch and left `meta.json`
+    /// rewritten with the new lifecycle. A retry without the fault must
+    /// still land the update normally.
+    #[tokio::test]
+    async fn a_failed_existence_probe_during_an_update_does_not_misfire_the_first_publish_order() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = |lifecycle: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: lifecycle.to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        // Publish the bundle for the first time — unaffected by the fault
+        // this test arms below.
+        store
+            .save(&record("provisioning"))
+            .await
+            .expect("first publish succeeds");
+
+        // Simulate the existence probe itself failing (a transient I/O error
+        // or an ACL denial), not either write. Under the pre-fix
+        // `unwrap_or(false)`, this reads as "does not exist" and `save`
+        // proceeds to write `meta.json` first — the first-publish order —
+        // even though the bundle is live.
+        fault_probe::fail_next_exists_check(&bundle.company_toml());
+
+        let err = store.save(&record("running")).await;
+        assert!(
+            err.is_err(),
+            "a failed existence probe must propagate out of save, not be \
+             silently read as \"bundle does not exist\""
+        );
+
+        let loaded = store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the bundle still exists — only the probe failed");
+        assert_eq!(
+            loaded.lifecycle, "provisioning",
+            "a failed existence probe must not let save fall through to the \
+             first-publish write order and rewrite meta.json's lifecycle \
+             before company.toml is even considered"
+        );
+
+        // The fault is one-shot, so the retry hits the real probe and lands
+        // the update normally.
         store
             .save(&record("running"))
             .await
