@@ -2279,10 +2279,16 @@ impl CompanyRuntime {
                 // `reconcile_stranded_blocked_nodes` finds it and tries
                 // again, exactly as if this attempt had never run.
                 if Self::is_retryable_dispatch_failure(&error) {
+                    // CodeRabbit (review 5038258829): the only retry path for
+                    // a kept stash is `reconcile_stranded_blocked_nodes`, which
+                    // runs once per boot (`RuntimeBuilder::build`, gated on
+                    // `handover.is_none()`) — not an in-process retry inside
+                    // minutes, which "will retry it automatically" led an
+                    // operator to expect.
                     self.announce_to_operator(&format!(
                         "That workflow step's approval is in, but the run could not start \
-                         right now: {error}. The approval stays recorded and this host will \
-                         retry it automatically."
+                         right now: {error}. The approval stays recorded and is picked back \
+                         up automatically the next time this company starts."
                     ))
                     .await;
                 } else {
