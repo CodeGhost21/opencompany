@@ -16,16 +16,28 @@
 // `Task` record, which is why a role-driven renderer was tried here and was
 // wrong. See `LedgerBoard`'s header for that argument in full.
 //
-// Nothing below changed on the way over. That was deliberate: the move is
-// verified by `test/unit/task-blocked-card.test.ts` passing with only its
-// import line touched.
+// Nothing changed on the way over. That was deliberate: the move was verified
+// by `test/unit/task-blocked-card.test.ts` passing with only its import line
+// touched.
+//
+// # The blocked card decides (#1891)
+//
+// What a paused card used to say was that approvals existed — one action name,
+// or a count, and a link somewhere else. Everything needed to say more was
+// already in hand and thrown away: which URL, which command, how much money,
+// who asked, and how long before the deadline default-denies it. So the card
+// renders `ApprovalRow`, the same component the Approvals page, the chat
+// transcript and the workflow run drawer decide through, in a stacked variant
+// sized for a column. It resolves; it does not re-implement resolving.
+//
+// This is the run drawer's fix (#1002) reaching the surface an operator
+// actually works from.
 
 import {
   AlertTriangle,
   CircleHelp,
   ClipboardList,
   FileText,
-  Hourglass,
   ListTree,
   Paperclip,
   Play,
@@ -33,14 +45,21 @@ import {
 } from "lucide-react";
 
 import type { Task, TaskPlan } from "@/api/tasks";
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { withHostParam } from "@/hooks/use-host-route";
 import { PRIORITY_STYLES } from "@/lib/board-columns";
 import { formatUsdCost } from "@/lib/cost";
-import { approvalAction, timeAgo } from "@/lib/language";
-import type { TaskApprovalBlock } from "@/lib/task-approvals";
+import {
+  blockingTaskApprovals,
+  decidingForTask,
+  taskApprovalVerdicts,
+  type TaskApprovalRow,
+} from "@/lib/task-approvals";
 import { extraOutputCount, primaryLink, type TaskLink } from "@/lib/task-output";
 import { cn } from "@/lib/utils";
+import { ApprovalRow } from "@/views/chat/ApprovalRow";
 import { tallyPrerequisites } from "./TaskPlanBrief";
 
 function priorityStyle(priority: string): string {
@@ -115,23 +134,49 @@ export function notePreview(note: string | undefined): string | null {
 export function TaskItem({
   task,
   dragging,
-  block,
+  rows,
   now,
+  askerNames,
+  deciding,
+  failed,
+  onDecide,
   onOpen,
   onResume,
-  onReview,
 }: {
   task: Task;
   dragging: boolean;
-  /** What this card is stopped behind, or `null` when nothing (issue #883). */
-  block: TaskApprovalBlock | null;
-  /** The clock `block` was derived against, for its relative label. */
+  /**
+   * Every approval this card is (or was just) stopped behind (#883, #1891) —
+   * empty when nothing is. Both the still-parked ones and any this console has
+   * witnessed a verdict for, so a decision settles in place across the gap
+   * between the resolve's answer and the feed's next poll.
+   */
+  rows: readonly TaskApprovalRow[];
+  /** The clock `rows` was derived against, for their relative labels. */
   now: number;
+  /** Roster ids → names, for naming who asked (#1891). */
+  askerNames: Map<string, string>;
+  /** Decisions in flight across the console; narrowed to this card below. */
+  deciding: ReadonlyMap<string, Verdict>;
+  /** Decisions that did not land, keyed by approval id. */
+  failed: Record<string, string>;
+  /**
+   * The shell's one resolve, per approval id (#1891).
+   *
+   * Optional on `RunResultPanel`'s precedent, and gating the row the same way:
+   * a surface with no handler renders no decide controls rather than live
+   * buttons that do nothing. Every board in this console is handed one.
+   */
+  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
   onOpen: () => void;
   onResume: () => void;
-  /** Opens the Approvals page filtered to this card (issue #883). */
-  onReview?: () => void;
 }) {
+  // What is *still* stopping the card, as opposed to what stopped it a moment
+  // ago. Resume keys on this, not on `rows`: a card whose last approval the
+  // operator just decided is no longer blocked, and leaving the button dead
+  // until the next poll would be the console disagreeing with the click it
+  // just accepted.
+  const blocking = blockingTaskApprovals(rows);
   return (
     <div
       className={cn(
@@ -195,20 +240,59 @@ export function TaskItem({
       {showsOutputLink(task) && <OutputLinkRow task={task} />}
       {task.stage === "paused" && (
         <>
-          {block && <BlockedRow block={block} now={now} onReview={onReview} />}
+          {blocking.length > 0 && onDecide && (
+            // Deciding, not just reporting (#1891). Rendered only while
+            // something is actually blocking: once every row has a verdict this
+            // component's own settled receipt would take the card's place
+            // permanently, and a board card is not where a decision's paperwork
+            // belongs — the card simply stops being blocked.
+            //
+            // Handed `rows` rather than `blocking`, though, because the row
+            // subtracts what is already decided itself and says so: "1 of 3
+            // decided — 2 still waiting on you" is exactly what an operator
+            // part-way through a batch needs, and passing only the remainder
+            // would silently renumber the work under them.
+            <div
+              // The row holds buttons and a link. Without this, every click
+              // inside it would also reach the card's own open handler and
+              // drop the operator into task detail as their decision landed.
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ApprovalRow
+                variant="card"
+                approvals={rows.map((r) => r.approval)}
+                now={now}
+                askerNames={askerNames}
+                // This card's rows on the Approvals page, not the flat queue —
+                // built with `withHostParam` because a raw hash href drops the
+                // host scope, and an operator on a second host would be sent to
+                // another console's queue.
+                detailsHref={withHostParam(`approvals/${encodeURIComponent(task.id)}`)}
+                deciding={decidingForTask(rows, deciding)}
+                decided={taskApprovalVerdicts(rows)}
+                failed={failed}
+                onDecide={onDecide}
+              />
+            </div>
+          )}
           <Button
             variant="outline"
             size="sm"
-            className={cn("h-7 w-full", block ? "mt-2" : "mt-3")}
+            className={cn("h-7 w-full", blocking.length > 0 ? "mt-2" : "mt-3")}
             // Issue #883: the button is disabled rather than hidden while the
             // card is blocked. Hiding it would leave the card looking like it
             // had no next action at all, which is the ambiguity being fixed —
             // the operator has to be able to see that Resume is the wrong click
             // right now, not wonder where it went. `title` carries the reason
             // for a pointer; the row above carries it for everyone else.
-            disabled={block !== null}
+            //
+            // Still disabled now that the decision is on the card, and more
+            // clearly right for it: since #469 the last verdict continues the
+            // turn on its own, so Approve *is* the resume. Pressing this
+            // instead would re-run the work from the start and park it again.
+            disabled={blocking.length > 0}
             title={
-              block
+              blocking.length > 0
                 ? "Blocked — decide its approvals first; resuming re-runs the work from the start."
                 : undefined
             }
@@ -223,64 +307,6 @@ export function TaskItem({
           </Button>
         </>
       )}
-    </div>
-  );
-}
-
-/**
- * Why a paused card is stopped, on the card itself (issue #883).
- *
- * The card used to carry a Resume button and nothing else, so "decided one of
- * five, still waiting on four" and "wedged" were the same pixels — and Resume
- * was the natural next click from both. It is the wrong click from the first:
- * the turn continues on its own when the last decision lands (#469), so
- * re-dispatching only re-runs the work and parks the same calls again.
- *
- * Names the calls, not the mechanism. One blocked call is quoted in full —
- * through {@link approvalAction}, the same function the Approvals page and the
- * chat card label their rows with, so all three say "Fetch a web page" rather
- * than three different things about one approval. Several are counted instead,
- * because five tool names is not something to read on a Kanban card; the count
- * plus the Review link is, and the page it links to lists them.
- */
-function BlockedRow({
-  block,
-  now,
-  onReview,
-}: {
-  block: TaskApprovalBlock;
-  /** The same clock the block was derived against. */
-  now: number;
-  onReview?: () => void;
-}) {
-  const only = block.count === 1 ? block.approvals[0] : null;
-  return (
-    <div className="mt-2 rounded-md border border-status-blocked/30 bg-status-blocked-soft px-2 py-1.5">
-      <div className="flex items-center gap-1.5 text-2xs font-medium text-status-blocked-text">
-        <Hourglass className="size-3 shrink-0" />
-        <span className="min-w-0 truncate">
-          {only ? approvalAction(only) : `Blocked on ${block.count} approvals`}
-        </span>
-      </div>
-      <div className="mt-0.5 flex items-center justify-between gap-2 text-2xs text-muted-foreground">
-        <span className="truncate">
-          Waiting for your approval · {timeAgo(block.since, now)}
-        </span>
-        {onReview && (
-          <button
-            type="button"
-            className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
-            onClick={(e) => {
-              // The card's own click handler opens task detail; this goes
-              // somewhere else, so it must not also do that.
-              e.stopPropagation();
-              onReview();
-            }}
-          >
-            Review
-          </button>
-        )}
-      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import type { TaskApproval } from "@/api/tasks";
-import type { ApprovalSummary } from "@/api/types";
+import type { ApprovalSummary, Verdict } from "@/api/types";
+import type { DecidedApproval } from "@/views/chat/model";
 
 /**
  * What the task card says about approvals (issue #468).
@@ -122,4 +123,117 @@ export function taskApprovalBlock(
   const mine = approvalsForTask(approvals, taskId).sort((a, b) => a.at_millis - b.at_millis);
   if (mine.length === 0) return null;
   return { approvals: mine, count: mine.length, since: mine[0].at_millis };
+}
+
+/**
+ * One approval this card is (or was) held on, and what has become of it (#1891).
+ *
+ * The `verdict` half is why this exists rather than the card rendering
+ * {@link TaskApprovalBlock.approvals} straight: a resolve's answer and the
+ * feed's next poll are two moments, and for that gap a decided row must read as
+ * decided rather than offering its buttons a second time.
+ */
+export interface TaskApprovalRow {
+  approval: ApprovalSummary;
+  /**
+   * The verdict already witnessed for it — from this card, from the Approvals
+   * page, or from another operator's console over the event stream — or `null`
+   * while it is still waiting on somebody.
+   */
+  verdict: Verdict | null;
+}
+
+/**
+ * Every approval one card is blocked on, decidable, in a stable order (#1891).
+ *
+ * The task-board twin of `runApprovals` in `@/views/workflows/run-approvals`,
+ * and deliberately the same shape: the run drawer had exactly this problem
+ * first (#1002) — it *told* an operator their run had parked and gave them
+ * nowhere to act — and the board is that fix arriving at the surface an
+ * operator actually works from. Two sources, both needed:
+ *
+ * - the **live queue**, which is the point. A card decided anywhere leaves it,
+ *   so the board stops calling this card blocked without a reload;
+ * - the shell's **witnessed decisions**, which keep the last-seen summary of an
+ *   approval the queue has already dropped, so the operator's own decision
+ *   settles in place instead of blinking out from under their cursor.
+ *
+ * Ordered oldest park first, then by id — stable across a refresh, because the
+ * queue hands back a fresh array on every poll and a list that reordered under
+ * a pointer mid-click would be its own bug. Same ordering
+ * {@link taskApprovalBlock} uses, so the row the card measures its wait from is
+ * the row it draws first.
+ *
+ * A witnessed decision is only folded back in when it belongs to **this** card,
+ * by the same `{link: "task"}` rule {@link approvalsForTask} applies — a
+ * decision taken on some other card's row is not this card's business, and
+ * `decided` is a console-wide map covering every surface that resolves.
+ */
+export function taskApprovalRows(
+  approvals: readonly ApprovalSummary[],
+  decided: Readonly<Record<string, DecidedApproval>>,
+  taskId: string,
+): TaskApprovalRow[] {
+  const byId = new Map<string, TaskApprovalRow>();
+  for (const approval of approvalsForTask(approvals, taskId)) {
+    byId.set(approval.id, { approval, verdict: decided[approval.id]?.verdict ?? null });
+  }
+  for (const [id, d] of Object.entries(decided)) {
+    if (byId.has(id)) continue;
+    if (d.approval.task?.link !== "task" || d.approval.task.id !== taskId) continue;
+    byId.set(id, { approval: d.approval, verdict: d.verdict });
+  }
+  return [...byId.values()].sort(
+    (a, b) =>
+      a.approval.at_millis - b.approval.at_millis ||
+      (a.approval.id < b.approval.id ? -1 : a.approval.id > b.approval.id ? 1 : 0),
+  );
+}
+
+/** The subset still waiting on somebody — what the card is actually stopped behind. */
+export function blockingTaskApprovals(rows: readonly TaskApprovalRow[]): TaskApprovalRow[] {
+  return rows.filter((r) => r.verdict === null);
+}
+
+/** Stable empties, so an idle card's props do not churn on every board poll. */
+const NO_VERDICTS: Record<string, Verdict> = {};
+const NO_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+
+/**
+ * The verdicts already witnessed for one card's rows (#1891).
+ *
+ * What `ApprovalRow` means by `decided`: the map it subtracts from its batch to
+ * work out what an Approve still covers. Handing it the console-wide map would
+ * be nearly the same thing and quietly wrong on the count — a decision on some
+ * other card's approval would be subtracted from this card's total.
+ */
+export function taskApprovalVerdicts(rows: readonly TaskApprovalRow[]): Record<string, Verdict> {
+  const verdicts: Record<string, Verdict> = {};
+  for (const row of rows) if (row.verdict) verdicts[row.approval.id] = row.verdict;
+  return Object.keys(verdicts).length === 0 ? NO_VERDICTS : verdicts;
+}
+
+/**
+ * The decisions in flight on **this** card, as their own map (#1891).
+ *
+ * Narrowed for the reason #373 established and `RunResultPanel` repeats: the
+ * shell's `deciding` map is console-wide, and `ApprovalRow` reads `size > 0` as
+ * "I am busy". Passed whole, one operator click would grey out the buttons on
+ * every blocked card on the board at once.
+ *
+ * Per *card* rather than per row, unlike the run drawer's version: the card
+ * renders one batch with one Approve, so every id it covers is genuinely in
+ * flight together and each should show it.
+ */
+export function decidingForTask(
+  rows: readonly TaskApprovalRow[],
+  deciding: ReadonlyMap<string, Verdict>,
+): ReadonlyMap<string, Verdict> {
+  if (deciding.size === 0) return NO_DECIDING;
+  const mine = new Map<string, Verdict>();
+  for (const row of rows) {
+    const verdict = deciding.get(row.approval.id);
+    if (verdict) mine.set(row.approval.id, verdict);
+  }
+  return mine.size === 0 ? NO_DECIDING : mine;
 }

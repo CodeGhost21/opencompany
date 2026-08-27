@@ -2934,11 +2934,25 @@ export function AppShell({
               // second request.
               approvals={feed.approvals}
               now={feed.now}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Issue #1891: a blocked card decides in place rather than only
+              // reporting that it is blocked. The same four maps the run drawer
+              // receives, owned here for the same reason — an operator who
+              // decides on the board, steps over to Approvals and comes back
+              // must not find a card that forgot what they did. `decided` is
+              // fed by the `approval_resolved` frame as well as by this
+              // console's own resolves, so a decision taken on the page settles
+              // on the board with no reload.
+              //
+              // This replaces `onReviewApprovals`: the card's own "View
+              // details" is an `href` built with `withHostParam`, which lands
+              // the same `#/approvals/<taskId>` in the hash — surviving a
+              // refresh and the Back button — without a callback to route it.
+              decidingApprovals={decidingApprovals}
+              decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
+              onDecideApproval={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
               // Lists, which reads the same instance) with no reload.
