@@ -144,7 +144,10 @@ async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, crate::server::Re
     // bug the honest-verdicts work exists to close — a durable row written
     // but never returned to the one client that reads this store. Read rows
     // are still excluded: the client only needs the actionable, unread set.
-    let rows: Vec<_> = rows.into_iter().filter(|view| view.read_at.is_none()).collect();
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|view| view.read_at.is_none())
+        .collect();
     let unread = rows.len();
     Ok(Json(FeedDto {
         notifications: rows.into_iter().map(NotificationDto::from).collect(),
@@ -505,9 +508,27 @@ mod tests {
         let home = home();
         let state = state(home.path()).await;
         let mine = me(&state).await;
-        file_kind(&state, "bounced", Some(vec![mine.clone()]), "dispatch_failed").await;
-        file_kind(&state, "expired", Some(vec![mine.clone()]), "approval_expired").await;
-        file_kind(&state, "run", Some(vec![mine.clone()]), "workflow_run_failed").await;
+        file_kind(
+            &state,
+            "bounced",
+            Some(vec![mine.clone()]),
+            "dispatch_failed",
+        )
+        .await;
+        file_kind(
+            &state,
+            "expired",
+            Some(vec![mine.clone()]),
+            "approval_expired",
+        )
+        .await;
+        file_kind(
+            &state,
+            "run",
+            Some(vec![mine.clone()]),
+            "workflow_run_failed",
+        )
+        .await;
         file(&state, "mentioned", Some(vec![mine])).await;
 
         let (status, feed) = call(&state, "GET", None, true).await;
