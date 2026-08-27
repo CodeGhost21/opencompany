@@ -1593,7 +1593,8 @@ async fn run_workflow(
             // settled, and a run that failed leaves through `Ok(Err(err))` one
             // arm down as an `ApiError` with no body at all. So the readings
             // this response can carry are `stopped`, `blocked`, `undelivered`,
-            // `awaiting-approval` and `ok` — never `running`, never `failed`.
+            // `awaiting-approval`, `degraded` (issue #1865) and `ok` — never
+            // `running`, never `failed`.
             let verdict = WorkflowRunVerdict::of(RunVerdictFacts {
                 running: false,
                 error: None,
@@ -1601,13 +1602,37 @@ async fn run_workflow(
                 blocked_nodes: run.blocked_nodes.len(),
                 deliveries: &run.deliveries,
                 pending_approvals: run.pending_approvals.len(),
-                // Issue #1189: deliberately not reconciled here, and a literal
-                // rather than a lookup. This body is written microseconds after
+                // Issue #1189: the live-approvals JOIN is deliberately not run
+                // here — this body is written microseconds after
                 // `park_pending_gates` minted the cards, so joining against the
-                // queue would be a guaranteed-zero query on the hot path — the
+                // queue would be a guaranteed-zero query on the hot path; that
                 // reconciliation is a fact about a run somebody comes back to,
                 // which is what the history route is for.
-                stranded_approvals: 0,
+                //
+                // Issue #1865: but a card this run tried to park and never
+                // reached the queue at all — `ParkFailed`/`Discarded` — is known
+                // the instant the run settles, with no query. Reading it off
+                // `run.approvals` here (rather than hardcoding zero) is what
+                // stops a run whose approvals queue is unwired, or whose turn
+                // gated more calls than the per-batch cap, from reporting
+                // `awaiting-approval` on a card nobody will ever see.
+                stranded_approvals: run
+                    .approvals
+                    .iter()
+                    .filter(|a| a.outcome.unparkable())
+                    .count(),
+                // Issue #1865: `run.nodes` already carries the runner's own
+                // reclassification (`reclassify_blocked`, `reclassify_capped_nodes`)
+                // by the time it reaches this response, so a row still `Error`
+                // here is a genuine one — either a capability error under
+                // `on_error: continue|route`, or a turn that truncated at the
+                // iteration cap. Read before `run.nodes` moves onto the wire
+                // shape below.
+                errored_nodes: run
+                    .nodes
+                    .iter()
+                    .filter(|n| n.status == WorkflowNodeStatus::Error)
+                    .count(),
             });
             Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
                 output: run.output,
@@ -2817,6 +2842,23 @@ impl WorkflowRunOutcome {
             // Issue #1189: filled in by the join below, which is why the verdict
             // pass now runs AFTER it. See `list_runs`.
             stranded_approvals: self.stranded_approvals,
+            // Issue #1865: `self.nodes` already carries `relabel_blocked`'s
+            // reclassification by the time this runs — see `fold_run_events`'s
+            // settle arm — so a row still `Error` here is a genuine one under
+            // `on_error: continue|route`. A turn that instead truncated at the
+            // `max_tool_iterations` cap is NOT caught by this count: the engine
+            // journals `WorkflowNodeFinished` for it as `Ok` in real time,
+            // before the host-side relabel in `run_workflow_inner` ever runs
+            // (see `reclassify_capped_nodes`), so a persisted, re-read run
+            // undercounts by exactly that case until the journal itself carries
+            // the fact. The live/synchronous run response (`run_workflow`) does
+            // not have this gap — it reads the in-memory, already-relabelled
+            // `WorkflowRun.nodes` directly.
+            errored_nodes: self
+                .nodes
+                .iter()
+                .filter(|n| n.status == WorkflowNodeStatus::Error)
+                .count(),
         })
     }
 }
@@ -6808,6 +6850,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: origin_run_id.map(str::to_string),
                 origin_workflow_id: None,
+                bounced: None,
             }
         }
 
