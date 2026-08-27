@@ -280,10 +280,11 @@ overlay fingerprint (`overlay_fingerprint`, see
 
 Every detail response carries an `editable` list naming the fields this route
 will accept, so a client renders read-only from the host's answer instead of
-re-deriving the rule. `tools` is admin-only for both kinds — an empty list means
-"the company's standard grant", so a `tools` edit is a potential *widening* —
-and `tier` is read-only for both: it has no override layer, and adding one is a
-policy decision rather than a form field.
+re-deriving the rule. `tools` is admin-only for both kinds and three-state since
+#1804 — `null` resets to the company's standard grant (a potential *widening*),
+an **explicit empty list** (`[]`) is a deliberate deny-all, and a non-empty list
+narrows — and `tier` is read-only for both: it has no override layer, and adding
+one is a policy decision rather than a form field.
 
 ### Drafting a mandate or a persona
 
