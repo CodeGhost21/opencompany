@@ -3637,9 +3637,26 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
                 }
             }
         }
-        // Adoption commits nothing: the transaction is dropped, which rolls back
-        // a reservation that never wrote.
-        if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+        // Adoption stamps the lease flag (issue #1839) and commits it. The write
+        // rides `node_json` via serde, inside the immediate transaction this
+        // method already holds, so the flag lands atomically against a
+        // concurrent `delete_if_empty` and Race 1 is closed on this backend.
+        // Authorship is untouched — only `adopted` changes.
+        if let Some(mut existing) = existing_folder_claim(nodes.values(), parent, name)? {
+            if !existing.adopted {
+                existing.adopted = true;
+                tx.execute(
+                    "UPDATE workspace_nodes SET node_json = ?3 \
+                     WHERE company_id = ?1 AND id = ?2",
+                    params![
+                        company.as_ref(),
+                        existing.id,
+                        serde_json::to_string(&existing)?
+                    ],
+                )
+                .map_err(sql_err)?;
+                tx.commit().map_err(sql_err)?;
+            }
             return Ok(FolderClaim::Adopted(existing));
         }
         let node = new_folder(name, parent, origin);
@@ -4642,6 +4659,16 @@ mod test {
         conformance::assert_workspace_sibling_names(store()).await;
     }
 
+    /// Issue #1839: the adoption lease — a second claim marks the folder, and
+    /// `delete_if_empty` refuses it while a minted-unadopted twin still deletes.
+    /// SQLite inherits the trait-default `delete_if_empty`, so this pins that the
+    /// flag it persists in `node_json` under the adopt transaction is the flag
+    /// the default reads back.
+    #[tokio::test]
+    async fn conformance_workspace_adoption_lease() {
+        conformance::assert_workspace_adoption_lease(store()).await;
+    }
+
     /// **The race issue #894 is actually about**, and the reason the guard is an
     /// `IMMEDIATE` transaction rather than a check in `create`'s caller.
     ///
@@ -4682,6 +4709,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         let gate = Arc::new(tokio::sync::Barrier::new(2));
@@ -4776,6 +4804,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         WorkspaceStore::create(
