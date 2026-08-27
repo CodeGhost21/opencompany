@@ -866,6 +866,13 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// second path prefix on the same host; it is a second, unrelated host that
 /// fronts the same toolkit's API surface, so it gets its own entry in the
 /// slice rather than a wider prefix set on the first one.
+///
+/// Stripe repeats the GitHub shape (PR #1780 review, round 6): `api.stripe.com`
+/// is the general REST host, but file uploads
+/// (`POST https://files.stripe.com/v1/files`, used for dispute evidence,
+/// identity documents, etc.) are served from `files.stripe.com` — a sibling
+/// host again, not a subdomain of `api.stripe.com`, so it needs its own entry
+/// the same way `uploads.github.com` did.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
         "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
@@ -885,7 +892,7 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'stat
         "notion" => &[("api.notion.com", &[])],
         "linear" => &[("api.linear.app", &[])],
         "hubspot" => &[("api.hubapi.com", &[])],
-        "stripe" => &[("api.stripe.com", &[])],
+        "stripe" => &[("api.stripe.com", &[]), ("files.stripe.com", &[])],
         "jira" => &[
             ("api.atlassian.com", &["/ex/jira/"]),
             ("atlassian.net", &["/rest/"]),
@@ -1766,6 +1773,25 @@ mod tests {
         );
         assert!(
             web_call_deflection(&connected, "https://api.github.com/repos/o/r/issues").is_some(),
+            "the dedicated API host stays deflected"
+        );
+    }
+
+    /// PR #1780 review (round 6): `api.stripe.com` is Stripe's general REST
+    /// host, but file uploads (dispute evidence, identity documents, ...) are
+    /// served from a SIBLING host, `files.stripe.com` — not a subdomain of
+    /// `api.stripe.com`, so `host_is` never caught it before this host was
+    /// added to the table, and a raw file-upload request passed through
+    /// unauthenticated instead of being deflected.
+    #[test]
+    fn stripe_file_upload_host_is_deflected_alongside_the_api_host() {
+        let connected = vec!["stripe".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://files.stripe.com/v1/files").is_some(),
+            "the file-upload host must be deflected alongside api.stripe.com"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://api.stripe.com/v1/charges").is_some(),
             "the dedicated API host stays deflected"
         );
     }
