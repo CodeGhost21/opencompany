@@ -733,6 +733,32 @@ pub(crate) async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 /// already uses is the precedent to copy — with evidence, rather than guessed at
 /// now.
 pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = stage_atomic_bytes(path, bytes).await?;
+    commit_staged(path, tmp).await
+}
+
+/// The write-and-fsync half of [`write_atomic_bytes`], split out so a caller
+/// that must publish more than one file "at once" (`FsCompanyStore::save`,
+/// issue #1828 review, fourth round) can durably stage every file's bytes
+/// *before* any of them is published.
+///
+/// That ordering matters because staging — serialize, open, write, fsync —
+/// is where a save actually fails in practice: a transient I/O error, a full
+/// disk, a denied ACL. None of those touch `path`; they only touch the temp
+/// file this returns. So if `save` stages both `company.toml` and
+/// `meta.json` before calling [`commit_staged`] on either, a failure here
+/// leaves **neither** live file touched, regardless of which file failed or
+/// which order the two are eventually committed in. Only [`commit_staged`]'s
+/// rename can leave one file updated and not the other, and a bare rename
+/// over an already-fsynced temp file is a far smaller, cheaper failure
+/// window than the write this function does — small enough that the commit
+/// order `save` already picks (first-publish vs. update) is left to police
+/// it, rather than needing a corresponding "stage order."
+///
+/// Every other caller of [`write_atomic_bytes`] gets the same fault-injection
+/// point and the same durability recipe as before — this only splits *when*
+/// the temp file is published from *when* it is written.
+async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     // Test-only: see `fault_probe`. Fails before any filesystem call, like a
     // real early I/O error — no temp file, no partial write under `path`.
     #[cfg(test)]
@@ -749,18 +775,18 @@ pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> 
     }
     let tmp = path.with_extension(format!("tmp-{}", generate_id()));
     let owned_tmp = tmp.clone();
+    // Only read back under `#[cfg(test)]` below now that staging no longer
+    // renames — a non-test build would otherwise warn this unused.
+    #[cfg_attr(not(test), allow(unused_variables))]
     let owned_path = path.to_path_buf();
     let bytes = bytes.to_vec();
 
-    // One `spawn_blocking` for the whole write-sync-rename-sync sequence rather
-    // than four `tokio::fs` calls, mirroring `append_line_inner`: each
-    // `tokio::fs` call is its own hop to the blocking pool, and the two flushes
-    // here are exactly the operations that hold a pool thread longest.
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
         let mut file = std::fs::File::create(&owned_tmp).map_err(|e| io_err(&owned_tmp, e))?;
         file.write_all(&bytes).map_err(|e| io_err(&owned_tmp, e))?;
-        // Before the rename, deliberately — see the recipe above.
+        // Before the rename, deliberately — see the recipe on
+        // `write_atomic_bytes`'s doc comment.
         file.sync_data().map_err(|e| io_err(&owned_tmp, e))?;
         // Recorded here rather than at the end of the block, and that placement
         // is the whole value of the probe: tallying on the way out would count
@@ -769,8 +795,25 @@ pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> 
         // fails the test.
         #[cfg(test)]
         append_probe::record_atomic_sync(&owned_path);
-        drop(file);
-        std::fs::rename(&owned_tmp, &owned_path).map_err(|e| io_err(&owned_path, e))?;
+        Ok::<_, OpenCompanyError>(())
+    })
+    .await
+    .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))??;
+
+    Ok(tmp)
+}
+
+/// The rename-and-fsync half of [`write_atomic_bytes`]: publishes a temp
+/// file previously staged by [`stage_atomic_bytes`] over `path`, then
+/// flushes the parent directory. See that function's doc comment for why
+/// the two are split.
+async fn commit_staged(path: &Path, tmp: PathBuf) -> Result<()> {
+    let owned_path = path.to_path_buf();
+
+    // One `spawn_blocking` for the rename-then-sync pair rather than two
+    // `tokio::fs` calls, mirroring `stage_atomic_bytes` above.
+    tokio::task::spawn_blocking(move || {
+        std::fs::rename(&tmp, &owned_path).map_err(|e| io_err(&owned_path, e))?;
         // Unconditional: the rename changed this directory whether or not the
         // destination already existed.
         sync_parent_dir(&owned_path)?;
@@ -1077,12 +1120,40 @@ impl CompanyStore for FsCompanyStore {
             .await
             .map_err(|e| io_err(&bundle.company_toml(), e))?;
         let meta_src = serde_json::to_string(&meta)?;
+
+        // Invariant this function must hold, independent of the commit
+        // order above: an `Err` from `save` must mean *neither* file
+        // changed, not "one of the two changed, but I'm not telling you
+        // which." The order alone can't deliver that — it only controls
+        // which file survives *loss of the rename*, not which file
+        // survives a failed *write*, and a write is the far more likely
+        // failure (I/O error, a full disk, a denied ACL all land here,
+        // never on a bare `rename(2)`). Issue #1828 review, fourth round:
+        // the update order above protects `meta.json` (so a failed second
+        // write never durably commits a lifecycle/overlay change) but, on
+        // its own, does nothing to stop the *first* write — `company.toml`,
+        // e.g. a manifest-only change like the logo endpoint's
+        // `logo_url` — from landing durably even though the caller is
+        // told the save failed when the second write then fails.
+        //
+        // So both files are staged (written + fsynced to a temp name, never
+        // touching the live path) before either is committed (renamed into
+        // place). A failure during staging — the likely case — now leaves
+        // both live files exactly as they were, regardless of which file
+        // failed or what order they're staged in; staging order is
+        // deliberately not made to match commit order, to keep it visible
+        // that the two are independent. Only a failure *between* the two
+        // commits below (an already-fsynced rename failing) still lands
+        // asymmetrically, and that residual, much smaller window is what
+        // the create/update commit order was chosen to make safe.
+        let meta_tmp = stage_atomic_bytes(&bundle.meta_json(), meta_src.as_bytes()).await?;
+        let toml_tmp = stage_atomic_bytes(&bundle.company_toml(), toml_src.as_bytes()).await?;
         if updating_existing_bundle {
-            write_atomic(&bundle.company_toml(), &toml_src).await?;
-            write_atomic(&bundle.meta_json(), &meta_src).await?;
+            commit_staged(&bundle.company_toml(), toml_tmp).await?;
+            commit_staged(&bundle.meta_json(), meta_tmp).await?;
         } else {
-            write_atomic(&bundle.meta_json(), &meta_src).await?;
-            write_atomic(&bundle.company_toml(), &toml_src).await?;
+            commit_staged(&bundle.meta_json(), meta_tmp).await?;
+            commit_staged(&bundle.company_toml(), toml_tmp).await?;
         }
         Ok(())
     }
@@ -3019,6 +3090,121 @@ mod test {
             .await
             .expect("retry succeeds once the fault is no longer armed");
         assert_eq!(store.load(&id).await.unwrap().unwrap().lifecycle, "running");
+    }
+
+    /// **Issue #1828 review, fourth round**: the mirror image of the
+    /// second-round hazard above, on the *other* file. For an update, `save`
+    /// commits `company.toml` (the manifest — name, output, logo, …)
+    /// *before* `meta.json`, so that a failure on `meta.json` never lands a
+    /// lifecycle/overlay change the caller was told failed. But ordering the
+    /// two *writes* that way means a fault on the *second* write —
+    /// `meta.json` — used to let the *first* write land durably first:
+    /// exactly the same shape of bug as the second-round hazard, just with
+    /// which file survives and which is protected swapped. A real-world
+    /// instance: `PUT …/logo` changes `record.manifest.company.logo_url`
+    /// and calls `save`; a transient failure writing `meta.json` right after
+    /// would report the request failed while the new logo was already on
+    /// disk and would reappear on reload.
+    ///
+    /// The fix is not a fifth reorder — reordering again would just swap the
+    /// hazard back. It durably stages both files (write + fsync to a temp
+    /// name) *before* committing (renaming) either one, so a write failure —
+    /// the likely failure mode a transient I/O error or a full disk actually
+    /// produces — never touches a live file no matter which of the two temp
+    /// writes fails or in what order they're attempted. This proves it:
+    /// publish a bundle, change the manifest, arm the fault on `meta.json`'s
+    /// write for the update `save`, and assert the manifest read back
+    /// afterward is still the *old* value — never the new one — even though
+    /// `meta.json` is committed second and untouched-on-disk is normally
+    /// where a change would be expected to survive a same-call failure.
+    #[tokio::test]
+    async fn an_update_interrupted_on_the_second_write_does_not_persist_the_manifest_change() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = |company_name: &str| {
+            let mut manifest = sample_manifest();
+            manifest.company.name = company_name.to_string();
+            CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            }
+        };
+
+        // Publish the bundle for the first time — the create-path branch,
+        // unaffected by this test's assertion.
+        store
+            .save(&record("Acme"))
+            .await
+            .expect("first publish succeeds");
+
+        // The update save this test exercises: a manifest-only change (the
+        // shape of the logo endpoint's `PUT …/logo`), landing via a
+        // `company.toml`-first commit order. Under the pre-fix code the
+        // fault below fires on the *second* write, after `company.toml`
+        // (the new name) had already been written and committed — the
+        // untested window the review flagged. Under the fix, both files are
+        // staged before either is committed, so this same fault fails
+        // before `company.toml` is ever published.
+        fault_probe::fail_next_write(&bundle.meta_json());
+
+        let err = store.save(&record("Acme Renamed")).await;
+        assert!(
+            err.is_err(),
+            "the injected failure must propagate out of save"
+        );
+
+        let loaded = store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the bundle still exists — only the update failed");
+        assert_eq!(
+            loaded.manifest.company.name, "Acme",
+            "a failed meta.json write during an update must leave \
+             company.toml — and the manifest fields it carries — exactly as \
+             it was before the update; the caller was told the save \
+             failed, so nothing about it may have taken effect"
+        );
+
+        // `fail_next_write` is one-shot, so the retry hits the real write
+        // path and the manifest change lands normally.
+        store
+            .save(&record("Acme Renamed"))
+            .await
+            .expect("retry succeeds once the fault is no longer armed");
+        assert_eq!(
+            store
+                .load(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .manifest
+                .company
+                .name,
+            "Acme Renamed"
+        );
     }
 
     /// **Issue #1828 review, third round**: `save` picks its write order by
