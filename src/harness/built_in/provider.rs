@@ -850,9 +850,23 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             .is_some_and(|v| !v.is_null());
     if content.is_empty() && tool_calls.is_empty() && !raw_tool_call_requested && genuinely_finished
     {
-        content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
-        if content.is_empty() {
-            content = extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
+        // A nonempty `message.refusal` is the provider's own visible safety
+        // response — it wins over any `reasoning`/`reasoning_content` the
+        // model emitted before declining. Promoting the reasoning instead
+        // would expose exactly the content the refusal was withholding
+        // (CodeRabbit review on #1779, comment 3872084054).
+        let refusal = payload
+            .pointer("/choices/0/message/refusal")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        if let Some(refusal) = refusal {
+            content = refusal.to_string();
+        } else {
+            content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
+            if content.is_empty() {
+                content =
+                    extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
+            }
         }
     }
 
@@ -2115,6 +2129,30 @@ mod tests {
         });
         let resp = model_response_from_payload(payload).expect("reasoning-only turn parses");
         assert_eq!(resp.text(), "The answer is 42.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A refusal turn: `content: null`, `finish_reason: "stop"`, a nonempty
+    /// `message.refusal`, and `reasoning` the model emitted before declining.
+    /// The refusal is the provider's own visible safety response and must win
+    /// over the internal reasoning — promoting the reasoning instead would
+    /// expose exactly the content the model declined to return (CodeRabbit
+    /// review on #1779, comment 3872084054).
+    #[test]
+    fn a_refusal_wins_over_leaked_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The user wants help with something I should decline.",
+                    "refusal": "I can't help with that."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
         assert!(resp.message.tool_calls.is_empty());
     }
 
