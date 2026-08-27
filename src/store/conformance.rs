@@ -440,6 +440,28 @@ pub async fn assert_isolation_by_company(
         context.list(&beta, "").await.unwrap().is_empty(),
         "beta context leaked"
     );
+    // `beta` was never saved: the activation gate reads "never seen", exactly
+    // like a company with no bundle/document/row at all.
+    assert!(
+        !store.activation_gate_seen(&beta).await.unwrap(),
+        "a company that was never saved must report the activation gate as \
+         never seen"
+    );
+    // PR #1875 review finding: `alpha` WAS just saved, by this same
+    // activation-aware build, so the gate must already read "seen" —
+    // immediately, with no second save. A backend that leaves this at the
+    // `CompanyStore` trait's always-`false` default cannot tell a fresh
+    // company's second boot apart from a genuine pre-#1843 legacy record, and
+    // `RuntimeBuilder::build`'s grandfather back-fill would silently
+    // auto-activate every such company on that backend the moment it
+    // restarts before onboarding finishes — the exact bug #1843 fixed,
+    // reopened for whichever backend forgets this.
+    assert!(
+        store.activation_gate_seen(&alpha).await.unwrap(),
+        "a company just saved by activation-aware code must have the \
+         activation gate marked as seen — a backend inheriting the trait's \
+         always-false default would re-open the #1843 auto-activation bug"
+    );
 
     // `alpha` still sees its own data.
     let loaded = store.load(&alpha).await.unwrap().expect("alpha record");
