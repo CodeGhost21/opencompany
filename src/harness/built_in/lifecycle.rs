@@ -388,6 +388,14 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
 /// `steps` is empty by construction: a dispatched card has no chat bubble to
 /// render a timeline on, so its steps go into the note (and, once #190 lands,
 /// onto the task's own `task_id`-correlated timeline).
+///
+/// `task_id` carries the card's own id (issue #1852): once the runtime
+/// journals this bubble, that is the value that lands on
+/// [`AgentReply::task_id`](crate::ports::types::CompanyEvent::AgentReply), the
+/// same "card this reply is about" widening `journal_chat_replies`
+/// (`server::operator`) already relies on for its own card-opened chip — so
+/// the origin thread's bubble carries a working link back to the card that
+/// answered it, and that link survives a transcript reload.
 pub fn relay_reply(
     card: &TaskRecord,
     responder: &str,
@@ -396,7 +404,7 @@ pub fn relay_reply(
 ) -> OutboundMessage {
     OutboundMessage {
         message_id: None,
-        task_id: None,
+        task_id: Some(card.id.clone()),
         channel: orchestrator.to_string(),
         agent: None,
         text: relay_text(card, responder, orchestrator),
@@ -509,6 +517,10 @@ mod test {
             relayed.reply_to.as_ref().map(|r| r.chat_id.as_str()),
             Some("strategy")
         );
+        // Issue #1852: the relay carries the card's own id, so once the
+        // runtime journals it the origin thread's bubble links back to the
+        // card that answered it.
+        assert_eq!(relayed.task_id.as_deref(), Some("t-1"));
         assert!(
             relayed.text.contains("is ready for review"),
             "{}",
