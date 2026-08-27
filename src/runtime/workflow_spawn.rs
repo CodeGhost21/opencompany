@@ -344,6 +344,35 @@ impl WorkflowSpawn {
                 // notification is reserved for the three that leave a run
                 // with nothing more it can do on its own.
                 match &result {
+                    // Issue #1865 (Codex review): tested BEFORE the generic
+                    // `blocked_nodes` arm below. `HarnessAgentRunner` pushes a
+                    // `WorkflowBlockedNode` whenever a turn gated anything at
+                    // all — `ParkedCalls::is_empty` is false the moment
+                    // `unparkable > 0`, even with zero `approval_ids` — so a
+                    // node that failed to park a single call still lands in
+                    // `blocked_nodes` exactly like one with a live card. The
+                    // call-level `unparkable()` check this arm replaced had
+                    // the same blind spot the other direction: one parked call
+                    // beside one failed park on the same node is not stranded
+                    // (an operator can still act on the card), which
+                    // `stranded_approvals`'s per-node grouping — the same
+                    // reconciliation the sync run response uses — gets right
+                    // and a bare `.any()` over `approvals` cannot.
+                    Ok(run)
+                        if crate::ports::workflow_runner::stranded_approvals(
+                            &run.pending_approvals,
+                            &run.approvals,
+                        ) > 0 =>
+                    {
+                        self.notify_run_unhealthy(
+                            &workflow.id,
+                            &ctx.run_id,
+                            "stranded",
+                            "This run tried to park an approval and could not — nothing is \
+                             waiting on it any more, and nobody was asked.",
+                        )
+                        .await;
+                    }
                     Ok(run) if !run.blocked_nodes.is_empty() => {
                         self.notify_run_unhealthy(
                             &workflow.id,
@@ -351,16 +380,6 @@ impl WorkflowSpawn {
                             "blocked",
                             "This run stopped because a step is waiting on a person to decide \
                              something.",
-                        )
-                        .await;
-                    }
-                    Ok(run) if run.approvals.iter().any(|a| a.outcome.unparkable()) => {
-                        self.notify_run_unhealthy(
-                            &workflow.id,
-                            &ctx.run_id,
-                            "stranded",
-                            "This run tried to park an approval and could not — nothing is \
-                             waiting on it any more, and nobody was asked.",
                         )
                         .await;
                     }
@@ -622,6 +641,108 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s.event, CompanyEvent::WorkflowRunFinished { .. })),
             "a dry run journals no finish, panic or not"
+        );
+    }
+
+    /// A runner whose one node gated a call that failed to park — nothing is
+    /// left waiting on anyone, but `blocked_nodes` is non-empty too (issue
+    /// #1865 Codex review): `HarnessAgentRunner` pushes a
+    /// `WorkflowBlockedNode` the moment a turn gated anything at all, parked
+    /// or not, so a fully-unparkable node reads exactly like a node with a
+    /// live card on that field alone.
+    struct FullyStrandedRunner;
+
+    #[async_trait]
+    impl WorkflowRunner for FullyStrandedRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &WorkflowRunContext,
+        ) -> Result<WorkflowRun> {
+            Ok(WorkflowRun {
+                output: Value::Null,
+                pending_approvals: vec!["node1".to_string()],
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                    node_id: "node1".to_string(),
+                    tools: vec!["some_tool".to_string()],
+                    // Empty: every park attempt on this node failed. This is
+                    // what makes `blocked_nodes.is_empty()` alone the wrong
+                    // test — it is non-empty here exactly as it would be for
+                    // a node with a live, decidable card.
+                    approval_ids: Vec::new(),
+                    unparkable: 1,
+                    stranded: 0,
+                }],
+                approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("node1".to_string()),
+                    tool: Some("some_tool".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                    approval_id: None,
+                }],
+            })
+        }
+    }
+
+    /// Issue #1865 (Codex review): a run whose only pending node has zero live
+    /// parked calls must file a `workflow_run_stranded` notification, not
+    /// `workflow_run_blocked` — nobody is actually waiting on a person to
+    /// decide anything, so the "blocked" wording would send an operator
+    /// looking for an Approvals card that does not exist.
+    ///
+    /// Before the fix, the match in `WorkflowSpawn::spawn` tested
+    /// `!run.blocked_nodes.is_empty()` before the stranded arm, and that field
+    /// is non-empty for this exact case (see `FullyStrandedRunner`), so the
+    /// blocked arm always won and the stranded arm below it was unreachable
+    /// for a fully-stranded run.
+    #[tokio::test]
+    async fn a_fully_stranded_run_notifies_stranded_not_blocked() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-spawn-stranded-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let notifications = Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let spawn = WorkflowSpawn {
+            company: company.clone(),
+            events: events.clone(),
+            supervisor: RunSupervisor::new(),
+            runner: Arc::new(FullyStrandedRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
+            notifications: notifications.clone(),
+        };
+
+        let (run_id, handle) = spawn
+            .spawn(empty_workflow(), Value::Null, false, false)
+            .expect("under the default cap");
+        handle.await.expect("join").expect("run settles Ok");
+
+        use crate::ports::notifications::NotificationStore;
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_stranded"
+                    && n.notification.subject.id == run_id),
+            "a fully-stranded run must file a stranded notification: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_blocked"),
+            "a fully-stranded run must NOT file the misleading 'blocked' \
+             notification — nobody is waiting on a person to decide anything: \
+             {notes:?}"
         );
     }
 }
