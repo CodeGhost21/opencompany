@@ -52,6 +52,11 @@ use crate::ports::tasks::COLUMN_IN_PROGRESS as IN_PROGRESS;
 /// The board column a task must enter to be planned (issue #337). Read from the
 /// task port for the same reason the dispatch literal is.
 use crate::ports::tasks::COLUMN_PLANNING as PLANNING;
+/// The board column a bounced card lands in (issue #1865). Read from the task
+/// port for the same reason the dispatch/planning literals above are — so the
+/// clear-on-departure edge below and [`TaskRecord::bounced`]'s own doc cannot
+/// drift onto two different literals for "todo".
+use crate::ports::tasks::COLUMN_TODO as TODO;
 
 /// Whether an upsert moves a card **into** `in_progress` (the dispatch edge).
 /// A card already in `in_progress` re-saved is not a fresh dispatch.
@@ -75,6 +80,22 @@ fn task_enters_in_progress(prev_column: Option<&str>, next_column: &str) -> bool
 /// to be.
 fn task_enters_planning(prev_column: Option<&str>, next_column: &str) -> bool {
     next_column == PLANNING && prev_column != Some(PLANNING)
+}
+
+/// Whether an upsert moves a card **out of** `todo`, by any route (issue
+/// #1865 Codex review on PR #1883).
+///
+/// [`TaskRecord::bounced`](crate::ports::tasks::TaskRecord::bounced)'s own doc
+/// says the field is "cleared the instant the card leaves `todo` any other
+/// way" — not only via the two edges above. `patch_task` accepts any board
+/// column on a single write, so an operator can move a bounced To-do card
+/// straight to `in_review` or `done` without ever passing through
+/// `in_progress`/`planning`; `dispatch || plan` alone missed that departure,
+/// so the stale chip rode along and could resurface if the card later came
+/// back to `todo` — a manual transition that superseded the bounce, reporting
+/// a reason that no longer applies.
+fn task_leaves_todo(prev_column: Option<&str>, next_column: &str) -> bool {
+    prev_column == Some(TODO) && next_column != TODO
 }
 
 /// Whether a company should come up with the emergency stop engaged, given what
@@ -996,12 +1017,20 @@ impl CompanyRuntime {
         // `TaskStore::upsert` port, not through here — so if this call sat out
         // the planning edge, the stale chip would ride the card all the way
         // through the pass and reappear on a To-do that has nothing to do with
-        // the dispatch failure it names. Cloned rather than mutating the
-        // caller's `task` in place: this is the single write site for REST
-        // mutations and the caller may hold or re-render its own copy
-        // afterwards.
+        // the dispatch failure it names.
+        //
+        // Codex review (PR #1883): gated on `task_leaves_todo`, not
+        // `dispatch || plan` — `patch_task` accepts every board column on one
+        // write, so a bounced card can leave `todo` straight for `in_review`
+        // or `done` without ever touching `in_progress`/`planning`. That
+        // manual transition supersedes the bounce exactly as much as a
+        // re-dispatch does, and the field's own doc promises it clears "the
+        // instant the card leaves `todo` any other way" — not only these two.
+        // Cloned rather than mutating the caller's `task` in place: this is
+        // the single write site for REST mutations and the caller may hold or
+        // re-render its own copy afterwards.
         let write: std::borrow::Cow<'_, TaskRecord> =
-            if (dispatch || plan) && task.bounced.is_some() {
+            if task_leaves_todo(prev_column.as_deref(), &task.column) && task.bounced.is_some() {
                 let mut cleared = task.clone();
                 cleared.bounced = None;
                 std::borrow::Cow::Owned(cleared)
@@ -3962,6 +3991,85 @@ mod tests {
             after.bounced, None,
             "entering Planning must clear the previous dispatch's bounce chip, not carry it \
              through to whatever the planning pass settles next"
+        );
+    }
+
+    /// Codex review on PR #1883 (comment 3874654383): `patch_task` accepts
+    /// any board column on one write, so an operator can move a bounced
+    /// To-do card straight to `done` — a departure that touches neither the
+    /// dispatch nor the planning edge. The manual move supersedes the bounce
+    /// exactly as much as a re-dispatch does, and
+    /// [`crate::ports::tasks::TaskRecord::bounced`]'s own doc promises it
+    /// clears "the instant the card leaves `todo` any other way" — this
+    /// proves the "any other way" case, not just the two edge-fired ones the
+    /// sibling test above covers.
+    ///
+    /// Before the fix, `upsert_task` only cleared `bounced` when
+    /// `dispatch || plan`, so this direct To-do → Done transition left the
+    /// stale chip in place — and it would have resurfaced if the card later
+    /// came back to To-do, naming a failure the intervening manual move had
+    /// already superseded.
+    #[tokio::test]
+    async fn a_direct_move_to_done_clears_a_stale_bounce_chip() {
+        use crate::ports::tasks::{COLUMN_DONE, COLUMN_TODO, TaskRecord};
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .expect("manifest");
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("runtime");
+        let runtime = std::sync::Arc::new(runtime);
+
+        let card = TaskRecord {
+            id: "card-2".to_string(),
+            title: "Draft the spec".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            // A stale chip from a dispatch attempt that already bounced.
+            bounced: Some("a previous run's dispatch failed".to_string()),
+        };
+        runtime
+            .upsert_task(&card)
+            .await
+            .expect("seed the bounced card in To-do");
+
+        let mut done = card.clone();
+        done.column = COLUMN_DONE.to_string();
+        runtime
+            .upsert_task(&done)
+            .await
+            .expect("drag it straight to Done");
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|t| t.id == "card-2")
+            .expect("card survives");
+        assert_eq!(
+            after.bounced, None,
+            "a direct To-do → Done move must clear the stale bounce chip too — the operator's \
+             manual transition supersedes the reason it named, and the chip must not resurface \
+             if the card ever comes back to To-do"
         );
     }
 
