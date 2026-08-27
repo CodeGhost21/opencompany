@@ -741,21 +741,39 @@ pub fn list_tools_description() -> &'static str {
 /// the agent is pointed at `composio_list_connections` to discover them rather
 /// than promised a provider (GitHub, say) that may not be connected.
 pub fn composio_brief(toolkits: &[String]) -> String {
-    let mut brief = String::from(
+    let named: Vec<String> = toolkits
+        .iter()
+        .map(|toolkit| toolkit.trim().to_ascii_lowercase())
+        .filter(|toolkit| !toolkit.is_empty())
+        .collect();
+
+    // Only claim GitHub is reachable through Composio when it actually is:
+    // open mode (no allowlist restriction) or GitHub named among the connected
+    // toolkits. A non-empty allowlist that excludes GitHub (e.g. `["slack"]`)
+    // must not tell the agent it can reach GitHub through Composio — the live
+    // tools enforce the allowlist and would reject the authorization/execution,
+    // routing a GitHub task toward a capability the agent does not hold (PR
+    // #1780 review, round 6).
+    let github_reachable = named.is_empty() || named.iter().any(|toolkit| toolkit == "github");
+
+    let mut brief = String::from(if github_reachable {
         "\n\n## Connected integrations (GitHub and other SaaS)\n\
          You reach GitHub and the company's other connected accounts through its Composio \
          integration, never by calling those services' web APIs yourself. Discover what is \
          available with `composio_list_toolkits` and `composio_list_connections`, find the action \
          you need with `composio_list_tools` (search words first, then `detail: \"schemas\"` on the \
          one slug), and run it with `composio_execute`; `composio_authorize` starts a connection \
-         that is not set up yet.\n",
-    );
+         that is not set up yet.\n"
+    } else {
+        "\n\n## Connected integrations (Composio)\n\
+         You reach the company's connected accounts through its Composio integration, never by \
+         calling those services' web APIs yourself. Discover what is available with \
+         `composio_list_toolkits` and `composio_list_connections`, find the action you need with \
+         `composio_list_tools` (search words first, then `detail: \"schemas\"` on the one slug), \
+         and run it with `composio_execute`; `composio_authorize` starts a connection that is not \
+         set up yet.\n"
+    });
 
-    let named: Vec<String> = toolkits
-        .iter()
-        .map(|toolkit| toolkit.trim().to_ascii_lowercase())
-        .filter(|toolkit| !toolkit.is_empty())
-        .collect();
     if named.is_empty() {
         brief.push_str(
             "Which toolkits this company has connected is not fixed here — call \
@@ -769,15 +787,23 @@ pub fn composio_brief(toolkits: &[String]) -> String {
         ));
     }
 
-    brief.push_str(
+    brief.push_str(if github_reachable {
         "Do NOT use `http_request`, `curl` or `web_fetch` against a connected provider's API (for \
          example `api.github.com`) — those tools call it with no credential and it answers 401 or \
          403; only the Composio tools carry the company's connection. And do not promise an action \
          before checking you hold a tool that can carry it out: unless you were separately granted \
          a browser tool, you have no browser and cannot open a page or \"review it on GitHub\" by \
          hand — either run the action through a Composio tool (or a browser tool you actually \
-         hold) or say plainly that you cannot.",
-    );
+         hold) or say plainly that you cannot."
+    } else {
+        "Do NOT use `http_request`, `curl` or `web_fetch` against a connected provider's API — \
+         those tools call it with no credential and it answers 401 or 403; only the Composio \
+         tools carry the company's connection. And do not promise an action before checking you \
+         hold a tool that can carry it out: unless you were separately granted a browser tool, \
+         you have no browser and cannot open a page or complete it by hand — either run the \
+         action through a Composio tool (or a browser tool you actually hold) or say plainly that \
+         you cannot."
+    });
     brief
 }
 
@@ -1471,6 +1497,27 @@ mod tests {
             brief.contains("Connected toolkits for this company: github, gmail"),
             "{brief}"
         );
+    }
+
+    /// PR #1780 review (round 6): a non-empty allowlist that excludes GitHub
+    /// (e.g. `["slack"]`) must not tell the agent it can reach GitHub through
+    /// Composio — the live tools enforce the allowlist and would reject the
+    /// authorization/execution, routing a GitHub task toward a capability the
+    /// agent does not hold.
+    #[test]
+    fn the_composio_brief_does_not_advertise_github_outside_a_restricting_allowlist() {
+        let brief = composio_brief(&["slack".to_string()]);
+        assert!(
+            !brief.to_lowercase().contains("github"),
+            "an allowlist that excludes GitHub must not name it as reachable: {brief}"
+        );
+        assert!(
+            brief.contains("Connected toolkits for this company: slack"),
+            "{brief}"
+        );
+        // The routing rule and grounding still hold generically.
+        assert!(brief.contains("composio_execute"), "{brief}");
+        assert!(brief.contains("http_request"), "{brief}");
     }
 
     /// Open mode (an empty allowlist) must NOT invent a provider the company may
