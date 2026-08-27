@@ -8056,11 +8056,17 @@ members = ["eng1", "eng2"]
     /// granting agent exactly as an ordinary paused message would — proven
     /// below by reading it straight off `BudgetPauseSet`. Before this fix, the
     /// bubble `redispatch_granted_call` built from that outcome carried
-    /// `outcome.reply` (the budget-paused placeholder text) verbatim, which
-    /// does not start with `BUDGET_PAUSE_NOTICE_PREFIX` — so the console's
-    /// `isBudgetPauseNotice` check never recognised it, and the operator saw
-    /// an ordinary-looking reply with no "Add credits & resend" CTA for a
-    /// marker that was sitting there, parked and redeemable, the whole time.
+    /// `outcome.reply` (the budget-paused placeholder text) verbatim, so the
+    /// operator saw an ordinary-looking reply rather than the runtime's own
+    /// pause notice.
+    ///
+    /// Issue #1846 review (Codex #3870562590): the notice it now carries is the
+    /// NO-RESEND one. The marker asserted below is real but not redeemable —
+    /// `run_steered_background` parks it with `background: true`, the one shape
+    /// `redeem_budget_pause` refuses (`src/server/ops/budget_pause.rs`) — so
+    /// the redeemable prefix would have drawn a CTA that returned 400 on every
+    /// click. Both prefixes are asserted: matching the new one is only half the
+    /// contract, since the console branches on the old one.
     #[tokio::test]
     async fn a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_marker() {
         let dir = tempfile::tempdir().unwrap();
@@ -8101,9 +8107,17 @@ members = ["eng1", "eng2"]
         let bubble = &result.channel_responses[0];
         assert_eq!(bubble.channel, "ceo");
         assert!(
-            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
-            "the console's SystemPill only renders the highlighted pause card for this exact \
-             prefix — got: {}",
+            bubble
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "an approval continuation parks a background marker the redeem route refuses, so \
+             its notice must carry the non-redeemable prefix — got: {}",
+            bubble.text
+        );
+        assert!(
+            !bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: this prefix is what the console keys its \"Add credits & \
+             resend\" CTA off, and this marker's redeem returns 400: {}",
             bubble.text
         );
         assert!(
@@ -8112,9 +8126,9 @@ members = ["eng1", "eng2"]
             bubble.text
         );
 
-        // And a re-issue marker really was parked for the granting agent —
-        // the CTA this notice's text is asking the console to render would
-        // have nothing to redeem otherwise.
+        // And a re-issue marker really was parked for the granting agent: the
+        // notice is non-redeemable because of HOW it was parked (background),
+        // not because nothing was parked at all.
         let marker = crate::runtime::grants::budget_pauses_for(&CompanyId::new("acme"))
             .peek("ceo")
             .expect("run_steered_background parks a marker on the same terms run_inner does");

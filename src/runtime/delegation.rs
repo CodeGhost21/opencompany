@@ -1419,6 +1419,14 @@ impl<'a> DelegationRunner<'a> {
         // bubble lands in `bubbles`.
         let mut bubbles = Vec::new();
         let mut desk_replies: Vec<(String, String)> = Vec::new();
+        // Issue #1846 review (Codex #3870516681): whether a DESK paused, kept
+        // apart from the sticky `budget_paused` above. That one is already
+        // carrying the responder's OWN pause, and a responder that paused on
+        // the turn that queued the hand-off still got a real answer back from
+        // the desk — relaying it is correct there, and is what
+        // `a_responders_own_budget_pause_survives_the_relay_replacing_the_reply`
+        // pins. Only a desk that paused has failed to answer.
+        let mut desk_paused = false;
         // Issue #246: the first card this turn opened, which is what the
         // operator bubble reports. `get_or_insert` rather than assignment keeps
         // it the FIRST — a later spawn must not overwrite the id an earlier one
@@ -1445,6 +1453,7 @@ impl<'a> DelegationRunner<'a> {
             operator_steps.extend(desk.steps);
             hit_iteration_cap |= desk.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(desk.halted_for_spend);
+            desk_paused |= desk.budget_paused.is_some();
             budget_paused = budget_paused.or(desk.budget_paused);
             desk_replies.push((desk.member, desk.reply));
         }
@@ -1465,7 +1474,12 @@ impl<'a> DelegationRunner<'a> {
         // that would have worked. Skipped entirely instead; the fold below
         // keeps the delegate's own text on the operator bubble, so nothing the
         // operator would have read is lost.
-        if !desk_replies.is_empty() && budget_paused.is_none() {
+        //
+        // Gated on `desk_paused`, NOT on the sticky `budget_paused`: the latter
+        // also carries the RESPONDER's own pause, and a responder that paused
+        // on the turn that queued the hand-off still has a real desk answer to
+        // relay. Widening the gate to it would silently drop that answer.
+        if !desk_replies.is_empty() && !desk_paused {
             let relay_prompt = build_relay_prompt(message, &desk_replies);
             self.queue.clear();
             let relay = self
@@ -7353,8 +7367,15 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// [`a_nested_delegates_spend_halt_reaches_the_operator_turn`]: a delegate
     /// two levels down pauses for lack of inference budget/credits, and the
     /// operator is told — because the pause folds into the member's answer
-    /// exactly as its reply and steps already do, and survives the relay
-    /// turn's overwrite the same way a spend halt does.
+    /// exactly as its reply and steps already do.
+    ///
+    /// Issue #1846 review (Codex #3870516681): the pause no longer survives a
+    /// relay OVERWRITE, because there is no relay turn to overwrite it. A desk
+    /// that paused has not answered, so the relay is skipped (see
+    /// [`a_delegates_budget_pause_does_not_launch_the_ceo_relay`]) and the
+    /// delegate's text is folded onto the operator bubble instead. This test
+    /// scripts only the three turns that actually run: a fourth would be the
+    /// relay, and `ScriptedTurns` running dry is how a regression surfaces.
     #[tokio::test]
     async fn a_nested_delegates_budget_pause_reaches_the_operator_turn() {
         let fx = Fixture::nested();
@@ -7374,7 +7395,6 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                      stopped instead of failing silently. Add credits to your account, then \
                      resend your message to continue.",
                 ),
-                Turn::reply("Built. Research is paused for credits."),
             ],
         );
 
@@ -7392,9 +7412,18 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "the notice must name the teammate that actually paused, not the one relaying it"
         );
         assert!(pause.summary.contains("add credits") || pause.summary.contains("Add credits"));
-        // The relay really did replace the reply — so the pause survived an
-        // overwrite rather than riding along on text that happened to persist.
-        assert_eq!(out.reply, "Built. Research is paused for credits.");
+        // The fold stands in for the relay: the delegate's own text still lands
+        // on the operator bubble, so skipping the relay drops nothing.
+        assert!(
+            out.reply.contains("engineer replied:"),
+            "the desk's answer must survive the skipped relay: {}",
+            out.reply
+        );
+        assert!(
+            out.reply.contains("researcher"),
+            "including the nested delegate's paused text: {}",
+            out.reply
+        );
     }
 
     /// Issue #1846 review (Codex #3864988176): the marker a delegated pause
