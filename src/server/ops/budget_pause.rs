@@ -221,6 +221,58 @@ async fn redeem_budget_pause(
         // `Attachment` values.
         attachments: marker.attachments.clone(),
     };
+    // Issue #1846 review (Codex #3869369474): journal the event HERE,
+    // synchronously, and notify its mentions — mirroring exactly what
+    // `accept_chat_turn` (`src/server/operator.rs`) does for an ordinary
+    // `/chat` send — rather than handing the raw, unjournaled event to
+    // `run_cycle` below, which journals it internally but has no notion of
+    // "notify the people this message names" (that is the CALLER's job on
+    // every other path: `accept_chat_turn` for a chat send,
+    // `CompanyRuntime::publish_continuation` for an approval-continuation
+    // reply). Before this, a redeemed message's `@user`/`@everyone` mentions
+    // still rendered as chips (`mentions` survives onto the journaled
+    // `AgentReply`/`OperatorMessage` and the console resolves chips from
+    // that) but nobody was ever notified: an operator offline when the
+    // resend happened had no badge and no way to know they'd been named.
+    //
+    // Reserved via `redeem`/`redeem_matching` above, so a failed append here
+    // must restore the marker exactly like a failed redispatch does below —
+    // the operator's saved re-issue payload must not be lost to a journal
+    // hiccup any more than to a `run_cycle` one.
+    let message_seq = match company
+        .runtime
+        .events()
+        .append(company.id(), event.clone())
+        .await
+    {
+        Ok(seq) => seq,
+        Err(err) => {
+            pauses.restore_if_absent(marker);
+            return Err(err.into());
+        }
+    };
+    if let CompanyEvent::OperatorMessage { mentions, .. } = &event
+        && !mentions.is_empty()
+    {
+        // `marker.chat_id` (folded into `event.chat` above) is `None` for an
+        // unaddressed original message, the same "default → orchestrator"
+        // thread `accept_chat_turn`'s own `desk` fallback resolves to
+        // elsewhere in this file's sibling routes.
+        let notify_desk = marker
+            .chat_id
+            .as_deref()
+            .unwrap_or(crate::server::ops::language::DEFAULT_DESK);
+        company
+            .runtime
+            .notify_mentions(
+                company.id(),
+                mentions,
+                &message_seq,
+                company.actor.as_ref(),
+                notify_desk,
+            )
+            .await;
+    }
     // Issue #1846 review (Codex #3865812411): spawned, not awaited directly
     // in this handler's own future. This host is plain
     // `axum::serve(listener, router(state))`; hyper drops a handler's future
@@ -261,7 +313,12 @@ async fn redeem_budget_pause(
         let marker = marker.clone();
         async move {
             let mut guard = RestoreGuard::new(pauses, marker);
-            let result = runtime.run_cycle(vec![event]).await;
+            // `run_journaled_cycle`, not `run_cycle`: `event` is ALREADY
+            // appended above (that's what `message_seq` is), so handing it
+            // to the plain `run_cycle` here would journal it a SECOND time.
+            let result = runtime
+                .run_journaled_cycle(vec![(message_seq, event)], None)
+                .await;
             if result.is_ok() {
                 guard.disarm();
             }
@@ -538,6 +595,106 @@ mod tests {
             }
             other => panic!("expected an OperatorMessage, got {other:?}"),
         }
+    }
+
+    /// Issue #1846 review (Codex #3869369474) — **the regression.** Redeeming
+    /// a budget pause hands the reconstructed `OperatorMessage` straight to
+    /// `run_cycle`, bypassing `accept_chat_turn` (`src/server/operator.rs`)
+    /// entirely — the ordinary `/chat` path this route stands in for. That
+    /// bypass carried the mentions through onto the journaled event (chips
+    /// still render, per the sibling test above), but skipped the SEPARATE
+    /// `notify_mentions` call `accept_chat_turn` makes right after journaling
+    /// — so an `@user`/`@everyone` the original, paused message named badged
+    /// and notified nobody once it was resent, even though the console still
+    /// rendered the chip.
+    ///
+    /// Mirrors `operator.rs`'s own
+    /// `a_continuation_reply_that_mentions_a_user_files_a_notification` —
+    /// same shape, this route's own fixture.
+    ///
+    /// Mentions a SECOND, distinct user rather than the fixed admin
+    /// `state_with_brain` already seeds: `fixed_cookie` authenticates every
+    /// request in this module AS that admin, and `notify_mentions` never
+    /// notifies the author of their own message — mentioning the admin here
+    /// would self-exclude and read as "notify_mentions was never called" for
+    /// the wrong reason.
+    #[tokio::test]
+    async fn redeem_notifies_a_mentioned_user() {
+        let home = home();
+        let company = "acme-redeem-notify";
+        let recording = Arc::new(RecordingBrain::default());
+        let state = state_with_brain(home.path(), company, recording.clone()).await;
+        let id = CompanyId::new(company);
+
+        let runtime = state.registry().get(&id).expect("company is registered");
+        let target_id = crate::ports::generate_id();
+        runtime
+            .users()
+            .upsert_user(
+                &id,
+                &crate::ports::users::UserRecord {
+                    id: target_id.clone(),
+                    email: "teammate@example.test".to_string(),
+                    display_name: None,
+                    avatar: None,
+                    role: crate::ports::users::UserRole::Member,
+                    status: crate::ports::users::UserStatus::Active,
+                    password_hash: None,
+                    must_change_password: false,
+                    created_at_millis: crate::ports::now_millis(),
+                    last_seen_at_millis: None,
+                    updated_at_millis: crate::ports::now_millis(),
+                },
+            )
+            .await
+            .expect("seed the mentioned user");
+
+        budget_pauses_for(&id).park(
+            "ceo",
+            Some("general".to_string()),
+            "ship the API",
+            "paused",
+            1_000,
+            RedeemContext {
+                parent: None,
+                deliverable: None,
+                mentions: vec![Mention {
+                    target: MentionTarget::User {
+                        id: target_id.clone(),
+                    },
+                    text: "@teammate".to_string(),
+                    offset: 0,
+                    quiet: false,
+                }],
+                text: None,
+                attachments: Vec::new(),
+            },
+        );
+
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            "/api/v1/company/agents/ceo/budget-pause/redeem",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        // The append + notify happen synchronously in the handler, before the
+        // redispatch is even spawned (see `redeem_budget_pause`'s doc), so —
+        // unlike the continuation-reply sibling test — there is no
+        // spawned-task race to poll for here.
+        let notes = runtime.notifications().list(&id, &target_id).await.unwrap();
+        let mentions: Vec<_> = notes
+            .into_iter()
+            .filter(|n| n.notification.kind == "mention")
+            .collect();
+        assert_eq!(
+            mentions.len(),
+            1,
+            "redeeming a marker whose original message named a user must file that user's \
+             mention notification, not just the chip"
+        );
     }
 
     /// Issue #1846 review (Codex #3866418891) — the keystone test for the
