@@ -18,12 +18,19 @@ import type { ObservatoryStep } from "@/api/observatory";
 import { clampText, formatBytes, present } from "./clamp";
 import { stepState } from "./model";
 
-/** Tone per step state, matching the waterfall's vocabulary. */
+/**
+ * Tone per step state, matching the waterfall's vocabulary.
+ *
+ * `idle` is unreachable here — `stepState` never returns it, only `runState`
+ * does (issue #1809's decline is a run-level outcome, not a step one) — but
+ * `SpanState` is one shared type, so the map must stay exhaustive.
+ */
 const TONE = {
   done: "text-muted-foreground",
   failed: "text-[var(--status-failed-text)]",
   blocked: "text-[var(--status-blocked-text)]",
   running: "text-[var(--status-running-text)]",
+  idle: "text-[var(--status-idle-text)]",
 } as const;
 
 const GLYPH: Record<string, string> = {

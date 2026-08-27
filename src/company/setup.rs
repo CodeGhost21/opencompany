@@ -1379,7 +1379,11 @@ pub fn manifest_from_setup(
             // so every teammate a first-run operator created held real-money
             // media and per-tenant Composio credentials. Intersected with
             // `[tools].allow`, so this can only ever narrow.
-            built.tools = tools_for_focus(agent.focus);
+            // An empty belt (the Research focus asks for nothing) maps to `None`
+            // — inherit the company's standard grant — not `Some(vec![])`, which
+            // since issue #1804 is an explicit deny-all. Preserving "empty focus
+            // belt = standard grant" keeps every first-run teammate unchanged.
+            built.tools = Some(tools_for_focus(agent.focus)).filter(|belt| !belt.is_empty());
             // Standing instructions: the shape's, then this profile's if the
             // teammate is one the curated template names. Looked up rather than
             // carried, so no instruction text ever arrives over the wire — see
@@ -2075,7 +2079,8 @@ mod tests {
             // asked for survives, so the Team screen shows no "asked for but
             // not granted" line on a company this flow just minted.
             assert_eq!(
-                grants, agent.tools,
+                agent.tools.as_deref(),
+                Some(grants.as_slice()),
                 "{} had part of its belt dropped by the company allow-list",
                 agent.id
             );
@@ -2123,9 +2128,16 @@ mod tests {
             focus: Some(AgentFocus::Research),
         }];
         let manifest = manifest_from_setup(&answers("a shop", ""), &roster, None);
-        let asked = &manifest.agents[0].tools;
+        let asked = manifest.agents[0]
+            .tools
+            .as_deref()
+            .expect("a designed teammate states an explicit belt instead of inheriting (None)");
 
-        assert!(!asked.is_empty(), "an empty list inherits the company belt");
+        assert!(
+            !asked.is_empty(),
+            "an empty list is a deny-all since #1804, not an inherit; a designed \
+             teammate must ask for a real belt"
+        );
         assert!(!asked.iter().any(|t| t == "media" || t == "composio"));
         assert_eq!(manifest.validate(), Vec::<String>::new());
 
@@ -2173,7 +2185,11 @@ mod tests {
             None,
         );
         for agent in &manifest.agents {
-            assert!(!agent.tools.is_empty(), "{} inherits the lot", agent.id);
+            assert!(
+                agent.tools.as_deref().is_some_and(|t| !t.is_empty()),
+                "{} inherits the lot",
+                agent.id
+            );
         }
         assert_eq!(manifest.validate(), Vec::<String>::new());
     }
@@ -2227,7 +2243,12 @@ mod tests {
         assert!(manifest.agents[0].prompt.is_none());
         // The belt still fails closed on the same input, which is the point of
         // the contrast.
-        assert!(!manifest.agents[0].tools.is_empty());
+        assert!(
+            manifest.agents[0]
+                .tools
+                .as_deref()
+                .is_some_and(|t| !t.is_empty())
+        );
         assert_eq!(manifest.validate(), Vec::<String>::new());
 
         // A role the host does know keeps its profile line, and gains no shape.
@@ -2789,11 +2810,16 @@ mod tests {
         let roster: Vec<ProposedAgent> = serde_json::from_str(wire).expect("parses");
         let manifest = manifest_from_setup(&answers("a shop", ""), &roster, None);
         for agent in &manifest.agents {
-            assert!(!agent.tools.is_empty(), "{} inherits the lot", agent.id);
+            assert!(
+                agent.tools.as_deref().is_some_and(|t| !t.is_empty()),
+                "{} inherits the lot",
+                agent.id
+            );
             assert!(
                 !agent
                     .tools
                     .iter()
+                    .flatten()
                     .any(|t| t == "media" || t == "composio" || t == "*"),
                 "{} holds {:?}",
                 agent.id,
