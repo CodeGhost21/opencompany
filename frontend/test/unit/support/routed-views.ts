@@ -152,12 +152,20 @@ export const NAMED_BY: Record<View, Names> = {
   settings: [{ pageHeader: "SettingsView.tsx" }],
   feedback: [{ pageHeader: "FeedbackView.tsx" }],
   /**
-   * The first-run flow, outside the console shell. `pageHeader` because its two
-   * pre-wizard states (cannot read the instance, still reading it) carry a
-   * `hidden` header — "outside the shell" is a reason not to paint a bar, not a
-   * reason to have no name.
+   * `#/setup` does **not** render `SetupWizard`. `app-shell.tsx` keeps
+   * `OperatorOverview` mounted for this view (`view === "overview" || view ===
+   * "setup"`) and opens `SetupController`, which draws `SetupDialog` over it.
+   * `SetupWizard` belongs to `ConnectionConsole`'s pre-console phase, which is
+   * not a routed view at all — so mapping the route to it left this check
+   * inspecting a component the route never mounts, and the real surface could
+   * have lost its heading while the guard stayed green.
+   *
+   * The route is therefore held to the page it actually renders. `SetupDialog`
+   * is deliberately absent: it is an overlay, and a dialog is named by its own
+   * title rather than by a page header. That is the documented exception, not a
+   * gap — `OperatorOverview` is what carries the `h1` for this address.
    */
-  setup: [{ pageHeader: "setup/SetupWizard.tsx" }],
+  setup: [{ pageHeader: "OperatorOverview.tsx" }],
   "not-found": [{ pageHeader: "UnknownRouteView.tsx" }],
 };
 
