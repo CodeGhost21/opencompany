@@ -855,9 +855,6 @@ name = "{name}"
         ))
         .expect("valid manifest");
         CompanyRecord {
-            name_confirmed: false,
-            activation_completed_at: None,
-            overlay_tool_grants: None,
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_tool_grants: None,
