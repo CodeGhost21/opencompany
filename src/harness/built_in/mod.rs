@@ -5072,6 +5072,7 @@ description = "Builds the product."
                     mime: None,
                     size: None,
                     sha256: None,
+                    adopted: false,
                 },
                 Some("What the company established."),
             )

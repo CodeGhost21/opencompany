@@ -555,6 +555,7 @@ async fn create_payload(
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     match target.payload {
         MirrorPayload::Text(body) => {
@@ -1138,6 +1139,132 @@ mod test {
         }
         async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
             WorkspaceStore::delete(&*self.0, company, id).await
+        }
+        async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
+            WorkspaceStore::is_empty(&*self.0, company).await
+        }
+    }
+
+    /// [`RefusingCreate`] with a twist: on the note create, a rival publisher
+    /// **adopts the just-minted parent folder** before the create is refused
+    /// (issue #1839) — the exact mid-write race the adoption lease exists for.
+    ///
+    /// This is what `RefusingCreate` alone cannot model: there, the folders this
+    /// publish minted are swept because nobody else laid a claim on them. Here a
+    /// second writer has, so `materialize`'s rollback must find the lease and
+    /// leave the folder standing rather than delete the one the rival is about to
+    /// write into.
+    struct AdoptParentThenRefuse(Arc<FsOps>);
+
+    #[async_trait::async_trait]
+    impl WorkspaceStore for AdoptParentThenRefuse {
+        async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
+            WorkspaceStore::tree(&*self.0, company).await
+        }
+        async fn read(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, String)>> {
+            WorkspaceStore::read(&*self.0, company, id).await
+        }
+        async fn write(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            content: &str,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write(&*self.0, company, id, content, author).await
+        }
+        async fn create(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            content: Option<&str>,
+        ) -> Result<()> {
+            if node.kind == NodeKind::Folder {
+                return WorkspaceStore::create(&*self.0, company, node, content).await;
+            }
+            // The note create is about to be refused — but first a rival adopts
+            // the folder this publish just minted for it, taking the lease. The
+            // rival is a real `adopt_or_create_folder` against the inner store,
+            // so the flag lands exactly as it would in production.
+            if let Some(parent_id) = node.parent_id.as_deref() {
+                let nodes = WorkspaceStore::tree(&*self.0, company).await?;
+                if let Some(parent) = nodes.iter().find(|n| n.id == parent_id) {
+                    WorkspaceStore::adopt_or_create_folder(
+                        &*self.0,
+                        company,
+                        parent.parent_id.as_deref(),
+                        &parent.name,
+                        WorkspaceOrigin::Operator,
+                    )
+                    .await?;
+                }
+            }
+            Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
+        }
+        async fn adopt_or_create_folder(
+            &self,
+            company: &CompanyId,
+            parent: Option<&str>,
+            name: &str,
+            origin: WorkspaceOrigin,
+        ) -> Result<crate::ports::workspace::FolderClaim> {
+            WorkspaceStore::adopt_or_create_folder(&*self.0, company, parent, name, origin).await
+        }
+        async fn create_binary(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _bytes: &[u8],
+        ) -> Result<WorkspaceNode> {
+            Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
+        }
+        async fn write_binary(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            bytes: &[u8],
+            mime: Option<&str>,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write_binary(&*self.0, company, id, bytes, mime, author).await
+        }
+        async fn read_bytes(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_bytes(&*self.0, company, id).await
+        }
+        async fn rename_move(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            name: Option<&str>,
+            parent: Option<Option<&str>>,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
+        }
+        async fn swap_files(
+            &self,
+            company: &CompanyId,
+            expected_id: Option<&str>,
+            replacement_id: &str,
+            name: &str,
+        ) -> Result<Option<WorkspaceNode>> {
+            WorkspaceStore::swap_files(&*self.0, company, expected_id, replacement_id, name).await
+        }
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            WorkspaceStore::delete(&*self.0, company, id).await
+        }
+        async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            // Forward to the inner backend's override, per the port contract, so
+            // the rollback exercises the real fs guard rather than the decorator
+            // default.
+            WorkspaceStore::delete_if_empty(&*self.0, company, id).await
         }
         async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
             WorkspaceStore::is_empty(&*self.0, company).await
@@ -2865,6 +2992,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         ws.create(&co, &note, Some("imported"))
             .await
@@ -3028,6 +3156,39 @@ mod test {
                 .iter()
                 .all(|n| n.kind != NodeKind::Folder || n.name == ARTIFACTS_ROOT),
             "no folder beneath the root should survive a fully-refused publish: {nodes:?}"
+        );
+    }
+
+    /// Issue #1839, the other side of the same refused publish: when a rival
+    /// **adopts** the folder this publish minted in the write window, the
+    /// rollback must leave it standing rather than sweep the folder the rival is
+    /// about to write into. `AdoptParentThenRefuse` takes the lease on the task
+    /// folder the instant before the note create is refused — the exact race —
+    /// so the agent and task folders survive despite the failed publish.
+    #[tokio::test]
+    async fn a_folder_a_rival_adopted_survives_the_refused_publish() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+        let racing = AdoptParentThenRefuse(ops.clone());
+
+        let err = materialize(&racing, &co, target("launch.md", "# Launch"))
+            .await
+            .expect_err("the refused note create must still fail the publish");
+        assert!(
+            err.to_string().contains("over quota"),
+            "the store's refusal must reach the caller: {err}"
+        );
+
+        let nodes = ws.tree(&co).await.unwrap();
+        assert!(
+            nodes.iter().any(|n| n.name == "cmo"),
+            "the agent folder a rival adopted must survive the minter's rollback: {nodes:?}"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "t-1" || task_folder_task_id(&n.name) == Some("t-1")),
+            "and the adopted task folder it parents must survive too: {nodes:?}"
         );
     }
 }

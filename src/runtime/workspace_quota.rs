@@ -442,6 +442,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 
@@ -615,6 +616,7 @@ mod test {
         let lying = WorkspaceNode {
             size: Some(1),
             sha256: Some("deadbeef".to_string()),
+            adopted: false,
             ..png("img", "hero.png")
         };
         store

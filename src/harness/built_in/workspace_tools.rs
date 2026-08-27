@@ -2269,6 +2269,7 @@ impl Tool for WorkspaceCreateTool {
                     mime: None,
                     size: None,
                     sha256: None,
+                    adopted: false,
                 };
                 match self
                     .workspace
@@ -2523,6 +2524,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 
@@ -2538,6 +2540,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 
@@ -5468,6 +5471,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         store
             .create(&id, &node, Some("maya's draft"))
@@ -5544,6 +5548,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         store.create(&id, &node, Some("a note")).await.unwrap();
 
