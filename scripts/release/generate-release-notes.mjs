@@ -526,7 +526,24 @@ export function serializeOpenAiPayload(payload) {
     return compactPayload;
   }
 
-  const bounded = { ...compact, pullRequests: [], omittedPullRequests: compact.pullRequests.length };
+  // The retained collections are trimmed FIRST. Spreading `compact` unchanged
+  // kept every contributor and every uncategorized commit, and only PRs were
+  // ever removed by the loop below — so a payload whose bulk was not PRs could
+  // never get under the cap no matter how many it dropped. On a first-release
+  // range that is not hypothetical: ~8,700 uncategorized commits serialize to
+  // roughly 900k characters against a 120k ceiling, and the request is rejected
+  // for size after the PRs it was supposed to describe have all been thrown
+  // away. Counts are kept so the model can say what was omitted.
+  const KEEP_UNCATEGORIZED = 25;
+  const bounded = {
+    ...compact,
+    contributors: compact.contributors.filter((contributor) => contributor.isNew),
+    omittedContributors: compact.contributors.filter((contributor) => !contributor.isNew).length,
+    uncategorizedCommits: compact.uncategorizedCommits.slice(0, KEEP_UNCATEGORIZED),
+    omittedUncategorizedCommits: Math.max(0, compact.uncategorizedCommits.length - KEEP_UNCATEGORIZED),
+    pullRequests: [],
+    omittedPullRequests: compact.pullRequests.length,
+  };
   for (const pullRequest of compact.pullRequests) {
     bounded.pullRequests.push(pullRequest);
     bounded.omittedPullRequests -= 1;
@@ -814,15 +831,28 @@ async function main() {
   }
 
   const repo = resolveRepo(options.repo);
-  const from = resolveStartRef(repo, options.from);
+  const { ref: from, fromRoot } = resolveStartRef(repo, options.from);
   const resolvedTo = resolveEndRef(options.to);
 
   assertRefExists(from, 'Start');
   assertRefExists(resolvedTo, 'End');
 
   console.error(`[release-notes] Collecting ${repo} changes from ${from} to ${resolvedTo}`);
-  const commits = collectCommits(from, resolvedTo);
-  const contributors = collectContributorStats(commits, priorAuthorKeys(from));
+  const commits = collectCommits(from, resolvedTo, fromRoot);
+
+  // An EMPTY RANGE is an error, not a document. Re-dispatching a release whose
+  // tag is already the latest published one makes start and end the same
+  // commit, and without this the generator cheerfully renders "0 PRs across 0
+  // commits" and `release.yml` publishes that as the release body. Failing here
+  // takes the deterministic fallback down with it, which is the intent: the
+  // range is wrong, and a release should not be cut with empty notes.
+  if (commits.length === 0) {
+    throw new Error(
+      `No commits between ${from} and ${resolvedTo} — nothing to write release notes about. Pass a --from that precedes the tag.`,
+    );
+  }
+
+  const contributors = collectContributorStats(commits, priorAuthorKeys(from, fromRoot));
   const pullRequests = collectPullRequests(repo, commits);
   const payload = buildReleasePayload({
     from,
