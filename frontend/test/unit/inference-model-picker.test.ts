@@ -15,12 +15,14 @@ function status(
   provider: string,
   models: Record<string, string>,
   keyConfigured = true,
+  defaultTierModels: Record<string, string> = {},
 ): InferenceStatus {
   return {
     provider,
     slug: provider === "openai_compatible" ? "byok" : provider,
     baseUrl: provider === "openai_compatible" ? "https://models.example/v1" : "https://openrouter.ai/api/v1",
     models,
+    defaultTierModels,
     source: "runtime",
     keyConfigured,
     cognition: "harness",
@@ -350,6 +352,156 @@ describe("clearing a tier override back to the tier default (issue #1838 follow-
     expect(puts).toHaveLength(1);
     const body = puts[0] as { models?: Record<string, string> };
     expect(body.models).toEqual({ "reasoning-v1": "anthropic/agentic" });
+  });
+});
+
+describe("typing an id the registry does not list (issue #1838 follow-up)", () => {
+  it("offers an 'Enter a model id' escape hatch and lets Save persist an id absent from the catalog", async () => {
+    // Once the catalog loads, every tier becomes a select — `optionsForTier`
+    // only keeps an *already-stored* custom id selectable, so a keyed
+    // operator who wants a model the registry has not caught up to yet had no
+    // way to type one. The escape hatch flips that one tier's control to free
+    // text without touching the others.
+    const { client, puts } = clientFor(status("openrouter", {}, true), [
+      { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" },
+    ]);
+
+    await mount(client);
+
+    const trigger = container.querySelector(
+      '[data-testid="inference-model-select-chat-v1"]',
+    ) as HTMLButtonElement;
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger.click();
+    });
+    await act(async () => {});
+
+    const customItem = document.body.querySelector(
+      '[data-testid="inference-model-custom-chat-v1"]',
+    ) as HTMLElement;
+    expect(customItem).not.toBeNull();
+    await act(async () => {
+      customItem.click();
+    });
+    await act(async () => {});
+
+    // The select is gone; a plain text field takes its place.
+    expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).toBeNull();
+    const input = container.querySelector<HTMLInputElement>("input#inference-model-chat-v1");
+    expect(input).not.toBeNull();
+
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      setter?.call(input, "moonshotai/kimi-k2-thinking");
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    // The other tier stays a select — the escape hatch is per-tier.
+    expect(container.querySelector('[data-testid="inference-model-select-reasoning-v1"]')).not.toBeNull();
+
+    const save = container.querySelector('[data-testid="inference-save"]') as HTMLButtonElement;
+    await act(async () => {
+      save.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { models?: Record<string, string> };
+    expect(body.models).toEqual({ "chat-v1": "moonshotai/kimi-k2-thinking" });
+  });
+
+  it("returns a tier to the catalog select via 'Choose from the OpenRouter catalog instead'", async () => {
+    const { client } = clientFor(status("openrouter", {}, true), [
+      { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet" },
+    ]);
+
+    await mount(client);
+
+    const trigger = container.querySelector(
+      '[data-testid="inference-model-select-chat-v1"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      trigger.click();
+    });
+    await act(async () => {});
+    const customItem = document.body.querySelector(
+      '[data-testid="inference-model-custom-chat-v1"]',
+    ) as HTMLElement;
+    await act(async () => {
+      customItem.click();
+    });
+    await act(async () => {});
+
+    const backLink = container.querySelector(
+      '[data-testid="inference-model-back-to-catalog-chat-v1"]',
+    ) as HTMLButtonElement;
+    expect(backLink).not.toBeNull();
+    await act(async () => {
+      backLink.click();
+    });
+    await act(async () => {});
+
+    expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).not.toBeNull();
+    expect(container.querySelector("input#inference-model-chat-v1")).toBeNull();
+  });
+});
+
+describe("the OpenRouter preset prefills from the host's own defaults (issue #1838 follow-up)", () => {
+  it("seeds the switch form from status.defaultTierModels rather than a hard-coded copy", async () => {
+    // The console used to duplicate `DEFAULT_TIER_MODELS` locally; a value
+    // that could only ever drift is not a fixture worth asserting against —
+    // this proves the picker actually reads the host's own answer.
+    //
+    // Status reports an already-keyed direct OpenRouter connection, so
+    // `wouldSaveProxied` stays false for the whole test — that guard exists
+    // to protect an *unkeyed* save from a raw catalog-shaped id it would
+    // save proxied (issue #1838 follow-up, sixth instance), which is a
+    // separate concern from what this test is proving. Switch through a
+    // second provider and back: the initial render seeds `models` straight
+    // from `status.models`, not through `presetFor`, so the preset only
+    // gets exercised on an actual provider pick.
+    const { client } = clientFor(
+      status("openrouter", {}, true, {
+        "chat-v1": "vendor-x/model-a",
+        "reasoning-v1": "vendor-x/model-b",
+        "agentic-v1": "vendor-x/model-c",
+        "vision-v1": "vendor-x/model-d",
+      }),
+      [],
+    );
+
+    await mount(client);
+
+    async function selectProvider(label: string) {
+      const trigger = container.querySelector("#inference-provider") as HTMLButtonElement;
+      expect(trigger).not.toBeNull();
+      await act(async () => {
+        trigger.click();
+      });
+      await act(async () => {});
+
+      const item = Array.from(
+        document.body.querySelectorAll('[data-slot="select-item"]'),
+      ).find((el) => el.textContent?.includes(label)) as HTMLElement | undefined;
+      expect(item).not.toBeUndefined();
+      await act(async () => {
+        item?.click();
+      });
+      await act(async () => {});
+    }
+
+    await selectProvider("Ollama");
+    await selectProvider("OpenRouter");
+
+    // No catalog entries, so the tier renders free text — the preset value
+    // shows up as the input's value, not as rendered text.
+    expect(
+      container.querySelector<HTMLInputElement>("input#inference-model-chat-v1"),
+    ).toHaveProperty("value", "vendor-x/model-a");
   });
 });
 

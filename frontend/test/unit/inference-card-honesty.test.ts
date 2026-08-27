@@ -28,6 +28,7 @@ function status(over: Partial<InferenceStatus> = {}): InferenceStatus {
     slug: "managed",
     baseUrl: "https://openrouter.ai/api/v1",
     models: {},
+    defaultTierModels: {},
     source: "runtime",
     keyConfigured: true,
     cognition: "echo",

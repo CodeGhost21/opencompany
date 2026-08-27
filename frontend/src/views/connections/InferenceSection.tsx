@@ -99,7 +99,10 @@ const PROVIDERS: Record<
     acceptsKey: true,
     requiresBaseUrl: false,
     keyKind: "an OpenRouter key (`sk-or-…`)",
-    // Premium defaults, kept aligned with backend DEFAULT_TIER_MODELS.
+    // Fallback only, used before the first status read resolves —
+    // `presetFor` prefers the host's own `defaultTierModels` once it has
+    // loaded, so this copy cannot drift from `DEFAULT_TIER_MODELS` and stay
+    // wrong (issue #1838 follow-up).
     preset: {
       baseUrl: "",
       models: {
@@ -145,11 +148,22 @@ const METERING_NOTES: Record<UsageMetering, string> = {
 };
 
 /** Per-provider form defaults applied when the operator picks a provider. */
-function presetFor(provider: InferenceProvider): {
+function presetFor(
+  provider: InferenceProvider,
+  defaultTierModels?: Partial<Record<Tier, string>>,
+): {
   baseUrl: string;
   models: Partial<Record<Tier, string>>;
 } {
-  return PROVIDERS[provider].preset;
+  const preset = PROVIDERS[provider].preset;
+  // The host's own `defaultTierModels` (from `GET …/inference`) is the source
+  // of truth once it has loaded; `PROVIDERS.openrouter.preset.models` is only
+  // the fallback used before that first status read resolves, so switching to
+  // OpenRouter still has something to prefill with immediately.
+  if (provider === "openrouter" && defaultTierModels && Object.keys(defaultTierModels).length > 0) {
+    return { ...preset, models: defaultTierModels };
+  }
+  return preset;
 }
 
 type Load = "loading" | "ready" | "unavailable" | "error";
@@ -190,6 +204,21 @@ function optionsForTier(catalog: InferenceModel[], current: string): InferenceMo
  * tier (issue #1838 follow-up).
  */
 const TIER_DEFAULT_MODEL = "__tier_default__";
+
+/**
+ * The tier model select's value for "the operator wants to type an id
+ * themselves rather than pick one off the registry."
+ *
+ * The catalog select otherwise only ever offers ids OpenRouter's registry
+ * already lists. `optionsForTier` keeps an *already-stored* custom id
+ * selectable once it is there, but nothing let an operator enter a *new* one
+ * once the catalog loaded — and the registry can lag a model OpenRouter only
+ * just published, or list it under a slightly different slug. `model_for_tier`
+ * forwards any concrete override verbatim, so the runtime has always accepted
+ * an unlisted id; only the picker stopped offering a way to type one (issue
+ * #1838 follow-up).
+ */
+const CUSTOM_MODEL = "__custom_model__";
 
 function modelLabel(model: InferenceModel): string {
   return model.name ? `${model.name} — ${model.id}` : model.id;
@@ -289,6 +318,13 @@ export function InferenceSection({
   const [provider, setProvider] = useState<InferenceProvider>("managed");
   const [baseUrl, setBaseUrl] = useState("");
   const [models, setModels] = useState<Partial<Record<Tier, string>>>({});
+  /**
+   * Tiers the operator switched from the catalog select into free-text entry
+   * via the "Enter a model id" option, so a registry that has not caught up
+   * to a newly published model does not leave them stuck picking from a list
+   * that will never contain it (issue #1838 follow-up).
+   */
+  const [manualEntryTiers, setManualEntryTiers] = useState<ReadonlySet<Tier>>(new Set());
   const [key, setKey] = useState("");
   const [pendingProvider, setPendingProvider] = useState<InferenceProvider | null>(null);
   /**
@@ -484,11 +520,12 @@ export function InferenceSection({
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
-    const preset = presetFor(next);
+    const preset = presetFor(next, status?.defaultTierModels);
     setBaseUrl(preset.baseUrl);
     setModels(preset.models);
     setBaseline({ baseUrl: preset.baseUrl, models: preset.models });
     setTest({ kind: "idle" });
+    setManualEntryTiers(new Set());
   }
 
   /**
@@ -979,11 +1016,18 @@ export function InferenceSection({
                     <div className="grid gap-2 sm:grid-cols-2">
                       {TIERS.map((tier) => {
                         const value = models[tier] ?? "";
+                        // Whether this tier is in manual entry *by the
+                        // operator's own choice* — as opposed to the other
+                        // `useFreeText` reasons below, which are the catalog
+                        // giving out on its own and offer no way back to a
+                        // select this render.
+                        const manualEntry = manualEntryTiers.has(tier);
                         const useFreeText =
                           provider !== "openrouter" ||
                           modelCatalog.kind === "error" ||
                           modelCatalog.kind === "empty" ||
-                          wouldSaveProxied;
+                          wouldSaveProxied ||
+                          manualEntry;
                         const options =
                           modelCatalog.kind === "ready"
                             ? optionsForTier(modelCatalog.models, value)
@@ -997,22 +1041,49 @@ export function InferenceSection({
                               {tier}
                             </Label>
                             {useFreeText ? (
-                              <Input
-                                id={`inference-model-${tier}`}
-                                value={value}
-                                placeholder="provider model id"
-                                onChange={(e) => setModel(tier, e.target.value)}
-                              />
+                              <div className="space-y-1">
+                                <Input
+                                  id={`inference-model-${tier}`}
+                                  value={value}
+                                  placeholder="provider model id"
+                                  onChange={(e) => setModel(tier, e.target.value)}
+                                />
+                                {/* Only the operator's own "enter a model id"
+                                    choice gets a way back — the other
+                                    `useFreeText` reasons (no key, no catalog)
+                                    have no select to return to this render. */}
+                                {manualEntry && modelCatalog.kind === "ready" && (
+                                  <button
+                                    type="button"
+                                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                                    data-testid={`inference-model-back-to-catalog-${tier}`}
+                                    onClick={() =>
+                                      setManualEntryTiers((prev) => {
+                                        const next = new Set(prev);
+                                        next.delete(tier);
+                                        return next;
+                                      })
+                                    }
+                                  >
+                                    Choose from the OpenRouter catalog instead
+                                  </button>
+                                )}
+                              </div>
                             ) : (
                               <Select
                                 value={value || null}
                                 disabled={modelCatalog.kind !== "ready"}
                                 onValueChange={(next) => {
                                   if (!next) return;
+                                  if (next === CUSTOM_MODEL) {
+                                    setManualEntryTiers((prev) => new Set(prev).add(tier));
+                                    return;
+                                  }
                                   setModel(tier, next === TIER_DEFAULT_MODEL ? "" : String(next));
                                 }}
                                 items={{
                                   [TIER_DEFAULT_MODEL]: "Use the tier default",
+                                  [CUSTOM_MODEL]: "Enter a model id…",
                                   ...modelItems(options),
                                 }}
                               >
@@ -1051,6 +1122,16 @@ export function InferenceSection({
                                       )}
                                     </SelectItem>
                                   ))}
+                                  {/* The registry can lag a model OpenRouter
+                                      only just published — this is the way out
+                                      of "pick from what the catalog happens to
+                                      list today" (issue #1838 follow-up). */}
+                                  <SelectItem
+                                    value={CUSTOM_MODEL}
+                                    data-testid={`inference-model-custom-${tier}`}
+                                  >
+                                    <span>Enter a model id…</span>
+                                  </SelectItem>
                                 </SelectContent>
                               </Select>
                             )}
