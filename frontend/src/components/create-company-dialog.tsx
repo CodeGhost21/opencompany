@@ -33,7 +33,7 @@ import {
   resetReplacementId,
   wasAlreadyArchived,
   wasAmbiguousProvisionOutcome,
-  wasArchiveNetworkAmbiguous,
+  wasArchiveOutcomeAmbiguous,
 } from "@/lib/company-manifest";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -334,14 +334,20 @@ export function CreateCompanyDialog({
           // failure that didn't happen.
           setArchived(true);
           didArchive = true;
-        } else if (wasArchiveNetworkAmbiguous(err)) {
+        } else if (wasArchiveOutcomeAmbiguous(err)) {
           // This attempt's own reply may have been lost after the host
           // already archived the company — the same ambiguity
           // `wasAlreadyArchived` covers for a later retry's
-          // `company_not_found`, but on a first attempt the code is still
-          // `network_error`. Reconcile with a status lookup instead of
-          // asserting "Nothing was changed", which may be false (issue
-          // #1828 comment 3865803912).
+          // `company_not_found`. Not just a dropped connection
+          // (`network_error`): the host's `set_lifecycle` persists the
+          // archived record *before* it appends the lifecycle event, and
+          // `transition()` then reads status back before answering — either
+          // step can fail AFTER the write already landed, and that failure
+          // reaches this client as an ordinary error response (e.g.
+          // `store_error`), indistinguishable by code alone from a request
+          // that never wrote anything. Reconcile with a status lookup
+          // instead of asserting "Nothing was changed", which may be false
+          // (issue #1828 comments 3865803912 and 3874840062).
           try {
             await client.status(request.company);
             // Still addressable and live: the archive genuinely did not
@@ -380,8 +386,13 @@ export function CreateCompanyDialog({
             }
           }
         } else {
-          // Nothing was created, and the archive did not take — say so
-          // plainly and leave the operator where they are to try again.
+          // `wasArchiveOutcomeAmbiguous` now covers every `ApiError` the
+          // host can throw for this call except `company_not_found`
+          // (handled above), so reaching here means `err` isn't an
+          // `ApiError` at all — a client-side exception before the request
+          // could have reached the host (e.g. an encoding failure). Nothing
+          // was sent, so "Nothing was changed" is safe to assert without a
+          // reconciliation lookup.
           setError(
             `Couldn't archive ${request.name}: ${describeProvisionError(err)} Nothing was changed.`,
           );

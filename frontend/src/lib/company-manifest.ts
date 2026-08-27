@@ -267,24 +267,32 @@ export function wasAlreadyArchived(err: unknown): boolean {
  * refusal — the FIRST-attempt counterpart to {@link wasAlreadyArchived}.
  *
  * `wasAlreadyArchived` recognizes a *retry's* `company_not_found` as proof
- * the earlier attempt's archive already landed. But the earlier attempt
- * itself throws `network_error`, the same ambiguous code
- * {@link wasAmbiguousProvisionOutcome} describes for the provisioning leg:
- * `ApiClient.request` throws it whether the request never reached the host,
- * or it reached the host, archived the company, and only the *reply* was
- * lost in transit. Treated as a definite refusal, that first attempt used to
- * tell the operator "Nothing was changed" — which may be false — and an
- * operator who trusted that and closed the dialog left the console showing a
- * company that was in fact already archived, roster and persisted-default
- * cleanup never run (issue #1828 comment 3865803912).
+ * the earlier attempt's archive already landed. Every OTHER code a first
+ * attempt can throw is ambiguous the same way, not just `network_error`
+ * (dropped connection / lost reply, the same ambiguity
+ * {@link wasAmbiguousProvisionOutcome} describes for the provisioning leg).
+ * The host's own `set_lifecycle` (`src/company/runtime.rs`) persists the
+ * lifecycle change to the store, *then* appends the lifecycle event; `POST
+ * .../archive`'s handler (`transition()`, `src/server/provision.rs`) then
+ * reads status back before answering `200`. Either step can fail AFTER the
+ * archived record already landed — an event-append I/O error or a
+ * status-read failure both surface to this client as an ordinary error
+ * response (e.g. `store_error`), not as a dropped connection, and there is
+ * no code that distinguishes "never wrote" from "wrote, then failed
+ * appending the event / reading status back". Treated as a definite
+ * refusal, any of these used to tell the operator "Nothing was changed" —
+ * which may be false — and an operator who trusted that and closed the
+ * dialog left the console showing a company that was in fact already
+ * archived, roster and persisted-default cleanup never run (issue #1828
+ * comments 3865803912 and 3874840062).
  *
  * The caller reconciles by looking the company up with `client.status`:
  * still there means the archive genuinely did not take; `company_not_found`
  * ({@link wasAlreadyArchived}) means this attempt's own archive landed and
- * only its reply was lost.
+ * only its reply (or a step after the write) was lost.
  */
-export function wasArchiveNetworkAmbiguous(err: unknown): boolean {
-  return err instanceof ApiError && err.code === "network_error";
+export function wasArchiveOutcomeAmbiguous(err: unknown): boolean {
+  return err instanceof ApiError && err.code !== "company_not_found";
 }
 
 /**
