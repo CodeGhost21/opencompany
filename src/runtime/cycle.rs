@@ -2319,7 +2319,13 @@ fn cycle_task_id(
             // write is made by this very cycle, so treating it as a stimulus
             // would let a run re-trigger itself on every transition it makes.
             | CompanyEvent::RunStatusChanged { .. }
-            | CompanyEvent::DeskTaskCompleted { .. } => continue,
+            | CompanyEvent::DeskTaskCompleted { .. }
+            // Issue #1843: both are records of the activation funnel moving,
+            // best-effort journaled after the fact by
+            // `crate::company::activation`. Neither names a card nor competes
+            // with one, exactly like the other audit-trail arms above.
+            | CompanyEvent::OnboardingStepCompleted { .. }
+            | CompanyEvent::OnboardingCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
         match &found {
@@ -2504,7 +2510,14 @@ fn cycle_conversation(
             // write is made by this very cycle, so treating it as a stimulus
             // would let a run re-trigger itself on every transition it makes.
             | CompanyEvent::RunStatusChanged { .. }
-            | CompanyEvent::DeskTaskCompleted { .. } => continue,
+            | CompanyEvent::DeskTaskCompleted { .. }
+            // Issue #1843: both are records of the activation funnel moving,
+            // best-effort journaled after the fact by
+            // `crate::company::activation`. Neither names a conversation nor
+            // competes with one, exactly like the other audit-trail arms
+            // above.
+            | CompanyEvent::OnboardingStepCompleted { .. }
+            | CompanyEvent::OnboardingCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
         match &mut found {
@@ -3393,10 +3406,13 @@ members = ["writer"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let hi = |chat: Option<&str>| CompanyEvent::OperatorMessage {
             text: "hi".into(),

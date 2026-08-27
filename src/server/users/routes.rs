@@ -389,6 +389,60 @@ async fn eligibility(
     Ok(invite.filter(|i| i.is_redeemable(now)).map(|i| i.role))
 }
 
+/// Write `user`, or adopt the record that reached its address first.
+///
+/// Every caller below is find-then-create: look the address up, and mint a
+/// record when it is absent. That pair is not atomic, and each caller mints a
+/// **fresh `generate_id()`**, so two requests arriving together both miss the
+/// lookup and then present two different ids for one address. The store is
+/// right to refuse the second — `upsert_user` holds a lock and rejects an email
+/// already held by another id, which is the invariant that keeps
+/// `find_user_by_email` unambiguous — but the caller's question was wrong. It
+/// asked "may I create this user", when what it needed to know was "who owns
+/// this address now".
+///
+/// So a `Conflict` here is read as "somebody else materialized it", and the
+/// winner is returned. That is what makes the operation idempotent under
+/// concurrency, which is what both callers' doc comments already claim.
+///
+/// Issue #1833. On a desktop first boot three requests raced
+/// [`local_owner_record`]; one won and two were refused 16ms later, and
+/// `graphql::auth` turns that refusal into `GatesRefused` — so the console
+/// reported the healthy host it was talking to as "Unreachable" and offered no
+/// way in. A restart fixed it permanently, because by then the record existed.
+///
+/// **Only `Conflict` is adopted.** Every other error still propagates, so the
+/// store-outage refusal that `graphql::auth` deliberately makes fatal stays
+/// fatal: a store that cannot be read must not read as "this user is fine".
+///
+/// A `Conflict` with nothing behind it returns the original error rather than
+/// retrying. That means the winner was deleted between the write and the
+/// re-read, and looping on it would spin against a store doing something this
+/// function has no business papering over.
+pub(super) async fn insert_or_adopt(
+    runtime: &CompanyRuntime,
+    user: UserRecord,
+) -> Result<UserRecord, OpenCompanyError> {
+    let id = runtime.id();
+    match runtime.users().upsert_user(id, &user).await {
+        Ok(()) => Ok(user),
+        Err(OpenCompanyError::Conflict(conflict)) => {
+            match runtime.users().find_user_by_email(id, &user.email).await? {
+                Some(winner) => {
+                    tracing::debug!(
+                        company = %id,
+                        email = %user.email,
+                        "adopted the user record that won the materialization race"
+                    );
+                    Ok(winner)
+                }
+                None => Err(OpenCompanyError::Conflict(conflict)),
+            }
+        }
+        Err(other) => Err(other),
+    }
+}
+
 /// Returns the existing user for `email`, or materializes one from their
 /// eligibility.
 ///
@@ -418,7 +472,7 @@ async fn upsert_from_eligibility(
         last_seen_at_millis: Some(now),
         updated_at_millis: now,
     };
-    runtime.users().upsert_user(id, &user).await?;
+    let user = insert_or_adopt(runtime, user).await?;
     // Mark any real invite as redeemed. A manifest-bootstrapped admin has no
     // invite record, so this is a no-op for them.
     if let Some(mut invite) = runtime.users().find_invite_by_email(id, email).await? {
@@ -464,8 +518,7 @@ pub(crate) async fn local_owner_record(
         last_seen_at_millis: Some(now),
         updated_at_millis: now,
     };
-    runtime.users().upsert_user(id, &user).await?;
-    Ok(user)
+    insert_or_adopt(runtime, user).await
 }
 
 // ---------------------------------------------------------------------------

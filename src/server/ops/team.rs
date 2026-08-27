@@ -35,7 +35,7 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +64,23 @@ pub fn router() -> Router<AppState> {
         .merge(scoped(
             "/team/{agent_id}",
             super::team_agent::method_router().delete(remove_member),
+        ))
+        // Issue #1776: the same drafting for a teammate that does not exist
+        // yet — the Add-teammate form, which has no id to address. A static
+        // segment, so it shadows nothing: no `POST` is served on
+        // `/team/{agent_id}`, and a teammate whose id really is `draft` drafts
+        // at `/team/draft/draft`.
+        .merge(scoped(
+            "/team/draft",
+            post(super::team_agent::draft_new_profile),
+        ))
+        // Issue #1776: drafting a mandate or persona for one teammate. Its own
+        // path rather than another method on `/team/{agent_id}`, because it is
+        // not a write to that teammate — it reads the record and returns text,
+        // and a `POST` on the teammate's own path would read as one.
+        .merge(scoped(
+            "/team/{agent_id}/draft",
+            post(super::team_agent::draft_profile),
         ))
         .merge(scoped("/team/{agent_id}/inbox", put(toggle_inbox)))
         .merge(scoped(
@@ -1059,10 +1076,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

@@ -46,7 +46,10 @@
 //! carried, but only through the host's *existing* redactor:
 //!
 //! * **Label** comes from the tool's server-computed `display_label`, else its
-//!   tool *name* — never from arguments or output.
+//!   tool *name* — never from arguments or output. The loop does not ask a tool
+//!   for that label, so [`StepLabels`] restores it from the built tool set
+//!   before the event is folded; both halves are registry-derived, and neither
+//!   widens what a label may contain.
 //! * **Detail** (arguments) is passed through
 //!   [`approval_display::redact`](crate::runtime::approval_display::redact) —
 //!   issue #372's host-side redactor — and then bounded. This is a deliberate
@@ -82,11 +85,15 @@
 //! stays text-only — so a scrubbed detail can never be re-retrieved and
 //! re-injected into a later turn.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use openhuman_core::openhuman as oh;
 use serde_json::Value;
 
 use oh::agent::progress::AgentProgress;
 use oh::tools::status::{ClassifiedFailure, ToolFailureClass};
+use oh::tools::traits::humanize_tool_name;
 
 use crate::harness::policy::POLICY_NAME;
 use crate::ports::deep_trace::TurnStepDetail;
@@ -650,6 +657,142 @@ pub(crate) fn stream_event_from(
             None
         }
         _ => None,
+    }
+}
+
+/// The curated step labels of one agent's tools, keyed by tool name.
+///
+/// # Why this exists
+///
+/// A tool states its own operator-facing step label through
+/// [`Tool::display_label`](oh::tools::traits::Tool::display_label): the managed
+/// web search calls itself "Exa web search", and a BYO belt names the provider
+/// actually wired behind it ("Brave web search", "SearXNG web search").
+/// **Nothing asks it.** The crate-level `ToolStarted` event carries a call id
+/// and a tool *name* and nothing else, so the bridge that projects it into an
+/// [`AgentProgress`] fills `display_label` with a humanized form of that name —
+/// the same "Web Search" for every provider, on every tenant. The tool's own
+/// answer reaches no one, and `label_for` below then faithfully renders a
+/// label the tool never chose.
+///
+/// OpenCompany assembles the tool set ([`build_agent`](crate::harness::build)),
+/// so it is the one layer that *can* answer the question the loop does not ask.
+/// It captures each tool's label once, at build time, and puts it back onto the
+/// event as that event enters the collector. Everything downstream is unchanged
+/// and stays consistent by construction: the folded [`TurnStep`]s, the live
+/// stream frames, and the durable run trace all read the one rewritten event.
+///
+/// # What it holds, exactly
+///
+/// Labels are captured with `Value::Null` arguments — which is precisely what
+/// the loop itself has at `ToolStarted`, since it emits `arguments: Null` there
+/// too. So this map carries exactly what a loop that *did* ask would have
+/// computed at that moment, and no more: a tool that varies its label by
+/// argument contributes its argument-free form, the same one the loop would
+/// have gotten.
+///
+/// Only labels that **differ** from the humanized tool name are kept, so the map
+/// holds deliberate overrides rather than a second copy of the default. An agent
+/// whose tools all accept the default carries an empty map and costs nothing.
+#[derive(Debug, Default, Clone)]
+pub struct StepLabels(Arc<HashMap<String, String>>);
+
+impl StepLabels {
+    /// Capture the curated labels of `tools`.
+    pub fn from_tools(tools: &[Box<dyn oh::tools::traits::Tool>]) -> Self {
+        let curated = tools
+            .iter()
+            .filter_map(|tool| {
+                let name = tool.name();
+                tool.display_label(&Value::Null)
+                    .filter(|label| !label.trim().is_empty())
+                    // A label equal to the default is not an override; keeping it
+                    // would only make `apply` rewrite an event into itself.
+                    .filter(|label| *label != humanize_tool_name(name))
+                    .map(|label| (name.to_string(), label))
+            })
+            .collect();
+        Self(Arc::new(curated))
+    }
+
+    /// Restore the tool's own label on a tool-call start.
+    ///
+    /// Every other event passes through untouched. Applied once per event, at
+    /// the collector, so the three consumers of that stream cannot disagree
+    /// about what a step is called.
+    pub fn apply(&self, event: AgentProgress) -> AgentProgress {
+        match event {
+            AgentProgress::ToolCallStarted {
+                call_id,
+                tool_name,
+                arguments,
+                iteration,
+                display_label,
+                display_detail,
+            } => {
+                let display_label = self.resolve(&tool_name, display_label);
+                AgentProgress::ToolCallStarted {
+                    call_id,
+                    tool_name,
+                    arguments,
+                    iteration,
+                    display_label,
+                    display_detail,
+                }
+            }
+            // A sub-agent's registry is a filtered view of this same parent tool
+            // set (openhuman's sub-agent runner narrows it per archetype), so the
+            // one map is correct for both scopes. `fold_steps` renders only
+            // parent-scope rows today; the run trace and any later nested view
+            // read the same corrected event rather than a stale humanized one.
+            AgentProgress::SubagentToolCallStarted {
+                agent_id,
+                task_id,
+                call_id,
+                tool_name,
+                arguments,
+                iteration,
+                display_label,
+                display_detail,
+            } => {
+                let display_label = self.resolve(&tool_name, display_label);
+                AgentProgress::SubagentToolCallStarted {
+                    agent_id,
+                    task_id,
+                    call_id,
+                    tool_name,
+                    arguments,
+                    iteration,
+                    display_label,
+                    display_detail,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// The label to carry for `tool_name`, given what the loop supplied.
+    ///
+    /// A curated label replaces the loop's *default* — the humanized tool name,
+    /// or nothing at all. It does **not** replace a label the loop actually
+    /// chose for this call: the unknown-tool row reads "`<name>` (unavailable)",
+    /// and a loop that one day computes a real per-call label should outrank a
+    /// build-time snapshot. Deferring is safe in both directions, because a name
+    /// the loop labels specially is either absent from this map (it never
+    /// registered as a tool) or better described by the call than by the
+    /// registry.
+    fn resolve(&self, tool_name: &str, from_loop: Option<String>) -> Option<String> {
+        let Some(curated) = self.0.get(tool_name) else {
+            return from_loop;
+        };
+        let loop_chose_it = from_loop.as_deref().is_some_and(|label| {
+            !label.trim().is_empty() && label != humanize_tool_name(tool_name)
+        });
+        if loop_chose_it {
+            from_loop
+        } else {
+            Some(curated.clone())
+        }
     }
 }
 
@@ -1373,6 +1516,186 @@ mod tests {
         assert_eq!(steps[0].label, "Searching the web");
         assert_eq!(steps[0].detail.as_deref(), Some("brave · search"));
         assert_eq!(steps[0].elapsed_ms, Some(42));
+    }
+
+    /// A tool that answers `display_label` however a test needs it to.
+    struct LabelledTool {
+        name: &'static str,
+        label: Option<&'static str>,
+    }
+
+    impl LabelledTool {
+        fn boxed(
+            name: &'static str,
+            label: Option<&'static str>,
+        ) -> Box<dyn oh::tools::traits::Tool> {
+            Box::new(Self { name, label })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl oh::tools::traits::Tool for LabelledTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "a tool"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn display_label(&self, _args: &Value) -> Option<String> {
+            self.label.map(str::to_string)
+        }
+
+        async fn execute(&self, _args: Value) -> anyhow::Result<oh::tools::traits::ToolResult> {
+            Ok(oh::tools::traits::ToolResult::success("ok"))
+        }
+    }
+
+    /// The whole reason [`StepLabels`] exists: the vendored turn loop labels a
+    /// tool row from the tool's **name**, and never asks the tool what it calls
+    /// itself.
+    ///
+    /// If this needle stops matching, upstream has changed how a row is
+    /// labelled — most likely by consulting `Tool::display_label` at last. Check
+    /// before deleting anything: `resolve` already defers to a label the loop
+    /// chose, so a correct upstream makes this shim inert rather than wrong, and
+    /// it can then go.
+    #[test]
+    fn the_vendored_loop_still_labels_a_tool_row_from_its_name_alone() {
+        let src = vendored("vendor/openhuman/src/openhuman/agent/tinyagents/observability.rs");
+        assert!(
+            src.contains("display_label: Some(humanize_tool_name(tool_name))"),
+            "the vendored loop no longer labels a tool row from its name — if it now asks \
+             the tool for its own label, `StepLabels` is redundant and should be removed \
+             rather than left to shadow the real answer"
+        );
+    }
+
+    #[test]
+    fn step_labels_keep_overrides_and_drop_the_default() {
+        // The default is the loop's own humanizer, which Title-Cases *every*
+        // word — "Spawn Task", not "Spawn task". Pinned here because the whole
+        // map hinges on recognising that string: read it as sentence case and
+        // every tool looks like it has an override.
+        assert_eq!(humanize_tool_name("spawn_task"), "Spawn Task");
+
+        let labels = StepLabels::from_tools(&[
+            LabelledTool::boxed("web_search", Some("Exa web search")),
+            // The trait default: humanizing its own name. Not an override.
+            LabelledTool::boxed("spawn_task", Some("Spawn Task")),
+            LabelledTool::boxed("file_read", None),
+            LabelledTool::boxed("file_write", Some("   ")),
+        ]);
+        let mut kept: Vec<_> = labels
+            .0
+            .iter()
+            .map(|(name, label)| (name.as_str(), label.as_str()))
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![("web_search", "Exa web search")]);
+    }
+
+    /// The end-to-end shape of the bug: the loop hands the timeline the
+    /// humanized name, and the tool's own label puts it back.
+    #[test]
+    fn a_curated_label_replaces_the_loop_s_humanized_name() {
+        let labels =
+            StepLabels::from_tools(&[LabelledTool::boxed("web_search", Some("Exa web search"))]);
+        let steps = fold_steps(
+            vec![
+                // Exactly what the loop emits: `humanize_tool_name("web_search")`.
+                started("c1", "web_search", Some("Web Search")),
+                completed("c1", "web_search", true, "ok", None, None),
+            ]
+            .into_iter()
+            .map(|event| labels.apply(event))
+            .collect(),
+        );
+        assert_eq!(steps[0].label, "Exa web search");
+    }
+
+    /// A BYO tenant reads the provider actually wired behind the belt — the half
+    /// of the fix that branding on the tool *name* could never deliver, since
+    /// every provider is aliased to the one canonical `web_search`.
+    #[test]
+    fn each_provider_s_own_label_reaches_the_timeline_under_one_tool_name() {
+        for provider in [
+            "Brave web search",
+            "Querit web search",
+            "SearXNG web search",
+        ] {
+            let labels =
+                StepLabels::from_tools(&[LabelledTool::boxed("web_search", Some(provider))]);
+            let steps = fold_steps(
+                vec![
+                    started("c1", "web_search", Some("Web Search")),
+                    completed("c1", "web_search", true, "ok", None, None),
+                ]
+                .into_iter()
+                .map(|event| labels.apply(event))
+                .collect(),
+            );
+            assert_eq!(steps[0].label, provider);
+        }
+    }
+
+    #[test]
+    fn a_tool_without_an_override_is_left_alone() {
+        let labels =
+            StepLabels::from_tools(&[LabelledTool::boxed("web_search", Some("Exa web search"))]);
+        let steps = fold_steps(
+            vec![
+                started("c1", "spawn_task", Some("Spawn task")),
+                completed("c1", "spawn_task", true, "ok", None, None),
+            ]
+            .into_iter()
+            .map(|event| labels.apply(event))
+            .collect(),
+        );
+        assert_eq!(steps[0].label, "Spawn task");
+    }
+
+    /// A label the loop *chose* for this call outranks the build-time snapshot.
+    /// The unavailable-tool row is the live example: it names a tool that never
+    /// ran, and "Web Search" would hide why the row is there at all.
+    #[test]
+    fn a_label_the_loop_chose_survives() {
+        let labels =
+            StepLabels::from_tools(&[LabelledTool::boxed("web_search", Some("Exa web search"))]);
+        let steps = fold_steps(
+            vec![
+                started("c1", "web_search", Some("Web search (unavailable)")),
+                completed("c1", "web_search", false, "", None, None),
+            ]
+            .into_iter()
+            .map(|event| labels.apply(event))
+            .collect(),
+        );
+        assert_eq!(steps[0].label, "Web search (unavailable)");
+    }
+
+    /// Nothing but a tool-call start is touched, so the rewrite cannot perturb
+    /// the thinking/text folding the rest of this module depends on.
+    #[test]
+    fn apply_leaves_every_other_event_untouched() {
+        let labels =
+            StepLabels::from_tools(&[LabelledTool::boxed("web_search", Some("Exa web search"))]);
+        let events = vec![
+            thinking("hm"),
+            text("hello"),
+            completed("c1", "web_search", true, "ok", None, None),
+        ];
+        let applied: Vec<_> = events
+            .clone()
+            .into_iter()
+            .map(|event| labels.apply(event))
+            .collect();
+        assert_eq!(fold_steps(applied), fold_steps(events));
     }
 
     #[test]

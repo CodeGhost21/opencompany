@@ -45,6 +45,7 @@ pub mod build;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
+pub mod chat_seed;
 mod checkpoint;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
@@ -169,6 +170,7 @@ pub use brain::HarnessBrain;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use openhuman_core::openhuman as oh;
 use tokio::sync::{Mutex, RwLock};
@@ -600,6 +602,14 @@ pub struct CompanyAgent {
     /// The embedded openhuman session. A [`Mutex`] because a `turn` takes
     /// `&mut self` and one agent must serialise its own turns.
     agent: Mutex<Agent>,
+    /// The curated step labels of this agent's tools, captured from the built
+    /// tool set (see [`StepLabels`](steps::StepLabels) for why the turn loop
+    /// cannot supply them).
+    ///
+    /// Resolved once per agent build rather than per turn: the tool set is fixed
+    /// for the life of a pooled agent, and a rebuild — the only thing that can
+    /// change which search belt is wired — mints a new `CompanyAgent` anyway.
+    step_labels: steps::StepLabels,
     /// The chat/desk thread this pooled agent's in-memory history is currently
     /// bound to (issue #1725).
     ///
@@ -773,7 +783,7 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None, None).await
+        self.run_with_steer(message, None, None, None, None).await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -805,6 +815,7 @@ impl CompanyAgent {
         steer: Option<&SteerControl>,
         stream: Option<crate::turn_stream::TurnStreamCtx>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
+        chat_seed: Option<chat_seed::ChatSeedRequest>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
@@ -827,7 +838,20 @@ impl CompanyAgent {
             crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
             crate::turn_stream::LiveRoute::Workflow { .. } => None,
         });
+        // The company this turn's chat seed (if any) projects from — same
+        // "captured before `stream` moves" reasoning as `turn_chat_id` above.
+        // Only meaningful alongside `turn_chat_id`, so `None` for exactly the
+        // same turns.
+        let turn_company: Option<CompanyId> = stream.as_ref().map(|ctx| ctx.company.clone());
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
+        // This agent's curated step labels, restored onto each tool-call start as
+        // it arrives. The turn loop labels a tool row from its *name* alone and
+        // never asks the tool what it calls itself, so a branded belt would
+        // otherwise render as the generic humanized name on every surface below
+        // (see `steps::StepLabels`). Applied here — once, at the single point the
+        // turn's events enter OpenCompany — so the live stream, the durable run
+        // trace, and the folded timeline cannot disagree about a step's name.
+        let step_labels = self.step_labels.clone();
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
             let mut seq: u64 = 0;
@@ -835,6 +859,7 @@ impl CompanyAgent {
             // emits the same "Thinking" rows the final folded one does.
             let mut thinking_open = false;
             while let Some(event) = rx.recv().await {
+                let event = step_labels.apply(event);
                 if let Some(ctx) = &stream
                     && let Some(frame) = steps::stream_event_from(&event, seq, &mut thinking_open)
                 {
@@ -897,12 +922,59 @@ impl CompanyAgent {
                     "[harness] chat switched — resetting agent history and re-binding to the incoming thread"
                 );
                 agent.clear_history();
-                let seeded = agent.seed_resume_from_thread_transcript(incoming);
+                // Prefer OpenCompany's own EventLog-derived seed (issue #1840).
+                // OpenHuman never writes a file transcript for an OC `chat_id`, so
+                // `seed_resume_from_thread_transcript` always misses and the reply
+                // starts blind (the #1725/#1730 regression). Project it HERE, now
+                // that `switched` is confirmed true — not by the caller for every
+                // turn — because the projection walks the company journal and is
+                // costly on the filesystem backend (`chat_seed::build_chat_seed`'s
+                // docs); building it unconditionally meant every ordinary
+                // same-desk reply paid for a journal scan its `switched == false`
+                // branch below would just throw away (codex review finding). This
+                // still runs inside the same `bound_chat`-locked section as the
+                // switch decision, so it is exactly as atomic as the eager build
+                // was — no turn can observe a `switched` verdict this projection
+                // doesn't match.
+                let seed = match (&chat_seed, turn_company.as_ref()) {
+                    (Some(request), Some(company)) => request.build(company, incoming).await,
+                    _ => Vec::new(),
+                };
+                tracing::debug!(
+                    chat = incoming,
+                    seeded = seed.len(),
+                    "[harness] built recent-chat seed for the incoming desk"
+                );
+                // Fall back to the transcript lookup only when the seed is empty
+                // (a background/workflow turn, no `chat_seed` request, or a desk
+                // with no recent history).
+                let seeded = if seed.is_empty() {
+                    agent.seed_resume_from_thread_transcript(incoming)
+                } else {
+                    // `message` is the augmented turn text; `seed_resume_from_messages`
+                    // drops a trailing user line matching it. `ChatSeedRequest::build`
+                    // (above) already stripped the raw duplicate against
+                    // `raw_message` (see `chat_seed::strip_current_message`), so
+                    // this is a defensive no-op on the happy path and correct if
+                    // augmentation was off.
+                    match agent.seed_resume_from_messages(seed, message) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                chat = incoming,
+                                %error,
+                                "[harness] chat-seed resume failed; turn starts without recent history"
+                            );
+                            false
+                        }
+                    }
+                };
                 // On a switch the agent-latest transcript is the WRONG thread, so
-                // never let the turn's fallback auto-resume run: a seed hit sets
-                // `cached_transcript_messages` (the fallback is skipped anyway); a
-                // miss must start fresh, NOT reload the previous chat's
-                // transcript and re-leak it (the exact screenshot bug).
+                // never let the turn's fallback auto-resume run: our explicit
+                // correct-thread seed (or a transcript hit) has already set
+                // `cached_transcript_messages`; a miss must start fresh, NOT reload
+                // the previous chat's transcript and re-leak it (the exact
+                // screenshot bug). Keep this true regardless of which seed path ran.
                 overrides.suppress_transcript_autoload = true;
                 tracing::debug!(
                     chat = incoming,
@@ -1010,9 +1082,20 @@ impl CompanyAgent {
                 hooks,
                 Box::pin(async {
                     let mut usages: Vec<TurnUsage> = Vec::new();
+                    // Issue #1680: timed PER ATTEMPT, not across the retry. Each
+                    // `agent.turn` opens a fresh harness run with a fresh
+                    // wall-clock budget, so a duration spanning both attempts
+                    // would be compared against a ceiling neither of them saw.
+                    // This is the only per-turn duration measured anywhere —
+                    // `WorkflowRunNodeRow::elapsed_ms` is per NODE, and a node
+                    // is not a turn.
+                    let started = std::time::Instant::now();
                     let first = agent.turn(message).await;
+                    let first_elapsed = started.elapsed();
                     usages.push(read_turn_usage(&agent));
-                    let reply: crate::Result<String> = match self.classify_turn(first) {
+                    let reply: crate::Result<String> = match self
+                        .classify_turn(first, first_elapsed)
+                    {
                         AttemptOutcome::Reply(reply) => Ok(reply),
                         AttemptOutcome::Hard(err) => Err(err),
                         AttemptOutcome::Empty => {
@@ -1091,9 +1174,11 @@ impl CompanyAgent {
                                 {
                                     agent.set_next_turn_overrides(overrides);
                                 }
+                                let retry_started = std::time::Instant::now();
                                 let second = agent.turn(message).await;
+                                let second_elapsed = retry_started.elapsed();
                                 usages.push(read_turn_usage(&agent));
-                                match self.classify_turn(second) {
+                                match self.classify_turn(second, second_elapsed) {
                                     AttemptOutcome::Reply(reply) => Ok(reply),
                                     AttemptOutcome::Empty => Ok(crate::harness::mcp_probe::scrub(
                                         GRACEFUL_EMPTY_REPLY,
@@ -1212,11 +1297,25 @@ impl CompanyAgent {
     }
 
     /// Classify one `agent.turn` result for the retry wrapper.
-    fn classify_turn(&self, result: anyhow::Result<String>) -> AttemptOutcome {
+    ///
+    /// `elapsed` is how long THIS attempt ran, and is used only by the
+    /// wall-clock-ceiling arm (issue #1680) — see
+    /// [`wall_clock_ceiling_message`].
+    fn classify_turn(&self, result: anyhow::Result<String>, elapsed: Duration) -> AttemptOutcome {
         match result {
             Ok(reply) if reply.trim().is_empty() => AttemptOutcome::Empty,
             Ok(reply) => AttemptOutcome::Reply(reply),
             Err(err) if is_transient_empty_response(&err) => AttemptOutcome::Empty,
+            // Issue #1680: still Hard — a ceiling hit is not retryable and the
+            // one-shot retry must not double a ten-minute failure — but told in
+            // terms the operator can act on rather than the harness's own.
+            Err(err) if is_wall_clock_ceiling(&err) => {
+                AttemptOutcome::Hard(OpenCompanyError::Harness(wall_clock_ceiling_message(
+                    &self.agent_id,
+                    elapsed,
+                    &err,
+                )))
+            }
             Err(err) => AttemptOutcome::Hard(OpenCompanyError::Harness(format!(
                 "turn for '{}': {err}",
                 self.agent_id
@@ -1246,6 +1345,127 @@ fn is_transient_empty_response(err: &anyhow::Error) -> bool {
     format!("{err:#}")
         .to_ascii_lowercase()
         .contains("empty response")
+}
+
+/// The two phrasings `TinyAgentsError::Timeout` uses when the run's wall-clock
+/// budget expires around a call.
+///
+/// Copied from the vendored crate's own list — `web_errors::is_turn_timeout_error`
+/// anchors on exactly these — rather than invented here, so a phrasing added
+/// upstream is a diff against a known set instead of a silent miss.
+const WALL_CLOCK_CEILING_LEAVES: [&str; 2] = [
+    "exceeded its remaining wall-clock budget",
+    "exceeded its wall-clock deadline",
+];
+
+/// Whether a turn error is the harness's per-turn wall-clock ceiling firing
+/// (issue #1680).
+///
+/// Matched on the error chain's message for the same reason
+/// [`is_transient_empty_response`] is: `turn` returns `anyhow::Result`, so the
+/// typed error is erased by the time it reaches us. The leaf reads
+/// "…exceeded its remaining wall-clock budget (56636 ms)", raised by
+/// `with_call_budget` in the vendored tinyagents harness.
+///
+/// **Whole phrases, not the words `wall-clock budget`.** A provider's response
+/// body reaches this chain verbatim — `provider.rs` raises
+/// `TinyAgentsError::Model(format!("hosted inference returned {status}: {text}"))`
+/// — so a hosted or BYOK endpoint that says anything about a wall-clock budget
+/// of its own would otherwise be reported as this ceiling, complete with a
+/// measured duration of a second or two and an instruction to raise
+/// `OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`, which would fix nothing. Being wrong in
+/// that direction is worse than the bare wrapper this replaces, because it
+/// reads as a diagnosis.
+fn is_wall_clock_ceiling(err: &anyhow::Error) -> bool {
+    let chain = format!("{err:#}").to_ascii_lowercase();
+    WALL_CLOCK_CEILING_LEAVES
+        .iter()
+        .any(|leaf| chain.contains(leaf))
+}
+
+/// A duration as an operator reads one: `9s`, `1m 30s`, `10m 01s`.
+fn humanise_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    format!("{}m {:02}s", secs / 60, secs % 60)
+}
+
+/// What an operator should be told when a turn hits the wall-clock ceiling
+/// (issue #1680).
+///
+/// ## Why this message exists at all
+///
+/// The harness's own leaf reads "model call for run 'agent_turn' exceeded its
+/// remaining wall-clock budget (56636 ms)", and every part of that is true and
+/// almost every part of it misleads.
+///
+/// The ceiling is a **whole-turn** bound, armed as the harness policy's
+/// `max_wall_clock_ms` and checked as `ceiling − Instant::elapsed()` since the
+/// run began. Model time is therefore fully counted against it, as is tool
+/// time, sub-agent time and retry backoff. But the number the harness prints is
+/// the budget that **remained** when the offending call was issued, not that
+/// call's duration and not the ceiling — so a turn that genuinely ran for the
+/// full ten minutes reports a figure ten times smaller than the limit it hit,
+/// and reads as though one slow model call were at fault.
+///
+/// That reading is what issue #1680 was filed on: a node that had spent about
+/// nine minutes before its last model call even started was diagnosed as a 56
+/// second budget being too tight. Nothing about the mechanism was wrong; the
+/// only defect was that its report could not be read correctly.
+///
+/// ## Why the underlying error is kept
+///
+/// Appended verbatim rather than replaced. It is the only thing that names
+/// which call was in flight when the ceiling fired, and a bug report that has
+/// lost it is worse than a wordy one. The console strips known wrapper prefixes
+/// (`run-error-message.ts`) and leaves this leaf intact.
+///
+/// Rendered `{err:#}` — the whole chain — rather than `{err}`, which is only
+/// the outermost context. Today's leaf happens to arrive flattened
+/// (`vendor/openhuman/.../agent/tinyagents/mod.rs` interpolates it into a
+/// single `anyhow!`), but [`is_wall_clock_ceiling`] already searches `{err:#}`
+/// precisely because a chained one is possible; the two halves must agree, and
+/// only one of them is safe if it is. On a flat error the two render
+/// identically, so this costs nothing to be right about.
+///
+/// ## Why the ceiling's value is not quoted
+///
+/// `DEFAULT_AGENT_TURN_TIMEOUT_SECS` is private to the vendored openhuman crate
+/// and cannot be read from here. Restating `600` would be a copy that silently
+/// goes stale on the next vendored bump — the elapsed time is measured, and the
+/// knob's NAME is a fact independent of its value, so both can be stated
+/// honestly while the number cannot.
+///
+/// ## Why it hedges about the figure
+///
+/// "**any** millisecond figure below", not "the figure below", because the two
+/// spellings this classifies do not both carry one. `with_call_budget` raises
+/// `… exceeded its remaining wall-clock budget (56636 ms)`; the run loop and the
+/// tool loop raise `run \`agent_turn\` exceeded its wall-clock deadline`, which
+/// has no number in it at all. Pointing at a figure that is not there would
+/// reintroduce this issue's own defect one spelling over — an accurate sentence
+/// that cannot be followed. One clause covers both; a branch on the spelling
+/// would be two messages to keep true.
+///
+/// ## Why it is not longer than this
+///
+/// `RunHistoryPanel` renders a journaled run's error as the row's **headline**
+/// sentence, so every extra clause is a wall of red text over the run the
+/// operator is trying to read. Three facts earn their place — what the turn
+/// spent, that the harness's number is a remainder, and which knob moves the
+/// ceiling. The rest of the explanation belongs in
+/// `docs/spec/runtime/harnesses.md`, not in every failed run.
+fn wall_clock_ceiling_message(agent_id: &str, elapsed: Duration, err: &anyhow::Error) -> String {
+    format!(
+        "turn for '{agent_id}' hit the harness's per-turn wall-clock ceiling after {}. \
+         The ceiling bounds the whole turn, model time included, so any millisecond \
+         figure below is the budget that REMAINED when the last call started — not a \
+         limit on that call. Give this step less to do, or raise the ceiling with \
+         OPENHUMAN_AGENT_TURN_TIMEOUT_SECS. Underlying error: {err:#}",
+        humanise_elapsed(elapsed)
+    )
 }
 
 /// What a workspace-ensure attempt should say, given what the last attempt for
@@ -1420,6 +1640,21 @@ pub struct HarnessPool {
     /// declare no ceilings keeps a stable fingerprint and never rebuilds on this
     /// axis.
     desk_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the `[tools].allow` a roster's belts are wired
+    /// from — the seed's grants **plus** the namespaces an operator granted from
+    /// a connect surface (issue #1796).
+    ///
+    /// Needed for the same reason as [`Self::desk_fingerprints`], and it is what
+    /// makes the one-click grant mean anything: a belt is wired once per roster,
+    /// so without this axis an operator who connected Chargebee and granted it
+    /// would watch the page flip to "Connected" while every teammate kept the
+    /// belt built before the grant — until the process restarted. That is the
+    /// same "Connected and reaching nobody" the grant was clicked to end.
+    ///
+    /// A company with no console grants keeps a stable fingerprint (it hashes
+    /// the effective list, which is then just the seed's) and never rebuilds on
+    /// this axis.
+    grants_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Per-company fingerprint of the routed workspace documents — hashed over
     /// their **bodies**, not merely their names.
     ///
@@ -1539,6 +1774,7 @@ impl HarnessPool {
             policy_fingerprints: RwLock::new(HashMap::new()),
             pinned_policies: std::sync::Mutex::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
+            grants_fingerprints: RwLock::new(HashMap::new()),
             context_fingerprints: RwLock::new(HashMap::new()),
             memory_engine: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
@@ -1749,6 +1985,34 @@ impl HarnessPool {
         // desk — would not reach the roster until a restart.
         let desk_fp =
             desk_scope_fingerprint(&overlay.desks, &overlay.desk_members, &overlay.desk_tools);
+        // Issue #1796: the company grant list itself joins the staleness check.
+        // Hashed over the EFFECTIVE list — the record's `[tools].allow` folded
+        // with the live override read above — rather than over the override
+        // alone, so this axis also catches a seed `[tools]` edit that arrived
+        // with no override at all, and does not move when a redundant override
+        // is carried and later cleared. That is the shape `policy_fp` settled
+        // on, for the same reason.
+        //
+        // One asymmetry with `policy_fp` worth naming, since it is not obvious
+        // from the symmetry of the two lines. The policy axis reads BOTH halves
+        // live: `overlay.policy` from the store read above, and the manifest's
+        // `[policy]`, which no runtime write touches. This axis reads the
+        // override live but takes the base from `company.manifest.tools.allow`,
+        // and that field IS runtime-mutable now — the fold makes it so. A
+        // `DELETE …/tools/grants` landing after the caller snapshotted `company`
+        // therefore moves the override half but not the base, and the withdrawal
+        // reaches the belt a cycle later than a grant would.
+        //
+        // Bounded and safe rather than clean: it delays a revocation by one
+        // cycle, never a grant, and every axis here has some version of that
+        // window. It is recorded because the obvious reading of these two lines
+        // — "the grant axis works exactly like the policy axis" — is not quite
+        // true, and the next person to touch either should know which half is
+        // live.
+        let grants_fp = tool_grants_fingerprint(&crate::ports::types::effective_tool_allow(
+            &company.manifest.tools.allow,
+            overlay.tool_grants.as_ref(),
+        ));
 
         // Re-resolve + fingerprint the tenant's capability filter (issue #108):
         // a per-tenant, per-period, fail-closed budget read from the meter. With
@@ -1840,6 +2104,7 @@ impl HarnessPool {
             let override_fingerprints = self.override_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
+            let grants_fingerprints = self.grants_fingerprints.read().await;
             let context_fingerprints = self.context_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
@@ -1852,6 +2117,7 @@ impl HarnessPool {
                 && override_fingerprints.get(&company.id) == Some(&override_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
                 && desk_fingerprints.get(&company.id) == Some(&desk_fp)
+                && grants_fingerprints.get(&company.id) == Some(&grants_fp)
                 && context_fingerprints.get(&company.id) == Some(&context_fp)
             {
                 return Ok(());
@@ -1910,6 +2176,20 @@ impl HarnessPool {
         fresh_company.overlay_desks = overlay.desks;
         fresh_company.overlay_desk_members = overlay.desk_members;
         fresh_company.overlay_desk_tools = overlay.desk_tools;
+        // Issue #1796: same treatment for the company grant list. `build_roster`
+        // reads `[tools].allow` off the manifest rather than through an
+        // accessor — some three dozen sites do — so the live effective list is
+        // installed onto the manifest the roster is built from, which is the
+        // one place that has to be right for a console grant to reach a belt.
+        //
+        // `company` may be a stale boot-time snapshot (`HarnessBrain::record`),
+        // so this reads the freshly-loaded override rather than the snapshot's,
+        // exactly as the overlay fields above do.
+        fresh_company.overlay_tool_grants = overlay.tool_grants.clone();
+        fresh_company.manifest.tools.allow = crate::ports::types::effective_tool_allow(
+            &company.manifest.tools.allow,
+            overlay.tool_grants.as_ref(),
+        );
         // Issue #562: same treatment for the policy override — `build_roster`
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
@@ -1992,6 +2272,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), desk_fp);
+        self.grants_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), grants_fp);
         self.context_fingerprints
             .write()
             .await
@@ -2062,6 +2346,7 @@ impl HarnessPool {
         self.override_fingerprints.write().await.remove(company);
         self.policy_fingerprints.write().await.remove(company);
         self.desk_fingerprints.write().await.remove(company);
+        self.grants_fingerprints.write().await.remove(company);
         self.context_fingerprints.write().await.remove(company);
         self.memory_engine.write().await.remove(company);
     }
@@ -2401,6 +2686,7 @@ impl HarnessPool {
                 policy: record.overlay_policy,
                 desks: record.overlay_desks,
                 desk_members: record.overlay_desk_members,
+                tool_grants: record.overlay_tool_grants,
                 desk_tools: record.overlay_desk_tools,
             },
             _ => EffectiveOverlay {
@@ -2411,6 +2697,7 @@ impl HarnessPool {
                 policy: company.overlay_policy.clone(),
                 desks: company.overlay_desks.clone(),
                 desk_members: company.overlay_desk_members.clone(),
+                tool_grants: company.overlay_tool_grants.clone(),
                 desk_tools: company.overlay_desk_tools.clone(),
             },
         }
@@ -2468,6 +2755,15 @@ impl HarnessPool {
             .await
             .get(company)
             .copied()
+    }
+
+    /// The current grant fingerprint for a company (test-only), so a
+    /// grant-freshness test can assert the roster was actually rebuilt after a
+    /// console tool grant rather than inferring it (issue #1796). This is the
+    /// observable that makes "no restart" testable.
+    #[cfg(test)]
+    pub async fn grants_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.grants_fingerprints.read().await.get(company).copied()
     }
 
     /// The current policy fingerprint for a company (test-only), so a
@@ -2752,6 +3048,7 @@ impl HarnessPool {
             return Ok(refusal);
         }
 
+        let confined = confine::build_confined_agent(company, company_name, confinement, deps)?;
         let agent = CompanyAgent {
             agent_id: confine::CONFINED_AGENT_ID.to_string(),
             role: "Workflow copilot".to_string(),
@@ -2759,12 +3056,8 @@ impl HarnessPool {
             // per-agent daily cap to read; the company-wide ceiling above is the
             // one that applies to it.
             budget_usd_daily: None,
-            agent: Mutex::new(confine::build_confined_agent(
-                company,
-                company_name,
-                confinement,
-                deps,
-            )?),
+            step_labels: steps::StepLabels::from_tools(confined.tools()),
+            agent: Mutex::new(confined),
             bound_chat: Mutex::new(None),
         };
 
@@ -2780,9 +3073,11 @@ impl HarnessPool {
 
         // The message goes to the model AS SENT. This is the retrieve→inject
         // step's absence, and it is the difference between "grounded in one
-        // workflow" and "confined to one workflow".
+        // workflow" and "confined to one workflow". Empty seed for the same
+        // reason (issue #1840): a confined turn is intentionally context-free, so
+        // it carries none of the desk's recent history.
         let (outcome, turn_costs) = agent
-            .run_with_steer(message, None, stream_ctx, None)
+            .run_with_steer(message, None, stream_ctx, None, None)
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
@@ -3006,6 +3301,14 @@ impl HarnessPool {
         // their frames would otherwise misattribute to the active chat (#125
         // review). Either way the durable `TurnStep`s still fold from the same
         // buffered events at turn end.
+        // The chat thread this turn answers, if any — captured before `live` is
+        // consumed by the `stream_ctx` match below. Only a chat turn (`On`) seeds
+        // recent history; a background task or workflow node carries no chat
+        // thread to bind history to (issue #1840).
+        let seed_chat: Option<Option<&str>> = match &live {
+            LiveStream::On { chat_id } => Some(*chat_id),
+            _ => None,
+        };
         let stream_ctx = match live {
             LiveStream::On { chat_id } => Some(crate::turn_stream::TurnStreamCtx {
                 company: company.clone(),
@@ -3035,8 +3338,38 @@ impl HarnessPool {
             }),
             LiveStream::Off => None,
         };
+        // Recent-chat history seed (issue #1840): give a chat reply this desk's
+        // own recent turns so it isn't assembled blind on every switch. Only
+        // ever wanted for a chat turn with the company journal wired — never
+        // built here, though: `run_with_steer` projects it itself, and only
+        // once its `bound_chat`-locked switch check confirms this turn is
+        // actually a switch (a same-desk reply right after another one is not,
+        // and building it unconditionally on every chat turn made every
+        // ordinary reply pay for a journal scan whose result would just be
+        // thrown away — codex review finding). This is just the (cheap — two
+        // `Arc` clones, no I/O) request the projection needs when the switch
+        // check does land on `true`. The current operator message is ALREADY
+        // journaled at this point (the server appends it before dispatch), so
+        // it is the newest owning event the projector sees; `raw_message` is
+        // what `chat_seed::strip_current_message` matches to strip it —
+        // `run_single` re-appends the current message itself, so seeding it
+        // too would duplicate it on the wire.
+        let chat_seed_request = match (seed_chat, deps.events.as_ref()) {
+            (Some(_), Some(events)) => Some(chat_seed::ChatSeedRequest {
+                raw_message: message.to_string(),
+                events: events.clone(),
+                store: deps.store.clone(),
+            }),
+            _ => None,
+        };
         let (outcome, turn_costs) = agent
-            .run_with_steer(&augmented, steer, stream_ctx, run_sink.clone())
+            .run_with_steer(
+                &augmented,
+                steer,
+                stream_ctx,
+                run_sink.clone(),
+                chat_seed_request,
+            )
             .await?;
         // Issue #242: fold this turn's spend into the attempt it belongs to.
         // Per turn, not once at the end, so a redirect re-run and a delegate's
@@ -3424,6 +3757,8 @@ pub(crate) struct EffectiveOverlay {
     pub policy: Option<PolicyOverride>,
     pub desks: Vec<OverlayDesk>,
     pub desk_members: Vec<OverlayDeskMember>,
+    /// The namespaces an operator granted from a connect surface (issue #1796).
+    pub tool_grants: Option<crate::ports::types::ToolGrantsOverride>,
     pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
 }
 
@@ -3501,6 +3836,23 @@ fn desk_scope_fingerprint(
         ceiling.hash(&mut hasher);
     }
 
+    hasher.finish()
+}
+
+/// A stable fingerprint of the `[tools].allow` a roster's belts are wired from
+/// (issue #1796).
+///
+/// Order-**sensitive**, unlike its neighbours: `[tools].allow` is an ordered
+/// list an operator authored, `effective_tool_allow` appends to it
+/// deterministically, and two grant lists that differ only in order are two
+/// different manifests. Sorting here would hide a reordering that
+/// `allow_covers` can genuinely read differently.
+fn tool_grants_fingerprint(allow: &[String]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    allow.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -3789,6 +4141,7 @@ pub(crate) fn build_roster(
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
+            step_labels: steps::StepLabels::from_tools(agent.tools()),
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
         }));
@@ -3860,6 +4213,7 @@ pub(crate) fn build_roster(
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
             budget_usd_daily: effective_budget,
+            step_labels: steps::StepLabels::from_tools(agent.tools()),
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
         }));
@@ -4737,9 +5091,12 @@ description = "Builds the product."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -5955,7 +6312,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None, None)
+            .run_with_steer("hi", Some(&control), None, None, None)
             .await
             .expect("runs");
         assert_eq!(
@@ -6006,6 +6363,222 @@ description = "Builds the product."
         assert!(
             !is_transient_empty_response(&hard),
             "a budget error is NOT the transient empty class — it must propagate"
+        );
+    }
+
+    // --- the per-turn wall-clock ceiling (issue #1680) -----------------------
+
+    /// The leaf as the vendored harness actually writes it, taken verbatim from
+    /// the failing run in issue #1680.
+    fn ceiling_error() -> anyhow::Error {
+        anyhow::anyhow!(
+            "tinyagents harness run failed; model error; run timed out; model call for run \
+             'agent_turn' exceeded its remaining wall-clock budget (56636 ms)"
+        )
+    }
+
+    /// The same failure as [`ceiling_error`], but arriving as an `anyhow`
+    /// context chain instead of one flattened string. Nothing guarantees the
+    /// vendored crate keeps flattening it, and `is_wall_clock_ceiling` already
+    /// assumes it might not.
+    fn chained_ceiling_error() -> anyhow::Error {
+        use anyhow::Context as _;
+        Err::<(), _>(anyhow::anyhow!(
+            "model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)"
+        ))
+        .context("run timed out")
+        .context("model error")
+        .context("tinyagents harness run failed")
+        .unwrap_err()
+    }
+
+    /// A chain must not lose its leaf. `{err}` renders only the outermost
+    /// context — `tinyagents harness run failed` — which drops both the
+    /// remaining-budget figure and the call that was in flight, the two things
+    /// the message promises to keep. `{err:#}` renders the whole chain.
+    #[test]
+    fn a_chained_ceiling_error_keeps_its_leaf() {
+        let err = chained_ceiling_error();
+        assert_eq!(
+            format!("{err}"),
+            "tinyagents harness run failed",
+            "the premise: the outermost context alone says nothing useful"
+        );
+        assert!(
+            is_wall_clock_ceiling(&err),
+            "a chained ceiling hit is still a ceiling hit"
+        );
+
+        let msg =
+            wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
+        assert!(
+            msg.contains("56636 ms"),
+            "the remaining-budget figure survives the chain: {msg}"
+        );
+        assert!(
+            msg.contains("model call for run 'agent_turn'"),
+            "and so does the call that was in flight: {msg}"
+        );
+    }
+
+    #[test]
+    fn wall_clock_ceiling_is_recognised_and_other_timeouts_are_not() {
+        assert!(
+            is_wall_clock_ceiling(&ceiling_error()),
+            "the harness's own ceiling leaf must be recognised"
+        );
+        assert!(
+            !is_wall_clock_ceiling(&anyhow::anyhow!(
+                "request timed out after 30s connecting to the provider"
+            )),
+            "an ordinary provider timeout is NOT the turn ceiling — it keeps its own text"
+        );
+        assert!(
+            !is_wall_clock_ceiling(&anyhow::anyhow!("daily budget exceeded for agent 'ceo'")),
+            "a SPEND budget is not a wall-clock budget"
+        );
+    }
+
+    /// A provider's response body reaches this chain verbatim — `provider.rs`
+    /// raises `TinyAgentsError::Model("hosted inference returned {status}: {text}")`
+    /// — so an endpoint with a wall-clock budget of its own must not be read as
+    /// OpenHuman's per-turn ceiling. That misdiagnosis is worse than the plain
+    /// wrapper: it would report the second the request took as if it were a
+    /// ten-minute turn, and tell the operator to raise a ceiling that was never
+    /// reached.
+    #[test]
+    fn a_provider_body_that_mentions_a_wall_clock_budget_is_not_the_ceiling() {
+        for body in [
+            "hosted inference returned 429: {\"error\":\"wall-clock budget for this key is exhausted\"}",
+            "hosted inference returned 400: your per-request wall-clock budget must be positive",
+        ] {
+            assert!(
+                !is_wall_clock_ceiling(&anyhow::anyhow!("{body}")),
+                "a provider body is not the turn ceiling: {body}"
+            );
+        }
+        // Both phrasings the vendored harness actually raises still match,
+        // including the deadline spelling the old three-word search covered
+        // only by accident.
+        for leaf in [
+            "model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 ms)",
+            "tool call for run 'agent_turn' exceeded its wall-clock deadline",
+        ] {
+            assert!(
+                is_wall_clock_ceiling(&anyhow::anyhow!("{leaf}")),
+                "the harness's own leaf must still be recognised: {leaf}"
+            );
+        }
+    }
+
+    #[test]
+    fn elapsed_reads_as_an_operator_reads_a_clock() {
+        assert_eq!(humanise_elapsed(Duration::from_millis(9_400)), "9s");
+        assert_eq!(humanise_elapsed(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(humanise_elapsed(Duration::from_millis(601_000)), "10m 01s");
+    }
+
+    /// The whole point of #1680: the operator is told what the turn actually
+    /// spent, and told that the harness's own number is the remainder rather
+    /// than a limit. The old text said neither.
+    #[test]
+    fn ceiling_message_reports_elapsed_and_reframes_the_harness_number() {
+        let err = ceiling_error();
+        let msg =
+            wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
+
+        assert!(msg.contains("product_manager"), "names the agent: {msg}");
+        assert!(
+            msg.contains("10m 01s"),
+            "states what the turn actually spent: {msg}"
+        );
+        assert!(
+            msg.contains("REMAINED"),
+            "says the harness's figure is the remainder, not a limit: {msg}"
+        );
+        assert!(
+            msg.contains("OPENHUMAN_AGENT_TURN_TIMEOUT_SECS"),
+            "names the knob that moves the ceiling: {msg}"
+        );
+        assert!(
+            msg.contains("56636 ms"),
+            "keeps the underlying diagnostic verbatim: {msg}"
+        );
+        // The ceiling's own value is private to the vendored crate, so it is
+        // deliberately not restated — a stale copy would be worse than none.
+        assert!(
+            !msg.contains("600"),
+            "must not hardcode a ceiling it cannot read: {msg}"
+        );
+    }
+
+    /// At the classifier, where the retry wrapper actually reads it: a ceiling
+    /// hit stays HARD (a ten-minute failure must not be retried into twenty),
+    /// and carries the honest message rather than the bare `turn for 'x': …`.
+    /// The other spelling the harness raises carries **no** figure — `run
+    /// `agent_turn` exceeded its wall-clock deadline` — so the message must not
+    /// point the operator at one. Being accurate but unfollowable is the exact
+    /// defect #1680 was filed on; reintroducing it one spelling over would be a
+    /// poor way to close it.
+    #[test]
+    fn the_figure_less_spelling_is_not_promised_a_figure() {
+        let err = anyhow::anyhow!(
+            "tinyagents harness run failed: run timed out: run `agent_turn` exceeded its \
+             wall-clock deadline"
+        );
+        assert!(
+            is_wall_clock_ceiling(&err),
+            "it is still the ceiling, and still classified here"
+        );
+
+        let msg = wall_clock_ceiling_message("ceo", Duration::from_secs(600), &err);
+        assert!(
+            !msg.contains("the figure below"),
+            "there is no figure below to point at: {msg}"
+        );
+        assert!(
+            msg.contains("10m 00s"),
+            "the measured elapsed still leads: {msg}"
+        );
+        assert!(
+            msg.contains("OPENHUMAN_AGENT_TURN_TIMEOUT_SECS"),
+            "and the knob is still named: {msg}"
+        );
+        assert!(
+            msg.contains("exceeded its wall-clock deadline"),
+            "the leaf survives verbatim: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_turn_reframes_a_ceiling_hit_and_keeps_it_hard() {
+        let (agent, _deps) = scripted_agent(vec![]);
+
+        let outcome = agent.classify_turn(Err(ceiling_error()), Duration::from_millis(601_000));
+        let AttemptOutcome::Hard(err) = outcome else {
+            panic!("a ceiling hit is not retryable and must classify Hard");
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("per-turn wall-clock ceiling after 10m 01s"),
+            "got {text}"
+        );
+
+        // Every other hard error keeps the plain wrapper, unchanged.
+        let other = agent.classify_turn(
+            Err(anyhow::anyhow!("provider refused the request")),
+            Duration::from_secs(3),
+        );
+        let AttemptOutcome::Hard(err) = other else {
+            panic!("an unrelated failure is still Hard");
+        };
+        assert!(
+            err.to_string().contains("provider refused the request"),
+            "an unrelated failure keeps its own text: {err}"
+        );
+        assert!(
+            !err.to_string().contains("wall-clock"),
+            "and gains no ceiling prose: {err}"
         );
     }
 
@@ -6957,9 +7530,12 @@ description = "Sets direction."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -7538,6 +8114,97 @@ description = "Builds the product."
         assert!(
             ok.contains("hello-marker"),
             "one teammate's exhausted budget must not stop the company: {ok:?}"
+        );
+    }
+
+    // --- Console tool grants, live (issue #1796) -----------------------------
+
+    /// **The no-restart proof for the one-click grant.** A namespace granted
+    /// through the company store — the exact path `PUT …/tools/grants` writes
+    /// through — moves the grant fingerprint, so `ensure` rebuilds the roster in
+    /// place and the belt the next turn runs with actually has the tools.
+    ///
+    /// Without this axis every other fingerprint stays stable across a grant,
+    /// the fast path returns the cached roster, and the operator watches the
+    /// connect page flip to "Connected" while no teammate receives anything
+    /// until the process restarts — which is the same "Connected and reaching
+    /// nobody" the grant was clicked to end, with a delay attached.
+    ///
+    /// One pool throughout, never reconstructed (`resident_companies()` stays
+    /// 1), so nothing here can be smuggling in a restart.
+    #[tokio::test]
+    async fn a_tool_grant_written_through_the_store_rebuilds_the_roster_in_place() {
+        use crate::ports::types::{Actor, ActorKind, ToolGrantsOverride};
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        // A catch-all company: `*` covers shell/code/web and confers none of the
+        // five namespaces this route deals in, which is the manifest shape the
+        // issue was reported against.
+        let mut rec = capped_record();
+        rec.manifest.tools.allow = vec!["*".to_string()];
+
+        let live_store = Arc::new(LiveStore::default());
+        live_store.save(&rec).await.unwrap();
+        let mut deps = deps_with_plan(dir.path(), context.clone(), None, None);
+        deps.store = live_store.clone();
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure before");
+        let before = pool
+            .grants_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // An admin grants `chargebee` from the connect page.
+        let mut granted = rec.clone();
+        granted.overlay_tool_grants = Some(ToolGrantsOverride {
+            added: vec!["chargebee".to_string()],
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-admin".to_string(),
+            },
+            at_millis: crate::ports::now_millis(),
+        });
+        granted.manifest.tools.allow = granted.effective_tool_allow();
+        live_store.save(&granted).await.unwrap();
+
+        // Deliberately re-`ensure` with the STALE record the caller is holding.
+        // A boot-time snapshot is what `HarnessBrain::record` hands in, so the
+        // grant must be picked up from the live store read rather than from the
+        // record passed in — otherwise this works only for callers that happen
+        // to have reloaded.
+        pool.ensure(&rec, &deps).await.expect("ensure after");
+        let after = pool
+            .grants_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            before, after,
+            "granting a namespace must move the grant fingerprint, or the cached \
+             roster is reused and no teammate ever receives the tools"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "the same company, rebuilt in place — not a new process"
+        );
+
+        // Withdrawing it returns the fingerprint to where it started: the axis
+        // tracks the effective list, so a revoked grant is as visible as a
+        // granted one.
+        pool.ensure(&rec, &deps).await.expect("ensure idempotent");
+        assert_eq!(
+            pool.grants_fingerprint_of(&rec.id).await,
+            Some(after),
+            "an unchanged grant set must not churn the roster"
+        );
+        live_store.save(&rec).await.unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure cleared");
+        assert_eq!(
+            pool.grants_fingerprint_of(&rec.id).await,
+            Some(before),
+            "withdrawing the grant must move the fingerprint back"
         );
     }
 
@@ -8579,5 +9246,334 @@ budget_usd_daily = 0.0
                 .await
                 .is_none()
         );
+    }
+
+    /// End-to-end proof that a chat reply is assembled WITH this desk's recent
+    /// journaled history in front of the model (issue #1840), driven through the
+    /// real `HarnessPool::run` path with only the model captured.
+    ///
+    /// Each test is RED on the pre-fix code: the old switch branch re-seeded via
+    /// OpenHuman's `seed_resume_from_thread_transcript`, which reads a file
+    /// OpenCompany never writes for a `chat_id`, so the model saw `history_len =
+    /// 0` and none of these markers reached it.
+    mod chat_seed_regression {
+        use super::*;
+
+        use std::sync::Mutex as StdMutex;
+
+        use futures::stream::{self, BoxStream};
+        use tinyagents::harness::model::{ModelRequest, ModelResponse};
+
+        use crate::ports::events::EventStreamItem;
+        use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
+
+        /// An appendable in-memory journal. `read_from` returns ascending order,
+        /// so the trait's default `read_before` yields the newest-first paging the
+        /// seed projector walks.
+        ///
+        /// `reads` counts every `read_from` call (the default `read_before`'s
+        /// only path into a backend) — a stand-in for the filesystem backend's
+        /// whole-file JSONL scan (`store::fs::read_before`'s docs), so a test
+        /// can assert the seed projector only walks the journal when a chat
+        /// switch actually needs it, not on every chat turn (codex review
+        /// finding).
+        #[derive(Default)]
+        struct InMemoryLog {
+            events: StdMutex<Vec<StoredEvent>>,
+            reads: std::sync::atomic::AtomicUsize,
+        }
+
+        impl InMemoryLog {
+            fn reads(&self) -> usize {
+                self.reads.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn operator(&self, chat: &str, text: &str) {
+                self.push(CompanyEvent::OperatorMessage {
+                    text: text.to_string(),
+                    by: None,
+                    chat: Some(chat.to_string()),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                });
+            }
+            fn reply(&self, chat_id: &str, text: &str) {
+                self.push(CompanyEvent::AgentReply {
+                    chat_id: chat_id.to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: text.to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                });
+            }
+            fn push(&self, event: CompanyEvent) {
+                let mut log = self.events.lock().unwrap();
+                let seq = EventSeq::new(log.len() as u64);
+                log.push(StoredEvent {
+                    seq,
+                    company: CompanyId::new("acme"),
+                    event,
+                    at_millis: seq.value(),
+                });
+            }
+        }
+
+        #[async_trait]
+        impl EventLog for InMemoryLog {
+            async fn append(
+                &self,
+                _id: &CompanyId,
+                event: CompanyEvent,
+            ) -> crate::Result<EventSeq> {
+                let mut log = self.events.lock().unwrap();
+                let seq = EventSeq::new(log.len() as u64);
+                log.push(StoredEvent {
+                    seq,
+                    company: CompanyId::new("acme"),
+                    event,
+                    at_millis: seq.value(),
+                });
+                Ok(seq)
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(self
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.seq.value() >= seq.value())
+                    .take(limit)
+                    .cloned()
+                    .collect())
+            }
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        /// A model that records the full text of every request it is handed, so a
+        /// test can assert which prior turns reached the model's context.
+        #[derive(Default)]
+        struct RecordingProvider {
+            seen: Arc<StdMutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl ChatModel<()> for RecordingProvider {
+            async fn invoke(
+                &self,
+                _state: &(),
+                request: ModelRequest,
+            ) -> tinyagents::Result<ModelResponse> {
+                let joined = request
+                    .messages
+                    .iter()
+                    .map(|m| m.text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.seen.lock().unwrap().push(joined);
+                // A fixed non-empty reply: empty would trip the empty-response
+                // retry wrapper into a second invoke.
+                Ok(ModelResponse::assistant("ok"))
+            }
+        }
+
+        impl HarnessModel for RecordingProvider {
+            fn telemetry_provider_id(&self) -> String {
+                "recording".to_string()
+            }
+        }
+
+        /// A fixture whose journal and model are observable: the returned `log` is
+        /// pre-populated by the test, and `seen` collects every model request.
+        fn recording_fixture() -> (Fixture, Arc<InMemoryLog>, Arc<StdMutex<Vec<String>>>) {
+            let mut fx = fixture();
+            let log = Arc::new(InMemoryLog::default());
+            let provider = Arc::new(RecordingProvider::default());
+            let seen = provider.seen.clone();
+            fx.deps.events = Some(log.clone());
+            fx.deps.provider = provider;
+            (fx, log, seen)
+        }
+
+        /// A — fresh process, first chat turn on `general` (bound = None): the
+        /// prior journaled exchange is seeded into the model, and the current
+        /// message (already journaled) is not duplicated.
+        #[tokio::test]
+        async fn first_chat_turn_seeds_prior_journaled_exchange() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "PRIOR_USER_MARKER");
+            log.reply("general", "PRIOR_AGENT_MARKER");
+            // The current operator message is journaled BEFORE the turn runs, just
+            // as the server does — so the projector sees it as the newest event.
+            log.operator("general", "CURRENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(&rec.id, "ceo", "CURRENT_MARKER", &fx.deps, Some("general"))
+                .await
+                .expect("chat turn runs");
+
+            let all = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                all.contains("PRIOR_USER_MARKER") && all.contains("PRIOR_AGENT_MARKER"),
+                "the prior journaled exchange must reach the model: {all:?}"
+            );
+            assert_eq!(
+                all.matches("CURRENT_MARKER").count(),
+                1,
+                "the current message is stripped from the seed, so it appears once \
+                 (as this turn's user message), not duplicated: {all:?}"
+            );
+        }
+
+        /// B — an unthreaded (background) turn between two chat turns resets
+        /// `bound_chat` to None, making the next chat turn a switch. It must STILL
+        /// re-seed the desk's history — the exact "every background turn blinds the
+        /// next chat reply" failure the fix removes.
+        #[tokio::test]
+        async fn chat_turn_after_a_background_turn_still_seeds_history() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "HISTORY_USER_MARKER");
+            log.reply("general", "HISTORY_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            // First chat turn binds to general.
+            pool.run(&rec.id, "ceo", "first", &fx.deps, Some("general"))
+                .await
+                .expect("first chat turn");
+            // A background/unthreaded turn: resets bound_chat to None.
+            pool.run_background(&rec.id, "ceo", "background", &fx.deps, None)
+                .await
+                .expect("background turn");
+
+            let before = seen.lock().unwrap().len();
+            // Second chat turn on general — a switch again, because the background
+            // turn invalidated the binding.
+            pool.run(&rec.id, "ceo", "second", &fx.deps, Some("general"))
+                .await
+                .expect("second chat turn");
+
+            let after: Vec<String> = seen.lock().unwrap()[before..].to_vec();
+            let last = after
+                .last()
+                .expect("the second chat turn made a model call");
+            assert!(
+                last.contains("HISTORY_USER_MARKER") && last.contains("HISTORY_AGENT_MARKER"),
+                "a chat turn after a background turn must still see the desk's \
+                 recent history: {last:?}"
+            );
+        }
+
+        /// C — isolation: history on desk A must never leak into a turn on desk B.
+        #[tokio::test]
+        async fn a_switch_seeds_only_the_incoming_desks_history() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("alpha", "ALPHA_USER_MARKER");
+            log.reply("alpha", "ALPHA_AGENT_MARKER");
+            log.operator("beta", "BETA_USER_MARKER");
+            log.reply("beta", "BETA_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(&rec.id, "ceo", "hello beta", &fx.deps, Some("beta"))
+                .await
+                .expect("beta chat turn");
+
+            let all = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                all.contains("BETA_USER_MARKER") && all.contains("BETA_AGENT_MARKER"),
+                "beta's own history must be seeded: {all:?}"
+            );
+            assert!(
+                !all.contains("ALPHA_USER_MARKER") && !all.contains("ALPHA_AGENT_MARKER"),
+                "alpha's history must NEVER leak into a beta turn: {all:?}"
+            );
+        }
+
+        /// D — DM parity: a `dm:<id>` thread seeds exactly like a named desk.
+        #[tokio::test]
+        async fn a_dm_thread_seeds_its_own_history() {
+            let (fx, log, seen) = recording_fixture();
+            let rec = record();
+            log.operator("dm:teammate", "DM_USER_MARKER");
+            log.reply("dm:teammate", "DM_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(&rec.id, "ceo", "hey there", &fx.deps, Some("dm:teammate"))
+                .await
+                .expect("dm chat turn");
+
+            let all = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                all.contains("DM_USER_MARKER") && all.contains("DM_AGENT_MARKER"),
+                "a DM thread's own history must be seeded (parity with named desks): {all:?}"
+            );
+        }
+
+        /// E — a second chat turn on the SAME desk, back to back, is not a
+        /// switch: `bound_chat` already points at it, so `run_with_steer`'s
+        /// switch check must skip both the re-seed AND the journal read that
+        /// builds it. RED on the pre-fix code, which built the (costly on the
+        /// filesystem backend — `chat_seed::build_chat_seed`'s docs) seed in
+        /// the caller for every chat turn, switch or not, and simply discarded
+        /// it on a non-switch turn; GREEN once the projection only runs inside
+        /// the confirmed-switch branch (codex review finding).
+        #[tokio::test]
+        async fn a_non_switch_chat_turn_does_not_re_read_the_journal() {
+            let (fx, log, _seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "PRIOR_USER_MARKER");
+            log.reply("general", "PRIOR_AGENT_MARKER");
+            // The current operator message for turn 1, journaled before it runs.
+            log.operator("general", "first");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            // Turn 1 on "general": a switch (bound_chat starts None) — must
+            // read the journal to build the seed.
+            pool.run(&rec.id, "ceo", "first", &fx.deps, Some("general"))
+                .await
+                .expect("first chat turn");
+            let reads_after_first = log.reads();
+            assert!(
+                reads_after_first > 0,
+                "the first (switching) turn must read the journal to build its seed"
+            );
+
+            // The current operator message for turn 2, journaled before it runs
+            // — same desk as turn 1, so `bound_chat` already matches it.
+            log.operator("general", "second");
+
+            // Turn 2 on "general" — NOT a switch. Must not touch the journal
+            // again to build a seed nothing downstream will use.
+            pool.run(&rec.id, "ceo", "second", &fx.deps, Some("general"))
+                .await
+                .expect("second chat turn");
+            assert_eq!(
+                log.reads(),
+                reads_after_first,
+                "a same-desk, non-switch chat turn must not re-read the \
+                 journal to build a seed the switch check will discard"
+            );
+        }
     }
 }
