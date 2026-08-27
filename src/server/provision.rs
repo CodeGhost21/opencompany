@@ -549,6 +549,50 @@ async fn persist_owner_with_retry(
     Err(last.expect("at least one attempt ran"))
 }
 
+/// How many times [`archive_reconcile_status`] retries a transient
+/// `status()` failure. Mirrors [`OWNERSHIP_WRITE_ATTEMPTS`]'s reasoning: this
+/// read is the last chance to catch a genuinely-landed archive after
+/// `transition` already reported non-`OK`, and a lone blip should not be
+/// mistaken for "not archived" when a couple of retries would resolve it.
+const ARCHIVE_RECONCILE_READ_ATTEMPTS: usize = 3;
+
+/// Re-reads `runtime.status()` for `archive`'s non-`OK` reconciliation
+/// branch, retrying a transient failure instead of trusting a single `Err`.
+///
+/// `set_lifecycle` persists `lifecycle: "archived"` to the store BEFORE it
+/// appends the `LifecycleChanged` audit event (`src/company/runtime.rs`), so
+/// by the time this runs the write has already landed — a failure here is a
+/// read problem, not evidence the archive didn't happen. Collapsing that
+/// straight to "not archived" (the pre-fix `unwrap_or(false)`) had no other
+/// trigger to retry it: this reconciliation branch only runs once per
+/// request, and the create/reset dialog's own client-side reconciliation
+/// (`create-company-dialog.tsx`) has no visibility into the server registry —
+/// if ITS later status lookup succeeds and observes `archived`, it reports
+/// the reset as done and never calls `archive` again, so registry/owner
+/// cleanup was permanently skipped by a single passing blip (issue #1828
+/// comment 3875297944). No sleep between attempts, matching
+/// `persist_owner_with_retry`: this is for a failed round-trip, not a busy
+/// one, and a caller is waiting on this request.
+async fn archive_reconcile_status(
+    runtime: &std::sync::Arc<crate::runtime::CompanyRuntime>,
+) -> crate::Result<crate::runtime::types::CompanyStatus> {
+    let mut last = None;
+    for attempt in 1..=ARCHIVE_RECONCILE_READ_ATTEMPTS {
+        match runtime.status().await {
+            Ok(status) => return Ok(status),
+            Err(err) => {
+                tracing::warn!(
+                    attempt,
+                    error = %err,
+                    "archive reconciliation status() read failed; retrying"
+                );
+                last = Some(err);
+            }
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle controls
 // ---------------------------------------------------------------------------
@@ -876,12 +920,21 @@ async fn archive(
     // registered — still occupying its tenant/global quota slot and still
     // showing up in `listCompanies()` — for a request whose write already
     // succeeded (issue #1828 comment 3875046440).
+    //
+    // That reconciliation read itself retries a transient failure
+    // (`archive_reconcile_status` below) instead of collapsing a single `Err`
+    // straight to "not archived". This branch is the LAST place that can ever
+    // trigger cleanup: the create/reset dialog's own client-side
+    // reconciliation has no visibility into the server registry, so if ITS
+    // later status lookup succeeds and observes `archived`, it considers the
+    // reset done and never calls `archive` again — permanently skipping
+    // cleanup a single-shot blip on this read would otherwise have caused
+    // (issue #1828 comment 3875297944).
     let archived = if response.status() == StatusCode::OK {
         true
     } else {
         match state.registry().get(&id) {
-            Some(runtime) => runtime
-                .status()
+            Some(runtime) => archive_reconcile_status(&runtime)
                 .await
                 .map(|status| status.lifecycle == "archived")
                 .unwrap_or(false),

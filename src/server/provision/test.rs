@@ -2035,3 +2035,183 @@ async fn archive_removes_from_registry_when_the_response_already_confirms_it_eve
          registered and occupying its quota slot"
     );
 }
+
+// ── issue #1828 comment 3875297944: retry the reconciliation read itself ──
+// ── instead of treating one blip on it as proof the archive never landed ──
+
+/// A `CompanyStore` that fails every `load` call whose 1-indexed call number
+/// is in `fail_on` and otherwise delegates to `inner`. Unlike `FlakyLoadStore`
+/// above (which fails exactly one call), this can make two calls in a row
+/// fail — modeling `transition`'s own post-`set_lifecycle` status() read AND
+/// one or more attempts of `archive`'s retrying reconciliation read landing
+/// back to back.
+struct FlakyLoadStoreOnCalls {
+    inner: Arc<dyn CompanyStore>,
+    fail_on: HashSet<usize>,
+    load_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FlakyLoadStoreOnCalls {
+    fn new(inner: Arc<dyn CompanyStore>, fail_on: impl IntoIterator<Item = usize>) -> Self {
+        Self {
+            inner,
+            fail_on: fail_on.into_iter().collect(),
+            load_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl CompanyStore for FlakyLoadStoreOnCalls {
+    async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+        let n = self
+            .load_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self.fail_on.contains(&n) {
+            return Err(crate::error::OpenCompanyError::Config(
+                "transient store read failure".into(),
+            ));
+        }
+        self.inner.load(id).await
+    }
+    async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+        self.inner.save(record).await
+    }
+    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+        self.inner.list().await
+    }
+    async fn append_ledger(&self, id: &CompanyId, entry: LedgerEntry) -> crate::Result<()> {
+        self.inner.append_ledger(id, entry).await
+    }
+}
+
+/// Builds a runtime the same way `build_runtime_with_archive_status_read_failing`
+/// does, but over a store whose 3rd AND 4th `load` calls both fail. The 3rd is
+/// `transition`'s own post-`set_lifecycle` status() read (so its response
+/// still comes back non-`OK`, same as the single-failure case above); the 4th
+/// is the FIRST attempt of `archive`'s retrying reconciliation read
+/// (`archive_reconcile_status`) — made to fail too, so only the retry's
+/// SECOND attempt (the 5th load) succeeds. Proves the fix is an actual retry,
+/// not a lone lucky first try landing where the old single read used to.
+async fn build_runtime_with_archive_status_read_failing_twice(
+    home: &std::path::Path,
+    id: &CompanyId,
+) -> crate::runtime::CompanyRuntime {
+    let inner = Arc::new(FsCompanyStore::new(home.to_path_buf()));
+    let store = Arc::new(FlakyLoadStoreOnCalls::new(inner, [3, 4]));
+    let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
+    RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .with_store(store)
+        .build()
+        .await
+        .expect("build succeeds — its own save is unaffected by a later load failing")
+}
+
+/// The retry `archive_reconcile_status` adds (`src/server/provision.rs`)
+/// closes the gap the single-attempt `unwrap_or(false)` left: a transient
+/// failure on `archive`'s non-`OK` reconciliation read used to be
+/// indistinguishable from "not archived", even though `set_lifecycle`'s own
+/// `store.save` already persisted `lifecycle: "archived"` before that read
+/// ever ran. Left uncorrected, the registry/owner cleanup this branch is the
+/// LAST chance to run was skipped for good: the create/reset dialog's own
+/// client-side reconciliation has no visibility into the server registry, so
+/// if its own later status lookup succeeds it reports the reset as done and
+/// never calls `archive` again (issue #1828 comment 3875297944). This test
+/// makes BOTH `transition`'s own read and the reconciliation branch's first
+/// attempt fail, and proves cleanup still lands once the retry's second
+/// attempt succeeds.
+#[tokio::test]
+async fn archive_removes_from_registry_when_the_reconciliation_read_retries_past_one_blip() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+
+    let state = platform_state(&home, None);
+    let app = router(state.clone());
+    let provisioned = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+    assert_eq!(provisioned.status(), StatusCode::CREATED);
+
+    let flaky_runtime = build_runtime_with_archive_status_read_failing_twice(&home, &id).await;
+    state.registry().insert(id.clone(), Arc::new(flaky_runtime));
+
+    let app = router(state.clone());
+    let archived = app
+        .oneshot(post_req(
+            "/api/v1/companies/acme/archive",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        archived.status(),
+        StatusCode::OK,
+        "transition's own status() read (the 3rd load) was made to fail — the response itself \
+         must still report that"
+    );
+
+    assert!(
+        state.registry().get(&id).is_none(),
+        "set_lifecycle's own store.save already persisted lifecycle:\"archived\" before either \
+         read failed; the reconciliation branch's retry must recover from a single blip on its \
+         first attempt (the 4th load) and still find archived on its second (the 5th), so \
+         cleanup must not be permanently skipped"
+    );
+}
+
+/// The retry is bounded, not unconditional trust: when the reconciliation
+/// read fails on EVERY attempt (`ARCHIVE_RECONCILE_READ_ATTEMPTS` of them),
+/// `archive_reconcile_status` must still report failure rather than looping
+/// forever or defaulting to "archived", and the registry entry must survive
+/// exactly like the pre-existing single-failure case — proving the fix adds
+/// resilience to a genuine blip without papering over a store that is really
+/// down.
+#[tokio::test]
+async fn archive_reconciliation_read_gives_up_after_its_attempt_budget_and_leaves_registry_intact()
+{
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+
+    let state = platform_state(&home, None);
+    let app = router(state.clone());
+    let provisioned = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+    assert_eq!(provisioned.status(), StatusCode::CREATED);
+
+    // 3rd load = transition's own read (fails, so response is non-OK); 4th,
+    // 5th, 6th = every attempt archive_reconcile_status's retry budget makes.
+    let inner = Arc::new(FsCompanyStore::new(home.clone()));
+    let store = Arc::new(FlakyLoadStoreOnCalls::new(inner, [3, 4, 5, 6]));
+    let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
+    let flaky_runtime = RuntimeBuilder::new(home.clone(), manifest)
+        .with_id(id.clone())
+        .with_store(store)
+        .build()
+        .await
+        .expect("build succeeds — its own save is unaffected by a later load failing");
+    state.registry().insert(id.clone(), Arc::new(flaky_runtime));
+
+    let app = router(state.clone());
+    let archived = app
+        .oneshot(post_req(
+            "/api/v1/companies/acme/archive",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(archived.status(), StatusCode::OK);
+
+    assert!(
+        state.registry().get(&id).is_some(),
+        "every reconciliation attempt was made to fail — a request this inconclusive must not \
+         run cleanup (the registry entry stays), but must also return promptly rather than \
+         retrying without bound"
+    );
+}
