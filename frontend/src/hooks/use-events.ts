@@ -470,31 +470,52 @@ export function isBudgetPauseNoticeSuperseded(
 }
 
 /**
- * How long the "nearing its limit" budget-proximity banner is allowed to
- * keep claiming its warning without a fresh `budget_proximity` frame
- * renewing it (issue #1846 review, Codex #3866418899).
- *
- * The backend only ever publishes that frame while usage is at least 90%
- * (`is_approaching_budget_ceiling`'s callers in `harness/built_in/mod.rs`),
- * and never a "cleared" counterpart. With no expiry, a daily agent cap
- * resetting at 00:00 UTC, a plan period rolling over, or an operator raising
- * the cap all left usage back below that threshold with nothing on the wire
- * to say so, and the banner kept claiming the previous period's status
- * forever. 24 hours matches the daily reset cadence, the shortest and most
- * common of the three.
+ * The upper bound the "nearing its limit" budget-proximity banner is allowed
+ * to keep claiming its warning without a fresh `budget_proximity` frame
+ * renewing it (issue #1846 review, Codex #3866418899) — a plan-period
+ * rollover or an operator raising the cap has no fixed reset instant the
+ * console can compute, so those two fall back to this flat ceiling. Kept
+ * exported for that ceiling and for tests; the DAILY case (see
+ * {@link nextUtcMidnightAfter}) no longer uses it directly, per Codex
+ * #3868962374's review — see that function's doc for why a flat 24h-from-
+ * `atMillis` window was wrong for the far more common daily reset.
  */
 export const BUDGET_PROXIMITY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * The next UTC-midnight instant strictly after `atMillis` (issue #1846
+ * review, Codex #3868962374) — the boundary the backend's PER-AGENT DAILY
+ * cap actually resets against.
+ *
+ * `isBudgetProximityExpired` used to add a flat {@link BUDGET_PROXIMITY_TTL_MS}
+ * (24h) to `atMillis` instead, on the theory that 24h "matches the daily
+ * reset cadence" — but a warning that fires at 23:58 UTC and a warning that
+ * fires at 00:02 UTC are on opposite sides of that night's reset despite
+ * being four minutes apart, and the flat window kept the first banner alive
+ * for nearly a full EXTRA day after the count it was warning about had
+ * already reset to zero. Anchoring to the next actual midnight instead means
+ * a late-day warning clears within minutes of the reset that actually
+ * clears it, while a warning caused by a plan-period rollover or a manual
+ * cap raise (no daily-reset instant to anchor to) still ages out within at
+ * most 24h, same as before.
+ */
+export function nextUtcMidnightAfter(atMillis: number): number {
+  const d = new Date(atMillis);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0, 0);
+}
+
+/**
  * Whether a `budget_proximity` frame parked at `atMillis` has aged out and
  * must no longer be shown, as of `nowMillis` (issue #1846 review, Codex
- * #3866418899). A frame that is STILL near the cap re-publishes its own,
- * newer `atMillis` well inside the window, so a genuinely ongoing warning
- * never expires mid-window — only a stale one, with nothing renewing it,
- * eventually does.
+ * #3866418899 / #3868962374). A frame that is STILL near the cap
+ * re-publishes its own, newer `atMillis` well inside the window, so a
+ * genuinely ongoing warning never expires mid-window — only a stale one,
+ * with nothing renewing it, eventually does. Bounded by the next UTC
+ * midnight after `atMillis` — see {@link nextUtcMidnightAfter} — not a flat
+ * 24h-from-`atMillis` window.
  */
 export function isBudgetProximityExpired(atMillis: number, nowMillis: number): boolean {
-  return nowMillis - atMillis >= BUDGET_PROXIMITY_TTL_MS;
+  return nowMillis >= nextUtcMidnightAfter(atMillis);
 }
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */

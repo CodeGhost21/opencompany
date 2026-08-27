@@ -69,9 +69,9 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
-  BUDGET_PROXIMITY_TTL_MS,
   type CompanyStreamEvent,
   isBudgetProximityExpired,
+  nextUtcMidnightAfter,
   useEvents,
 } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
@@ -2106,28 +2106,30 @@ export function AppShell({
   useEffect(() => {
     setBudgetProximity((prev) => (prev === null ? prev : null));
   }, [client, company]);
-  // Issue #1846 review (Codex #3866418899): bounded self-expiry, since the
-  // backend only ever publishes a `budget_proximity` frame while usage is at
-  // least 90% (`is_approaching_budget_ceiling`'s callers in
-  // `harness/built_in/mod.rs`) and never a "cleared" counterpart. Without
-  // this, a daily agent cap resetting at 00:00 UTC, a plan period rolling
-  // over, or an operator raising the cap all leave usage back below that
-  // threshold with nothing on the wire to say so, and the banner claimed the
-  // previous period's status forever. `BUDGET_PROXIMITY_TTL_MS` bounds that
-  // to the daily reset cadence — the shortest and most common of the three —
-  // so the OTHER two are bounded to at most this long instead of unbounded,
-  // rather than being fixed outright without a per-agent live status the
-  // console can poll. A dispatch that is STILL near the cap re-publishes its
-  // own frame well inside the window, which reaches this effect as a new
-  // `budgetProximity` value and re-arms the timer, so a genuinely ongoing
-  // warning never flickers off mid-window.
+  // Issue #1846 review (Codex #3866418899, refined by #3868962374): bounded
+  // self-expiry, since the backend only ever publishes a `budget_proximity`
+  // frame while usage is at least 90% (`is_approaching_budget_ceiling`'s
+  // callers in `harness/built_in/mod.rs`) and never a "cleared" counterpart.
+  // Without this, a daily agent cap resetting at 00:00 UTC, a plan period
+  // rolling over, or an operator raising the cap all leave usage back below
+  // that threshold with nothing on the wire to say so, and the banner
+  // claimed the previous period's status forever.
+  //
+  // Anchored to the next UTC midnight after the warning (see
+  // `nextUtcMidnightAfter`'s doc), not a flat 24h from `atMillis`: the
+  // DAILY case this exists for resets exactly at that boundary, and a flat
+  // window left a warning that fired late in the evening claiming stale
+  // status for most of the following day. A dispatch that is STILL near the
+  // cap re-publishes its own frame well inside the window, which reaches
+  // this effect as a new `budgetProximity` value and re-arms the timer, so a
+  // genuinely ongoing warning never flickers off mid-window.
   useEffect(() => {
     if (budgetProximity === null) return;
     if (isBudgetProximityExpired(budgetProximity.atMillis, Date.now())) {
       setBudgetProximity(null);
       return;
     }
-    const remainingMs = budgetProximity.atMillis + BUDGET_PROXIMITY_TTL_MS - Date.now();
+    const remainingMs = nextUtcMidnightAfter(budgetProximity.atMillis) - Date.now();
     const timer = setTimeout(() => setBudgetProximity(null), Math.max(remainingMs, 0));
     return () => clearTimeout(timer);
   }, [budgetProximity]);
