@@ -491,6 +491,11 @@ fn seed_draft(file: &crate::company::WorkflowFile) -> RawWorkflow {
         id: file.id.clone(),
         name: file.name.clone(),
         description: file.description.clone(),
+        // Issue #1862 prerequisite: carried, not dropped — the same reason
+        // `repeatable` below is: this is a round trip of a stored graph, so
+        // losing the owning desk here would clear it as a side effect of an
+        // agent merely reading the workflow.
+        owner_desk: file.owner_desk.clone(),
         nodes: file
             .nodes
             .iter()

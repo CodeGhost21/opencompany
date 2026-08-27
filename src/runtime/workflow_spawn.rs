@@ -404,6 +404,7 @@ mod tests {
             nodes: Vec::new(),
             edges: Vec::new(),
             global: false,
+            owner_desk: None,
         }
     }
 

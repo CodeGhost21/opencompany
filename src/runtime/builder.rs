@@ -7131,6 +7131,7 @@ needs_reason = true
             id: id.to_string(),
             name: name.to_string(),
             description: Some("A tiny graph.".to_string()),
+            owner_desk: None,
             nodes: vec![
                 node("start", "trigger", "Start", None),
                 node("worker", "agent", "Worker", Some("assistant")),

@@ -524,6 +524,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "worker".into(),
                 kind: WorkflowNodeKind::Agent,
@@ -644,6 +645,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "gate".into(),
@@ -710,6 +712,7 @@ mod tests {
                 id: "wf".into(),
                 name: "WF".into(),
                 description: None,
+                owner_desk: None,
                 nodes: vec![WorkflowNodeDef {
                     id: "n".into(),
                     kind: oc,
@@ -740,6 +743,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "sw".into(),
