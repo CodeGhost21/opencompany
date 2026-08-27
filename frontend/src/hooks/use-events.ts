@@ -469,6 +469,34 @@ export function isBudgetPauseNoticeSuperseded(
   return latestMessageIdByAgent.get(agentId) !== messageId;
 }
 
+/**
+ * How long the "nearing its limit" budget-proximity banner is allowed to
+ * keep claiming its warning without a fresh `budget_proximity` frame
+ * renewing it (issue #1846 review, Codex #3866418899).
+ *
+ * The backend only ever publishes that frame while usage is at least 90%
+ * (`is_approaching_budget_ceiling`'s callers in `harness/built_in/mod.rs`),
+ * and never a "cleared" counterpart. With no expiry, a daily agent cap
+ * resetting at 00:00 UTC, a plan period rolling over, or an operator raising
+ * the cap all left usage back below that threshold with nothing on the wire
+ * to say so, and the banner kept claiming the previous period's status
+ * forever. 24 hours matches the daily reset cadence, the shortest and most
+ * common of the three.
+ */
+export const BUDGET_PROXIMITY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a `budget_proximity` frame parked at `atMillis` has aged out and
+ * must no longer be shown, as of `nowMillis` (issue #1846 review, Codex
+ * #3866418899). A frame that is STILL near the cap re-publishes its own,
+ * newer `atMillis` well inside the window, so a genuinely ongoing warning
+ * never expires mid-window — only a stale one, with nothing renewing it,
+ * eventually does.
+ */
+export function isBudgetProximityExpired(atMillis: number, nowMillis: number): boolean {
+  return nowMillis - atMillis >= BUDGET_PROXIMITY_TTL_MS;
+}
+
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {
   chatId: string;

@@ -25,8 +25,10 @@ const {
   handleEvent,
   isBudgetPauseNotice,
   isBudgetPauseNoticeSuperseded,
+  isBudgetProximityExpired,
   parseBudgetPauseAgent,
   BUDGET_PAUSE_NOTICE_PREFIX,
+  BUDGET_PROXIMITY_TTL_MS,
 } = await import("@/hooks/use-events");
 type Ev = import("@/hooks/use-events").CompanyStreamEvent;
 type Subs = import("@/hooks/use-events").Subscribers;
@@ -228,5 +230,57 @@ describe("budget_proximity routing", () => {
     handleEvent(frame(undefined), subs);
     const [received] = subs.onBudgetProximityEvent.mock.calls[0] as [Ev];
     expect(received).toMatchObject({ type: "budget_proximity", agentId: undefined });
+  });
+});
+
+/**
+ * Issue #1846 review (Codex #3866418899) — the console half of the
+ * proximity-banner staleness fix.
+ *
+ * `app-shell.tsx`'s `budgetProximity` state used to clear only on dismissal
+ * or a company switch: the backend only ever publishes a `budget_proximity`
+ * frame while usage is at least 90%, so once a daily agent cap reset at
+ * midnight, a plan period rolled over, or an operator raised the cap, the
+ * next below-threshold dispatch published nothing — and the banner kept
+ * claiming the previous period's status forever, with no wire signal ever
+ * telling the console to drop it. `isBudgetProximityExpired` is the pure
+ * predicate `app-shell.tsx`'s expiry effect is built on; these pin its
+ * boundary directly, since there is no component-test harness in this
+ * project to mount the effect itself (see this file's header doc comment).
+ */
+describe("isBudgetProximityExpired", () => {
+  const parkedAt = 1_700_000_000_000;
+
+  it("is not expired the moment it is parked", () => {
+    expect(isBudgetProximityExpired(parkedAt, parkedAt)).toBe(false);
+  });
+
+  it("is not expired a millisecond before the TTL elapses", () => {
+    expect(isBudgetProximityExpired(parkedAt, parkedAt + BUDGET_PROXIMITY_TTL_MS - 1)).toBe(
+      false,
+    );
+  });
+
+  it("is expired exactly at the TTL boundary — a stale banner must not survive it", () => {
+    expect(isBudgetProximityExpired(parkedAt, parkedAt + BUDGET_PROXIMITY_TTL_MS)).toBe(true);
+  });
+
+  it("is expired well past the TTL — the pre-fix 'remains indefinitely' case", () => {
+    // A week later: before this fix, nothing ever cleared this state, so a
+    // check like this one would have failed against the pre-fix code path
+    // (which had no expiry predicate to call at all — the banner just never
+    // went away).
+    expect(isBudgetProximityExpired(parkedAt, parkedAt + 7 * BUDGET_PROXIMITY_TTL_MS)).toBe(true);
+  });
+
+  it("a fresh frame's later atMillis is not expired against the same clock reading", () => {
+    // Mirrors the re-arming behaviour: a dispatch that is STILL near the cap
+    // republishes with a newer `atMillis`, and that newer value must read as
+    // fresh even at a clock reading where the OLD one has already expired.
+    const staleAt = parkedAt;
+    const now = parkedAt + BUDGET_PROXIMITY_TTL_MS + 1000;
+    const freshAt = now - 1000;
+    expect(isBudgetProximityExpired(staleAt, now)).toBe(true);
+    expect(isBudgetProximityExpired(freshAt, now)).toBe(false);
   });
 });
