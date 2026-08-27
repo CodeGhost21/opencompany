@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::app::config::EnvSource;
+use crate::company::IMPLICIT_HARNESS_ID;
 use crate::company::Inference;
 use crate::company::inference::{
     self, EnvDefault, InferenceSource, RuntimeInference, clear_runtime_config, resolve_effective,
@@ -75,8 +76,24 @@ pub fn router() -> Router<AppState> {
         "/inference",
         get(get_status).put(set_config).delete(revert_config),
     )
+    .merge(scoped("/inference/models", get(list_models)))
     .merge(scoped("/inference/test", post(test_config)))
     .merge(scoped("/inference/restart", post(restart_runtime)))
+}
+
+/// `GET …/inference/models` — the cached public OpenRouter model registry.
+async fn list_models(
+    company: ScopedCompany,
+) -> Result<Json<Vec<crate::server::inference_models::InferenceModel>>, ApiError> {
+    let _ = company;
+    crate::server::inference_models::openrouter_models()
+        .await
+        .map(Json)
+        .map_err(|error| {
+            ApiError(OpenCompanyError::Store(format!(
+                "OpenRouter model registry unavailable: {error}"
+            )))
+        })
 }
 
 /// The company's effective inference status as the console renders it. **Never**
@@ -96,6 +113,17 @@ struct InferenceStatusDto {
     base_url: String,
     /// Abstract-tier → concrete model id.
     models: BTreeMap<String, String>,
+    /// The shipped tier → model defaults ([`inference::DEFAULT_TIER_MODELS`]),
+    /// independent of `provider`/`models` above.
+    ///
+    /// The console's OpenRouter preset used to hard-code its own copy of these
+    /// four ids so switching to OpenRouter had something to prefill the form
+    /// with before an operator typed an override — duplicated data that could
+    /// silently drift from this host's actual defaults the moment
+    /// `DEFAULT_TIER_MODELS` changed. Carrying the live values on every status
+    /// read means the preset is never more than one request stale, on a route
+    /// the console already polls.
+    default_tier_models: BTreeMap<String, String>,
     /// Where the effective config came from: `default` / `manifest` / `runtime`,
     /// or `managed` when nothing tenant-specific is configured.
     source: String,
@@ -173,7 +201,13 @@ struct SetInference {
 
 /// Loads the inference the company actually boots and runs on: the *default
 /// harness's* `[harness.inference]` when that harness declares one, falling back
-/// to the company-level `[inference]` section.
+/// to the company-level `[inference]` section. Also returns the default
+/// harness's real id, alongside the config, for callers that need to name it —
+/// [`test_config`] threads it into [`probe`](crate::harness::provider::probe)
+/// so a repair hint on a harness-owned table points at that table rather than
+/// the (possibly shadowed) company-level one, the same distinction
+/// [`TenantProvider::invoke`](crate::harness::built_in::provider::TenantProvider::invoke)
+/// already makes for live turns.
 ///
 /// This mirrors [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build),
 /// which resolves `default_harness_inference()` before the company-level
@@ -182,15 +216,17 @@ struct SetInference {
 /// otherwise it would report `managed`, reject `/inference/test` as
 /// `not_configured`, and mislabel its status after a reset, while turns run on
 /// the harness configuration the same record holds.
-async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiError> {
+async fn manifest_inference(runtime: &CompanyRuntime) -> Result<(Inference, String), ApiError> {
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     Ok(record
         .map(|r| {
-            r.manifest
+            let inference = r
+                .manifest
                 .default_harness_inference()
-                .unwrap_or_else(|| r.manifest.inference.clone())
+                .unwrap_or_else(|| r.manifest.inference.clone());
+            (inference, r.manifest.default_harness_id())
         })
-        .unwrap_or_default())
+        .unwrap_or_else(|| (Inference::default(), IMPLICIT_HARNESS_ID.to_string())))
 }
 
 /// What resolving this company's inference configuration produced.
@@ -206,7 +242,7 @@ async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiEr
 /// as [`InferenceResolution::Unreadable`] — the operator can act on neither,
 /// and [`runner_gap_for`] already folds them the same way.
 pub(crate) async fn inference_resolution(runtime: &CompanyRuntime) -> InferenceResolution {
-    let Ok(manifest) = manifest_inference(runtime).await else {
+    let Ok((manifest, _harness_id)) = manifest_inference(runtime).await else {
         return InferenceResolution::Unreadable;
     };
     match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
@@ -305,7 +341,7 @@ pub(crate) enum RunnerGap {
 ///   or a save would help — the #266 doctrine), or a company already on the
 ///   harness path.
 pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
-    let Ok(manifest) = manifest_inference(runtime).await else {
+    let Ok((manifest, _harness_id)) = manifest_inference(runtime).await else {
         return RunnerGap::NotWired;
     };
     // A resolve *error* is not the same as a clean resolve to nothing. `Err`
@@ -407,7 +443,7 @@ async fn effective_status_with(
     platform: Option<&EnvDefault>,
     can_rebuild_in_place: bool,
 ) -> Result<InferenceStatusDto, ApiError> {
-    let manifest = manifest_inference(runtime).await?;
+    let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
     let decl = resolve_effective(runtime.id(), &manifest, None, secrets)
         .await
@@ -431,12 +467,19 @@ async fn effective_status_with(
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
+    // Independent of `decl`: the shipped defaults are the same regardless of
+    // what (if anything) this company has configured.
+    let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
+        .iter()
+        .map(|(tier, model)| (tier.to_string(), model.to_string()))
+        .collect();
     Ok(match decl {
         Some(d) => InferenceStatusDto {
             provider: d.provider.clone(),
             slug: d.telemetry_slug().to_string(),
             base_url,
             models: d.models.clone(),
+            default_tier_models: default_tier_models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
             cognition: cognition.path.to_string(),
@@ -450,6 +493,7 @@ async fn effective_status_with(
             slug: "managed".to_string(),
             base_url,
             models: BTreeMap::new(),
+            default_tier_models,
             source: "managed".to_string(),
             key_configured: false,
             cognition: cognition.path.to_string(),
@@ -718,7 +762,7 @@ async fn test_config(company: ScopedCompany) -> Response {
     use axum::response::IntoResponse;
 
     let runtime = company.runtime.as_ref();
-    let manifest = match manifest_inference(runtime).await {
+    let (manifest, harness_id) = match manifest_inference(runtime).await {
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
@@ -781,7 +825,13 @@ async fn test_config(company: ScopedCompany) -> Response {
                 }
                 Ok(None) => {}
             }
-            match crate::harness::provider::probe(&decl).await {
+            // The default harness's real id, whether or not it declares its own
+            // `[harness.inference]` — `model_unavailable_advice` names the same
+            // table either way (its own, or the company's as the harness's
+            // fallback), so this always passes it rather than gating on
+            // `is_default` the way `TenantProvider::invoke` deliberately does not
+            // (Codex review on #1824's #1811 follow-up).
+            match crate::harness::provider::probe(&decl, Some(harness_id.as_str())).await {
                 Ok(()) => Json(serde_json::json!({
                     "ok": true,
                     "provider": decl.provider,
@@ -1188,6 +1238,28 @@ base_url = "https://byo.example/v1"
         (status, value, raw)
     }
 
+    #[tokio::test]
+    async fn model_catalog_route_returns_cached_openrouter_models() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+        crate::server::inference_models::openrouter_cache().store(
+            vec![crate::server::inference_models::InferenceModel {
+                id: "provider/real-model".to_string(),
+                name: Some("Real Model".to_string()),
+                context_length: Some(128_000),
+            }],
+            std::time::Instant::now(),
+        );
+
+        let (status, body, raw) =
+            send(&state, "GET", "/api/v1/company/inference/models", None).await;
+
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(body[0]["id"], "provider/real-model");
+        assert_eq!(body[0]["name"], "Real Model");
+        assert_eq!(body[0]["contextLength"], 128_000);
+    }
+
     // ---------------------------------------------------------------------
     // Issue #597 — the card must report the endpoint requests actually reach,
     // not the built-in production constant.
@@ -1478,6 +1550,19 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "managed");
         assert_eq!(dto["keyConfigured"], false);
         assert!(dto.get("key").is_none(), "status DTO must not carry a key");
+        // `defaultTierModels` must actually be on the wire, not just the DTO
+        // struct — the frontend preset (issue #1838) reads it off this exact
+        // response, so a field that only exists in Rust and never serializes
+        // would leave the console silently falling back to a stale local copy.
+        let expected_chat_v1 = inference::DEFAULT_TIER_MODELS
+            .iter()
+            .find(|(tier, _)| *tier == "chat-v1")
+            .map(|(_, model)| *model)
+            .expect("chat-v1 must have a documented default");
+        assert_eq!(
+            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
+            "defaultTierModels must be present on the managed-default status response: {dto}"
+        );
 
         // Switch to OpenRouter with a write-only key + a tier→model map.
         let (status, resp, raw) = send(
@@ -1509,6 +1594,13 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "runtime");
         assert_eq!(dto["keyConfigured"], true);
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
+        // defaultTierModels is independent of the tenant's own `models` map —
+        // it must still be the shipped default here even though this company
+        // now has a runtime override with its own chat-v1/reasoning-v1 entries.
+        assert_eq!(
+            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
+            "defaultTierModels must not follow the tenant's own model override: {dto}"
+        );
     }
 
     #[tokio::test]

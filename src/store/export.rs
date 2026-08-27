@@ -1762,7 +1762,7 @@ mod test {
             name: "Dana Designer".into(),
             role: "Design".into(),
             description: Some("Owns the brand".into()),
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         }];
@@ -1771,13 +1771,26 @@ mod test {
             desk_id: "eng".into(),
             agent_id: "designer".into(),
         }];
-        // An operator-created desk the manifest never declared.
-        let desks = vec![OverlayDesk {
-            id: "growth".into(),
-            name: "Growth".into(),
-            description: Some("Marketing pod".into()),
-            members: vec!["ceo".into()],
-        }];
+        // Operator-created desks the manifest never declared — one of each
+        // responder mode, so the round-trip below (whole-vec equality) proves
+        // the `auto` flag survives export→import rather than silently
+        // reverting a leadless channel to a lead desk (issue #1835).
+        let desks = vec![
+            OverlayDesk {
+                id: "growth".into(),
+                name: "Growth".into(),
+                description: Some("Marketing pod".into()),
+                members: vec!["ceo".into()],
+                responder: crate::ports::types::ResponderMode::default(),
+            },
+            OverlayDesk {
+                id: "launch".into(),
+                name: "Launch".into(),
+                description: None,
+                members: vec!["ceo".into(), "cto".into()],
+                responder: crate::ports::types::ResponderMode::Auto,
+            },
+        ];
         // A workflow graph authored at runtime (issue #168). On a hosted tenant
         // this body is the ONLY copy — a bundle that dropped it would lose the
         // workflow outright.
@@ -2406,7 +2419,7 @@ mod test {
             AgentOverride {
                 agent_id: "ceo".into(),
                 role: Some("Interim Chief".into()),
-                tools: Some(vec!["docs.read".into()]),
+                tools: Some(Some(vec!["docs.read".into()])),
                 ..Default::default()
             },
         ];

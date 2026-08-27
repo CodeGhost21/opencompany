@@ -44,6 +44,13 @@ GET    .../memory/archives                    traces retained on eviction
                                              when the engine keeps no archive)
 POST   /api/v1/companies/{id}/export           export bundle (tar)
 POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transitions
+GET    /api/v1/companies/{id}/desks            the company's desks and channels
+POST   /api/v1/companies/{id}/desks            create one ({ name, description?, id?,
+                                               members?, responder? })
+DELETE /api/v1/companies/{id}/desks/{desk}     delete an overlay desk
+POST   /api/v1/companies/{id}/desks/{desk}/members         add a member
+DELETE /api/v1/companies/{id}/desks/{desk}/members/{agent} remove an overlay member
+PUT    /api/v1/companies/{id}/desks/{desk}/order           reorder (hierarchy)
 ```
 
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
@@ -78,6 +85,27 @@ on its own task, so it is no longer cancelled when a client or a reverse proxy
 gives up mid-turn. `detach` removes the *wait*; it is not what provides the
 drop-safety. See
 [company-brain/approvals.md](../company-brain/approvals.md#settling-the-verdict-is-not-running-the-follow-up).
+
+## Desks and channels: the `responder` mode
+
+A desk row carries `responder: "lead" | "auto"` (issue #1835), **omitted when
+`lead`** — which is every manifest `[[group_chat]]` (the blueprint syntax has
+no such field) and every desk created before the field existed, so old
+consoles and old wire shapes are byte-for-byte unchanged.
+
+`"lead"` is the standing model: `members[0]` leads, and an unmentioned message
+addressed to the desk is answered by that lead. `"auto"` is a **channel**: no
+lead exists — the org chart crowns nobody, the members pane badges nobody, and
+`delegate_to_desk` refuses it with a reason — and an unmentioned message's
+answerer is picked **per message**, by a single tool-less model call over the
+channel's own membership (id, role, description), clamped to that membership.
+An `@`-mention outranks the pick everywhere, and wherever selection cannot run
+— the default build (the selector compiles under the harness feature), the
+small-talk fast path, a failure, a timeout — the answer is the channel's first
+roster member: exactly what a lead desk would have answered, so the worst case
+of the new mode is the old mode. Selection spend is metered under its own
+usage kind (`selectorCall`), charged to the whole-company bucket.
+
 
 ### Chat attachments (issue #1682)
 

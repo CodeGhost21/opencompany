@@ -3610,7 +3610,7 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         name: "Helper".to_string(),
         role: "Assistant".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     };

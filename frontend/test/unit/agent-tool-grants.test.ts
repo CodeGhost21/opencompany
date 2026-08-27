@@ -47,9 +47,11 @@ describe("parseToolGlobs", () => {
     expect(parseToolGlobs("search, docs.*, search")).toEqual(["search", "docs.*"]);
   });
 
-  it("reads a blank field as an empty list, which is the standard grant", () => {
-    // The inversion the card warns about: `[]` means "everything the company
-    // allows", so this must not be confused with a parse failure.
+  it("reads a blank field as an empty list, which since #1804 is a deny-all", () => {
+    // The parse is unchanged — a blank field is `[]` — but its meaning inverted:
+    // since #1804 `[]` is a deliberate deny-all ("no tools"), NOT the standard
+    // grant. The standard grant is `null`, reached via "Reset to standard grant".
+    // This must still not be confused with a parse failure.
     expect(parseToolGlobs("   ")).toEqual([]);
     expect(parseToolGlobs(",, ,")).toEqual([]);
   });

@@ -245,6 +245,16 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("{} approval {approval_id}", verdict_word(*verdict)),
             "approval.resolved",
         ),
+        // Issue #1805: the brain is told a stalled request got more time, so it
+        // can reason that it is still blocked but no longer racing a deadline.
+        // Structural only, like the parked/resolved arms beside it — the id and
+        // who extended it, no payload.
+        CompanyEvent::ApprovalExtended { approval_id, by } => (
+            Role::System,
+            by.id.clone(),
+            format!("extended approval {approval_id}"),
+            "approval.extended",
+        ),
         CompanyEvent::FeedbackFiled { note } => (
             Role::User,
             "operator".to_string(),

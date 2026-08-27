@@ -1803,6 +1803,34 @@ impl HarnessAgentRunner {
             return Err(EngineError::Capability(diagnosis));
         }
 
+        // PR #1880 review: an ACP turn that stopped abnormally — a `refusal`,
+        // a `cancelled` turn, or an unrecognized `stopReason` — is not a cap
+        // pause (there is no resumable checkpoint to report, unlike
+        // `hit_iteration_cap` below) and is not a clean finish either.
+        // `hit_iteration_cap` alone could not say so: it stays `false` on
+        // every one of these, and until `abnormal_stop` existed this method
+        // read only that flag, so the node settled `Succeeded` here and
+        // `run` below reported `StopReason::Finished` — indistinguishable
+        // from the agent having actually answered, letting a declined or
+        // interrupted turn's reply advance the workflow graph as if it were
+        // the deliverable. `Err`, the same channel the #881 block above
+        // uses, rather than folding into the `LimitStop` shape below: a
+        // `LimitStop` still lets the engine bind the node's output
+        // downstream (with a warning) because a capped turn's checkpoint is
+        // real, partial work — there is no equivalent partial-but-real
+        // claim to make about a refusal or a cancellation, so `on_error`'s
+        // default "stop" is the honest outcome, not a tagged pass-through.
+        if let Some(reason) = &outcome.abnormal_stop {
+            let message = format!("harness agent '{agent_ref}': {reason}");
+            self.settle_attempt(
+                run_sink.as_ref(),
+                crate::ports::RunStatus::Failed,
+                Some(message.clone()),
+            )
+            .await;
+            return Err(EngineError::Capability(message));
+        }
+
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves. A
         // workflow node carries no chat bubble, so the turn's steps are dropped
@@ -1812,10 +1840,32 @@ impl HarnessAgentRunner {
         // A capped turn is a real, partial checkpoint rather than a completed
         // answer. Keep the engine's typed `LimitStop` outcome below, but do not
         // let the durable attempt claim that this node finished successfully.
+        //
+        // Issue #1846 review (Codex #3864988168): a budget pause gets the same
+        // treatment, for the same reason. The model call itself errored, so
+        // `outcome.reply` is the pause notice, not an answer — before this it
+        // fell into the `else` arm below, the attempt settled `Succeeded`, and
+        // the pause text flowed downstream through `=items` as if it were the
+        // node's real output. There is no engine-level resume for this today
+        // (see `StopReason::Paused`'s own doc — an agent node is not
+        // re-enterable), so this reuses the already-supported `LimitStop`
+        // shape rather than inventing a resume path this PR does not wire: the
+        // node blocks the branch exactly as a capped turn does, and the durable
+        // per-agent marker `run_background_workflow` already parked is what the
+        // console's "Add credits & resend" redeems — outside the engine, via
+        // the same `OperatorMessage` cycle path every redeem takes.
         let (status, error) = if outcome.hit_iteration_cap {
             (
                 crate::ports::RunStatus::Failed,
                 Some("agent stopped at the max_tool_iterations cap before finishing".to_string()),
+            )
+        } else if let Some(pause) = &outcome.budget_paused {
+            (
+                crate::ports::RunStatus::Failed,
+                Some(format!(
+                    "agent paused for lack of inference budget/credits: {}",
+                    pause.summary
+                )),
             )
         } else {
             (crate::ports::RunStatus::Succeeded, None)
@@ -1857,9 +1907,18 @@ impl AgentRunner for HarnessAgentRunner {
         // `StopReason::Paused`: `run_turn` returns `Err` for it so the runner can
         // reclassify the node as Blocked, and an agent node is not re-enterable
         // (see the #881 block above). Nothing here changes that.
+        // Issue #1846 review (Codex #3864988168): a budget pause is the same
+        // "reads like a finished answer but is not one" shape `hit_iteration_cap`
+        // closes above, so it gets the same `LimitStop` override rather than
+        // falling into `Finished` and binding the pause notice downstream as a
+        // real result.
         let stop = if outcome.hit_iteration_cap {
             StopReason::LimitStop {
                 limit: "max_tool_iterations".to_string(),
+            }
+        } else if outcome.budget_paused.is_some() {
+            StopReason::LimitStop {
+                limit: "budget_exhausted".to_string(),
             }
         } else {
             StopReason::Finished
@@ -2329,7 +2388,9 @@ mod tests {
             reply: "ok".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            abnormal_stop: None,
             halted_for_spend: None,
+            budget_paused: None,
         }
     }
 
@@ -2465,6 +2526,113 @@ mod tests {
                 ),
             ],
             "a node with no graph id resolves lineage to the agent ref"
+        );
+    }
+
+    /// A [`RunTurn`] that always answers with a scripted outcome — standing in
+    /// for an ACP-backed harness whose turn stopped abnormally, without
+    /// needing a real ACP subprocess to produce one.
+    struct ScriptedTurn(crate::harness::TurnOutcome);
+
+    #[async_trait]
+    impl RunTurn for ScriptedTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(self.0.clone())
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(self.0.clone())
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// PR #1880 review: "Propagate abnormal ACP stops beyond step notes." The
+    /// gap was that `HarnessAgentRunner::run_turn` read only
+    /// `hit_iteration_cap`, which stays `false` on an ACP `refusal`,
+    /// `cancelled`, or unrecognized `stopReason` — so the node settled
+    /// `Succeeded` here and `run` (the `AgentRunner` impl below) reported
+    /// `StopReason::Finished`, indistinguishable from the agent having
+    /// actually answered.
+    ///
+    /// Asserted on the **outcome**, not on whether a `Note` step exists —
+    /// `harness::acp::run_turn::fold` already put a note on the timeline
+    /// before this fix, and the finding was explicitly that the note alone
+    /// does not stop the workflow graph from advancing as if the turn
+    /// succeeded. This is that stronger claim: the node call itself must
+    /// fail.
+    #[tokio::test]
+    async fn an_abnormal_acp_stop_fails_the_workflow_node() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1880-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "I can't help with that.".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: Some("[stopped: the agent declined to continue]".to_string()),
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1880"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1880"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1880".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn("responder", json!({ "prompt": "do the thing" }))
+            .await;
+
+        let err = result.expect_err(
+            "a refused/cancelled/unrecognized ACP stop must fail the node, \
+             not settle it Succeeded/Finished",
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("the agent declined to continue"),
+            "the error must carry the abnormal-stop reason, not a generic failure: {message}"
         );
     }
 

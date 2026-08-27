@@ -1154,7 +1154,12 @@ async fn probe_inference<E: EnvSource + Sync>(
         crate::company::inference::normalize_provider(&req.provider),
         "ollama" | "openai_compatible"
     ) {
-        discover_local_model(&decl).await
+        let bearer = decl.bearer().await.ok().flatten();
+        crate::server::inference_models::discover_models(&decl.base_url, bearer.as_deref())
+            .await
+            .ok()
+            .and_then(|models| models.into_iter().next())
+            .map(|model| model.id)
     } else {
         None
     };
@@ -1177,7 +1182,11 @@ async fn probe_inference<E: EnvSource + Sync>(
         };
     }
 
-    match crate::harness::provider::probe(&decl).await {
+    // No company exists yet at this step, so there is no harness to name — the
+    // repair hint on failure falls back to the company-level phrasing (there is
+    // no company-level config to name either, but nothing here has one to
+    // offer instead).
+    match crate::harness::provider::probe(&decl, None).await {
         Ok(()) => InferenceTestDto {
             ok: true,
             base_url,
@@ -1219,28 +1228,6 @@ async fn probe_inference<E: EnvSource + Sync>(
             "This build cannot reach a model — the agent harness is not compiled in.".to_string(),
         ),
     }
-}
-
-/// Reads the standard OpenAI-compatible model catalog and picks its first
-/// concrete model. Local servers generally require that id rather than the
-/// abstract `agentic-v1` tier OpenCompany uses internally.
-#[cfg(feature = "openhuman")]
-async fn discover_local_model(decl: &crate::company::inference::InferenceDecl) -> Option<String> {
-    let url = format!("{}/models", decl.base_url.trim_end_matches('/'));
-    let mut request = reqwest::Client::new().get(url);
-    if let Ok(Some(bearer)) = decl.bearer().await {
-        request = request.bearer_auth(bearer);
-    }
-    let response = request.send().await.ok()?.error_for_status().ok()?;
-    let payload: serde_json::Value = response.json().await.ok()?;
-    payload
-        .get("data")?
-        .as_array()?
-        .iter()
-        .filter_map(|entry| entry.get("id")?.as_str())
-        .map(str::trim)
-        .find(|id| !id.is_empty())
-        .map(str::to_string)
 }
 
 /// Turns a provider failure into one line an operator can act on.

@@ -519,9 +519,21 @@ impl<'a> CycleRunner<'a> {
             None => self.rt.serial.clone().lock_owned().await,
         };
         let mut effects = EffectCounts::default();
-        let outcome = self
-            .run_locked(events, cycle_id.clone(), run_id, &mut effects)
-            .await;
+        // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+        // the ambient `RedeemContext` for this cycle, read by every
+        // `BudgetPauseSet::park` call underneath it (the top-level turn, a
+        // CEO-relay call, a delegate's own turn) so a redeem replays the
+        // operator's ORIGINAL thread parent, deliverable choice, and
+        // resolved mentions instead of empty defaults. Derived from `events`
+        // before the batch moves into `run_locked` — see
+        // `RedeemContext::from_events` for why "first `OperatorMessage`" is
+        // the right read.
+        let redeem_context = crate::runtime::grants::RedeemContext::from_events(&events);
+        let outcome = crate::runtime::grants::with_redeem_context(
+            redeem_context,
+            self.run_locked(events, cycle_id.clone(), run_id, &mut effects),
+        )
+        .await;
         // Issue #1739: the product's unit of work, reported as shape and outcome.
         //
         // Emitted here rather than inside `run_locked` for the same reason the
@@ -2262,6 +2274,10 @@ fn cycle_task_id(
             | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
+            // Issue #1805: an operator's deadline extension is a record of a
+            // decision, not a work trigger — it names no card and competes with
+            // none, exactly like the park it defers.
+            | CompanyEvent::ApprovalExtended { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
             // A reaction (issue #364) is a reader's response to a message that
             // already exists. It starts no work and rivals no conversation, so
@@ -2461,6 +2477,10 @@ fn cycle_conversation(
             | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
+            // Issue #1805: an operator's deadline extension is a record of a
+            // decision, not a work trigger — it names no card and competes with
+            // none, exactly like the park it defers.
+            | CompanyEvent::ApprovalExtended { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
             // A reaction (issue #364) is a reader's response to a message that
             // already exists. It starts no work and rivals no conversation, so
@@ -2949,6 +2969,26 @@ impl<'a> CycleHostImpl<'a> {
                 }),
             });
         };
+        // An `auto` channel is refused here even though an ordinary leadless
+        // desk is not (issue #1835, codex on #1872). The carve-out above is
+        // about a desk that has no lead *yet* — a card on the board is visible
+        // work either way. An auto channel has no lead by design and never
+        // will, so accepting one wrote a card noting "no lead member on the
+        // roster yet": false about a staffed channel, and permanently so. The
+        // reason comes from `reject_auto_channel_target`, the same definition
+        // the harness tool refuses through, so the two paths cannot drift.
+        if let Some(reason) = record
+            .as_ref()
+            .and_then(|r| crate::runtime::delegation_tools::reject_auto_channel_target(r, &desk_id))
+        {
+            return Ok(ToolResult {
+                ok: false,
+                output: serde_json::json!({
+                    "status": "no_lead",
+                    "error": reason,
+                }),
+            });
+        }
         // The desk's lead, when it has a roster-backed one, is recorded in the
         // note; the card is assigned to the DESK so an operator asking the desk
         // directly (chat targets the desk) sees the hand-off.
@@ -7883,6 +7923,61 @@ members = ["writer"]
         assert_eq!(cards[0].assignee, "eng");
         // Same as the spawn path: a handoff opens a card, it does not dispatch.
         assert_eq!(cards[0].column, COLUMN_TODO);
+    }
+
+    /// Issue #1872 (codex): the hosted path refuses an `auto` channel, and
+    /// says why.
+    ///
+    /// This path deliberately does **not** refuse an ordinary leadless desk —
+    /// a hosted hand-off is a durable card, visible on the board whether or
+    /// not anyone leads the desk yet. An auto channel is different in kind: it
+    /// has no lead by design and never will, so accepting one wrote a card
+    /// noting "no lead member on the roster yet", which is false about a
+    /// staffed channel and permanently so — and it disagreed with the
+    /// built-in tool, which refuses. Remove the guard and this opens a card.
+    #[tokio::test]
+    async fn delegate_to_desk_refuses_an_auto_channel_on_the_hosted_path() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home.clone(), desk_manifest())
+            .build()
+            .await
+            .unwrap();
+        let mut record = rt.store().load(rt.id()).await.unwrap().unwrap();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["eng1".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        rt.store().save(&record).await.unwrap();
+
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+        let refused = host
+            .delegate_to_desk(
+                serde_json::json!({ "desk": "launch", "instruction": "ship the launch" }),
+            )
+            .await
+            .unwrap();
+        assert!(!refused.ok, "{:?}", refused.output);
+        assert_eq!(refused.output["status"], "no_lead");
+        let error = refused.output["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("picked per message"),
+            "the refusal says why, rather than reusing the leadless-desk wording: {error}"
+        );
+        assert!(
+            rt.tasks().list(rt.id()).await.unwrap().is_empty(),
+            "a refused hand-off opens no card"
+        );
     }
 
     #[tokio::test]

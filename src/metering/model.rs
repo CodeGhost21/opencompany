@@ -195,10 +195,8 @@ struct Vendor {
 /// The vendor table. See the [module docs](self) for the rule that governs
 /// what may be added to it.
 const VENDORS: &[Vendor] = &[
-    // Shipped by this repo: `DEFAULT_TIER_MODELS` binds `chat-v1` to
-    // `deepseek-v4-flash` and both `reasoning-v1` and `agentic-v1` to
-    // `deepseek-v4-pro` on the direct path, so these two are priced separately
-    // and are the pair a self-serve tenant's spend actually splits across.
+    // DeepSeek's flash and pro lines are priced separately, so retain the line
+    // split for operators who select either from the OpenRouter catalog.
     Vendor {
         slug: "deepseek",
         authors: &["deepseek"],
@@ -207,15 +205,21 @@ const VENDORS: &[Vendor] = &[
             ("v4-pro", "deepseek-v4-pro"),
         ],
     },
-    // Shipped by this repo: `DEFAULT_TIER_MODELS` binds `vision-v1` to
-    // `qwen/qwen3.7-plus`. The dot in the upstream id is not carried into the
-    // slug — a telemetry value is read by people and grouped by machines, and
-    // a point release must not mint a new one.
+    // `DEFAULT_TIER_MODELS` binds `vision-v1` to `qwen/qwen3.8-max`. The dot in
+    // the upstream id is not carried into the slug — a telemetry value is read
+    // by people and grouped by machines, and a point release must not mint a
+    // new one.
     Vendor {
         slug: "qwen",
         authors: &["qwen"],
-        lines: &[("3.7-plus", "qwen3-plus"), ("3-plus", "qwen3-plus")],
+        lines: &[
+            ("3.8-max", "qwen3-max"),
+            ("3-max", "qwen3-max"),
+            ("3.7-plus", "qwen3-plus"),
+            ("3-plus", "qwen3-plus"),
+        ],
     },
+    // The shipped chat and agentic defaults are Anthropic Sonnet and Opus.
     // Anthropic prices opus, sonnet and haiku separately and by an order of
     // magnitude; "what is Sonnet costing us versus Haiku?" is the question
     // issue #1749 is named after, and a vendor-level slug cannot answer it.
@@ -228,8 +232,9 @@ const VENDORS: &[Vendor] = &[
             ("haiku", "anthropic-haiku"),
         ],
     },
-    // OpenAI's reasoning (`o`-series) and chat (`gpt`) families are priced on
-    // different rate cards, which is the same split as above.
+    // The shipped reasoning default is an OpenAI GPT model. OpenAI's reasoning
+    // (`o`-series) and chat (`gpt`) families are priced on different rate cards,
+    // which is the same split as above.
     Vendor {
         slug: "openai",
         authors: &["openai", "gpt", "o1", "o3", "o4"],
@@ -375,6 +380,7 @@ mod tests {
             ("deepseek/deepseek-v4-flash", "deepseek-v4-flash"),
             ("deepseek/deepseek-v4-pro", "deepseek-v4-pro"),
             ("deepseek/deepseek-r1", "deepseek"),
+            ("qwen/qwen3.8-max", "qwen3-max"),
             ("qwen/qwen3.7-plus", "qwen3-plus"),
             ("meta-llama/llama-4-70b", "meta-llama"),
             ("mistralai/mistral-large", "mistral"),
