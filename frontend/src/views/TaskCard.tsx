@@ -191,7 +191,14 @@ export function TaskItem({
           Workflow
         </div>
       )}
-      {task.column === "todo" && task.bounced && (
+      {/* Issue #1865 (Codex review): the task API converts a stored `todo`
+          card to the wire phase `column: "pending"` (issue #1512) and never
+          serializes `column: "todo"` — `stage_of` only fills `stage` for the
+          `working` phase's four columns, so a To-do card carries no `stage`
+          either. `"todo"` here matched no real card; `"pending"` is the wire
+          value a bounced card — always in the store's `todo` column — is
+          actually seen at. */}
+      {task.column === "pending" && task.bounced && (
         <BouncedBadgeRow reason={task.bounced} />
       )}
       {task.plan && <PlanBadgeRow plan={task.plan} />}

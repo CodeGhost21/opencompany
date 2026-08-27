@@ -25,7 +25,13 @@ function card(over: Partial<Task> = {}): Task {
   return {
     id: "task-1",
     title: "Send the weekly digest",
-    column: "todo",
+    // Issue #1865 (Codex review): the task API never serializes `column:
+    // "todo"` — a card in the store's `todo` column carries the wire phase
+    // `column: "pending"` (issue #1512) and no `stage` at all. `"todo"` here
+    // was a wire value no real card can ever have, which is exactly how the
+    // production `task.column === "todo"` check went unnoticed: this fixture
+    // made it look reachable.
+    column: "pending",
     priority: "medium",
     assignee: "ops",
     updatedAt: T0,
